@@ -6,6 +6,7 @@ WORKSPACE_DIR="${HOME}/llm-workspace"
 CONFIG_FILE="${WORKSPACE_DIR}/.config"
 PRESETS_FILE="${WORKSPACE_DIR}/presets.ini"
 PID_FILE="${WORKSPACE_DIR}/.config/server.pid"
+LOG_FILE="${WORKSPACE_DIR}/.config/server.log"
 CONTAINER_NAME="llm-env"
 
 GREEN='\033[0;32m'
@@ -56,14 +57,14 @@ echo ""
 # Start server in router mode
 echo "Starting llama-server in router mode..."
 distrobox enter "${CONTAINER_NAME}" -- bash -c "
-cd llama.cpp
+cd '${WORKSPACE_DIR}/llama.cpp' || { echo 'ERROR: llama.cpp directory not found'; exit 1; }
 ./build/bin/llama-server \
-    --models-preset ${PRESETS_FILE} \
+    --models-preset '${PRESETS_FILE}' \
     --models-max ${MODELS_MAX} \
     --host ${SERVER_HOST} \
     --port ${SERVER_PORT} \
-    > ${WORKSPACE_DIR}/.config/server.log 2>&1 &
-echo \$! > ${PID_FILE}
+    > '${LOG_FILE}' 2>&1 &
+echo \$! > '${PID_FILE}'
 "
 
 # Wait for server to be ready
@@ -98,5 +99,5 @@ done
 
 echo ""
 echo -e "${RED}✗ Server failed to start within ${TIMEOUT}s${NC}"
-echo -e "${YELLOW}Check logs:${NC} cat ${WORKSPACE_DIR}/.config/server.log"
+echo -e "${YELLOW}Check logs:${NC} cat ${LOG_FILE}"
 exit 1

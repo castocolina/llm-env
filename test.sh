@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LLM Server Test - Verify router mode and both models
+# LLM Server Test - Verify server and models
 set -e
 
 WORKSPACE_DIR="${HOME}/llm-workspace"

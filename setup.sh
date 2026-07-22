@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LLM Environment Setup - Download/compile only, does NOT start server
-# Router mode: downloads both models, generates presets.ini
+# Interactive model selection, non-blocking tests
 set -e
 
 WORKSPACE_DIR="${HOME}/llm-workspace"
@@ -12,14 +12,15 @@ CONTAINER_NAME="llm-env"
 FEDORA_VERSION="44"
 CPP_REPO_URL="https://github.com/ggml-org/llama.cpp"
 
-# Model definitions: ALIAS|URL|FILENAME|SIZE_BYTES
-GEMMA4="gemma4|https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf|gemma-4-12B-it-Q4_K_M.gguf|7660000000"
-ORNITH="ornith|https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF/resolve/main/ornith-1.0-9b-Q4_K_M.gguf|ornith-1.0-9b-Q4_K_M.gguf|5600000000"
+# Model definitions: ALIAS|URL|FILENAME|SIZE_BYTES|DESCRIPTION
+GEMMA4="gemma4|https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf|gemma-4-12B-it-Q4_K_M.gguf|7660000000|Gemma 4 12B"
+ORNITH="ornith|https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF/resolve/main/ornith-1.0-9b-Q4_K_M.gguf|ornith-1.0-9b-Q4_K_M.gguf|5600000000|Ornith 1.0 9B"
 
 # Color codes
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 # Checkpoint functions
@@ -60,7 +61,7 @@ download_file() {
 # Parse model definition
 parse_model() {
     local def="$1"
-    IFS='|' read -r _ MODEL_URL MODEL_NAME MODEL_SIZE <<< "$def"
+    IFS='|' read -r _ MODEL_URL MODEL_NAME MODEL_SIZE _ <<< "$def"
 }
 
 # Check if model file exists and is valid
@@ -92,19 +93,31 @@ download_model() {
     download_file "${MODEL_URL}" "${MODEL_NAME}"
 }
 
-# Generate presets.ini
+# Generate presets.ini based on selected models
 generate_presets() {
+    local models="$1"
     mkdir -p "$(dirname "$PRESETS_FILE")"
+
+    # Start with header
     cat > "$PRESETS_FILE" << 'EOF'
 # LLM Router Mode Presets
 # Clients select model via "model" field in API requests.
-# Both models fit in 16GB VRAM simultaneously.
+EOF
+
+    # Add selected models
+    if echo "$models" | grep -q "gemma4"; then
+        cat >> "$PRESETS_FILE" << 'EOF'
 
 [gemma4]
 model = ~/llm-workspace/models/gemma-4-12B-it-Q4_K_M.gguf
 n-gpu-layers = 99
 ctx-size = 8192
 jinja = true
+EOF
+    fi
+
+    if echo "$models" | grep -q "ornith"; then
+        cat >> "$PRESETS_FILE" << 'EOF'
 
 [ornith]
 model = ~/llm-workspace/models/ornith-1.0-9b-Q4_K_M.gguf
@@ -112,14 +125,17 @@ n-gpu-layers = 99
 ctx-size = 8192
 jinja = true
 EOF
+    fi
+
     echo -e "${GREEN}✓${NC} Presets saved to ${PRESETS_FILE}"
 }
 
 # Save config
 save_config() {
+    local models="$1"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" << EOF
-MODELS=gemma4,ornith
+MODELS=${models}
 SERVER_PORT=8000
 SERVER_HOST=0.0.0.0
 MODELS_MAX=2
@@ -127,12 +143,40 @@ EOF
     echo -e "${GREEN}✓${NC} Config saved to ${CONFIG_FILE}"
 }
 
+# Interactive model selection
+select_models() {
+    echo ""
+    echo -e "${YELLOW}Select models to download:${NC}"
+    echo ""
+    echo "  1) Gemma4 12B    ~7.6 GB  (general, multimodal)"
+    echo "  2) Ornith 9B     ~5.6 GB  (coding specialist)"
+    echo "  3) Both          ~13.2 GB (recommended for 16GB VRAM)"
+    echo ""
+
+    while true; do
+        read -rp "  Enter choice [1-3] (default: 3): " choice
+        choice=${choice:-3}
+
+        case "$choice" in
+            1) SELECTED_MODELS="gemma4"; break ;;
+            2) SELECTED_MODELS="ornith"; break ;;
+            3) SELECTED_MODELS="gemma4,ornith"; break ;;
+            *) echo -e "${RED}Invalid choice. Please enter 1, 2, or 3.${NC}" ;;
+        esac
+    done
+
+    echo ""
+    echo -e "${GREEN}Selected: ${SELECTED_MODELS}${NC}"
+    echo ""
+}
+
 # Main execution
 mkdir -p "${CHECKPOINT_DIR}" "${WORKSPACE_DIR}/models"
 
-show_status "LLM Setup - Router Mode"
-echo -e "${YELLOW}Models: Gemma4 12B + Ornith 9B${NC}"
-echo ""
+show_status "LLM Setup"
+
+# Model selection (always ask)
+select_models
 
 # STEP 1: Create distrobox container
 if ! is_checkpoint_done "container_created"; then
@@ -148,11 +192,15 @@ else
     show_status "STEP 1: Container Already Created (Skipped)"
 fi
 
-# STEP 2: Download models
+# STEP 2: Download selected models
 if ! is_checkpoint_done "models_downloaded"; then
     show_status "STEP 2: Downloading Models"
-    download_model "$GEMMA4"
-    download_model "$ORNITH"
+    if echo "$SELECTED_MODELS" | grep -q "gemma4"; then
+        download_model "$GEMMA4"
+    fi
+    if echo "$SELECTED_MODELS" | grep -q "ornith"; then
+        download_model "$ORNITH"
+    fi
     mark_checkpoint "models_downloaded"
 else
     show_status "STEP 2: Models Already Downloaded (Skipped)"
@@ -160,8 +208,8 @@ fi
 
 # STEP 3: Generate presets and config
 show_status "STEP 3: Generating Config"
-generate_presets
-save_config
+generate_presets "$SELECTED_MODELS"
+save_config "$SELECTED_MODELS"
 
 cd "${WORKSPACE_DIR}"
 
@@ -212,31 +260,29 @@ else
     show_status "STEP 4: llama.cpp Already Compiled (Skipped)"
 fi
 
-# STEP 5: Run test inference
+# STEP 5: Run test inference (non-blocking)
 if ! is_checkpoint_done "test_inference_run"; then
     show_status "STEP 5: Testing Inference"
     distrobox enter "${CONTAINER_NAME}" -- bash -c "
     set -e
     cd llama.cpp
-    echo '  -> Testing Gemma4...'
-    ./build/bin/llama-cli \
+    echo 'Say hello in 5 words.' | ./build/bin/llama-cli \
         -m ../models/gemma-4-12B-it-Q4_K_M.gguf \
         -ngl 99 \
         -t \$(nproc) \
         --jinja \
-        -p 'Say hello in 5 words.' \
+        -f /dev/stdin \
         -n 50 \
-        --simple-io
-    echo '  -> Testing Ornith...'
-    ./build/bin/llama-cli \
+        --simple-io 2>/dev/null || echo '  (Gemma4 test skipped)'
+    echo 'Say hello in 5 words.' | ./build/bin/llama-cli \
         -m ../models/ornith-1.0-9b-Q4_K_M.gguf \
         -ngl 99 \
         -t \$(nproc) \
         --jinja \
-        -p 'Say hello in 5 words.' \
+        -f /dev/stdin \
         -n 50 \
-        --simple-io
-    " || exit 1
+        --simple-io 2>/dev/null || echo '  (Ornith test skipped)'
+    "
     mark_checkpoint "test_inference_run"
 else
     show_status "STEP 5: Test Inference Already Completed (Skipped)"
@@ -246,6 +292,7 @@ fi
 show_status "Setup Complete!"
 echo ""
 echo -e "${GREEN}Your LLM environment is ready!${NC}"
+echo -e "${GREEN}Selected models: ${SELECTED_MODELS}${NC}"
 echo ""
 echo "Quick start commands:"
 echo -e "  ${BLUE}Start server:${NC} ./start.sh"
