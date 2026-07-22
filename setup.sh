@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LLM Environment Setup - Download/compile only, does NOT start server
-# Interactive model selection, non-blocking tests
+# Interactive model selection, non-blocking tests with timeout
 set -e
 
 WORKSPACE_DIR="${HOME}/llm-workspace"
@@ -15,6 +15,12 @@ CPP_REPO_URL="https://github.com/ggml-org/llama.cpp"
 # Model definitions: ALIAS|URL|FILENAME|SIZE_BYTES|DESCRIPTION
 GEMMA4="gemma4|https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf|gemma-4-12B-it-Q4_K_M.gguf|7660000000|Gemma 4 12B"
 ORNITH="ornith|https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF/resolve/main/ornith-1.0-9b-Q4_K_M.gguf|ornith-1.0-9b-Q4_K_M.gguf|5600000000|Ornith 1.0 9B"
+
+# All model definitions for iteration
+ALL_MODELS=("$GEMMA4" "$ORNITH")
+
+# Test prompts (multiple to verify model works)
+TEST_PROMPTS=("Say hello in 5 words." "What is 2+2? Reply with just the number." "Write a one-line Python hello world.")
 
 # Color codes
 GREEN='\033[0;32m'
@@ -58,10 +64,12 @@ download_file() {
     fi
 }
 
-# Parse model definition
+# Parse model definition into global variables
+# Usage: parse_model "$GEMMA4"
+# Sets: MODEL_ALIAS, MODEL_URL, MODEL_NAME, MODEL_SIZE, MODEL_DESC
 parse_model() {
     local def="$1"
-    IFS='|' read -r _ MODEL_URL MODEL_NAME MODEL_SIZE _ <<< "$def"
+    IFS='|' read -r MODEL_ALIAS MODEL_URL MODEL_NAME MODEL_SIZE MODEL_DESC <<< "$def"
 }
 
 # Check if model file exists and is valid
@@ -84,11 +92,11 @@ download_model() {
     parse_model "$def"
 
     if check_model "$MODEL_NAME" "$MODEL_SIZE"; then
-        echo -e "${GREEN}✓${NC} ${MODEL_NAME} already exists ($(human_readable_size "$MODEL_SIZE"))"
+        echo -e "${GREEN}✓${NC} ${MODEL_DESC} already exists ($(human_readable_size "$MODEL_SIZE"))"
         return 0
     fi
 
-    echo "Downloading ${MODEL_NAME}..."
+    echo "Downloading ${MODEL_DESC}..."
     cd "${WORKSPACE_DIR}/models"
     download_file "${MODEL_URL}" "${MODEL_NAME}"
 }
@@ -98,34 +106,24 @@ generate_presets() {
     local models="$1"
     mkdir -p "$(dirname "$PRESETS_FILE")"
 
-    # Start with header
     cat > "$PRESETS_FILE" << 'EOF'
 # LLM Router Mode Presets
 # Clients select model via "model" field in API requests.
 EOF
 
-    # Add selected models
-    if echo "$models" | grep -q "gemma4"; then
-        cat >> "$PRESETS_FILE" << 'EOF'
+    for model_def in "${ALL_MODELS[@]}"; do
+        parse_model "$model_def"
+        if echo "$models" | grep -q "$MODEL_ALIAS"; then
+            cat >> "$PRESETS_FILE" << EOF
 
-[gemma4]
-model = ~/llm-workspace/models/gemma-4-12B-it-Q4_K_M.gguf
+[$MODEL_ALIAS]
+model = ~/llm-workspace/models/$MODEL_NAME
 n-gpu-layers = 99
 ctx-size = 8192
 jinja = true
 EOF
-    fi
-
-    if echo "$models" | grep -q "ornith"; then
-        cat >> "$PRESETS_FILE" << 'EOF'
-
-[ornith]
-model = ~/llm-workspace/models/ornith-1.0-9b-Q4_K_M.gguf
-n-gpu-layers = 99
-ctx-size = 8192
-jinja = true
-EOF
-    fi
+        fi
+    done
 
     echo -e "${GREEN}✓${NC} Presets saved to ${PRESETS_FILE}"
 }
@@ -148,26 +146,78 @@ select_models() {
     echo ""
     echo -e "${YELLOW}Select models to download:${NC}"
     echo ""
-    echo "  1) Gemma4 12B    ~7.6 GB  (general, multimodal)"
-    echo "  2) Ornith 9B     ~5.6 GB  (coding specialist)"
-    echo "  3) Both          ~13.2 GB (recommended for 16GB VRAM)"
+
+    local i=1
+    for model_def in "${ALL_MODELS[@]}"; do
+        parse_model "$model_def"
+        echo "  ${i}) ${MODEL_DESC}    $(human_readable_size "$MODEL_SIZE")"
+        i=$((i + 1))
+    done
+    echo "  ${i}) Both          ~13.2 GB (recommended for 16GB VRAM)"
     echo ""
 
     while true; do
-        read -rp "  Enter choice [1-3] (default: 3): " choice
-        choice=${choice:-3}
+        read -rp "  Enter choice [1-${i}] (default: ${i}): " choice
+        choice=${choice:-$i}
 
         case "$choice" in
             1) SELECTED_MODELS="gemma4"; break ;;
             2) SELECTED_MODELS="ornith"; break ;;
             3) SELECTED_MODELS="gemma4,ornith"; break ;;
-            *) echo -e "${RED}Invalid choice. Please enter 1, 2, or 3.${NC}" ;;
+            *) echo -e "${RED}Invalid choice. Please enter 1-${i}.${NC}" ;;
         esac
     done
 
     echo ""
     echo -e "${GREEN}Selected: ${SELECTED_MODELS}${NC}"
     echo ""
+}
+
+# Test a single model with multiple prompts and timeout
+test_model() {
+    local def="$1"
+    parse_model "$def"
+
+    echo -e "  ${BLUE}Testing ${MODEL_DESC}...${NC}"
+
+    local all_passed=true
+    for prompt in "${TEST_PROMPTS[@]}"; do
+        echo -e "    Prompt: ${YELLOW}${prompt}${NC}"
+        local output
+        output=$(timeout 60 distrobox enter "${CONTAINER_NAME}" -- bash -c "
+            cd '${WORKSPACE_DIR}/llama.cpp'
+            ./build/bin/llama-cli \
+                -m '../models/${MODEL_NAME}' \
+                -ngl 99 \
+                -t \$(nproc) \
+                --jinja \
+                -n 50 \
+                -no-cnv \
+                --simple-io \
+                -p '${prompt}' 2>/dev/null
+        " 2>&1) || {
+            echo -e "    ${RED}✗ Timeout or error${NC}"
+            all_passed=false
+            continue
+        }
+
+        if [ -n "$output" ] && echo "$output" | grep -qE '[a-zA-Z0-9]'; then
+            local response
+            response=$(echo "$output" | tail -1)
+            echo -e "    ${GREEN}✓ Response:${NC} ${response}"
+        else
+            echo -e "    ${RED}✗ Empty response${NC}"
+            all_passed=false
+        fi
+    done
+
+    if $all_passed; then
+        echo -e "  ${GREEN}✓ ${MODEL_DESC} passed all tests${NC}"
+        return 0
+    else
+        echo -e "  ${YELLOW}⚠ ${MODEL_DESC} had some failures${NC}"
+        return 1
+    fi
 }
 
 # Main execution
@@ -195,12 +245,12 @@ fi
 # STEP 2: Download selected models
 if ! is_checkpoint_done "models_downloaded"; then
     show_status "STEP 2: Downloading Models"
-    if echo "$SELECTED_MODELS" | grep -q "gemma4"; then
-        download_model "$GEMMA4"
-    fi
-    if echo "$SELECTED_MODELS" | grep -q "ornith"; then
-        download_model "$ORNITH"
-    fi
+    for model_def in "${ALL_MODELS[@]}"; do
+        parse_model "$model_def"
+        if echo "$SELECTED_MODELS" | grep -q "$MODEL_ALIAS"; then
+            download_model "$model_def"
+        fi
+    done
     mark_checkpoint "models_downloaded"
 else
     show_status "STEP 2: Models Already Downloaded (Skipped)"
@@ -260,32 +310,29 @@ else
     show_status "STEP 4: llama.cpp Already Compiled (Skipped)"
 fi
 
-# STEP 5: Run test inference (non-blocking)
+# STEP 5: Run test inference (dynamic, non-blocking, with timeout)
 if ! is_checkpoint_done "test_inference_run"; then
     show_status "STEP 5: Testing Inference"
-    distrobox enter "${CONTAINER_NAME}" -- bash -c "
-    set -e
-    cd llama.cpp
-    echo '  -> Testing Gemma4...'
-    ./build/bin/llama-cli \
-        -m ../models/gemma-4-12B-it-Q4_K_M.gguf \
-        -ngl 99 \
-        -t \$(nproc) \
-        --jinja \
-        -p 'Say hello in 5 words.' \
-        -n 50 \
-        -no-cnv 2>/dev/null || echo '  (Gemma4 test skipped)'
-    echo '  -> Testing Ornith...'
-    ./build/bin/llama-cli \
-        -m ../models/ornith-1.0-9b-Q4_K_M.gguf \
-        -ngl 99 \
-        -t \$(nproc) \
-        --jinja \
-        -p 'Say hello in 5 words.' \
-        -n 50 \
-        -no-cnv 2>/dev/null || echo '  (Ornith test skipped)'
-    "
-    mark_checkpoint "test_inference_run"
+
+    TEST_PASS=0
+    TEST_FAIL=0
+
+    for model_def in "${ALL_MODELS[@]}"; do
+        parse_model "$model_def"
+        if echo "$SELECTED_MODELS" | grep -q "$MODEL_ALIAS"; then
+            if test_model "$model_def"; then
+                TEST_PASS=$((TEST_PASS + 1))
+            else
+                TEST_FAIL=$((TEST_FAIL + 1))
+            fi
+        fi
+    done
+
+    if [ $TEST_FAIL -eq 0 ]; then
+        mark_checkpoint "test_inference_run"
+    else
+        echo -e "${YELLOW}Some tests failed. Checkpoint not saved. Re-run to retry.${NC}"
+    fi
 else
     show_status "STEP 5: Test Inference Already Completed (Skipped)"
 fi
@@ -303,8 +350,10 @@ echo -e "  ${BLUE}Test server:${NC}  ./test.sh"
 echo -e "  ${BLUE}Enter container:${NC} distrobox enter ${CONTAINER_NAME}"
 echo ""
 echo "Router mode:"
-echo -e "  ${BLUE}Gemma4:${NC} curl -d '{\"model\":\"gemma4\",...}' http://localhost:8000/v1/chat/completions"
-echo -e "  ${BLUE}Ornith:${NC} curl -d '{\"model\":\"ornith\",...}' http://localhost:8000/v1/chat/completions"
+for model_def in "${ALL_MODELS[@]}"; do
+    parse_model "$model_def"
+    echo -e "  ${BLUE}${MODEL_ALIAS}:${NC} curl -d '{\"model\":\"${MODEL_ALIAS}\",...}' http://localhost:8000/v1/chat/completions"
+done
 echo ""
 echo "Workspace: ${WORKSPACE_DIR}"
 echo "Presets: ${PRESETS_FILE}"
