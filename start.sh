@@ -1,35 +1,24 @@
 #!/usr/bin/env bash
-# LLM Server Start - Router mode with multiple models
+# start.sh — Launch server based on presets.ini
 set -e
 
-WORKSPACE_DIR="${HOME}/llm-workspace"
-CONFIG_FILE="${WORKSPACE_DIR}/.config"
-PRESETS_FILE="${WORKSPACE_DIR}/presets.ini"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/models.sh"
+
 PID_FILE="${WORKSPACE_DIR}/.config/server.pid"
 LOG_FILE="${WORKSPACE_DIR}/.config/server.log"
-CONTAINER_NAME="llm-env"
-
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-RED='\033[0;31m'
-NC='\033[0m'
 
 # Check config exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Config file not found at ${CONFIG_FILE}${NC}"
-    echo "Run ./setup.sh first to configure your environment."
+    echo "Run ./setup.sh first."
     exit 1
 fi
-
-# Source config
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
 
 # Check presets file
 if [ ! -f "$PRESETS_FILE" ]; then
     echo -e "${RED}Error: Presets file not found at ${PRESETS_FILE}${NC}"
-    echo "Run ./setup.sh first to generate presets."
+    echo "Run ./setup.sh first."
     exit 1
 fi
 
@@ -39,7 +28,6 @@ if [ -f "$PID_FILE" ]; then
     if kill -0 "$PID" 2>/dev/null; then
         echo -e "${YELLOW}Server already running (PID: ${PID})${NC}"
         echo -e "  ${BLUE}URL:${NC} http://localhost:${SERVER_PORT}/docs"
-        echo -e "  ${BLUE}Models:${NC} ${MODELS}"
         exit 0
     else
         echo -e "${YELLOW}Stale PID file found. Cleaning up...${NC}"
@@ -47,17 +35,21 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
+# Show what models will be served
+AVAILABLE_MODELS=$(grep -E '^\[' "$PRESETS_FILE" | tr -d '[]' || true)
+
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BLUE}Starting LLM Server (Router Mode)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Models: ${MODELS}${NC}"
+echo -e "${YELLOW}Models: ${AVAILABLE_MODELS}${NC}"
 echo -e "${YELLOW}Max concurrent: ${MODELS_MAX}${NC}"
 echo ""
 
-# Start server in router mode
+# Start server
 echo "Starting llama-server in router mode..."
+mkdir -p "$(dirname "$PID_FILE")"
 distrobox enter "${CONTAINER_NAME}" -- bash -c "
-cd '${WORKSPACE_DIR}/llama.cpp' || { echo 'ERROR: llama.cpp directory not found'; exit 1; }
+cd '${WORKSPACE_DIR}/llama.cpp' || { echo 'ERROR: llama.cpp not found'; exit 1; }
 ./build/bin/llama-server \
     --models-preset '${PRESETS_FILE}' \
     --models-max ${MODELS_MAX} \
@@ -67,7 +59,7 @@ cd '${WORKSPACE_DIR}/llama.cpp' || { echo 'ERROR: llama.cpp directory not found'
 echo \$! > '${PID_FILE}'
 "
 
-# Wait for server to be ready
+# Wait for health check
 echo "Waiting for server to be ready..."
 TIMEOUT=60
 ELAPSED=0
@@ -82,13 +74,9 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
         echo -e "  Network: http://${NETWORK_IP}:${SERVER_PORT}/docs"
         echo ""
         echo -e "${BLUE}Available models:${NC}"
-        echo "  - gemma4 (Gemma 4 12B)"
-        echo "  - ornith (Ornith 1.0 9B)"
-        echo ""
-        echo -e "${BLUE}Usage:${NC}"
-        echo "  curl http://localhost:${SERVER_PORT}/v1/chat/completions \\"
-        echo "    -H 'Content-Type: application/json' \\"
-        echo "    -d '{\"model\": \"gemma4\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'"
+        for model in $AVAILABLE_MODELS; do
+            echo "  - ${model}"
+        done
         echo ""
         exit 0
     fi
