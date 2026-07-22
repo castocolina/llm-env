@@ -7,11 +7,11 @@ make setup
 ```
 
 This will:
-1. Prompt you to select a model (Gemma 4 12B or Ornith 1.0 9B)
-2. Create a distrobox container
-3. Download the selected model
+1. Create a distrobox container
+2. Download both models (Gemma4 + Ornith)
+3. Generate presets.ini for router mode
 4. Compile llama.cpp with Vulkan support
-5. Run a basic inference test
+5. Run inference tests on both models
 
 ## Start Server
 
@@ -19,10 +19,25 @@ This will:
 make start
 ```
 
-The script will print:
+Router mode serves both models from a single server. The script will print:
 - Local URL: `http://localhost:8000/docs`
 - Network URL: `http://<linux-ip>:8000/docs`
-- OpenCode configuration
+
+## Usage
+
+Select model via `model` field in API requests:
+
+```bash
+# Use Gemma4 (general tasks)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemma4", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Use Ornith (coding tasks)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "ornith", "messages": [{"role": "user", "content": "Write a Python function"}]}'
+```
 
 ## Connect from macOS
 
@@ -35,7 +50,10 @@ The script will print:
            "local": {
                "api_key": "none",
                "models": {
-                   "local-model": {
+                   "gemma4": {
+                       "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
+                   },
+                   "ornith": {
                        "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
                    }
                }
@@ -52,8 +70,10 @@ make test
 
 Tests:
 1. Server health check
-2. curl inference test
-3. OpenCode integration test (requires internet)
+2. Model list (verifies both models available)
+3. Gemma4 inference test
+4. Ornith inference test
+5. OpenCode integration test (optional)
 
 ## Stop Server
 
@@ -61,22 +81,9 @@ Tests:
 make stop
 ```
 
-## Switch Models
-
-Edit `~/llm-workspace/.config`:
-```
-MODEL_ALIAS=gemma4
-MODEL_NAME=gemma-4-12B-it-Q4_K_M.gguf
-MODEL_URL=https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf
-SERVER_PORT=8000
-SERVER_HOST=0.0.0.0
-```
-
-Then restart: `make stop && make start`
-
 ## Troubleshooting
 
 - **Server won't start**: Check logs at `~/llm-workspace/.config/server.log`
 - **Connection refused**: Ensure server is running with `make start`
-- **Out of memory**: Only one model fits in 16GB VRAM at a time
+- **Out of memory**: Models are evicted automatically (LRU), but ensure sufficient VRAM
 - **Build failed**: Run `make clean-cache && make setup` to rebuild from scratch

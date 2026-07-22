@@ -11,14 +11,18 @@ make test       # Verify server and agent integration
 make stop       # Stop server
 ```
 
-## Model Selection
+## Models (Router Mode)
 
-| Model | Size | Best For |
-|-------|------|----------|
-| Gemma 4 12B Q4_K_M | ~7.6 GB | Best for 16GB VRAM, multimodal |
-| Ornith 1.0 9B Q4_K_M | ~5.6 GB | Coding specialist (69.4% SWE-bench) |
+Both models are served simultaneously from a single server:
 
-Select model during `make setup`. Config saved to `~/llm-workspace/.config`.
+| Alias | Model | Size | Best For |
+|-------|-------|------|----------|
+| `gemma4` | Gemma 4 12B Q4_K_M | ~7.6 GB | Multimodal, general tasks |
+| `ornith` | Ornith 1.0 9B Q4_K_M | ~5.6 GB | Coding specialist (69.4% SWE-bench) |
+
+Total VRAM usage: ~13.2 GB (fits in 16GB). Models are loaded on-demand with LRU eviction.
+
+Select model via `model` field in API requests (see [Usage](#usage)).
 
 ## Remote Access (macOS Client)
 
@@ -28,6 +32,22 @@ Connect directly to Linux IP (no SSH tunnel needed):
 http://<linux-ip>:8000/docs
 ```
 
+### Usage
+
+```bash
+# Use Gemma4 (general tasks)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemma4", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Use Ornith (coding tasks)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "ornith", "messages": [{"role": "user", "content": "Write a Python function"}]}'
+```
+
+### OpenCode Configuration
+
 Configure OpenCode to use local server:
 ```json
 {
@@ -35,7 +55,10 @@ Configure OpenCode to use local server:
         "local": {
             "api_key": "none",
             "models": {
-                "local-model": {
+                "gemma4": {
+                    "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
+                },
+                "ornith": {
                     "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
                 }
             }
