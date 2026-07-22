@@ -53,7 +53,7 @@ RESPONSE=$(curl -s "${SERVER_URL}/v1/chat/completions" \
 
 if echo "$RESPONSE" | grep -q "choices"; then
     echo -e "${GREEN}✓ Inference test passed${NC}"
-    echo -e "  ${BLUE}Response:${NC} $(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])" 2>/dev/null || echo "$RESPONSE")"
+    echo -e "  ${BLUE}Response:${NC} $(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])" || echo "$RESPONSE")"
     PASS=$((PASS + 1))
 else
     echo -e "${RED}✗ Inference test failed${NC}"
@@ -89,7 +89,7 @@ if command -v opencode &>/dev/null; then
 }
 EOF
 
-    echo "Sending test prompt (requires internet access)..."
+    echo "Sending test prompt to local server..."
     RESULT=$(cd "$OPENTMPDIR" && opencode -p "What is the current temperature in Santiago, Chile? Reply with just the temperature number." 2>&1)
 
     if echo "$RESULT" | grep -qE '[0-9]+.*°|temperature|grados|[0-9]+ C'; then
