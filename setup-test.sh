@@ -12,7 +12,7 @@ show_status "Setup Test — Inference Check"
 # Discover downloaded models
 DOWNLOADED=""
 if [ -d "${WORKSPACE_DIR}/models" ]; then
-    DOWNLOADED=$(ls "${WORKSPACE_DIR}/models/"*.gguf 2>/dev/null | xargs -I{} basename {} || true)
+    DOWNLOADED=$(find "${WORKSPACE_DIR}/models" -name "*.gguf" -exec basename {} \; 2>/dev/null || true)
 fi
 
 if [ -z "$DOWNLOADED" ]; then

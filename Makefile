@@ -1,4 +1,4 @@
-.PHONY: help all setup start stop test shell clean cache-status validate
+.PHONY: help all setup setup-test start stop server-test shell clean-cache clean validate
 
 CONTAINER_NAME = llm-env
 WORKSPACE = $(HOME)/llm-workspace
@@ -8,11 +8,12 @@ help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
 	@echo "║           LLM Environment - Available Commands             ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
-	@echo "║ make all          Full setup + start + test                ║"
+	@echo "║ make all          Full setup + test + start + server-test  ║"
 	@echo "║ make setup        Download/compile LLM environment         ║"
+	@echo "║ make setup-test   Test inference on downloaded models      ║"
 	@echo "║ make start        Start LLM server                        ║"
 	@echo "║ make stop         Stop LLM server                         ║"
-	@echo "║ make test         Run server and agent tests              ║"
+	@echo "║ make server-test  Live agent test (forces internet)       ║"
 	@echo "║ make shell        Enter distrobox container               ║"
 	@echo "║ make cache-status Show build cache/checkpoints status     ║"
 	@echo "║ make clean-cache  Clear all checkpoints (rebuild next)    ║"
@@ -20,12 +21,15 @@ help:
 	@echo "║ make validate     Run shellcheck on all .sh files         ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
-all: setup start test
+all: setup setup-test start server-test
 	@echo "Full setup complete!"
 
 setup:
 	@echo "Starting LLM environment setup..."
 	@bash setup.sh
+
+setup-test:
+	@bash setup-test.sh
 
 start:
 	@bash start.sh
@@ -33,8 +37,8 @@ start:
 stop:
 	@bash stop.sh
 
-test:
-	@bash test.sh
+server-test:
+	@bash server-test.sh
 
 shell:
 	@if distrobox list | grep -q "$(CONTAINER_NAME)"; then \
@@ -55,7 +59,8 @@ cache-status:
 	@echo ""
 	@echo "Workspace: $(WORKSPACE)"
 	@if [ -d "$(WORKSPACE)/models" ]; then \
-		echo "  Models: $$(ls -lh $(WORKSPACE)/models 2>/dev/null | tail -n +2 | awk '{print $$9, "(" $$5 ")"}')"; \
+		echo "  Models:"; \
+		ls -lh $(WORKSPACE)/models 2>/dev/null | tail -n +2 | awk '{print "    " $$9, "(" $$5 ")"}'; \
 	fi
 
 clean-cache:

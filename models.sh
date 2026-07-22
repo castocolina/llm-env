@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # models.sh — Single source of truth for LLM environment
 # Source this file from other scripts: source "$(dirname "$0")/models.sh"
+# shellcheck disable=SC2034
 
 # ── Paths ──────────────────────────────────────────────
 WORKSPACE_DIR="${HOME}/llm-workspace"
