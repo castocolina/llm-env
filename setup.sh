@@ -266,22 +266,24 @@ if ! is_checkpoint_done "test_inference_run"; then
     distrobox enter "${CONTAINER_NAME}" -- bash -c "
     set -e
     cd llama.cpp
-    echo 'Say hello in 5 words.' | ./build/bin/llama-cli \
+    echo '  -> Testing Gemma4...'
+    ./build/bin/llama-cli \
         -m ../models/gemma-4-12B-it-Q4_K_M.gguf \
         -ngl 99 \
         -t \$(nproc) \
         --jinja \
-        -f /dev/stdin \
+        -p 'Say hello in 5 words.' \
         -n 50 \
-        --simple-io 2>/dev/null || echo '  (Gemma4 test skipped)'
-    echo 'Say hello in 5 words.' | ./build/bin/llama-cli \
+        -no-cnv 2>/dev/null || echo '  (Gemma4 test skipped)'
+    echo '  -> Testing Ornith...'
+    ./build/bin/llama-cli \
         -m ../models/ornith-1.0-9b-Q4_K_M.gguf \
         -ngl 99 \
         -t \$(nproc) \
         --jinja \
-        -f /dev/stdin \
+        -p 'Say hello in 5 words.' \
         -n 50 \
-        --simple-io 2>/dev/null || echo '  (Ornith test skipped)'
+        -no-cnv 2>/dev/null || echo '  (Ornith test skipped)'
     "
     mark_checkpoint "test_inference_run"
 else
