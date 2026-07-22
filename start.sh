@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# LLM Server Start - Launch and wait for health
+# LLM Server Start - Router mode with multiple models
 set -e
 
 WORKSPACE_DIR="${HOME}/llm-workspace"
 CONFIG_FILE="${WORKSPACE_DIR}/.config"
+PRESETS_FILE="${WORKSPACE_DIR}/presets.ini"
 PID_FILE="${WORKSPACE_DIR}/.config/server.pid"
 CONTAINER_NAME="llm-env"
 
@@ -24,12 +25,20 @@ fi
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
+# Check presets file
+if [ ! -f "$PRESETS_FILE" ]; then
+    echo -e "${RED}Error: Presets file not found at ${PRESETS_FILE}${NC}"
+    echo "Run ./setup.sh first to generate presets."
+    exit 1
+fi
+
 # Check if server already running
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
         echo -e "${YELLOW}Server already running (PID: ${PID})${NC}"
         echo -e "  ${BLUE}URL:${NC} http://localhost:${SERVER_PORT}/docs"
+        echo -e "  ${BLUE}Models:${NC} ${MODELS}"
         exit 0
     else
         echo -e "${YELLOW}Stale PID file found. Cleaning up...${NC}"
@@ -38,29 +47,28 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}Starting LLM Server${NC}"
+echo -e "${BLUE}Starting LLM Server (Router Mode)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Model: ${MODEL_NAME}${NC}"
+echo -e "${YELLOW}Models: ${MODELS}${NC}"
+echo -e "${YELLOW}Max concurrent: ${MODELS_MAX}${NC}"
 echo ""
 
-# Start server in distrobox
-echo "Starting llama-server in distrobox..."
+# Start server in router mode
+echo "Starting llama-server in router mode..."
 distrobox enter "${CONTAINER_NAME}" -- bash -c "
 cd llama.cpp
 ./build/bin/llama-server \
-    -m ../models/${MODEL_NAME} \
-    -ngl 99 \
-    --jinja \
+    --models-preset ${PRESETS_FILE} \
+    --models-max ${MODELS_MAX} \
     --host ${SERVER_HOST} \
     --port ${SERVER_PORT} \
-    --ctx-size 8192 \
     > ${WORKSPACE_DIR}/.config/server.log 2>&1 &
 echo \$! > ${PID_FILE}
 "
 
 # Wait for server to be ready
 echo "Waiting for server to be ready..."
-TIMEOUT=30
+TIMEOUT=60
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
     if curl -s "http://localhost:${SERVER_PORT}/health" > /dev/null 2>&1; then
@@ -72,8 +80,14 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
         NETWORK_IP=$(hostname -I | awk '{print $1}')
         echo -e "  Network: http://${NETWORK_IP}:${SERVER_PORT}/docs"
         echo ""
-        echo -e "${BLUE}OpenCode config:${NC}"
-        echo -e "  model: http://${NETWORK_IP}:${SERVER_PORT}/v1/chat/completions"
+        echo -e "${BLUE}Available models:${NC}"
+        echo "  - gemma4 (Gemma 4 12B)"
+        echo "  - ornith (Ornith 1.0 9B)"
+        echo ""
+        echo -e "${BLUE}Usage:${NC}"
+        echo "  curl http://localhost:${SERVER_PORT}/v1/chat/completions \\"
+        echo "    -H 'Content-Type: application/json' \\"
+        echo "    -d '{\"model\": \"gemma4\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'"
         echo ""
         exit 0
     fi
