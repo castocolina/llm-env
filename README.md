@@ -1,91 +1,73 @@
-# LLM Environment - Bazzite + AMD GPU
+# LLM Environment
 
-Automated setup to compile and run **llama.cpp** on Bazzite with Vulkan GPU support and hardware optimizations.
+Automated setup for llama.cpp on Bazzite (Linux) with GPU acceleration.
 
 ## Quick Start
 
 ```bash
-make setup-dev
+make setup      # Download/compile (idempotent, uses checkpoints)
+make start      # Start server, print connection info
+make test       # Verify server and agent integration
+make stop       # Stop server
 ```
 
-Prompts for model selection (Gemma 4 26B or Ornith 9B), downloads the model, compiles llama.cpp with Vulkan, and runs a test inference. Each step is cached - if interrupted, re-running picks up where it left off.
+## Model Selection
 
-## Commands
+| Model | Size | Best For |
+|-------|------|----------|
+| Gemma 4 12B Q4_K_M | ~7.6 GB | Best for 16GB VRAM, multimodal |
+| Ornith 1.0 9B Q4_K_M | ~5.6 GB | Coding specialist (69.4% SWE-bench) |
+
+Select model during `make setup`. Config saved to `~/llm-workspace/.config`.
+
+## Remote Access (macOS Client)
+
+Connect directly to Linux IP (no SSH tunnel needed):
 
 ```bash
-make setup-dev        # Set up / complete the environment
-make shell            # Enter the Distrobox container
-make cache-status     # View checkpoint status
-make clean-cache      # Remove checkpoints (forces rebuild)
-make clean            # Remove the entire environment
-make validate         # Run shellcheck on all .sh files
+http://<linux-ip>:8000/docs
 ```
 
-## Remote Access (macOS to Linux)
-
-Run models on your Linux machine, access from macOS via SSH tunnel:
-
-```bash
-# On Linux: start the server
-make shell
-cd ~/llm-workspace/llama.cpp
-./build/bin/llama-server -m ../models/<model>.gguf -ngl 99 --jinja --host 0.0.0.0 --port 8000
-
-# On macOS: tunnel to it
-ssh -L 8000:localhost:8000 user@linux-machine-ip
-
-# Then open http://localhost:8000/docs on macOS
+Configure OpenCode to use local server:
+```json
+{
+    "provider": {
+        "local": {
+            "api_key": "none",
+            "models": {
+                "local-model": {
+                    "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
+                }
+            }
+        }
+    }
+}
 ```
 
-## Using Locally (Linux)
+## Available Commands
 
-```bash
-make shell
-cd ~/llm-workspace/llama.cpp
-./build/bin/llama-cli -m ../models/<model>.gguf -ngl 99 --jinja -t $(nproc) -p "Your prompt" -n 256
-```
+| Command | Description |
+|---------|-------------|
+| `make setup` | Download/compile environment (idempotent) |
+| `make start` | Start LLM server |
+| `make stop` | Stop LLM server |
+| `make test` | Run server and agent tests |
+| `make shell` | Enter distrobox container |
+| `make cache-status` | Show checkpoint status |
+| `make clean-cache` | Clear all checkpoints |
+| `make clean` | Remove container & workspace |
+| `make validate` | Run shellcheck on all scripts |
 
-Key flags: `-ngl 99` (all layers to GPU), `--jinja` (chat template, required), `--simple-io` (clean output).
+## Hardware Requirements
 
-## Customization
+- **GPU**: AMD 9070 XT 16GB VRAM (or equivalent)
+- **RAM**: 32GB DDR5
+- **Storage**: 2TB NVMe SSD
+- **OS**: Bazzite (Fedora-based) with distrobox
 
-```bash
-# Skip model selection prompt
-MODEL_URL="https://huggingface.co/..." MODEL_NAME="model.gguf" make setup-dev
+## Architecture
 
-# Change Fedora version
-FEDORA_VERSION="45" make setup-dev
-```
-
-## Model Sizing
-
-| Model | Q4_K Size | Min VRAM | Best For |
-|-------|-----------|----------|----------|
-| Gemma 4 26B-A4B | ~17 GB | 16 GB | Best quality, reasoning |
-| Ornith 1.0 9B | ~6 GB | 8 GB | Coding (69.4% SWE-bench) |
-
-## Optimizations
-
-- **CPU**: `-march=native -O3 -flto` for Zen 5, all cores for compilation
-- **GPU**: `-DGGML_VULKAN=ON` (Linux) / `-DGGML_METAL=ON` (macOS), full layer offload via `-ngl 99`
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| Container won't create | `distrobox create -n llm-env --image fedora:44 --no-entry` |
-| Model download error | Delete the file in `~/llm-workspace/models/` and re-run |
-| Vulkan permission issue | `sudo usermod -a -G render $USER` then re-enter container |
-| Metal not found (macOS) | `xcode-select --install` |
-| View build logs | `cd ~/llm-workspace/llama.cpp/build && make VERBOSE=1` |
-
-## Resources
-
-- [llama.cpp](https://github.com/ggml-org/llama.cpp)
-- [Gemma 4 26B](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF)
-- [Ornith 1.0 9B](https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF)
-- [GGUF Format](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-
----
-
-**Last reviewed**: 2026-07-21
+- **Linux only** for server (macOS connects as client)
+- **Distrobox** container for isolated build environment
+- **Vulkan** GPU acceleration for llama.cpp
+- **Checkpoint system** for idempotent setup
