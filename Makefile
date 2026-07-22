@@ -1,4 +1,4 @@
-.PHONY: help setup start stop test shell clean cache-status validate
+.PHONY: help all setup start stop test shell clean cache-status validate
 
 CONTAINER_NAME = llm-env
 WORKSPACE = $(HOME)/llm-workspace
@@ -8,6 +8,7 @@ help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
 	@echo "║           LLM Environment - Available Commands             ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
+	@echo "║ make all          Full setup + start + test                ║"
 	@echo "║ make setup        Download/compile LLM environment         ║"
 	@echo "║ make start        Start LLM server                        ║"
 	@echo "║ make stop         Stop LLM server                         ║"
@@ -18,6 +19,9 @@ help:
 	@echo "║ make clean        Remove container & workspace            ║"
 	@echo "║ make validate     Run shellcheck on all .sh files         ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
+
+all: setup start test
+	@echo "Full setup complete!"
 
 setup:
 	@echo "Starting LLM environment setup..."

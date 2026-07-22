@@ -70,8 +70,9 @@ select_model() {
 
     local vram_gb=0
     if command -v lspci &>/dev/null; then
-        vram_gb=$(lspci -v 2>/dev/null | grep -i "memory" | head -1 | grep -oP '\d+ MB' | head -1 | awk '{printf "%d", $1/1024}' || echo "0")
+        vram_gb=$(lspci -v 2>/dev/null | grep -i "memory" | head -1 | grep -oP '\d+ MB' | head -1 | awk '{printf "%d", $1/1024}' || true)
     fi
+    vram_gb=${vram_gb:-0}
 
     if [ "$vram_gb" -ge 16 ]; then
         echo -e "  ${GREEN}>> Recommended for your GPU: 1) Gemma 4 12B${NC}"
@@ -81,7 +82,10 @@ select_model() {
     echo ""
 
     local choice
-    read -rp "  Enter choice [1-2]: " choice
+    read -rp "  Enter choice [1-2] (default: 1, timeout 10s): " choice
+
+    # Default to gemma4 if no input
+    choice=${choice:-1}
 
     case "$choice" in
         1) MODEL_ALIAS="gemma4"; MODEL_URL="$GEMMA_URL"; MODEL_NAME="$GEMMA_NAME" ;;
