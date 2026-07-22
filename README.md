@@ -5,10 +5,17 @@ Automated setup for llama.cpp on Bazzite (Linux) with GPU acceleration.
 ## Quick Start
 
 ```bash
-make setup      # Download/compile (idempotent, uses checkpoints)
-make start      # Start server, print connection info
-make test       # Verify server and agent integration
-make stop       # Stop server
+make all          # Full setup + test + start + server-test
+```
+
+Or step by step:
+
+```bash
+make setup        # Download/compile (interactive model selection)
+make setup-test   # Test inference on downloaded models
+make start        # Start server, print connection info
+make server-test  # Live agent test (forces internet access)
+make stop         # Stop server
 ```
 
 ## Models (Router Mode)
@@ -22,7 +29,7 @@ Both models are served simultaneously from a single server:
 
 Total VRAM usage: ~13.2 GB (fits in 16GB). Models are loaded on-demand with LRU eviction.
 
-Select model via `model` field in API requests (see [Usage](#usage)).
+Select model via `model` field in API requests.
 
 ## Remote Access (macOS Client)
 
@@ -48,7 +55,6 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### OpenCode Configuration
 
-Configure OpenCode to use local server:
 ```json
 {
     "provider": {
@@ -71,26 +77,32 @@ Configure OpenCode to use local server:
 
 | Command | Description |
 |---------|-------------|
-| `make setup` | Download/compile environment (idempotent) |
+| `make all` | Full setup + test + start + server-test |
+| `make setup` | Download models, build llama.cpp |
+| `make setup-test` | Test inference on downloaded models |
 | `make start` | Start LLM server |
 | `make stop` | Stop LLM server |
-| `make test` | Run server and agent tests |
+| `make server-test` | Live agent test (forces internet) |
 | `make shell` | Enter distrobox container |
-| `make cache-status` | Show checkpoint status |
+| `make cache-status` | Show build checkpoint status |
 | `make clean-cache` | Clear all checkpoints |
 | `make clean` | Remove container & workspace |
-| `make validate` | Run shellcheck on all scripts |
-
-## Hardware Requirements
-
-- **GPU**: AMD 9070 XT 16GB VRAM (or equivalent)
-- **RAM**: 32GB DDR5
-- **Storage**: 2TB NVMe SSD
-- **OS**: Bazzite (Fedora-based) with distrobox
+| `make validate` | Run shellcheck on all .sh files |
 
 ## Architecture
 
-- **Linux only** for server (macOS connects as client)
-- **Distrobox** container for isolated build environment
-- **Vulkan** GPU acceleration for llama.cpp
-- **Checkpoint system** for idempotent setup
+```
+models.sh      ← Single source of truth (model definitions + helpers)
+setup.sh       ← Download models, build llama.cpp, validate
+setup-test.sh  ← Inference test based on downloaded models
+start.sh       ← Launch server based on presets.ini
+server-test.sh ← Live test forcing internet access
+stop.sh        ← Server shutdown
+```
+
+## Workspace
+
+- Models: `~/llm-workspace/models/`
+- Config: `~/llm-workspace/.config`
+- Presets: `~/llm-workspace/presets.ini`
+- Logs: `~/llm-workspace/.config/server.log`
