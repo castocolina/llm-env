@@ -44,7 +44,7 @@ for model_def in "${ALL_MODELS[@]}"; do
                     -n 50 \
                     -no-cnv \
                     --simple-io \
-                    -p '${prompt}' 2>/dev/null
+                    -p '${prompt}'
             " 2>&1) || {
                 echo -e "\r  ${prompt} ${RED}✗ timeout (${SETUP_TEST_TIMEOUT}s)${NC}    "
                 TEST_FAIL=$((TEST_FAIL + 1))

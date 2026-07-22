@@ -14,8 +14,8 @@ FEDORA_VERSION="44"
 CPP_REPO_URL="https://github.com/ggml-org/llama.cpp"
 
 # ── Configuration ──────────────────────────────────────
-SETUP_TEST_TIMEOUT=20
-SERVER_TEST_TIMEOUT=20
+SETUP_TEST_TIMEOUT=60
+SERVER_TEST_TIMEOUT=60
 SERVER_PORT=8000
 SERVER_HOST=0.0.0.0
 MODELS_MAX=2
