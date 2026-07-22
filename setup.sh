@@ -180,7 +180,8 @@ if ! is_checkpoint_done "llama_cpp_compiled"; then
     sudo dnf5 install -y \
         gcc gcc-c++ git cmake make \
         vulkan-loader-devel vulkan-headers \
-        mesa-vulkan-drivers glslc \
+        spirv-headers-devel glslc \
+        mesa-vulkan-drivers \
         python3-pip python3-devel 2>/dev/null || true
     sudo dnf5 install -y openblas-devel 2>/dev/null || true
 
