@@ -99,3 +99,32 @@ def test_models_enable_updates_models_max(tmp_path):
 
 def test_unknown_subcommand_is_usage_error():
     assert run("nonsense").returncode == 2
+
+
+def test_config_flag_works_before_the_subcommand(tmp_path):
+    config = tmp_path / "models.yml"
+    result = run("--config", str(config), "init", "--template", "models.yml.example")
+    assert result.returncode == 0, result.stderr
+    assert config.exists()
+
+
+def test_config_flag_works_after_the_subcommand(tmp_path):
+    config = tmp_path / "models.yml"
+    result = run("init", "--config", str(config), "--template", "models.yml.example")
+    assert result.returncode == 0, result.stderr
+    assert config.exists()
+
+
+def test_budget_reports_actionable_error_when_pci_address_unset(tmp_path):
+    config = tmp_path / "models.yml"
+    assert (
+        run(
+            "init", "--config", str(config), "--template", "models.yml.example"
+        ).returncode
+        == 0
+    )
+    result = run("budget", "--config", str(config), "--models-dir", str(tmp_path))
+    assert result.returncode == 1
+    message = json.loads(result.stdout)["error"]
+    assert "gpu.pci_address is not set" in message
+    assert "  " not in message

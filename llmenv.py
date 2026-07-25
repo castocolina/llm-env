@@ -104,12 +104,16 @@ def _model_costs(cfg: dict[str, Any], models_dir: Path) -> list[dict[str, Any]]:
 def cmd_budget(args: argparse.Namespace) -> int:
     cfg = load_config(Path(args.config))
     facts = detect()
-    gpu = next(
-        (g for g in facts["gpus"] if g["pci_address"] == cfg["gpu"]["pci_address"]),
-        None,
-    )
+    pci = cfg["gpu"]["pci_address"]
+    if not pci:
+        return fail(
+            "gpu.pci_address is not set. Run 'make setup' to choose a GPU, or copy "
+            "a pci_address from 'llmenv.py detect' into the config."
+        )
+    gpu = next((g for g in facts["gpus"] if g["pci_address"] == pci), None)
     if gpu is None:
-        return fail(f"configured GPU {cfg['gpu']['pci_address']} not present")
+        detected = [g["pci_address"] for g in facts["gpus"]]
+        return fail(f"configured GPU {pci} not present; detected: {detected}")
 
     compositor_used = (
         gpu["vram_used_mib"]
@@ -141,6 +145,7 @@ def cmd_models(args: argparse.Namespace) -> int:
     cfg = load_config(path)
 
     if args.action == "list":
+        cfg = sync_models_max(cfg)
         return emit(
             {
                 "models_max": cfg["runtime"]["models_max"],
@@ -182,6 +187,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llmenv")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("detect").set_defaults(func=cmd_detect)
@@ -193,30 +199,30 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.set_defaults(func=cmd_resolve_device)
 
     budget = sub.add_parser("budget")
-    budget.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    budget.add_argument("--config", default=argparse.SUPPRESS)
     budget.add_argument("--models-dir", required=True)
     budget.set_defaults(func=cmd_budget)
 
     presets = sub.add_parser("presets")
-    presets.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    presets.add_argument("--config", default=argparse.SUPPRESS)
     presets.add_argument("--models-dir", required=True)
     presets.add_argument("--device", required=True)
     presets.add_argument("--output", required=True)
     presets.set_defaults(func=cmd_presets)
 
     models = sub.add_parser("models")
-    models.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    models.add_argument("--config", default=argparse.SUPPRESS)
     models.add_argument("action", choices=["list", "enable", "disable"])
     models.add_argument("alias", nargs="?")
     models.set_defaults(func=cmd_models)
 
     gguf = sub.add_parser("validate-gguf")
-    gguf.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    gguf.add_argument("--config", default=argparse.SUPPRESS)
     gguf.add_argument("--models-dir", required=True)
     gguf.set_defaults(func=cmd_validate_gguf)
 
     init = sub.add_parser("init")
-    init.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    init.add_argument("--config", default=argparse.SUPPRESS)
     init.add_argument("--template", required=True)
     init.set_defaults(func=cmd_init)
 
