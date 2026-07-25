@@ -146,3 +146,47 @@ def test_budget_with_no_models_is_feasible():
     result = compute_budget(16304, 2026, 1024, [])
     assert result["feasible"] is True
     assert result["required_mib"] == 0
+
+
+def test_compositor_remedy_reports_only_what_exceeds_the_floor():
+    result = compute_budget(
+        vram_total_mib=16304,
+        compositor_used_mib=2497,
+        reserve_floor_mib=1024,
+        model_costs=[
+            {"alias": "a", "weights_mib": 7307, "kv_mib": 2788},
+            {"alias": "b", "weights_mib": 5368, "kv_mib": 544},
+        ],
+    )
+    assert result["feasible"] is False
+    compositor = [r for r in result["remedies"] if "KWIN_DRM_DEVICES" in r]
+    assert len(compositor) == 1
+    # 2497 - 1024 = 1473, not 2497.
+    assert "1473 MiB" in compositor[0]
+    assert "2497 MiB" not in compositor[0]
+
+
+def test_no_compositor_remedy_when_usage_is_below_the_floor():
+    result = compute_budget(
+        vram_total_mib=16304,
+        compositor_used_mib=200,
+        reserve_floor_mib=1024,
+        model_costs=[
+            {"alias": "a", "weights_mib": 14000, "kv_mib": 2000},
+            {"alias": "b", "weights_mib": 1000, "kv_mib": 100},
+        ],
+    )
+    assert result["feasible"] is False
+    assert not [r for r in result["remedies"] if "KWIN_DRM_DEVICES" in r]
+
+
+def test_quantization_remedy_suppressed_when_already_q8_0():
+    costs = [
+        {"alias": "a", "weights_mib": 14000, "kv_mib": 2000},
+        {"alias": "b", "weights_mib": 1000, "kv_mib": 100},
+    ]
+    default = compute_budget(16304, 2497, 1024, costs)
+    quantized = compute_budget(16304, 2497, 1024, costs, "q8_0", "q8_0")
+    assert any("q8_0" in r and "cache_type_k" in r for r in default["remedies"])
+    assert not [r for r in quantized["remedies"] if "cache_type_k" in r]
+    assert quantized["cache_type_k"] == "q8_0"

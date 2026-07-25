@@ -96,6 +96,8 @@ def compute_budget(
     compositor_used_mib: int,
     reserve_floor_mib: int,
     model_costs: list[dict[str, Any]],
+    cache_type_k: str = "f16",
+    cache_type_v: str = "f16",
 ) -> dict[str, Any]:
     reserve = max(compositor_used_mib, reserve_floor_mib)
     available = vram_total_mib - reserve - SPIKE_HEADROOM_MIB
@@ -105,10 +107,15 @@ def compute_budget(
 
     remedies: list[str] = []
     if not feasible:
-        remedies.append(
-            "set runtime.cache_type_k and cache_type_v to q8_0 "
-            "(roughly halves KV cache size)"
+        already_quantized = (
+            BYTES_PER_ELEMENT.get(cache_type_k, 2.0) <= BYTES_PER_ELEMENT["q8_0"]
+            and BYTES_PER_ELEMENT.get(cache_type_v, 2.0) <= BYTES_PER_ELEMENT["q8_0"]
         )
+        if not already_quantized:
+            remedies.append(
+                "set runtime.cache_type_k and cache_type_v to q8_0 "
+                "(roughly halves KV cache size)"
+            )
         remedies.append(
             "reduce ctx_size for one or more models (KV cache scales linearly)"
         )
@@ -119,10 +126,11 @@ def compute_budget(
                 f"disable a model, e.g. '{largest['alias']}' "
                 f"({largest['weights_mib'] + largest['kv_mib']} MiB)"
             )
-        if compositor_used_mib > reserve_floor_mib:
+        reclaimable = compositor_used_mib - reserve_floor_mib
+        if reclaimable > 0:
             remedies.append(
                 f"move the compositor to the iGPU with "
-                f"KWIN_DRM_DEVICES=/dev/dri/card0 to reclaim ~{compositor_used_mib} MiB "
+                f"KWIN_DRM_DEVICES=/dev/dri/card0 to reclaim ~{reclaimable} MiB "
                 "(this blanks displays attached to the dGPU)"
             )
 
@@ -136,4 +144,6 @@ def compute_budget(
         "feasible": feasible,
         "models": model_costs,
         "remedies": remedies,
+        "cache_type_k": cache_type_k,
+        "cache_type_v": cache_type_v,
     }
