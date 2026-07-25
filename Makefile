@@ -1,35 +1,26 @@
-.PHONY: help all setup setup-test start stop server-test shell clean-cache clean validate
+.PHONY: help setup start stop restart check-setup check-server benchmark \
+        enable-boot disable-boot status logs validate test clean
 
-CONTAINER_NAME = llm-env
-WORKSPACE = $(HOME)/llm-workspace
-CHECKPOINTS = $(WORKSPACE)/.cache/checkpoints
+UNIT = llm-server
 
 help:
-	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║           LLM Environment - Available Commands             ║"
-	@echo "╠════════════════════════════════════════════════════════════╣"
-	@echo "║ make all          Full setup + test + start + server-test  ║"
-	@echo "║ make setup        Download/compile LLM environment         ║"
-	@echo "║ make setup-test   Test inference on downloaded models      ║"
-	@echo "║ make start        Start LLM server                        ║"
-	@echo "║ make stop         Stop LLM server                         ║"
-	@echo "║ make server-test  Live agent test (forces internet)       ║"
-	@echo "║ make shell        Enter distrobox container               ║"
-	@echo "║ make cache-status Show build cache/checkpoints status     ║"
-	@echo "║ make clean-cache  Clear all checkpoints (rebuild next)    ║"
-	@echo "║ make clean        Remove container & workspace            ║"
-	@echo "║ make validate     Run shellcheck on all .sh files         ║"
-	@echo "╚════════════════════════════════════════════════════════════╝"
-
-all: setup setup-test start server-test
-	@echo "Full setup complete!"
+	@echo "make setup         Interactive configuration"
+	@echo "make start         Start the LLM server"
+	@echo "make stop          Stop the LLM server"
+	@echo "make restart       Restart the LLM server"
+	@echo "make check-setup   Validate config, image, models, GPU (offline)"
+	@echo "make check-server  Validate the running server API (online)"
+	@echo "make benchmark     Benchmark Vulkan vs ROCm and record results"
+	@echo "make enable-boot   Start automatically at boot"
+	@echo "make disable-boot  Do not start at boot"
+	@echo "make status        Show service status"
+	@echo "make logs          Follow service logs"
+	@echo "make validate      Run shellcheck and ruff"
+	@echo "make test          Run the Python test suite"
+	@echo "make clean         Remove config, unit, and images"
 
 setup:
-	@echo "Starting LLM environment setup..."
 	@bash setup.sh
-
-setup-test:
-	@bash setup-test.sh
 
 start:
 	@bash start.sh
@@ -37,48 +28,39 @@ start:
 stop:
 	@bash stop.sh
 
-server-test:
-	@bash server-test.sh
+restart: stop start
 
-shell:
-	@if distrobox list | grep -q "$(CONTAINER_NAME)"; then \
-		distrobox enter $(CONTAINER_NAME); \
-	else \
-		echo "Container $(CONTAINER_NAME) not found. Run 'make setup' first."; \
-		exit 1; \
-	fi
+check-setup:
+	@bash check-setup.sh
 
-cache-status:
-	@echo "Build Cache Status:"
-	@if [ -d "$(CHECKPOINTS)" ]; then \
-		echo "  Checkpoint directory exists"; \
-		ls -1 "$(CHECKPOINTS)" 2>/dev/null | sed 's/^/    /'; \
-	else \
-		echo "  No checkpoints yet"; \
-	fi
-	@echo ""
-	@echo "Workspace: $(WORKSPACE)"
-	@if [ -d "$(WORKSPACE)/models" ]; then \
-		echo "  Models:"; \
-		ls -lh $(WORKSPACE)/models 2>/dev/null | tail -n +2 | awk '{print "    " $$9, "(" $$5 ")"}'; \
-	fi
+check-server:
+	@bash check-server.sh
 
-clean-cache:
-	@echo "Clearing all build checkpoints..."
-	@rm -rf "$(CHECKPOINTS)"
-	@echo "Checkpoints cleared. Next run will rebuild from scratch."
+benchmark:
+	@bash benchmark.sh
 
-clean:
-	@echo "This will remove the entire LLM environment!"
-	@echo "  Container: $(CONTAINER_NAME)"
-	@echo "  Workspace: $(WORKSPACE)"
-	@read -p "Are you sure? (yes/no) " confirm && [ "$$confirm" = "yes" ] || exit 1
-	@distrobox rm -f $(CONTAINER_NAME) 2>/dev/null || true
-	@rm -rf $(WORKSPACE)
-	@echo "Cleanup complete."
+enable-boot:
+	@loginctl enable-linger "$$USER"
+	@systemctl --user enable $(UNIT).service
+	@echo "Enabled at boot."
+
+disable-boot:
+	@systemctl --user disable $(UNIT).service
+	@echo "Disabled at boot. Run 'loginctl disable-linger $$USER' to fully revert."
+
+status:
+	@systemctl --user status $(UNIT).service --no-pager || true
+
+logs:
+	@journalctl --user -u $(UNIT).service -f
 
 validate:
-	@command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install with: brew install shellcheck (macOS) or sudo dnf install ShellCheck (Fedora)"; exit 1; }
-	@echo "Running shellcheck on all .sh files..."
-	@shellcheck -s bash *.sh
-	@echo "All shell scripts pass shellcheck."
+	@shellcheck -s bash ./*.sh
+	@uvx ruff check llmenv.py pylib tests
+	@echo "All checks passed."
+
+test:
+	@uv run --with pytest pytest tests/ -v
+
+clean:
+	@bash clean.sh

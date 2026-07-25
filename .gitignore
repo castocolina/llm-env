@@ -1,1 +1,7 @@
 tmp/
+llama.cpp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+models.yml
