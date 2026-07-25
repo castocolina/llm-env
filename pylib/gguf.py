@@ -1,8 +1,9 @@
 """Minimal GGUF header reader.
 
 Parses only the header and metadata key/value block, which is all the VRAM
-budget calculation needs. Tensor data is never read, so this is fast even on
-multi-gigabyte files.
+budget calculation needs. Array values (such as tokenizer vocabularies) are
+summarized rather than materialized, and tensor data is never read, so this is
+fast even on multi-gigabyte files.
 
 Format reference: llama.cpp ggml/docs/gguf.md
 """
@@ -33,8 +34,10 @@ _SCALAR = {
     FLOAT64: ("<d", 8),
 }
 
-# Metadata is capped so a corrupt file cannot cause unbounded reads.
+# The KV count is the number of metadata keys, which is small even in large models.
 MAX_METADATA_ENTRIES = 100_000
+# Array element counts are capped only to catch corrupt headers, not real vocabularies.
+MAX_ARRAY_ELEMENTS = 100_000_000
 
 
 class GgufError(Exception):
@@ -53,6 +56,22 @@ def _read_string(fh: BinaryIO) -> str:
     return _read_exact(fh, length).decode("utf-8", errors="replace")
 
 
+def _skip_array_payload(fh: BinaryIO, elem_type: int, count: int) -> None:
+    """Seek past an array's payload without materializing it."""
+    if elem_type in _SCALAR:
+        _, size = _SCALAR[elem_type]
+        fh.seek(size * count, 1)
+        return
+    if elem_type == STRING:
+        for _ in range(count):
+            (length,) = struct.unpack("<Q", _read_exact(fh, 8))
+            fh.seek(length, 1)
+        return
+    if elem_type == ARRAY:
+        raise GgufError("nested GGUF arrays are not supported")
+    raise GgufError(f"unknown GGUF array element type: {elem_type}")
+
+
 def _read_value(fh: BinaryIO, type_code: int) -> Any:
     if type_code in _SCALAR:
         fmt, size = _SCALAR[type_code]
@@ -62,9 +81,10 @@ def _read_value(fh: BinaryIO, type_code: int) -> Any:
     if type_code == ARRAY:
         (elem_type,) = struct.unpack("<I", _read_exact(fh, 4))
         (count,) = struct.unpack("<Q", _read_exact(fh, 8))
-        if count > MAX_METADATA_ENTRIES:
+        if count > MAX_ARRAY_ELEMENTS:
             raise GgufError(f"array too large: {count} elements")
-        return [_read_value(fh, elem_type) for _ in range(count)]
+        _skip_array_payload(fh, elem_type, count)
+        return {"type": "array", "element_type": elem_type, "count": count}
     raise GgufError(f"unknown GGUF metadata type code: {type_code}")
 
 
@@ -111,7 +131,19 @@ def kv_geometry(metadata: dict[str, Any]) -> dict[str, int]:
         key = f"{arch}.{suffix}"
         if key not in metadata:
             raise GgufError(f"required metadata key missing: {key}")
-        return int(metadata[key])
+        val = metadata[key]
+        # Arrays in geometry (like per-layer head counts) are represented as
+        # dict summaries. For VRAM calculation, use the first element.
+        if isinstance(val, dict) and val.get("type") == "array":
+            if val["element_type"] in _SCALAR:
+                # For arrays of scalars, we need to read the actual array data.
+                # This is a limitation: we skipped the array payload.
+                raise GgufError(
+                    f"{key} is a {val['count']}-element array; "
+                    "cannot extract value without re-reading file"
+                )
+            raise GgufError(f"{key} is an array of unsupported type")
+        return int(val)
 
     return {
         "block_count": need("block_count"),

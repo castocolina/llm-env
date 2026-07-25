@@ -34,6 +34,21 @@ def _kv_string(key: str, value: str) -> bytes:
     )
 
 
+def _kv_string_array(key: str, values: list[str]) -> bytes:
+    kb = key.encode()
+    out = (
+        struct.pack("<Q", len(kb))
+        + kb
+        + struct.pack("<I", 9)          # ARRAY
+        + struct.pack("<I", T_STRING)   # element type
+        + struct.pack("<Q", len(values))
+    )
+    for v in values:
+        vb = v.encode()
+        out += struct.pack("<Q", len(vb)) + vb
+    return out
+
+
 def write_fake_gguf(path: Path, *, magic=b"GGUF", version=3) -> Path:
     kvs = [
         _kv_string("general.architecture", "llama"),
@@ -96,3 +111,39 @@ def test_kv_geometry_extracts_dimensions(tmp_path):
 def test_kv_geometry_raises_when_architecture_missing():
     with pytest.raises(GgufError):
         kv_geometry({"llama.block_count": 40})
+
+
+def test_large_string_array_is_summarized_not_materialized(tmp_path):
+    vocab = [f"tok{i}" for i in range(200_000)]
+    kvs = [
+        _kv_string("general.architecture", "llama"),
+        _kv_string_array("tokenizer.ggml.tokens", vocab),
+        _kv_uint32("llama.block_count", 40),
+    ]
+    body = b"".join(kvs)
+    path = tmp_path / "big.gguf"
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, len(kvs)) + body)
+
+    header = read_gguf_header(path)
+    assert header["metadata"]["tokenizer.ggml.tokens"] == {
+        "type": "array",
+        "element_type": T_STRING,
+        "count": 200_000,
+    }
+    # Keys after the big array must still parse, proving the skip landed correctly.
+    assert header["metadata"]["llama.block_count"] == 40
+
+
+def test_array_beyond_the_corruption_cap_is_rejected(tmp_path):
+    path = tmp_path / "corrupt.gguf"
+    kb = b"bad"
+    body = (
+        struct.pack("<Q", len(kb))
+        + kb
+        + struct.pack("<I", 9)
+        + struct.pack("<I", T_UINT32)
+        + struct.pack("<Q", 200_000_000)
+    )
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 1) + body)
+    with pytest.raises(GgufError):
+        read_gguf_header(path)
