@@ -147,3 +147,51 @@ def test_array_beyond_the_corruption_cap_is_rejected(tmp_path):
     path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 1) + body)
     with pytest.raises(GgufError):
         read_gguf_header(path)
+
+
+def _kv_int32_array(key: str, values: list[int]) -> bytes:
+    kb = key.encode()
+    out = (
+        struct.pack("<Q", len(kb))
+        + kb
+        + struct.pack("<I", 9)   # ARRAY
+        + struct.pack("<I", 5)   # INT32 element type
+        + struct.pack("<Q", len(values))
+    )
+    for v in values:
+        out += struct.pack("<i", v)
+    return out
+
+
+def test_per_layer_head_count_kv_array_is_materialized(tmp_path):
+    kvs = [
+        _kv_string("general.architecture", "llama"),
+        _kv_uint32("llama.block_count", 48),
+        _kv_int32_array("llama.attention.head_count_kv", [8] * 48),
+        _kv_uint32("llama.attention.key_length", 128),
+        _kv_uint32("llama.attention.value_length", 128),
+    ]
+    body = b"".join(kvs)
+    path = tmp_path / "perlayer.gguf"
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, len(kvs)) + body)
+
+    geo = kv_geometry(read_gguf_header(path)["metadata"])
+    assert geo["head_count_kv"] == [8] * 48
+    assert geo["block_count"] == 48
+    assert geo["key_length"] == 128
+
+
+def test_kv_geometry_rejects_non_integer_head_count(tmp_path):
+    kvs = [
+        _kv_string("general.architecture", "llama"),
+        _kv_uint32("llama.block_count", 40),
+        _kv_string("llama.attention.head_count_kv", "eight"),
+        _kv_uint32("llama.attention.key_length", 128),
+        _kv_uint32("llama.attention.value_length", 128),
+    ]
+    body = b"".join(kvs)
+    path = tmp_path / "badtype.gguf"
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, len(kvs)) + body)
+
+    with pytest.raises(GgufError):
+        kv_geometry(read_gguf_header(path)["metadata"])

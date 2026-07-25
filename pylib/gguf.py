@@ -38,6 +38,9 @@ _SCALAR = {
 MAX_METADATA_ENTRIES = 100_000
 # Array element counts are capped only to catch corrupt headers, not real vocabularies.
 MAX_ARRAY_ELEMENTS = 100_000_000
+# Arrays at or below this size are materialized; larger ones are summarized.
+# Per-layer geometry arrays are tens of elements; vocabularies are 100k+.
+MAX_INLINE_ARRAY_ELEMENTS = 4096
 
 
 class GgufError(Exception):
@@ -83,6 +86,8 @@ def _read_value(fh: BinaryIO, type_code: int) -> Any:
         (count,) = struct.unpack("<Q", _read_exact(fh, 8))
         if count > MAX_ARRAY_ELEMENTS:
             raise GgufError(f"array too large: {count} elements")
+        if elem_type != ARRAY and count <= MAX_INLINE_ARRAY_ELEMENTS:
+            return [_read_value(fh, elem_type) for _ in range(count)]
         _skip_array_payload(fh, elem_type, count)
         return {"type": "array", "element_type": elem_type, "count": count}
     raise GgufError(f"unknown GGUF metadata type code: {type_code}")
@@ -122,32 +127,50 @@ def validate_gguf(path: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
-def kv_geometry(metadata: dict[str, Any]) -> dict[str, int]:
+def kv_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Extract the dimensions needed to size a KV cache.
+
+    head_count_kv is an int for models with uniform attention, or a list with
+    one entry per layer for models that vary it. Callers must handle both.
+    """
     arch = metadata.get("general.architecture")
     if not arch:
         raise GgufError("general.architecture missing from GGUF metadata")
 
-    def need(suffix: str) -> int:
+    def need(suffix: str) -> Any:
         key = f"{arch}.{suffix}"
         if key not in metadata:
             raise GgufError(f"required metadata key missing: {key}")
-        val = metadata[key]
-        # Arrays in geometry (like per-layer head counts) are represented as
-        # dict summaries. For VRAM calculation, use the first element.
-        if isinstance(val, dict) and val.get("type") == "array":
-            if val["element_type"] in _SCALAR:
-                # For arrays of scalars, we need to read the actual array data.
-                # This is a limitation: we skipped the array payload.
-                raise GgufError(
-                    f"{key} is a {val['count']}-element array; "
-                    "cannot extract value without re-reading file"
-                )
-            raise GgufError(f"{key} is an array of unsupported type")
-        return int(val)
+        return metadata[key]
+
+    def as_int(suffix: str) -> int:
+        value = need(suffix)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise GgufError(f"{arch}.{suffix} must be an integer, got {value!r}")
+        return int(value)
+
+    head_count_kv = need("attention.head_count_kv")
+    if isinstance(head_count_kv, list):
+        if not head_count_kv or not all(
+            isinstance(v, int) and not isinstance(v, bool) and v > 0
+            for v in head_count_kv
+        ):
+            raise GgufError(
+                f"{arch}.attention.head_count_kv is a list but not all entries "
+                "are positive integers"
+            )
+        head_count_kv = [int(v) for v in head_count_kv]
+    elif isinstance(head_count_kv, int) and not isinstance(head_count_kv, bool):
+        head_count_kv = int(head_count_kv)
+    else:
+        raise GgufError(
+            f"{arch}.attention.head_count_kv has unsupported type "
+            f"{type(head_count_kv).__name__}; expected int or list of int"
+        )
 
     return {
-        "block_count": need("block_count"),
-        "head_count_kv": need("attention.head_count_kv"),
-        "key_length": need("attention.key_length"),
-        "value_length": need("attention.value_length"),
+        "block_count": as_int("block_count"),
+        "head_count_kv": head_count_kv,
+        "key_length": as_int("attention.key_length"),
+        "value_length": as_int("attention.value_length"),
     }
