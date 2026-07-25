@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pylib.detect import compositor_render_node, detect, list_gpus
+from pylib.detect import DetectError, compositor_render_node, detect, list_gpus
 
 MIB = 1024 * 1024
 
@@ -93,3 +95,25 @@ def test_detect_combines_both_sources(tmp_path):
     result = detect(drm, proc)
     assert len(result["gpus"]) == 2
     assert result["compositor_render_node"] == "renderD128"
+
+
+def test_card_without_vram_total_is_skipped(tmp_path):
+    drm = build_drm(tmp_path)
+    (tmp_path / "devices" / "0000:0e:00.0" / "mem_info_vram_total").unlink()
+    cards = [g["card"] for g in list_gpus(drm)]
+    assert cards == ["card1"], "a card with no VRAM attribute must be skipped"
+
+
+def test_card_with_corrupt_vram_total_raises(tmp_path):
+    drm = build_drm(tmp_path)
+    (tmp_path / "devices" / "0000:03:00.0" / "mem_info_vram_total").write_text("garbage")
+    with pytest.raises(DetectError) as excinfo:
+        list_gpus(drm)
+    assert "does not contain an integer" in str(excinfo.value)
+
+
+def test_card_without_device_symlink_is_skipped(tmp_path):
+    drm = build_drm(tmp_path)
+    (drm / "card0" / "device").unlink()
+    cards = [g["card"] for g in list_gpus(drm)]
+    assert cards == ["card1"], "a card with no resolvable PCI device must be skipped"

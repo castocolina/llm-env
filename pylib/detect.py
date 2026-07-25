@@ -16,11 +16,36 @@ RENDER_RE = re.compile(r"^renderD\d+$")
 COMPOSITOR_NAMES = ("kwin_wayland", "kwin_x11", "plasmashell", "gnome-shell", "sway")
 
 
-def _read_int(path: Path) -> int:
+class DetectError(Exception):
+    """Raised when a sysfs value is present but cannot be interpreted."""
+
+
+def _read_int_required(path: Path) -> int | None:
+    """Return the integer at path, or None if the file is absent.
+
+    Raises DetectError if the file exists but cannot be read or parsed, so a
+    corrupt sysfs value fails loudly instead of silently reading as zero.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise DetectError(f"cannot read {path}: {exc}") from exc
+    try:
+        return int(text.strip())
+    except ValueError as exc:
+        raise DetectError(
+            f"{path} does not contain an integer: {text.strip()!r}"
+        ) from exc
+
+
+def _read_int_optional(path: Path, default: int = 0) -> int:
+    """Return the integer at path, or default if it is missing or unparseable."""
     try:
         return int(path.read_text().strip())
     except (OSError, ValueError):
-        return 0
+        return default
 
 
 def _pci_of(entry: Path) -> str | None:
@@ -62,13 +87,17 @@ def list_gpus(drm_root: Path = Path("/sys/class/drm")) -> list[dict[str, Any]]:
         if not pci:
             continue
         device = entry / "device"
+        total = _read_int_required(device / "mem_info_vram_total")
+        if total is None:
+            # Not a VRAM-backed GPU (virtual driver, USB display adapter).
+            continue
         gpus.append(
             {
                 "card": entry.name,
                 "pci_address": pci,
                 "render_node": render_by_pci.get(pci, ""),
-                "vram_total_mib": _read_int(device / "mem_info_vram_total") // MIB,
-                "vram_used_mib": _read_int(device / "mem_info_vram_used") // MIB,
+                "vram_total_mib": total // MIB,
+                "vram_used_mib": _read_int_optional(device / "mem_info_vram_used") // MIB,
                 "connected_outputs": sorted(outputs_by_card.get(entry.name, [])),
             }
         )
