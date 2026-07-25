@@ -18,7 +18,7 @@ ask() {
     printf '%s' "${reply:-$default}"
 }
 
-require_cmd uv jq podman curl
+require_cmd uv jq yq podman curl
 
 log_step "Step 1/8  Creating configuration"
 if [ -f "$CONFIG_PATH" ]; then
@@ -77,11 +77,20 @@ llmenv --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" \
   || die "one or more model files are not valid GGUF"
 
 log_step "Step 6/8  Generating API key and storing GPU selection"
-api_key="$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+existing_key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH")"
+if [ -n "$existing_key" ] && [ "$existing_key" != "null" ] \
+   && [ "${LLM_ENV_ROTATE_KEY:-0}" != "1" ]; then
+    api_key="$existing_key"
+    log_info "kept the existing API key (set LLM_ENV_ROTATE_KEY=1 to rotate)"
+else
+    # 48 random bytes survive the charset filter with room to spare for 32 chars.
+    api_key="$(head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+    yq -i ".server.api_key = \"${api_key}\"" "$CONFIG_PATH"
+    log_info "generated a new API key"
+fi
 device_name="$(echo "$gpu" | jq -r '.card')"
 yq -i ".gpu.pci_address = \"${pci}\"" "$CONFIG_PATH"
 yq -i ".gpu.vram_total_mib = ${vram_total}" "$CONFIG_PATH"
-yq -i ".server.api_key = \"${api_key}\"" "$CONFIG_PATH"
 log_info "api key stored in ${CONFIG_PATH}"
 log_warn "device_name is set during 'make benchmark'; run it before first start (card: ${device_name})"
 

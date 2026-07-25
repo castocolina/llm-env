@@ -8,6 +8,9 @@ CONFIG_PATH="${LLM_ENV_CONFIG:-${HOME}/.config/llm-env/models.yml}"
 MODELS_DIR="${LLM_ENV_MODELS_DIR:-${HOME}/llm-workspace/models}"
 UNIT_NAME="llm-server"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
+
+# Exported so scripts that source this file expose them to child processes, and so
+# the linter does not flag them as unused (SC2034) in this library.
 export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR
 
 GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'
