@@ -195,3 +195,35 @@ def test_kv_geometry_rejects_non_integer_head_count(tmp_path):
 
     with pytest.raises(GgufError):
         kv_geometry(read_gguf_header(path)["metadata"])
+
+
+def test_kv_geometry_rejects_summarized_array_head_count(tmp_path):
+    """An oversized head_count_kv array is summarized, not materialized.
+
+    kv_geometry must reject the summary dict with a clear GgufError rather than
+    a TypeError or a silently wrong number.
+    """
+    oversized = _kv_int32_array(
+        "llama.attention.head_count_kv", [8] * (4096 + 1)
+    )
+    kvs = [
+        _kv_string("general.architecture", "llama"),
+        _kv_uint32("llama.block_count", 40),
+        oversized,
+        _kv_uint32("llama.attention.key_length", 128),
+        _kv_uint32("llama.attention.value_length", 128),
+    ]
+    body = b"".join(kvs)
+    path = tmp_path / "summarized.gguf"
+    path.write_bytes(
+        b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, len(kvs)) + body
+    )
+
+    metadata = read_gguf_header(path)["metadata"]
+    # Confirm the precondition: the array was summarized, not materialized.
+    assert metadata["llama.attention.head_count_kv"]["type"] == "array"
+    assert metadata["llama.attention.head_count_kv"]["count"] == 4097
+
+    with pytest.raises(GgufError) as excinfo:
+        kv_geometry(metadata)
+    assert "unsupported type" in str(excinfo.value)
