@@ -1,4 +1,5 @@
 import configparser
+import re
 import sys
 from pathlib import Path
 
@@ -43,7 +44,27 @@ def test_no_default_section_and_no_version_key():
     """llama-server registers [DEFAULT] as a phantom model, so it must not appear."""
     text = render_presets(CFG, "/models", "Vulkan0")
     assert "[DEFAULT]" not in text
-    assert "version" not in text
+    assert re.search(r"(?mi)^\s*version\s*=", text) is None
+    assert parse(text).defaults() == {}
+
+
+def test_version_check_tolerates_a_filename_containing_version():
+    """The guard must match a version directive, not the substring anywhere."""
+    cfg = {
+        **CFG,
+        "models": [
+            {
+                "alias": "verbose",
+                "enabled": True,
+                "file": "llama-3-70b-version2.gguf",
+                "ctx_size": 4096,
+                "n_gpu_layers": 99,
+            }
+        ],
+    }
+    text = render_presets(cfg, "/models", "Vulkan0")
+    assert "version2.gguf" in text
+    assert re.search(r"(?mi)^\s*version\s*=", text) is None
     assert parse(text).defaults() == {}
 
 
