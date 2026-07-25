@@ -20,10 +20,16 @@ run_bench() {
     local args=()
     for dev in "${devices[@]}"; do args+=(--device "$dev"); done
 
+    if ! podman run --rm --entrypoint /app/llama "$image" help all 2>/dev/null \
+         | grep -qE '^\s*bench\b'; then
+        log_warn "image ${image} has no 'bench' subcommand; skipping this backend"
+        return 1
+    fi
+
     podman run --rm "${args[@]}" \
         -v "${MODELS_DIR}:/models:ro,z" \
-        --entrypoint /app/llama-bench \
-        "$image" -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json 2>/dev/null \
+        --entrypoint /app/llama \
+        "$image" bench -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json 2>/dev/null \
       | jq -r '
           [ (.[] | select(.n_prompt > 0) | .avg_ts),
             (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv'
