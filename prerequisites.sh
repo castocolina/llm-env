@@ -29,16 +29,28 @@ command_is_usable() {
     fi
 }
 
+command_purpose() {
+    case "$1" in
+        uv) printf '%s\n' "Python tool runner and dependency manager" ;;
+        jq) printf '%s\n' "JSON processor for script-to-Python communication" ;;
+        yq) printf '%s\n' "Mike Farah yq v4 configuration processor" ;;
+        podman) printf '%s\n' "container engine for llama.cpp" ;;
+        curl) printf '%s\n' "HTTP client for downloads and health checks" ;;
+        ip) printf '%s\n' "network address inspection" ;;
+        git) printf '%s\n' "source control for updates" ;;
+        shellcheck) printf '%s\n' "shell script validation" ;;
+        firewall-cmd) printf '%s\n' "firewall configuration for LAN access" ;;
+        avahi-publish) printf '%s\n' "LAN service discovery" ;;
+    esac
+}
+
 check_group() {
-    local purpose="$1" category="$2" item command package description
-    shift 2
+    local category="$1" item command package description
+    shift
     for item in "$@"; do
         command="${item%%:*}"
         package="${item#*:}"
-        description="$purpose"
-        if [ "$command" = "yq" ]; then
-            description="Mike Farah yq v4 configuration processor"
-        fi
+        description="$(command_purpose "$command")"
         if command_is_usable "$command"; then
             printf '  installed  %-16s %s\n' "$command" "$description"
         else
@@ -60,9 +72,9 @@ check_group() {
 }
 
 printf 'Checking Bazzite/Fedora prerequisites:\n'
-check_group "required to run llm-env" runtime "${RUNTIME[@]}"
-check_group "development validation tool" development "${DEVELOPMENT[@]}"
-check_group "optional LAN access tool" optional "${OPTIONAL_LAN[@]}"
+check_group runtime "${RUNTIME[@]}"
+check_group development "${DEVELOPMENT[@]}"
+check_group optional "${OPTIONAL_LAN[@]}"
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ "${#missing_runtime[@]}" -eq 0 ]; then

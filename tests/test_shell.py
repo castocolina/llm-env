@@ -12,7 +12,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def _mock_command(directory: pathlib.Path, name: str) -> None:
     command = directory / name
-    command.write_text("#!/usr/bin/env bash\nexit 0\n")
+    command.write_text("#!/usr/bin/bash\nexit 0\n")
+    command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+
+def _mock_dirname(directory: pathlib.Path) -> None:
+    """Provide the only external utility prerequisites.sh needs to source lib.sh."""
+    command = directory / "dirname"
+    command.write_text(
+        "#!/usr/bin/bash\ncase $1 in */*) printf '%s\\n' \"${1%/*}\" ;; *) printf '.\\n' ;; esac\n"
+    )
     command.chmod(command.stat().st_mode | stat.S_IXUSR)
 
 
@@ -29,6 +38,7 @@ def run_prerequisites_with_stubs(
     commands.mkdir()
     calls = tmp_path / "calls"
 
+    _mock_dirname(commands)
     names = ["uv", "jq", "podman", "curl", "ip", "sudo"]
     if development_available:
         names.extend(("git", "shellcheck"))
@@ -37,20 +47,20 @@ def run_prerequisites_with_stubs(
 
     if yq_version is not None:
         yq = commands / "yq"
-        yq.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' '{yq_version}'\n")
+        yq.write_text(f"#!/usr/bin/bash\nprintf '%s\\n' '{yq_version}'\n")
         yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
     sudo = commands / "sudo"
-    sudo.write_text("#!/usr/bin/env bash\nexec \"$@\"\n")
+    sudo.write_text("#!/usr/bin/bash\nexec \"$@\"\n")
     sudo.chmod(sudo.stat().st_mode | stat.S_IXUSR)
     rpm_ostree = commands / "rpm-ostree"
     rpm_ostree.write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+        "#!/usr/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"
     )
     rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
 
     environment = os.environ | {
-        "PATH": f"{commands}:/usr/bin:/bin",
+        "PATH": str(commands),
         "CALLS": str(calls),
     }
     result = subprocess.run(
@@ -76,10 +86,10 @@ def test_prerequisites_reports_missing_yq_v4_without_installing(
     assert not calls.exists()
 
 
-def test_prerequisites_check_requires_runtime_not_development_tools(
+def test_prerequisites_check_reports_missing_non_runtime_rows_on_controlled_path(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Setup preflight must not fail when only development tools are absent."""
+    """Preflight must not discover host development or LAN commands."""
     result, _ = run_prerequisites_with_stubs(
         tmp_path,
         yq_version="yq (https://github.com/mikefarah/yq/) version v4.45.1",
@@ -88,6 +98,38 @@ def test_prerequisites_check_requires_runtime_not_development_tools(
     )
 
     assert result.returncode == 0
+    assert "missing    git              (git)        source control for updates" in result.stdout
+    assert "missing    shellcheck       (ShellCheck) shell script validation" in result.stdout
+    assert "missing    firewall-cmd     (firewalld)  firewall configuration for LAN access" in result.stdout
+    assert "missing    avahi-publish    (avahi)      LAN service discovery" in result.stdout
+
+
+def test_prerequisites_displays_a_distinct_purpose_for_every_command(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Each status row must explain the command's specific role."""
+    result, _ = run_prerequisites_with_stubs(
+        tmp_path,
+        yq_version="yq (https://github.com/mikefarah/yq/) version v4.45.1",
+        development_available=True,
+        arguments=("--check",),
+    )
+
+    assert result.returncode == 0
+    expected_purposes = (
+        "Python tool runner and dependency manager",
+        "JSON processor for script-to-Python communication",
+        "Mike Farah yq v4 configuration processor",
+        "container engine for llama.cpp",
+        "HTTP client for downloads and health checks",
+        "network address inspection",
+        "source control for updates",
+        "shell script validation",
+        "firewall configuration for LAN access",
+        "LAN service discovery",
+    )
+    for purpose in expected_purposes:
+        assert purpose in result.stdout
 
 
 def test_prerequisites_installs_only_after_yes(tmp_path: pathlib.Path) -> None:
