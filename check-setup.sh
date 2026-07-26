@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# check-setup.sh — offline validation. No server required.
+set -uo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+set +e
+
+PASS=0; FAIL=0
+
+check() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+        log_info "$label"; PASS=$((PASS + 1))
+    else
+        log_error "$label"; FAIL=$((FAIL + 1))
+    fi
+}
+
+log_step "Tooling"
+for cmd in uv jq yq podman systemctl curl; do
+    check "command available: ${cmd}" command -v "$cmd"
+done
+
+log_step "Configuration"
+check "config exists at ${CONFIG_PATH}" test -f "$CONFIG_PATH"
+check "config parses and validates" bash -c \
+    "uv run '${REPO_DIR}/llmenv.py' --config '${CONFIG_PATH}' models list"
+
+log_step "GPU access"
+check "/dev/dri exists" test -d /dev/dri
+pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || echo "")"
+render_node="$(uv run "${REPO_DIR}/llmenv.py" detect 2>/dev/null \
+  | jq -r --arg p "$pci" '.gpus[] | select(.pci_address==$p) | .render_node')"
+if [ -n "$render_node" ] && [ "$render_node" != "null" ]; then
+    check "render node /dev/dri/${render_node} is readable" test -r "/dev/dri/${render_node}"
+else
+    log_error "no render node found for ${pci}"
+    FAIL=$((FAIL + 1))
+fi
+backend="$(yq -r '.gpu.backend' "$CONFIG_PATH" 2>/dev/null || echo unknown)"
+if [ "$backend" = "rocm" ]; then
+    check "/dev/kfd readable (required by ROCm)" test -r /dev/kfd
+fi
+
+log_step "Configured GPU is present"
+check "GPU ${pci} detected" bash -c \
+    "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'"
+
+log_step "Container image"
+image="$(yq -r '.gpu.image' "$CONFIG_PATH" 2>/dev/null || echo "")"
+check "image ${image} present locally" podman image exists "$image"
+
+log_step "Model files"
+if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
+          validate-gguf --models-dir "$MODELS_DIR" 2>/dev/null)"; then
+    echo "$out" | jq -r '.results[] | "  ok   \(.alias)"'
+    PASS=$((PASS + 1))
+else
+    echo "$out" | jq -r '.results[]? | "  \(if .valid then "ok  " else "FAIL" end) \(.alias): \(.message)"'
+    log_error "one or more model files are invalid"
+    FAIL=$((FAIL + 1))
+fi
+
+log_step "VRAM budget"
+if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
+          budget --models-dir "$MODELS_DIR" 2>/dev/null)"; then
+    echo "$out" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
+    log_info "budget is feasible for models_max=$(echo "$out" | jq -r .models_max)"
+    PASS=$((PASS + 1))
+else
+    echo "$out" | jq -r '"  short by \(.shortfall_mib) MiB"' 2>/dev/null
+    echo "$out" | jq -r '.remedies[]? | "    - \(.)"' 2>/dev/null
+    log_error "budget exceeded"
+    FAIL=$((FAIL + 1))
+fi
+
+echo
+log_step "Results: ${PASS} passed, ${FAIL} failed"
+[ "$FAIL" -eq 0 ]
