@@ -29,6 +29,7 @@ from pylib.config import (
     enabled_models,
     load_config,
     save_config,
+    set_enabled_models,
     set_model_enabled,
     sync_models_max,
     validate_config,
@@ -37,7 +38,10 @@ from pylib.detect import DetectError, detect
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
 from pylib.presets import write_presets
 
-DEVICE_LINE_RE = re.compile(r"^\s*(\S+):\s+(.*?)\s*\(\d+\s*MiB", re.MULTILINE)
+DEVICE_LINE_RE = re.compile(
+    r"^\s*(?P<id>\S+):\s*(?P<name>.*?)\s*\((?P<total_mib>\d+)\s*MiB.*\)$",
+    re.MULTILINE,
+)
 
 
 def emit(payload: dict[str, Any], code: int = 0) -> int:
@@ -53,27 +57,44 @@ def cmd_detect(args: argparse.Namespace) -> int:
     return emit(detect())
 
 
-def cmd_resolve_device(args: argparse.Namespace) -> int:
+def parse_device_listing(text: str) -> list[dict[str, int | str]]:
+    return [
+        {
+            "id": match["id"],
+            "name": match["name"].strip(),
+            "total_mib": int(match["total_mib"]),
+        }
+        for match in DEVICE_LINE_RE.finditer(text)
+    ]
+
+
+def _read_device_listing(args: argparse.Namespace) -> str:
     if args.listing_file:
-        listing = Path(args.listing_file).read_text(encoding="utf-8")
-    else:
-        try:
-            listing = subprocess.run(
-                args.list_command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            ).stdout
-        except subprocess.TimeoutExpired:
-            return fail("timed out running the device listing command")
+        return Path(args.listing_file).read_text(encoding="utf-8")
+    try:
+        return subprocess.run(
+            args.list_command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        ).stdout
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigError("timed out running the device listing command") from exc
 
-    for device_id, name in DEVICE_LINE_RE.findall(listing):
-        if name.strip() == args.device_name.strip():
-            return emit({"device": device_id, "name": name.strip()})
 
-    available = [f"{d}: {n}" for d, n in DEVICE_LINE_RE.findall(listing)]
+def cmd_list_devices(args: argparse.Namespace) -> int:
+    return emit({"devices": parse_device_listing(_read_device_listing(args))})
+
+
+def cmd_resolve_device(args: argparse.Namespace) -> int:
+    devices = parse_device_listing(_read_device_listing(args))
+    for device in devices:
+        if device["name"] == args.device_name.strip():
+            return emit({"device": device["id"], "name": device["name"]})
+
+    available = [f"{d['id']}: {d['name']}" for d in devices]
     return fail(
         f"device {args.device_name!r} not found. Available: {available or 'none'}"
     )
@@ -160,9 +181,15 @@ def cmd_models(args: argparse.Namespace) -> int:
             }
         )
 
-    cfg = sync_models_max(set_model_enabled(cfg, args.alias, args.action == "enable"))
+    if args.action == "select":
+        cfg = set_enabled_models(cfg, args.aliases)
+        save_config(cfg, path)
+        return emit({"models_max": cfg["runtime"]["models_max"]})
+
+    alias = args.aliases[0]
+    cfg = sync_models_max(set_model_enabled(cfg, alias, args.action == "enable"))
     save_config(cfg, path)
-    return emit({"alias": args.alias, "models_max": cfg["runtime"]["models_max"]})
+    return emit({"alias": alias, "models_max": cfg["runtime"]["models_max"]})
 
 
 def cmd_validate_gguf(args: argparse.Namespace) -> int:
@@ -192,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("detect").set_defaults(func=cmd_detect)
 
+    list_devices = sub.add_parser("list-devices")
+    list_devices.add_argument("--listing-file")
+    list_devices.add_argument("--list-command", default="")
+    list_devices.set_defaults(func=cmd_list_devices)
+
     resolve = sub.add_parser("resolve-device")
     resolve.add_argument("--device-name", required=True)
     resolve.add_argument("--listing-file")
@@ -212,8 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     models = sub.add_parser("models")
     models.add_argument("--config", default=argparse.SUPPRESS)
-    models.add_argument("action", choices=["list", "enable", "disable"])
-    models.add_argument("alias", nargs="?")
+    models.add_argument("action", choices=["list", "enable", "disable", "select"])
+    models.add_argument("aliases", nargs="*")
     models.set_defaults(func=cmd_models)
 
     gguf = sub.add_parser("validate-gguf")
@@ -231,8 +263,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "models" and args.action != "list" and not args.alias:
-        print(json.dumps({"error": "alias is required for enable/disable"}, indent=2))
+    if args.command == "models" and args.action != "list" and not args.aliases:
+        print(json.dumps({"error": "at least one alias is required"}, indent=2))
+        return 2
+    if args.command == "models" and args.action in ("enable", "disable") and len(args.aliases) != 1:
+        print(json.dumps({"error": "exactly one alias is required for enable/disable"}, indent=2))
         return 2
     try:
         return args.func(args)

@@ -10,6 +10,7 @@ from pylib.config import (
     enabled_models,
     load_config,
     save_config,
+    set_enabled_models,
     set_model_enabled,
     sync_models_max,
     validate_config,
@@ -44,6 +45,9 @@ def make_cfg(**overrides):
         "models": [
             {
                 "alias": "gemma4",
+                "label": "Gemma 4 Instruct",
+                "parameters": "12B",
+                "quantization": "Q4_K_M",
                 "enabled": True,
                 "file": "gemma-4-12B-it-Q4_K_M.gguf",
                 "url": "https://example.invalid/gemma.gguf",
@@ -54,6 +58,9 @@ def make_cfg(**overrides):
             },
             {
                 "alias": "ornith",
+                "label": "Ornith 1.0",
+                "parameters": "9B",
+                "quantization": "Q4_K_M",
                 "enabled": False,
                 "file": "ornith-1.0-9b-Q4_K_M.gguf",
                 "url": "https://example.invalid/ornith.gguf",
@@ -70,6 +77,23 @@ def make_cfg(**overrides):
 
 def test_valid_config_has_no_errors():
     assert validate_config(make_cfg()) == []
+
+
+def test_model_requires_display_metadata():
+    cfg = make_cfg()
+    del cfg["models"][0]["label"]
+    assert "model gemma4 missing key: label" in validate_config(cfg)
+
+
+def test_set_enabled_models_replaces_the_enabled_set():
+    cfg = set_enabled_models(make_cfg(), ["ornith"])
+    assert [m["alias"] for m in enabled_models(cfg)] == ["ornith"]
+    assert cfg["runtime"]["models_max"] == 1
+
+
+def test_set_enabled_models_rejects_unknown_alias():
+    with pytest.raises(ConfigError, match="unknown model alias"):
+        set_enabled_models(make_cfg(), ["missing"])
 
 
 def test_missing_top_level_section_is_reported():

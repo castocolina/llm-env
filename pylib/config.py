@@ -13,6 +13,9 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "llm-env" / "models.yml"
 REQUIRED_SECTIONS = ("server", "gpu", "runtime", "models")
 REQUIRED_MODEL_KEYS = (
     "alias",
+    "label",
+    "parameters",
+    "quantization",
     "enabled",
     "file",
     "url",
@@ -101,6 +104,17 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
 def enabled_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in cfg.get("models", []) if m.get("enabled")]
+
+
+def set_enabled_models(cfg: dict[str, Any], aliases: list[str]) -> dict[str, Any]:
+    requested = set(aliases)
+    known = {model["alias"] for model in cfg.get("models", [])}
+    unknown = requested - known
+    if unknown:
+        raise ConfigError(f"unknown model alias: {min(unknown)}")
+    for model in cfg["models"]:
+        model["enabled"] = model["alias"] in requested
+    return sync_models_max(cfg)
 
 
 def set_model_enabled(cfg: dict[str, Any], alias: str, enabled: bool) -> dict[str, Any]:
