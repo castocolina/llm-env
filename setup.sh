@@ -6,6 +6,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ASSUME_YES="${LLM_ENV_ASSUME_YES:-0}"
 
+bash "${REPO_DIR}/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"
+
 # ask PROMPT DEFAULT -> echoes the answer, or DEFAULT when running unattended
 ask() {
     local prompt="$1" default="$2" reply

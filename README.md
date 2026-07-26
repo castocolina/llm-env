@@ -6,6 +6,7 @@ podman quadlet on Bazzite.
 ## Quick start
 
 ```bash
+make prerequisites  # confirm and install Bazzite/Fedora host tools
 make setup       # choose GPU and models, download, generate config
 make benchmark   # measure Vulkan vs ROCm, record the winner
 make start       # start the server
@@ -39,8 +40,10 @@ uv run llmenv.py models enable openhermes
 
 ## Requirements
 
-Bazzite or Fedora, podman, uv, jq, yq, curl. No compiler needed — the
-llama.cpp server comes from a prebuilt image.
+Bazzite or Fedora. Run `make prerequisites` to detect and, after explicit
+confirmation, install uv, jq, Mike Farah yq v4, podman, curl, iproute, git,
+and ShellCheck. No compiler needed — the llama.cpp server comes from a
+prebuilt image.
 
 ## Commands
 

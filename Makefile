@@ -1,9 +1,10 @@
-.PHONY: help setup start stop restart check-setup check-server benchmark \
+.PHONY: help prerequisites setup start stop restart check-setup check-server benchmark \
         enable-boot disable-boot status logs validate test clean
 
 UNIT = llm-server
 
 help:
+	@echo "make prerequisites Confirm and install host prerequisites"
 	@echo "make setup         Interactive configuration"
 	@echo "make start         Start the LLM server"
 	@echo "make stop          Stop the LLM server"
@@ -18,6 +19,9 @@ help:
 	@echo "make validate      Run shellcheck and ruff"
 	@echo "make test          Run the Python test suite"
 	@echo "make clean         Remove config, unit, and images"
+
+prerequisites:
+	@bash prerequisites.sh
 
 setup:
 	@bash setup.sh
