@@ -6,6 +6,7 @@ server:
   api_key: ""
   mdns_name: llm
   sleep_idle_seconds: 300
+  start_at_boot: false
 
 gpu:
   pci_address: ""

@@ -40,13 +40,10 @@ benchmark:
 	@bash benchmark.sh
 
 enable-boot:
-	@loginctl enable-linger "$$USER"
-	@systemctl --user enable $(UNIT).service
-	@echo "Enabled at boot."
+	@bash enable-boot.sh
 
 disable-boot:
-	@systemctl --user disable $(UNIT).service
-	@echo "Disabled at boot. Run 'loginctl disable-linger $$USER' to fully revert."
+	@bash disable-boot.sh
 
 status:
 	@systemctl --user status $(UNIT).service --no-pager || true
