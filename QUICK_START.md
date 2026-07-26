@@ -21,7 +21,7 @@ make logs
 ## Start at boot
 
 ```bash
-make enable-boot     # loginctl enable-linger + systemctl --user enable
+make enable-boot     # enable lingering and render the quadlet [Install] section
 make disable-boot
 ```
 

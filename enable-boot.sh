@@ -13,7 +13,7 @@ loginctl enable-linger "$USER"
 log_info "lingering enabled for ${USER}"
 
 if [ -f "${QUADLET_DIR}/${UNIT_NAME}.container" ]; then
-    bash "${REPO_DIR}/start.sh" >/dev/null 2>&1 || true
+    bash "${REPO_DIR}/start.sh"
     log_info "unit re-rendered with [Install]"
 fi
 systemctl --user daemon-reload
