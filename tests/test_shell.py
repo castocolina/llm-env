@@ -300,6 +300,105 @@ def test_setup_rejects_invalid_numbered_model_selection_before_download(
     assert "curl " not in calls.read_text()
 
 
+def test_check_setup_runs_disposable_inference_for_each_enabled_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Offline setup validation must resolve and smoke-test every enabled model."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("systemctl", "curl"):
+        _mock_command(commands, name)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
+        "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"pci_address\":\"0000:03:00.0\",\"render_node\":\"renderD128\"}]}' ;;\n"
+        "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}' ;;\n"
+        "  *' resolve-device'*) printf '%s\\n' '{\"device\":\"Vulkan7\"}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *'--list-devices'*) printf '%s\\n' 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ;;\n"
+        "  *' cli '*) printf '%s\\n' 'ready' ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "gpu:\n"
+        "  image: example.invalid/llama:latest\n"
+        "  pci_address: 0000:03:00.0\n"
+        "  device_name: Selected Radeon\n"
+        "runtime:\n"
+        "  models_max: 2\n"
+        "models:\n"
+        "  - alias: first\n"
+        "    enabled: true\n"
+        "    file: first.gguf\n"
+        "    n_gpu_layers: 42\n"
+        "  - alias: skipped\n"
+        "    enabled: false\n"
+        "    file: skipped.gguf\n"
+        "    n_gpu_layers: 99\n"
+        "  - alias: second\n"
+        "    enabled: true\n"
+        "    file: second.gguf\n"
+        "    n_gpu_layers: 17\n"
+    )
+    models_dir = tmp_path / "models"
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(models_dir),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "check-setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    recorded = calls.read_text()
+    assert "resolve-device --device-name Selected Radeon" in recorded
+    assert (
+        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
+        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
+        "--device Vulkan7 --n-gpu-layers 42 -p Reply with exactly: ready -n 16"
+    ) in recorded
+    assert (
+        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
+        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
+        "--device Vulkan7 --n-gpu-layers 17 -p Reply with exactly: ready -n 16"
+    ) in recorded
+    assert "/models/skipped.gguf" not in recorded
+    assert "podman exec" not in recorded
+
+
 def test_enable_boot_fails_when_quadlet_rerender_fails(tmp_path: pathlib.Path) -> None:
     """A failed start.sh rerender must not be reported as boot setup success."""
     commands = tmp_path / "bin"

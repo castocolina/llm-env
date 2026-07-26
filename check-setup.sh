@@ -67,6 +67,37 @@ if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
     echo "$out" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
     log_info "budget is feasible for models_max=$(echo "$out" | jq -r .models_max)"
     PASS=$((PASS + 1))
+
+    log_step "Offline inference"
+    device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || echo "")"
+    listing_file="$(mktemp)"
+    podman run --rm --device /dev/dri --entrypoint /app/llama \
+        "$image" --list-devices >"$listing_file" 2>/dev/null || true
+    if resolved="$(llmenv resolve-device --device-name "$device_name" \
+                    --listing-file "$listing_file")"; then
+        device="$(echo "$resolved" | jq -r '.device')"
+        log_info "resolved ${device_name} to ${device}"
+        while IFS=$'\t' read -r alias file layers; do
+            if output="$(timeout 180 podman run --rm --device /dev/dri \
+                -v "${MODELS_DIR}:/models:ro,z" \
+                --entrypoint /app/llama "$image" cli \
+                -m "/models/${file}" --device "$device" \
+                --n-gpu-layers "$layers" -p "Reply with exactly: ready" -n 16 2>&1)" \
+                && [ -n "$output" ]; then
+                log_info "inference ${alias}"
+                PASS=$((PASS + 1))
+            else
+                diagnostic="$(printf '%s' "$output" | head -c 1000)"
+                [ -n "$diagnostic" ] || diagnostic="no output"
+                log_error "inference ${alias} failed: ${diagnostic}"
+                FAIL=$((FAIL + 1))
+            fi
+        done < <(yq -r '.models[] | select(.enabled) | [.alias, .file, .n_gpu_layers] | @tsv' "$CONFIG_PATH")
+    else
+        log_error "could not resolve GPU device ${device_name}"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$listing_file"
 else
     if err="$(echo "$out" | jq -r '.error // empty' 2>/dev/null)" && [ -n "$err" ]; then
         log_error "budget check failed: ${err}"
