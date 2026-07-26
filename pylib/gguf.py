@@ -54,6 +54,16 @@ def _read_exact(fh: BinaryIO, size: int) -> bytes:
     return data
 
 
+def _skip_exact(fh: BinaryIO, size: int) -> None:
+    """Advance a seekable stream, rejecting a skip past its end."""
+    start = fh.tell()
+    end = fh.seek(0, 2)
+    fh.seek(start)
+    if size > end - start:
+        raise GgufError(f"truncated GGUF: wanted {size} bytes, got {end - start}")
+    fh.seek(size, 1)
+
+
 def _read_string(fh: BinaryIO) -> str:
     (length,) = struct.unpack("<Q", _read_exact(fh, 8))
     return _read_exact(fh, length).decode("utf-8", errors="replace")
@@ -63,12 +73,12 @@ def _skip_array_payload(fh: BinaryIO, elem_type: int, count: int) -> None:
     """Seek past an array's payload without materializing it."""
     if elem_type in _SCALAR:
         _, size = _SCALAR[elem_type]
-        fh.seek(size * count, 1)
+        _skip_exact(fh, size * count)
         return
     if elem_type == STRING:
         for _ in range(count):
             (length,) = struct.unpack("<Q", _read_exact(fh, 8))
-            fh.seek(length, 1)
+            _skip_exact(fh, length)
         return
     if elem_type == ARRAY:
         raise GgufError("nested GGUF arrays are not supported")

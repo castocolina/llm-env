@@ -134,6 +134,24 @@ def test_large_string_array_is_summarized_not_materialized(tmp_path):
     assert header["metadata"]["llama.block_count"] == 40
 
 
+def test_truncated_summarized_array_is_rejected(tmp_path):
+    path = tmp_path / "truncated-array.gguf"
+    key = b"tokenizer.ggml.tokens"
+    body = (
+        struct.pack("<Q", len(key))
+        + key
+        + struct.pack("<I", 9)  # ARRAY
+        + struct.pack("<I", T_UINT32)
+        + struct.pack("<Q", 4097)
+    )
+    path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 1) + body)
+
+    ok, message = validate_gguf(path)
+
+    assert ok is False
+    assert "truncated" in message
+
+
 def test_array_beyond_the_corruption_cap_is_rejected(tmp_path):
     path = tmp_path / "corrupt.gguf"
     kb = b"bad"
