@@ -68,9 +68,13 @@ if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
     log_info "budget is feasible for models_max=$(echo "$out" | jq -r .models_max)"
     PASS=$((PASS + 1))
 else
-    echo "$out" | jq -r '"  short by \(.shortfall_mib) MiB"' 2>/dev/null
-    echo "$out" | jq -r '.remedies[]? | "    - \(.)"' 2>/dev/null
-    log_error "budget exceeded"
+    if err="$(echo "$out" | jq -r '.error // empty' 2>/dev/null)" && [ -n "$err" ]; then
+        log_error "budget check failed: ${err}"
+    else
+        echo "$out" | jq -r '"  short by \(.shortfall_mib) MiB"' 2>/dev/null
+        echo "$out" | jq -r '.remedies[]? | "    - \(.)"' 2>/dev/null
+        log_error "budget exceeded"
+    fi
     FAIL=$((FAIL + 1))
 fi
 

@@ -9,6 +9,15 @@ require_cmd curl jq yq
 
 port="$(yq -r '.server.port' "$CONFIG_PATH")"
 api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+
+auth_conf="$(mktemp)"
+chmod 600 "$auth_conf"
+printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
+bad_conf="$(mktemp)"
+chmod 600 "$bad_conf"
+printf 'header = "Authorization: Bearer definitely-not-the-key"\n' > "$bad_conf"
+trap 'rm -f "$auth_conf" "$bad_conf"' EXIT
+
 # 127.0.0.1 rather than localhost: localhost resolves to ::1 first on this system
 # while podman publishes the port on 0.0.0.0 (IPv4), so localhost never connects.
 base="http://127.0.0.1:${port}"
@@ -18,7 +27,7 @@ ok()   { log_info "$1"; PASS=$((PASS + 1)); }
 bad()  { log_error "$1"; FAIL=$((FAIL + 1)); }
 
 log_step "Health"
-if curl -fsS -o /dev/null "${base}/health"; then
+if curl -fsS --max-time 10 -o /dev/null "${base}/health"; then
     ok "/health responds"
 else
     bad "/health did not respond; is the server running?"
@@ -27,8 +36,8 @@ else
 fi
 
 log_step "Authentication"
-code="$(curl -s -o /dev/null -w '%{http_code}' \
-        -H "Authorization: Bearer definitely-not-the-key" "${base}/v1/models")"
+code="$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
+        -K "$bad_conf" "${base}/v1/models")"
 if [ "$code" = "401" ]; then
     ok "an invalid API key is rejected (401)"
 else
@@ -36,7 +45,7 @@ else
 fi
 
 log_step "Model listing"
-listed="$(curl -fsS -H "Authorization: Bearer ${api_key}" "${base}/v1/models" \
+listed="$(curl -fsS --max-time 10 -K "$auth_conf" "${base}/v1/models" \
           | jq -r '[.data[].id] | sort | join(",")')"
 expected="$(yq -r '[.models[] | select(.enabled) | .alias] | sort | join(",")' "$CONFIG_PATH")"
 if [ "$listed" = "$expected" ]; then
@@ -54,7 +63,7 @@ while read -r alias; do
           max_tokens: 16, stream: false}')"
 
     response="$(curl -fsS --max-time 120 \
-        -H "Authorization: Bearer ${api_key}" \
+        -K "$auth_conf" \
         -H "Content-Type: application/json" \
         -d "$body" "${base}/v1/chat/completions")"
 
