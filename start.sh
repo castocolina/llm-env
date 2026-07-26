@@ -73,7 +73,7 @@ Environment=LLAMA_ARG_HOST=${host}
 Environment=LLAMA_ARG_PORT=${port}
 Environment=LLAMA_API_KEY=${api_key}
 Exec=--sleep-idle-seconds ${sleep_idle}
-HealthCmd=curl -fsS http://localhost:${port}/health || exit 1
+HealthCmd=curl -fsS http://127.0.0.1:${port}/health || exit 1
 HealthInterval=10s
 HealthRetries=30
 HealthStartPeriod=20s
@@ -93,14 +93,16 @@ systemctl --user daemon-reload
 systemctl --user start "${UNIT_NAME}.service"
 
 log_step "Waiting for health"
+# Probe 127.0.0.1 explicitly: "localhost" resolves to ::1 first on this system while
+# podman publishes the port on 0.0.0.0 (IPv4), so a localhost probe would never connect.
 for _ in $(seq 1 60); do
-    if curl -fsS -o /dev/null "http://localhost:${port}/health" 2>/dev/null; then
+    if curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null; then
         log_info "server is ready"
         ip="$(ip -4 -json addr show scope global 2>/dev/null \
               | jq -r '[.[].addr_info[].local] | first // "unknown"')"
         mdns="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
         echo
-        echo "  Local:   http://localhost:${port}/v1"
+        echo "  Local:   http://127.0.0.1:${port}/v1"
         echo "  Network: http://${ip}:${port}/v1"
         echo "  mDNS:    http://${mdns}.local:${port}/v1"
         echo "  API key: ${api_key}"
