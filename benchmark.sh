@@ -13,7 +13,7 @@ bench_model="$(yq -r '[.models[] | select(.enabled)] | sort_by(.size_bytes) | .[
 [ -n "$bench_model" ] && [ "$bench_model" != "null" ] || die "no enabled models to benchmark"
 log_info "benchmarking with the smallest enabled model: ${bench_model}"
 
-# Runs llama-bench in a container. Echoes "pp_tps tg_tps" or returns non-zero.
+# Runs `llama bench` in a container. Echoes "pp_tps<TAB>tg_tps" or returns non-zero.
 run_bench() {
     local image="$1"; shift
     local devices=("$@")
@@ -32,7 +32,8 @@ run_bench() {
         "$image" bench -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json 2>/dev/null \
       | jq -r '
           [ (.[] | select(.n_prompt > 0) | .avg_ts),
-            (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv'
+            (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv' \
+      | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }'
 }
 
 record() {
@@ -106,7 +107,7 @@ rm -f "$listing_file"
 
 if [ -n "$device_name" ]; then
     yq -i ".gpu.device_name = \"${device_name}\"" "$CONFIG_PATH"
-    log_info "device name recorded: ${device_name}"
+    log_info "device name recorded: ${device_name} (pci $(yq -r '.gpu.pci_address' "$CONFIG_PATH"))"
 else
     log_warn "could not match a device with ${vram} MiB; start.sh will offload to all devices"
 fi
