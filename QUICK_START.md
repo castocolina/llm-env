@@ -1,57 +1,67 @@
 # Quick Start
 
-## First-Time Setup
+## First run
 
 ```bash
-make all
+make setup       # 1. pick GPU + models, download, write config
+make benchmark   # 2. measure backends (pulls up to 8 GB, once)
+make start       # 3. start
+make check-server
 ```
 
-This will:
-1. Prompt you to select models (Gemma4, Ornith, or Both)
-2. Create a distrobox container
-3. Download selected models
-4. Compile llama.cpp with Vulkan support
-5. Validate models are accessible
-6. Test inference on downloaded models
-7. Start the server
-8. Run live agent test
-
-## Step by Step
+## Daily use
 
 ```bash
-make setup        # Interactive setup with model selection
-make setup-test   # Test inference (non-blocking, 20s timeout)
-make start        # Start server, print connection info
-make server-test  # Live test forcing internet access
-make stop         # Stop server
+make start
+make stop
+make status
+make logs
 ```
 
-## Connect from macOS
+## Start at boot
 
-1. Ensure both machines are on the same network
-2. Open browser on macOS: `http://<linux-ip>:8000/docs`
-3. Or configure OpenCode:
-   ```json
-   {
-       "provider": {
-           "local": {
-               "api_key": "none",
-               "models": {
-                   "gemma4": {
-                       "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
-                   },
-                   "ornith": {
-                       "endpoint": "http://<linux-ip>:8000/v1/chat/completions"
-                   }
-               }
-           }
-       }
-   }
-   ```
+```bash
+make enable-boot     # loginctl enable-linger + systemctl --user enable
+make disable-boot
+```
 
-## Troubleshooting
+## Using it
 
-- **Server won't start**: Check logs at `~/llm-workspace/.config/server.log`
-- **Connection refused**: Ensure server is running with `make start`
-- **Inference timeout**: Models may need more time to load, increase `SETUP_TEST_TIMEOUT` in models.sh
-- **Build failed**: Run `make clean-cache && make setup` to rebuild from scratch
+The config file (`~/.config/llm-env/models.yml`) is mode 600 because it
+holds the API key.
+
+From the same machine, use `127.0.0.1` — `localhost` resolves to `::1`
+first on this system, and podman publishes the port on `0.0.0.0` (IPv4
+only), so `localhost` never connects:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $(yq -r .server.api_key ~/.config/llm-env/models.yml)" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma4","messages":[{"role":"user","content":"hello"}]}'
+```
+
+From another machine on the LAN, use the mDNS name instead:
+
+```bash
+curl http://llm.local:8000/v1/chat/completions \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma4","messages":[{"role":"user","content":"hello"}]}'
+```
+
+## Changing models
+
+```bash
+uv run llmenv.py models list
+uv run llmenv.py models enable openhermes
+make restart
+```
+
+## When something breaks
+
+```bash
+make check-setup     # config, GPU, images, model files, VRAM budget
+make check-server    # health, auth, model listing, completions
+make logs
+```
