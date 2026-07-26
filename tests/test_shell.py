@@ -442,33 +442,147 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
     assert "podman exec" not in recorded
 
 
-def test_enable_boot_fails_when_quadlet_rerender_fails(tmp_path: pathlib.Path) -> None:
-    """A failed start.sh rerender must not be reported as boot setup success."""
+def run_lifecycle_script(
+    tmp_path: pathlib.Path,
+    script: str,
+    *,
+    api_key: str = "existing-key",
+    active: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run a lifecycle script with real configuration writes and external stubs."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
     commands = tmp_path / "bin"
     commands.mkdir()
-    for name in ("yq", "loginctl", "systemctl"):
-        _mock_command(commands, name)
-
+    calls = tmp_path / "calls"
+    calls.touch()
     home = tmp_path / "home"
     config = home / ".config/llm-env/models.yml"
     config.parent.mkdir(parents=True)
-    config.write_text("server: {}\n")
-    unit = home / ".config/containers/systemd/llm-server.container"
-    unit.parent.mkdir(parents=True)
-    unit.write_text("[Container]\n")
+    config.write_text(
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8000\n"
+        f"  api_key: {api_key!r}\n"
+        "  mdns_name: llm\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "gpu:\n"
+        "  backend: cpu\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "models:\n"
+        "  - alias: test\n"
+        "    enabled: true\n"
+    )
+    config.chmod(0o600)
+
+    bash = commands / "bash"
+    bash.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'bash %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "exec /usr/bin/bash \"$@\"\n"
+    )
+    bash.chmod(bash.stat().st_mode | stat.S_IXUSR)
+    for name in ("loginctl", "ip"):
+        command = commands / name
+        command.write_text(
+            "#!/usr/bin/bash\n"
+            "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$CALLS\"\n"
+            "[ \"$(basename \"$0\")\" != ip ] || printf '%s\\n' '[{\"addr_info\":[{\"local\":\"192.0.2.1\"}]}]'\n"
+        )
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;; esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+    curl = commands / "curl"
+    curl.write_text("#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n")
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+    systemctl = commands / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *'is-active --quiet'*) [ \"$ACTIVE\" = 1 ] ;; esac\n"
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
 
     environment = os.environ | {
+        "ACTIVE": "1" if active else "0",
+        "CALLS": str(calls),
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
     }
     result = subprocess.run(
-        ["bash", "enable-boot.sh"],
+        ["/usr/bin/bash", script],
         cwd=ROOT,
         env=environment,
         text=True,
         capture_output=True,
         check=False,
     )
+    return result, config, calls
 
-    assert result.returncode != 0
+
+def yq_value(config: pathlib.Path, expression: str) -> str:
+    """Read one scalar from a test configuration with the real yq binary."""
+    return subprocess.run(
+        [shutil.which("yq") or "yq", "-r", expression, str(config)],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
+    """Starting an unconfigured server must persist a secret without printing it."""
+    result, config, calls = run_lifecycle_script(tmp_path, "start.sh", api_key="")
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".server.api_key")
+    assert yq_value(config, ".server.api_key") not in result.stdout
+    assert yq_value(config, ".server.api_key") not in result.stderr
+    assert "systemctl --user start llm-server.service" in calls.read_text()
+
+
+def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
+    """Rotating an active server key must load the replacement immediately."""
+    result, config, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=True)
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".server.api_key") != "existing-key"
+    assert "systemctl --user stop llm-server.service" in calls.read_text()
+    assert "systemctl --user start llm-server.service" in calls.read_text()
+
+
+def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> None:
+    """Rotating a stopped server key must preserve its stopped state."""
+    result, _, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "systemctl --user start llm-server.service" not in calls.read_text()
+
+
+def test_enable_boot_calls_render_unit_not_start(tmp_path: pathlib.Path) -> None:
+    """Boot setup must render a unit without measuring a running server's VRAM."""
+    result, _, calls = run_lifecycle_script(tmp_path, "enable-boot.sh")
+
+    assert result.returncode == 0, result.stderr
+    assert "render-unit.sh" in calls.read_text()
+    assert "start.sh" not in calls.read_text()

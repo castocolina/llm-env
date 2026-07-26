@@ -1,5 +1,5 @@
 .PHONY: help prerequisites setup start stop restart check-setup check-server benchmark \
-        enable-boot disable-boot status logs validate test clean
+        key-reset enable-boot disable-boot status logs validate test clean
 
 UNIT = llm-server
 
@@ -12,6 +12,7 @@ help:
 	@echo "make check-setup   Validate config, image, models, GPU (offline)"
 	@echo "make check-server  Validate the running server API (online)"
 	@echo "make benchmark     Benchmark Vulkan vs ROCm and record results"
+	@echo "make key-reset     Generate a new API key"
 	@echo "make enable-boot   Start automatically at boot"
 	@echo "make disable-boot  Do not start at boot"
 	@echo "make status        Show service status"
@@ -42,6 +43,9 @@ check-server:
 
 benchmark:
 	@bash benchmark.sh
+
+key-reset:
+	@bash key-reset.sh
 
 enable-boot:
 	@bash enable-boot.sh
