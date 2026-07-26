@@ -8,6 +8,7 @@ Make `make setup` prepare a local model environment without implying that a serv
 
 This change covers:
 
+- A confirmed host-prerequisite installation flow
 - Numbered GPU and model selection in `make setup`
 - Removal of OpenHermes from the template and generated configuration
 - Vulkan image preparation and device-name resolution during setup
@@ -18,6 +19,22 @@ This change covers:
 - Documentation and automated tests for the new lifecycle
 
 This change does not add Ollama model import, partial CPU/GPU offload, dynamic model loading, or macOS support.
+
+## Host Prerequisites
+
+`make prerequisites` delegates to a shell script that examines the host before setup changes user configuration.
+
+It reports three groups:
+
+- Required runtime tools: `bash`, `make`, `uv`, `jq`, Mike Farah `yq`, `podman`, `curl`, `systemctl`, and `ip`
+- Development tools: `git`, `shellcheck`, and the tooling that `make validate` and `make test` invoke
+- Optional LAN tools: `firewall-cmd` and `avahi-publish`
+
+For each missing tool, it prints the tool name, why the project needs it, and the package that supplies it on the supported host platform. It does not install anything until the user confirms a single prompt that lists every proposed host change. If installation requires an image deployment or reboot, it states that before confirmation and reports the required next action after installation.
+
+The installer must verify that an installed `yq` is Mike Farah v4, because the scripts use its syntax. A similarly named incompatible package does not satisfy the prerequisite. `uv` continues to manage Python and Python dependencies; users do not manually create a project virtual environment.
+
+`make setup` runs the detector first and stops with a clear instruction to run `make prerequisites` when a required runtime tool is missing. It never attempts an implicit host-package installation.
 
 ## Configuration
 
@@ -82,6 +99,7 @@ The image is Vulkan before benchmark. Benchmark may later select ROCm or CPU for
 
 Add or update tests for:
 
+- Prerequisite grouping, incompatible `yq` detection, and no installation without confirmation
 - GPU number-to-PCI selection and unambiguous device-name resolution
 - Comma-separated model-number selection, enabled-set replacement, and OpenHermes removal
 - Setup without API-key or network changes
