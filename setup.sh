@@ -90,7 +90,7 @@ llmenv --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" \
 
 log_step "Step 6/7  Preparing Vulkan"
 podman pull ghcr.io/ggml-org/llama.cpp:server-vulkan >/dev/null
-vulkan_listing="podman run --rm ghcr.io/ggml-org/llama.cpp:server-vulkan /app/llama-server --list-devices"
+vulkan_listing="podman run --rm --device /dev/dri ghcr.io/ggml-org/llama.cpp:server-vulkan --list-devices"
 devices="$(llmenv list-devices --list-command "$vulkan_listing")"
 matching_candidates="$(echo "$devices" | jq --argjson total "$vram_total" '[.devices[] | select(.total_mib == $total)]')"
 match_count="$(echo "$matching_candidates" | jq 'length')"

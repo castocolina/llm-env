@@ -273,7 +273,13 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
     assert result.returncode == 0, result.stderr
     assert "Integrated GPU" in result.stdout
     assert 'Fallback Radeon: "safe"' in result.stdout
-    assert "models select gemma4 ornith" in calls.read_text()
+    call_log = calls.read_text()
+    assert "models select gemma4 ornith" in call_log
+    assert (
+        "podman run --rm --device /dev/dri "
+        "ghcr.io/ggml-org/llama.cpp:server-vulkan --list-devices" in call_log
+    )
+    assert "/app/llama-server --list-devices" not in call_log
     config_json = subprocess.run(
         [shutil.which("yq") or "yq", "-o=json", ".", str(config)],
         text=True,
