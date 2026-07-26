@@ -92,21 +92,30 @@ log_step "Step 6/7  Preparing Vulkan"
 podman pull ghcr.io/ggml-org/llama.cpp:server-vulkan >/dev/null
 vulkan_listing="podman run --rm ghcr.io/ggml-org/llama.cpp:server-vulkan /app/llama-server --list-devices"
 devices="$(llmenv list-devices --list-command "$vulkan_listing")"
-candidates="$(echo "$devices" | jq --argjson total "$vram_total" '[.devices[] | select(.total_mib == $total)]')"
-candidate_count="$(echo "$candidates" | jq 'length')"
-if [ "$candidate_count" -eq 1 ]; then
-    device_name="$(echo "$candidates" | jq -r '.[0].name')"
+matching_candidates="$(echo "$devices" | jq --argjson total "$vram_total" '[.devices[] | select(.total_mib == $total)]')"
+match_count="$(echo "$matching_candidates" | jq 'length')"
+if [ "$match_count" -eq 1 ]; then
+    device_name="$(echo "$matching_candidates" | jq -r '.[0].name')"
 else
+    if [ "$match_count" -eq 0 ]; then
+        candidates="$(echo "$devices" | jq '.devices')"
+    else
+        candidates="$matching_candidates"
+    fi
+    candidate_count="$(echo "$candidates" | jq 'length')"
     echo "$candidates" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)  \(.value.total_mib) MiB"'
-    [ "$candidate_count" -gt 0 ] || die "no Vulkan device matches ${vram_total} MiB"
+    [ "$candidate_count" -gt 0 ] || die "no Vulkan devices detected"
     device_choice="$(ask "  Vulkan device number: " "")"
     [[ "$device_choice" =~ ^[1-9][0-9]*$ ]] || die "Vulkan device selection must be a positive integer"
     [ "$device_choice" -le "$candidate_count" ] || die "Vulkan device selection is out of range"
     device_name="$(echo "$candidates" | jq -r --argjson index "$device_choice" '.[$index - 1].name')"
 fi
-yq -i ".gpu.pci_address = \"${pci}\"" "$CONFIG_PATH"
-yq -i ".gpu.vram_total_mib = ${vram_total}" "$CONFIG_PATH"
-yq -i ".gpu.device_name = \"${device_name}\"" "$CONFIG_PATH"
+PCI_ADDRESS="$pci" VRAM_TOTAL_MIB="$vram_total" DEVICE_NAME="$device_name" \
+  yq -i '
+    .gpu.pci_address = strenv(PCI_ADDRESS) |
+    .gpu.vram_total_mib = (strenv(VRAM_TOTAL_MIB) | tonumber) |
+    .gpu.device_name = strenv(DEVICE_NAME)
+  ' "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH"
 log_info "prepared ${device_name} for ${pci}"
 

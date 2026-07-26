@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 
@@ -175,8 +177,11 @@ def test_setup_stops_for_missing_prerequisites_before_mutating_config(
 
 def run_setup_with_numbered_selection(
     tmp_path: pathlib.Path, selection: str
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run setup against deterministic GPU, model, and Vulkan command stubs."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
     commands = tmp_path / "bin"
     commands.mkdir()
     calls = tmp_path / "calls"
@@ -193,39 +198,59 @@ def run_setup_with_numbered_selection(
         "case \"$*\" in\n"
         "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
-        "  *' models select '*) printf '%s\\n' '{\"models_max\":2}' ;;\n"
+        "  *' models select '*)\n"
+        "    \"$REAL_YQ\" -i '.models[] |= (.enabled = (.alias == \"gemma4\" or .alias == \"ornith\")) | .runtime.models_max = 2' \"$CONFIG_PATH_TEST\"\n"
+        "    printf '%s\\n' '{\"models_max\":2}' ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
-        "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"AMD Radeon\",\"total_mib\":16384}]}' ;;\n"
+        "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":8192},{\"id\":\"Vulkan1\",\"name\":\"Fallback Radeon: \\\"safe\\\"\",\"total_mib\":32768}]}' ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
-    yq.write_text(
-        "#!/usr/bin/bash\n"
-        "if [ \"$1\" = \"--version\" ]; then\n"
-        "  printf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
-        "fi\n"
-    )
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
     podman = commands / "podman"
     podman.write_text(
         "#!/usr/bin/bash\n"
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in *'--list-devices'*) printf '%s\\n' 'Vulkan0: AMD Radeon (16384 MiB, 16000 MiB free)' ;; esac\n"
+        "case \"$*\" in *'--list-devices'*) printf '%s\\n' 'Vulkan0: Integrated GPU (8192 MiB, 8000 MiB free)\\nVulkan1: Fallback Radeon: \\\"safe\\\" (32768 MiB, 32000 MiB free)' ;; esac\n"
     )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
 
     config = tmp_path / "models.yml"
-    config.write_text("models: []\n")
+    config.write_text(
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+    )
     environment = os.environ | {
         "CALLS": str(calls),
+        "CONFIG_PATH_TEST": str(config),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
     }
     result = subprocess.run(
         ["/usr/bin/bash", "setup.sh"],
@@ -236,22 +261,40 @@ def run_setup_with_numbered_selection(
         capture_output=True,
         check=False,
     )
-    return result, calls
+    return result, calls, config
 
 
-def test_setup_selects_all_numbered_model_aliases(tmp_path: pathlib.Path) -> None:
-    """Selecting 1,2 must replace enabled models with gemma4 and ornith."""
-    result, calls = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n")
+def test_setup_selects_zero_match_vulkan_device_and_persists_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A zero-VRAM match must require and persist an explicit llama device choice."""
+    result, calls, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
 
     assert result.returncode == 0, result.stderr
+    assert "Integrated GPU" in result.stdout
+    assert 'Fallback Radeon: "safe"' in result.stdout
     assert "models select gemma4 ornith" in calls.read_text()
+    config_json = subprocess.run(
+        [shutil.which("yq") or "yq", "-o=json", ".", str(config)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    persisted = json.loads(config_json.stdout)
+    assert persisted["gpu"] == {
+        "pci_address": "0000:03:00.0",
+        "vram_total_mib": 16384,
+        "device_name": 'Fallback Radeon: "safe"',
+    }
+    assert persisted["runtime"]["models_max"] == 2
+    assert [model["enabled"] for model in persisted["models"]] == [True, True]
 
 
 def test_setup_rejects_invalid_numbered_model_selection_before_download(
     tmp_path: pathlib.Path,
 ) -> None:
     """Out-of-range model indexes must stop setup before any download starts."""
-    result, calls = run_setup_with_numbered_selection(tmp_path, "1\n3\n")
+    result, calls, _ = run_setup_with_numbered_selection(tmp_path, "1\n3\n")
 
     assert result.returncode != 0
     assert "curl " not in calls.read_text()
