@@ -155,24 +155,25 @@ fi
 
 echo
 log_step "Usage examples"
-api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
 first_alias="$(yq -r '[.models[] | select(.enabled)] | .[0].alias' "$CONFIG_PATH")"
+key_cmd="\$(yq -r '.server.api_key' ${CONFIG_PATH})"
 cat <<EOF
   From this machine:
     curl http://127.0.0.1:${port}/v1/chat/completions \\
-      -H "Authorization: Bearer ${api_key}" \\
+      -H "Authorization: Bearer ${key_cmd}" \\
       -H "Content-Type: application/json" \\
       -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
 
   From another machine on the LAN:
     curl http://${mdns}.local:${port}/v1/chat/completions \\
-      -H "Authorization: Bearer ${api_key}" \\
+      -H "Authorization: Bearer ${key_cmd}" \\
       -H "Content-Type: application/json" \\
       -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
 
   OpenAI-compatible client settings:
     base_url = http://${mdns}.local:${port}/v1
-    api_key  = ${api_key}
+    api_key  = read it with: yq -r '.server.api_key' ${CONFIG_PATH}
+    (the config file is mode 600 because it holds this key)
     model    = ${first_alias}
 EOF
 
