@@ -105,7 +105,7 @@ for _ in $(seq 1 60); do
         echo "  Local:   http://127.0.0.1:${port}/v1"
         echo "  Network: http://${ip}:${port}/v1"
         echo "  mDNS:    http://${mdns}.local:${port}/v1"
-        echo "  API key: ${api_key}"
+        echo "  API key: read it with  yq -r '.server.api_key' ${CONFIG_PATH}"
         echo
         echo "  Models:"
         yq -r '.models[] | select(.enabled) | "    - " + .alias' "$CONFIG_PATH"

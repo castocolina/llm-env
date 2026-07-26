@@ -35,13 +35,17 @@ else
     exit 1
 fi
 
+# The router enforces the API key on inference endpoints only; /health and /v1/models
+# answer unauthenticated, so probing those would never detect a missing key.
 log_step "Authentication"
-code="$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
-        -K "$bad_conf" "${base}/v1/models")"
+auth_probe_body="$(jq -n '{model: "x", messages: [{role: "user", content: "x"}], max_tokens: 1}')"
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -K "$bad_conf" -H "Content-Type: application/json" \
+    -d "$auth_probe_body" "${base}/v1/chat/completions")"
 if [ "$code" = "401" ]; then
-    ok "an invalid API key is rejected (401)"
+    ok "an invalid API key is rejected on inference (401)"
 else
-    bad "an invalid API key returned HTTP ${code}, expected 401"
+    bad "an invalid API key returned HTTP ${code} on inference, expected 401"
 fi
 
 log_step "Model listing"
@@ -60,7 +64,7 @@ while read -r alias; do
     body="$(jq -n --arg m "$alias" \
         '{model: $m,
           messages: [{role: "user", content: "Reply with the single word: ready"}],
-          max_tokens: 16, stream: false}')"
+          max_tokens: 256, stream: false}')"
 
     response="$(curl -fsS --max-time 120 \
         -K "$auth_conf" \
@@ -73,10 +77,14 @@ while read -r alias; do
     fi
 
     content="$(jq -r '.choices[0].message.content // empty' <<<"$response")"
+    reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' <<<"$response")"
+    finish="$(jq -r '.choices[0].finish_reason // empty' <<<"$response")"
     if [ -n "$content" ]; then
-        ok "${alias}: returned $(printf '%q' "$(head -c 40 <<<"$content")")"
+        ok "${alias}: returned $(printf '%.40s' "$content")"
+    elif [ -n "$reasoning" ]; then
+        ok "${alias}: reasoning-only response, finish_reason=${finish}"
     else
-        bad "${alias}: empty content — $(jq -c '.error // .' <<<"$response" | head -c 120)"
+        bad "${alias}: empty content and no reasoning — $(jq -c '.error // .' <<<"$response" | head -c 120)"
     fi
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 
