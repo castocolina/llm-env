@@ -86,6 +86,7 @@ TimeoutStartSec=300
 WantedBy=default.target
 EOF
 log_info "wrote ${QUADLET_DIR}/${UNIT_NAME}.container"
+chmod 600 "${QUADLET_DIR}/${UNIT_NAME}.container"
 
 log_step "Starting the service"
 systemctl --user daemon-reload
@@ -93,8 +94,7 @@ systemctl --user start "${UNIT_NAME}.service"
 
 log_step "Waiting for health"
 for _ in $(seq 1 60); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/health" 2>/dev/null || true)"
-    if [ "$code" = "200" ] || [ "$code" = "401" ]; then
+    if curl -fsS -o /dev/null "http://localhost:${port}/health" 2>/dev/null; then
         log_info "server is ready"
         ip="$(ip -4 -json addr show scope global 2>/dev/null \
               | jq -r '[.[].addr_info[].local] | first // "unknown"')"

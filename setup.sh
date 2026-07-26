@@ -93,6 +93,7 @@ yq -i ".gpu.pci_address = \"${pci}\"" "$CONFIG_PATH"
 yq -i ".gpu.vram_total_mib = ${vram_total}" "$CONFIG_PATH"
 log_info "api key stored in ${CONFIG_PATH}"
 log_warn "device_name is set during 'make benchmark'; run it before first start (card: ${device_name})"
+chmod 600 "$CONFIG_PATH"
 
 log_step "Step 7/8  Checking the VRAM budget"
 if llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" > /tmp/llm-budget.json; then
