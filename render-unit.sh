@@ -46,9 +46,11 @@ mkdir -p "$QUADLET_DIR"
 device_lines="AddDevice=/dev/dri"
 [ "$backend" = "rocm" ] && device_lines="${device_lines}"$'\n'"AddDevice=/dev/kfd"
 
-mdns_unit="${QUADLET_DIR}/${UNIT_NAME}-mdns.service"
+mdns_unit="${HOME}/.config/systemd/user/${UNIT_NAME}-mdns.service"
 mdns_wants=""
 if avahi_publish="$(command -v avahi-publish 2>/dev/null)"; then
+    mkdir -p "$(dirname "$mdns_unit")"
+    rm -f "${QUADLET_DIR}/${UNIT_NAME}-mdns.service"
     mdns_name="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
     curl_path="$(command -v curl)"
     cat > "$mdns_unit" <<EOF
@@ -71,7 +73,7 @@ EOF
     mdns_wants="Wants=${UNIT_NAME}-mdns.service"
     log_info "wrote ${mdns_unit}"
 else
-    rm -f "$mdns_unit"
+    rm -f "$mdns_unit" "${QUADLET_DIR}/${UNIT_NAME}-mdns.service"
 fi
 
 start_at_boot="$(yq -r '.server.start_at_boot // false' "$CONFIG_PATH")"

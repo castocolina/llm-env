@@ -502,8 +502,19 @@ def run_lifecycle_script(
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
-    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'yq %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "exec \"$REAL_YQ\" \"$@\"\n"
+    )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    chmod = commands / "chmod"
+    chmod.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'chmod %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "exec /usr/bin/chmod \"$@\"\n"
+    )
+    chmod.chmod(chmod.stat().st_mode | stat.S_IXUSR)
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
@@ -521,7 +532,10 @@ def run_lifecycle_script(
     systemctl.write_text(
         "#!/usr/bin/bash\n"
         "printf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in *'is-active --quiet'*) [ \"$ACTIVE\" = 1 ] ;; esac\n"
+        "case \"$*\" in\n"
+        "  *'daemon-reload'*) [ -f \"$MDNS_UNIT\" ] || exit 66 ;;\n"
+        "  *'is-active --quiet'*) [ \"$ACTIVE\" = 1 ] ;;\n"
+        "esac\n"
     )
     systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
 
@@ -531,6 +545,7 @@ def run_lifecycle_script(
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
     }
@@ -567,6 +582,28 @@ def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     assert yq_value(config, ".server.api_key") not in result.stdout
     assert yq_value(config, ".server.api_key") not in result.stderr
     assert "systemctl --user start llm-server.service" in calls.read_text()
+
+
+def test_key_writes_secure_config_before_persisting_a_secret(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A generated or reset key must never be written to a mode-0644 config."""
+    for script, api_key in (("start.sh", ""), ("key-reset.sh", "existing-key")):
+        case_path = tmp_path / script
+        case_path.mkdir()
+        result, config, calls = run_lifecycle_script(
+            case_path, script, api_key=api_key, config_mode=0o644
+        )
+
+        assert result.returncode == 0, result.stderr
+        log = calls.read_text().splitlines()
+        chmod_index = log.index(f"chmod 600 {config}")
+        write_index = next(
+            index
+            for index, call in enumerate(log)
+            if call.startswith("yq -i .server.api_key = strenv(API_KEY)")
+        )
+        assert chmod_index < write_index
 
 
 def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
@@ -612,10 +649,12 @@ def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Pa
     assert " budget " not in calls.read_text()
 
 
-def test_enable_boot_renders_a_health_gated_mdns_unit(tmp_path: pathlib.Path) -> None:
-    """Boot-enabled servers must publish mDNS under systemd after health succeeds."""
-    result, config, _ = run_lifecycle_script(tmp_path, "enable-boot.sh")
-    mdns_unit = config.parent.parent / "containers/systemd/llm-server-mdns.service"
+def test_enable_boot_renders_a_health_gated_mdns_user_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Boot setup must make mDNS discoverable as a reloaded user unit."""
+    result, config, calls = run_lifecycle_script(tmp_path, "enable-boot.sh")
+    mdns_unit = config.parent.parent / "systemd/user/llm-server-mdns.service"
 
     assert result.returncode == 0, result.stderr
     unit = mdns_unit.read_text()
@@ -626,6 +665,8 @@ def test_enable_boot_renders_a_health_gated_mdns_unit(tmp_path: pathlib.Path) ->
     assert "Requires=llm-server.service" in unit
     assert "After=llm-server.service" in unit
     assert "PartOf=llm-server.service" in unit
+    assert "Restart=on-failure" in unit
     assert "ExecStartPre=" in unit
     assert "http://127.0.0.1:8000/health" in unit
     assert "avahi-publish -s llm _http._tcp 8000" in unit
+    assert "systemctl --user daemon-reload" in calls.read_text()
