@@ -173,6 +173,90 @@ def test_setup_stops_for_missing_prerequisites_before_mutating_config(
     assert config.read_text() == "server: {}\n"
 
 
+def run_setup_with_numbered_selection(
+    tmp_path: pathlib.Path, selection: str
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run setup against deterministic GPU, model, and Vulkan command stubs."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("ip", "git", "shellcheck"):
+        _mock_command(commands, name)
+    curl = commands / "curl"
+    curl.write_text("#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n")
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
+        "  *' models select '*) printf '%s\\n' '{\"models_max\":2}' ;;\n"
+        "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
+        "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"AMD Radeon\",\"total_mib\":16384}]}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "if [ \"$1\" = \"--version\" ]; then\n"
+        "  printf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+        "fi\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *'--list-devices'*) printf '%s\\n' 'Vulkan0: AMD Radeon (16384 MiB, 16000 MiB free)' ;; esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text("models: []\n")
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        input=selection,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_setup_selects_all_numbered_model_aliases(tmp_path: pathlib.Path) -> None:
+    """Selecting 1,2 must replace enabled models with gemma4 and ornith."""
+    result, calls = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n")
+
+    assert result.returncode == 0, result.stderr
+    assert "models select gemma4 ornith" in calls.read_text()
+
+
+def test_setup_rejects_invalid_numbered_model_selection_before_download(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Out-of-range model indexes must stop setup before any download starts."""
+    result, calls = run_setup_with_numbered_selection(tmp_path, "1\n3\n")
+
+    assert result.returncode != 0
+    assert "curl " not in calls.read_text()
+
+
 def test_enable_boot_fails_when_quadlet_rerender_fails(tmp_path: pathlib.Path) -> None:
     """A failed start.sh rerender must not be reported as boot setup success."""
     commands = tmp_path / "bin"

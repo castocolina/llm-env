@@ -22,7 +22,7 @@ ask() {
 
 require_cmd uv jq yq podman curl
 
-log_step "Step 1/8  Creating configuration"
+log_step "Step 1/7  Creating configuration"
 if [ -f "$CONFIG_PATH" ]; then
     log_info "using existing config at ${CONFIG_PATH}"
 else
@@ -30,37 +30,47 @@ else
     log_info "created ${CONFIG_PATH} from template"
 fi
 
-log_step "Step 2/8  Detecting GPUs"
+log_step "Step 2/7  Detecting GPUs"
 facts="$(llmenv detect)"
-echo "$facts" | jq -r '
-  .gpus[] |
-  "  \(.card)  \(.pci_address)  \(.vram_total_mib) MiB  " +
-  (if (.connected_outputs | length) > 0 then "displays: \(.connected_outputs | join(","))" else "headless" end)'
-
-default_pci="$(echo "$facts" | jq -r '[.gpus[]] | max_by(.vram_total_mib) | .pci_address')"
-pci="$(ask "  PCI address to use for inference [${default_pci}]: " "$default_pci")"
-pci="${pci:-$default_pci}"
-
-gpu="$(echo "$facts" | jq --arg p "$pci" '.gpus[] | select(.pci_address == $p)')"
-[ -n "$gpu" ] || die "no GPU with PCI address ${pci}"
+gpu_count="$(echo "$facts" | jq '.gpus | length')"
+[ "$gpu_count" -gt 0 ] || die "no VRAM-backed GPUs detected"
+echo "$facts" | jq -r --arg green "$GREEN" --arg nc "$NC" '
+  .gpus | to_entries[] |
+  "  \(.key + 1)) \($green)\(.value.card)\($nc)  \(.value.pci_address)  \(.value.vram_total_mib) MiB  \(.value.render_node)  " +
+  (if (.value.connected_outputs | length) > 0 then "displays: \(.value.connected_outputs | join(","))" else "headless" end)'
+default_gpu="$(echo "$facts" | jq -r '.gpus | to_entries | max_by(.value.vram_total_mib) | .key + 1')"
+gpu_choice="$(ask "  GPU number [${default_gpu}]: " "$default_gpu")"
+[[ "$gpu_choice" =~ ^[1-9][0-9]*$ ]] || die "GPU selection must be a positive integer"
+[ "$gpu_choice" -le "$gpu_count" ] || die "GPU selection is out of range"
+gpu="$(echo "$facts" | jq --argjson index "$gpu_choice" '.gpus[$index - 1]')"
+pci="$(echo "$gpu" | jq -r '.pci_address')"
 vram_total="$(echo "$gpu" | jq -r '.vram_total_mib')"
 log_info "selected ${pci} with ${vram_total} MiB VRAM"
 
-log_step "Step 3/8  Selecting models"
-llmenv --config "$CONFIG_PATH" models list \
-  | jq -r '.models[] | "  \(if .enabled then "[x]" else "[ ]" end) \(.alias)  \(.file)"'
-echo "  Toggle with: make setup, or 'uv run llmenv.py models enable <alias>'"
-alias_toggle="$(ask "  Toggle any alias now (blank to keep current): " "")"
-if [ -n "$alias_toggle" ]; then
-    current="$(llmenv --config "$CONFIG_PATH" models list \
-      | jq -r --arg a "$alias_toggle" '.models[] | select(.alias==$a) | .enabled')"
-    [ -n "$current" ] || die "unknown alias: ${alias_toggle}"
-    if [ "$current" = "true" ]; then action=disable; else action=enable; fi
-    llmenv --config "$CONFIG_PATH" models "$action" "$alias_toggle" >/dev/null
-    log_info "${action}d ${alias_toggle}"
+log_step "Step 3/7  Selecting models"
+if [ -f "$CONFIG_PATH" ]; then
+    yq -i 'del(.models[] | select(.alias == "openhermes"))' "$CONFIG_PATH"
 fi
+models="$(llmenv --config "$CONFIG_PATH" models list)"
+model_count="$(echo "$models" | jq '.models | length')"
+[ "$model_count" -gt 0 ] || die "no models are configured"
+yq -r '.models | to_entries[] | "  \(.key + 1)) \(.value.label) — \(.value.parameters), \(.value.quantization), \(.value.size_bytes / 1000000000) GB"' "$CONFIG_PATH"
+default_models="$(echo "$models" | jq -r '[.models | to_entries[] | select(.value.enabled) | (.key + 1 | tostring)] | join(",")')"
+model_choice="$(ask "  Model numbers [${default_models}]: " "$default_models")"
+[[ "$model_choice" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "model selection must be comma-separated positive integers"
+IFS=',' read -r -a model_indexes <<< "$model_choice"
+declare -A selected_indexes=()
+aliases=()
+for index in "${model_indexes[@]}"; do
+    [ "$index" -le "$model_count" ] || die "model selection is out of range"
+    [ -z "${selected_indexes[$index]:-}" ] || die "model selection contains duplicate index ${index}"
+    selected_indexes[$index]=1
+    aliases+=("$(echo "$models" | jq -r --argjson index "$index" '.models[$index - 1].alias')")
+done
+llmenv --config "$CONFIG_PATH" models select "${aliases[@]}" >/dev/null
+log_info "selected ${aliases[*]}"
 
-log_step "Step 4/8  Downloading models"
+log_step "Step 4/7  Downloading models"
 mkdir -p "$MODELS_DIR"
 while IFS=$'\t' read -r file url; do
     [ -n "$file" ] || continue
@@ -73,111 +83,43 @@ while IFS=$'\t' read -r file url; do
       || die "download failed: ${url}"
 done < <(yq -r '.models[] | select(.enabled) | [.file, .url] | @tsv' "$CONFIG_PATH")
 
-log_step "Step 5/8  Validating model files"
+log_step "Step 5/7  Validating model files"
 llmenv --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" \
   | jq -r '.results[] | "  \(if .valid then "ok  " else "FAIL" end) \(.alias): \(.message)"' \
   || die "one or more model files are not valid GGUF"
 
-log_step "Step 6/8  Generating API key and storing GPU selection"
-existing_key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH")"
-if [ -n "$existing_key" ] && [ "$existing_key" != "null" ] \
-   && [ "${LLM_ENV_ROTATE_KEY:-0}" != "1" ]; then
-    api_key="$existing_key"
-    log_info "kept the existing API key (set LLM_ENV_ROTATE_KEY=1 to rotate)"
+log_step "Step 6/7  Preparing Vulkan"
+podman pull ghcr.io/ggml-org/llama.cpp:server-vulkan >/dev/null
+vulkan_listing="podman run --rm ghcr.io/ggml-org/llama.cpp:server-vulkan /app/llama-server --list-devices"
+devices="$(llmenv list-devices --list-command "$vulkan_listing")"
+candidates="$(echo "$devices" | jq --argjson total "$vram_total" '[.devices[] | select(.total_mib == $total)]')"
+candidate_count="$(echo "$candidates" | jq 'length')"
+if [ "$candidate_count" -eq 1 ]; then
+    device_name="$(echo "$candidates" | jq -r '.[0].name')"
 else
-    # 48 random bytes survive the charset filter with room to spare for 32 chars.
-    api_key="$(head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
-    yq -i ".server.api_key = \"${api_key}\"" "$CONFIG_PATH"
-    log_info "generated a new API key"
+    echo "$candidates" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)  \(.value.total_mib) MiB"'
+    [ "$candidate_count" -gt 0 ] || die "no Vulkan device matches ${vram_total} MiB"
+    device_choice="$(ask "  Vulkan device number: " "")"
+    [[ "$device_choice" =~ ^[1-9][0-9]*$ ]] || die "Vulkan device selection must be a positive integer"
+    [ "$device_choice" -le "$candidate_count" ] || die "Vulkan device selection is out of range"
+    device_name="$(echo "$candidates" | jq -r --argjson index "$device_choice" '.[$index - 1].name')"
 fi
-device_name="$(echo "$gpu" | jq -r '.card')"
 yq -i ".gpu.pci_address = \"${pci}\"" "$CONFIG_PATH"
 yq -i ".gpu.vram_total_mib = ${vram_total}" "$CONFIG_PATH"
-log_info "api key stored in ${CONFIG_PATH}"
-log_warn "device_name is set during 'make benchmark'; run it before first start (card: ${device_name})"
+yq -i ".gpu.device_name = \"${device_name}\"" "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH"
+log_info "prepared ${device_name} for ${pci}"
 
-log_step "Step 7/8  Checking the VRAM budget"
-if llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" > /tmp/llm-budget.json; then
-    jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — fits"' /tmp/llm-budget.json
+log_step "Step 7/7  Checking the VRAM budget"
+budget_json="$(mktemp)"
+trap 'rm -f "$budget_json"' EXIT
+if llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" > "$budget_json"; then
+    jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — fits"' "$budget_json"
 else
-    jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — SHORT BY \(.shortfall_mib) MiB"' /tmp/llm-budget.json
-    jq -r '.remedies[] | "    - \(.)"' /tmp/llm-budget.json
-    log_warn "models_max=$(jq -r .models_max /tmp/llm-budget.json) exceeds the VRAM budget"
-fi
-
-log_step "Step 8/8  Network exposure"
-port="$(yq -r '.server.port' "$CONFIG_PATH")"
-mdns="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
-
-if command -v firewall-cmd >/dev/null 2>&1; then
-    if firewall-cmd --query-port="${port}/tcp" >/dev/null 2>&1; then
-        log_info "firewall port ${port}/tcp already open"
-    else
-        open_port="$(ask "  Open firewall port ${port}/tcp for LAN access? (yes/no) " "no")"
-        if [ "$open_port" = "yes" ]; then
-            if sudo firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null \
-              && sudo firewall-cmd --reload >/dev/null; then
-                log_info "opened ${port}/tcp"
-            else
-                log_warn "could not open the port; do it manually"
-            fi
-        else
-            log_warn "port not opened; other machines will not be able to connect"
-        fi
-    fi
-else
-    log_warn "firewall-cmd not found; skipping firewall configuration"
-fi
-
-if command -v avahi-publish >/dev/null 2>&1; then
-    mkdir -p "${HOME}/.config/systemd/user"
-    cat > "${HOME}/.config/systemd/user/llm-mdns.service" <<EOF
-[Unit]
-Description=Publish ${mdns}.local for the LLM server
-After=network-online.target
-
-[Service]
-ExecStart=/bin/sh -c 'exec /usr/bin/avahi-publish -a -R ${mdns}.local "\$(ip -4 -json addr show scope global | jq -r "[.[].addr_info[].local] | first")"'
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-    systemctl --user daemon-reload
-    if systemctl --user enable --now llm-mdns.service 2>/dev/null; then
-        log_info "publishing ${mdns}.local"
-    else
-        log_warn "could not start mDNS publishing; use the IP address instead"
-    fi
-else
-    log_warn "avahi-publish not found; use the IP address instead of ${mdns}.local"
+    jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — SHORT BY \(.shortfall_mib) MiB"' "$budget_json"
+    jq -r '.remedies[] | "    - \(.)"' "$budget_json"
+    log_warn "models_max=$(jq -r .models_max "$budget_json") exceeds the VRAM budget"
 fi
 
 echo
-log_step "Usage examples"
-first_alias="$(yq -r '[.models[] | select(.enabled)] | .[0].alias' "$CONFIG_PATH")"
-key_cmd="\$(yq -r '.server.api_key' ${CONFIG_PATH})"
-cat <<EOF
-  From this machine:
-    curl http://127.0.0.1:${port}/v1/chat/completions \\
-      -H "Authorization: Bearer ${key_cmd}" \\
-      -H "Content-Type: application/json" \\
-      -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
-
-  From another machine on the LAN:
-    curl http://${mdns}.local:${port}/v1/chat/completions \\
-      -H "Authorization: Bearer ${key_cmd}" \\
-      -H "Content-Type: application/json" \\
-      -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
-
-  OpenAI-compatible client settings:
-    base_url = http://${mdns}.local:${port}/v1
-    api_key  = read it with: yq -r '.server.api_key' ${CONFIG_PATH}
-    (the config file is mode 600 because it holds this key)
-    model    = ${first_alias}
-EOF
-
-echo
-log_info "Setup complete. Next: make benchmark, then make start"
+log_info "Setup complete. Next: make check-setup"
