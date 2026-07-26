@@ -71,7 +71,7 @@ if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
     log_step "Offline inference"
     device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || echo "")"
     listing_file="$(mktemp)"
-    podman run --rm --device /dev/dri --entrypoint /app/llama \
+    podman run --rm --device /dev/dri \
         "$image" --list-devices >"$listing_file" 2>/dev/null || true
     if resolved="$(uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" \
                     --listing-file "$listing_file")"; then
@@ -82,7 +82,7 @@ if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
                 -v "${MODELS_DIR}:/models:ro,z" \
                 --entrypoint /app/llama "$image" cli \
                 -m "/models/${file}" --device "$device" \
-                --n-gpu-layers "$layers" -p "Reply with exactly: ready" -n 16 2>&1)" \
+                --n-gpu-layers "$layers" --single-turn -p "Reply with exactly: ready" -n 16 2>&1)" \
                 && [ -n "$output" ]; then
                 log_info "inference ${alias}"
                 PASS=$((PASS + 1))
