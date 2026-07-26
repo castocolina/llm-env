@@ -8,9 +8,7 @@ require_cmd yq systemctl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 
-api_key="$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')"
-API_KEY="$api_key" yq -i '.server.api_key = strenv(API_KEY)' "$CONFIG_PATH"
-chmod 600 "$CONFIG_PATH"
+reset_api_key
 log_info "API key reset"
 
 if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then

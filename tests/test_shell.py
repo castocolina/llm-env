@@ -448,6 +448,7 @@ def run_lifecycle_script(
     *,
     api_key: str = "existing-key",
     active: bool = False,
+    config_mode: int = 0o600,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -478,7 +479,7 @@ def run_lifecycle_script(
         "  - alias: test\n"
         "    enabled: true\n"
     )
-    config.chmod(0o600)
+    config.chmod(config_mode)
 
     bash = commands / "bash"
     bash.write_text(
@@ -487,6 +488,10 @@ def run_lifecycle_script(
         "exec /usr/bin/bash \"$@\"\n"
     )
     bash.chmod(bash.stat().st_mode | stat.S_IXUSR)
+    avahi_publish = commands / "avahi-publish"
+    avahi_publish.write_text("#!/usr/bin/bash\nexit 0\n")
+    avahi_publish.chmod(avahi_publish.stat().st_mode | stat.S_IXUSR)
+
     for name in ("loginctl", "ip"):
         command = commands / name
         command.write_text(
@@ -552,21 +557,35 @@ def yq_value(config: pathlib.Path, expression: str) -> str:
 
 def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     """Starting an unconfigured server must persist a secret without printing it."""
-    result, config, calls = run_lifecycle_script(tmp_path, "start.sh", api_key="")
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "start.sh", api_key="", config_mode=0o644
+    )
 
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert yq_value(config, ".server.api_key") not in result.stdout
     assert yq_value(config, ".server.api_key") not in result.stderr
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
 
+def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
+    """Starting with a configured key must not replace that credential."""
+    result, config, _ = run_lifecycle_script(tmp_path, "start.sh")
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".server.api_key") == "existing-key"
+
+
 def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
     """Rotating an active server key must load the replacement immediately."""
-    result, config, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=True)
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "key-reset.sh", active=True, config_mode=0o644
+    )
 
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key") != "existing-key"
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert "systemctl --user stop llm-server.service" in calls.read_text()
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
@@ -579,10 +598,34 @@ def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> 
     assert "systemctl --user start llm-server.service" not in calls.read_text()
 
 
-def test_enable_boot_calls_render_unit_not_start(tmp_path: pathlib.Path) -> None:
-    """Boot setup must render a unit without measuring a running server's VRAM."""
-    result, _, calls = run_lifecycle_script(tmp_path, "enable-boot.sh")
+def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Path) -> None:
+    """Boot setup must create a private key without starting or budget-checking."""
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "enable-boot.sh", api_key="", config_mode=0o644
+    )
 
     assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".server.api_key")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert "render-unit.sh" in calls.read_text()
     assert "start.sh" not in calls.read_text()
+    assert " budget " not in calls.read_text()
+
+
+def test_enable_boot_renders_a_health_gated_mdns_unit(tmp_path: pathlib.Path) -> None:
+    """Boot-enabled servers must publish mDNS under systemd after health succeeds."""
+    result, config, _ = run_lifecycle_script(tmp_path, "enable-boot.sh")
+    mdns_unit = config.parent.parent / "containers/systemd/llm-server-mdns.service"
+
+    assert result.returncode == 0, result.stderr
+    unit = mdns_unit.read_text()
+    container_unit = (
+        config.parent.parent / "containers/systemd/llm-server.container"
+    ).read_text()
+    assert "Wants=llm-server-mdns.service" in container_unit
+    assert "Requires=llm-server.service" in unit
+    assert "After=llm-server.service" in unit
+    assert "PartOf=llm-server.service" in unit
+    assert "ExecStartPre=" in unit
+    assert "http://127.0.0.1:8000/health" in unit
+    assert "avahi-publish -s llm _http._tcp 8000" in unit

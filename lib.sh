@@ -31,3 +31,25 @@ require_cmd() {
 
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
+
+new_api_key() {
+    head -c 32 /dev/urandom | base64 | tr -d '/+=\n'
+}
+
+ensure_api_key() {
+    local api_key
+    api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+    if [ -z "$api_key" ] || [ "$api_key" = "null" ]; then
+        api_key="$(new_api_key)"
+        API_KEY="$api_key" yq -i '.server.api_key = strenv(API_KEY)' "$CONFIG_PATH"
+        log_info "generated an API key"
+    fi
+    chmod 600 "$CONFIG_PATH"
+}
+
+reset_api_key() {
+    local api_key
+    api_key="$(new_api_key)"
+    API_KEY="$api_key" yq -i '.server.api_key = strenv(API_KEY)' "$CONFIG_PATH"
+    chmod 600 "$CONFIG_PATH"
+}

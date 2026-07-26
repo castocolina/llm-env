@@ -25,8 +25,7 @@ if command -v firewall-cmd >/dev/null 2>&1; then
 fi
 
 if command -v avahi-publish >/dev/null 2>&1; then
-    avahi-publish -s "$mdns" _http._tcp "$port" >/dev/null 2>&1 &
-    log_info "published http://${mdns}.local:${port}/v1"
+    log_info "mDNS is managed by ${UNIT_NAME}-mdns.service"
 fi
 
 ip="$(ip -4 -json addr show scope global 2>/dev/null \

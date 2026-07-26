@@ -9,6 +9,7 @@ require_cmd yq loginctl systemctl
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 
 yq -i '.server.start_at_boot = true' "$CONFIG_PATH"
+ensure_api_key
 bash "${REPO_DIR}/render-unit.sh"
 log_info "unit rendered with [Install]"
 

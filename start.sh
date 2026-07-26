@@ -8,13 +8,7 @@ require_cmd uv jq yq systemctl curl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 
-api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
-if [ -z "$api_key" ] || [ "$api_key" = "null" ]; then
-    api_key="$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')"
-    API_KEY="$api_key" yq -i '.server.api_key = strenv(API_KEY)' "$CONFIG_PATH"
-    chmod 600 "$CONFIG_PATH"
-    log_info "generated an API key"
-fi
+ensure_api_key
 
 models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
 [ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
