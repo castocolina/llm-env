@@ -313,6 +313,16 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
     for name in ("systemctl", "curl"):
         _mock_command(commands, name)
 
+    timeout = commands / "timeout"
+    timeout.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'timeout %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "[ \"$1\" = 180 ] || exit 64\n"
+        "shift\n"
+        "exec \"$@\"\n"
+    )
+    timeout.chmod(timeout.stat().st_mode | stat.S_IXUSR)
+
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
@@ -322,7 +332,13 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"pci_address\":\"0000:03:00.0\",\"render_node\":\"renderD128\"}]}' ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}' ;;\n"
-        "  *' resolve-device'*) printf '%s\\n' '{\"device\":\"Vulkan7\"}' ;;\n"
+        "  *' resolve-device'*)\n"
+        "    for argument in \"$@\"; do\n"
+        "      if [ \"$previous\" = --listing-file ]; then listing_file=\"$argument\"; fi\n"
+        "      previous=\"$argument\"\n"
+        "    done\n"
+        "    [ \"$(cat \"$listing_file\")\" = 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ] || exit 65\n"
+        "    printf '%s\\n' '{\"device\":\"Vulkan7\"}' ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -384,18 +400,39 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
 
     assert result.returncode == 0, result.stderr
     recorded = calls.read_text()
-    assert "resolve-device --device-name Selected Radeon" in recorded
+    check_setup = (ROOT / "check-setup.sh").read_text()
+    assert 'uv run "${REPO_DIR}/llmenv.py" resolve-device' in check_setup
     assert (
+        f"uv run {ROOT / 'llmenv.py'} resolve-device --device-name Selected Radeon "
+        "--listing-file "
+    ) in recorded
+    list_devices = (
+        "podman run --rm --device /dev/dri --entrypoint /app/llama "
+        "example.invalid/llama:latest --list-devices"
+    )
+    first_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
         "--device Vulkan7 --n-gpu-layers 42 -p Reply with exactly: ready -n 16"
-    ) in recorded
-    assert (
+    )
+    second_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
         "--device Vulkan7 --n-gpu-layers 17 -p Reply with exactly: ready -n 16"
-    ) in recorded
+    )
+    assert recorded.count(list_devices) == 1
+    assert recorded.count(f"timeout 180 {first_inference}") == 1
+    assert recorded.count(f"timeout 180 {second_inference}") == 1
     assert "/models/skipped.gguf" not in recorded
+    inference_calls = [
+        line.split()
+        for line in recorded.splitlines()
+        if line.startswith("podman run") and " cli " in line
+    ]
+    assert len(inference_calls) == 2
+    for arguments in inference_calls:
+        assert "--publish" not in arguments
+        assert "-p" not in arguments[: arguments.index("example.invalid/llama:latest")]
     assert "podman exec" not in recorded
 
 

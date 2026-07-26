@@ -73,7 +73,7 @@ if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
     listing_file="$(mktemp)"
     podman run --rm --device /dev/dri --entrypoint /app/llama \
         "$image" --list-devices >"$listing_file" 2>/dev/null || true
-    if resolved="$(llmenv resolve-device --device-name "$device_name" \
+    if resolved="$(uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" \
                     --listing-file "$listing_file")"; then
         device="$(echo "$resolved" | jq -r '.device')"
         log_info "resolved ${device_name} to ${device}"
