@@ -104,5 +104,77 @@ else
     log_warn "models_max=$(jq -r .models_max /tmp/llm-budget.json) exceeds the VRAM budget"
 fi
 
+log_step "Step 8/8  Network exposure"
+port="$(yq -r '.server.port' "$CONFIG_PATH")"
+mdns="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
+
+if command -v firewall-cmd >/dev/null 2>&1; then
+    if firewall-cmd --query-port="${port}/tcp" >/dev/null 2>&1; then
+        log_info "firewall port ${port}/tcp already open"
+    else
+        open_port="$(ask "  Open firewall port ${port}/tcp for LAN access? (yes/no) " "no")"
+        if [ "$open_port" = "yes" ]; then
+            if sudo firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null \
+              && sudo firewall-cmd --reload >/dev/null; then
+                log_info "opened ${port}/tcp"
+            else
+                log_warn "could not open the port; do it manually"
+            fi
+        else
+            log_warn "port not opened; other machines will not be able to connect"
+        fi
+    fi
+else
+    log_warn "firewall-cmd not found; skipping firewall configuration"
+fi
+
+if command -v avahi-publish >/dev/null 2>&1; then
+    mkdir -p "${HOME}/.config/systemd/user"
+    cat > "${HOME}/.config/systemd/user/llm-mdns.service" <<EOF
+[Unit]
+Description=Publish ${mdns}.local for the LLM server
+After=network-online.target
+
+[Service]
+ExecStart=/bin/sh -c 'exec /usr/bin/avahi-publish -a -R ${mdns}.local "\$(ip -4 -json addr show scope global | jq -r "[.[].addr_info[].local] | first")"'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    if systemctl --user enable --now llm-mdns.service 2>/dev/null; then
+        log_info "publishing ${mdns}.local"
+    else
+        log_warn "could not start mDNS publishing; use the IP address instead"
+    fi
+else
+    log_warn "avahi-publish not found; use the IP address instead of ${mdns}.local"
+fi
+
+echo
+log_step "Usage examples"
+api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+first_alias="$(yq -r '[.models[] | select(.enabled)] | .[0].alias' "$CONFIG_PATH")"
+cat <<EOF
+  From this machine:
+    curl http://127.0.0.1:${port}/v1/chat/completions \\
+      -H "Authorization: Bearer ${api_key}" \\
+      -H "Content-Type: application/json" \\
+      -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
+
+  From another machine on the LAN:
+    curl http://${mdns}.local:${port}/v1/chat/completions \\
+      -H "Authorization: Bearer ${api_key}" \\
+      -H "Content-Type: application/json" \\
+      -d '{"model":"${first_alias}","messages":[{"role":"user","content":"hello"}]}'
+
+  OpenAI-compatible client settings:
+    base_url = http://${mdns}.local:${port}/v1
+    api_key  = ${api_key}
+    model    = ${first_alias}
+EOF
+
 echo
 log_info "Setup complete. Next: make benchmark, then make start"
