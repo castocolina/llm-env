@@ -71,17 +71,26 @@ def parse_device_listing(text: str) -> list[dict[str, int | str]]:
 def _read_device_listing(args: argparse.Namespace) -> str:
     if args.listing_file:
         return Path(args.listing_file).read_text(encoding="utf-8")
+    if not args.list_command:
+        raise ConfigError("provide --listing-file or --list-command to list devices")
     try:
-        return subprocess.run(
+        result = subprocess.run(
             args.list_command,
             shell=True,
             capture_output=True,
             text=True,
             timeout=120,
             check=False,
-        ).stdout
+        )
     except subprocess.TimeoutExpired as exc:
         raise ConfigError("timed out running the device listing command") from exc
+    if result.returncode:
+        detail = result.stderr.strip()
+        message = f"device listing command failed with exit status {result.returncode}"
+        if detail:
+            message += f": {detail}"
+        raise ConfigError(message)
+    return result.stdout
 
 
 def cmd_list_devices(args: argparse.Namespace) -> int:
@@ -90,9 +99,16 @@ def cmd_list_devices(args: argparse.Namespace) -> int:
 
 def cmd_resolve_device(args: argparse.Namespace) -> int:
     devices = parse_device_listing(_read_device_listing(args))
-    for device in devices:
-        if device["name"] == args.device_name.strip():
-            return emit({"device": device["id"], "name": device["name"]})
+    matches = [device for device in devices if device["name"] == args.device_name.strip()]
+    if len(matches) == 1:
+        device = matches[0]
+        return emit({"device": device["id"], "name": device["name"]})
+    if len(matches) > 1:
+        ids = [device["id"] for device in matches]
+        return fail(
+            f"multiple devices match {args.device_name!r}: {ids}. "
+            "Choose a unique device name."
+        )
 
     available = [f"{d['id']}: {d['name']}" for d in devices]
     return fail(

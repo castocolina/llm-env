@@ -69,6 +69,23 @@ def test_resolve_device_matches_pci_from_device_listing(tmp_path):
     assert json.loads(result.stdout)["device"] == "Vulkan0"
 
 
+def test_resolve_device_rejects_duplicate_device_names(tmp_path):
+    listing = tmp_path / "devices.txt"
+    listing.write_text(
+        "  Vulkan0: Shared GPU (16304 MiB)\n"
+        "  Vulkan1: Shared GPU (16304 MiB)\n"
+    )
+    result = run(
+        "resolve-device",
+        "--device-name",
+        "Shared GPU",
+        "--listing-file",
+        str(listing),
+    )
+    assert result.returncode == 1
+    assert "multiple devices match" in json.loads(result.stdout)["error"]
+
+
 def test_resolve_device_reports_error_when_absent(tmp_path):
     listing = tmp_path / "devices.txt"
     listing.write_text("Available devices:\n  Vulkan0: Some Other GPU (1024 MiB)\n")
@@ -132,6 +149,35 @@ def test_models_select_replaces_enabled_set(tmp_path):
     assert result.returncode == 0
     assert json.loads(result.stdout)["models_max"] == 1
     assert enabled_aliases(config) == ["b"]
+
+
+def test_models_select_accepts_multiple_aliases(tmp_path):
+    config = write_test_config(tmp_path)
+    result = run("models", "select", "a", "b", "--config", str(config))
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["models_max"] == 2
+    assert enabled_aliases(config) == ["a", "b"]
+
+
+def test_models_select_reports_unknown_alias(tmp_path):
+    config = write_test_config(tmp_path)
+    result = run("models", "select", "missing", "--config", str(config))
+    assert result.returncode == 1
+    assert "unknown model alias: missing" in json.loads(result.stdout)["error"]
+
+
+def test_list_devices_reports_failed_listing_command():
+    result = run("list-devices", "--list-command", "exit 7")
+    assert result.returncode == 1
+    assert "device listing command failed with exit status 7" in json.loads(result.stdout)[
+        "error"
+    ]
+
+
+def test_list_devices_requires_listing_source():
+    result = run("list-devices")
+    assert result.returncode == 1
+    assert "provide --listing-file or --list-command" in json.loads(result.stdout)["error"]
 
 
 def test_list_devices_parses_vulkan_rows(tmp_path):
