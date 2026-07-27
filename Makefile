@@ -1,4 +1,4 @@
-.PHONY: help prerequisites setup start stop restart check-setup check-server benchmark \
+.PHONY: help prerequisites setup start stop restart check-setup check-server check-with-agents benchmark \
         key-reset enable-boot disable-boot status logs validate test clean
 
 UNIT = llm-server
@@ -11,6 +11,7 @@ help:
 	@echo "make restart       Restart the LLM server"
 	@echo "make check-setup   Validate config, image, models, GPU (offline)"
 	@echo "make check-server  Validate the running server API (online)"
+	@echo "make check-with-agents Opt-in independent agent inference checks"
 	@echo "make benchmark     Benchmark Vulkan vs ROCm and record results"
 	@echo "make key-reset     Generate a new API key"
 	@echo "make enable-boot   Start automatically at boot"
@@ -40,6 +41,9 @@ check-setup:
 
 check-server:
 	@bash check-server.sh
+
+check-with-agents:
+	@bash check-with-agents.sh
 
 benchmark:
 	@bash benchmark.sh

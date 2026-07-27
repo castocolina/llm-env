@@ -808,3 +808,158 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def run_agent_check(
+    tmp_path: pathlib.Path,
+    *,
+    clients: dict[str, str],
+    arguments: tuple[str, ...] = (),
+    model_alias: str = "gemma4",
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run the opt-in check with an isolated client path and fake APIs."""
+    real_jq = shutil.which("jq")
+    real_yq = shutil.which("yq")
+    assert real_jq is not None
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "  api_key: test-key-not-a-secret\n"
+    )
+
+    _mock_dirname(commands)
+    for name, executable in {
+        "chmod": "/usr/bin/chmod",
+        "jq": real_jq,
+        "mktemp": "/usr/bin/mktemp",
+        "rm": "/usr/bin/rm",
+        "yq": real_yq,
+    }.items():
+        command = commands / name
+        command.write_text(f"#!/usr/bin/bash\nexec {executable!s} \"$@\"\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "url=\"${!#}\"\n"
+        "case \"$url\" in\n"
+        "  */v1/models) printf '%s\\n' \"$AGENT_CHECK_MODELS\" ;;\n"
+        "  https://api.open-meteo.com/*)\n"
+        "    printf '%s\\n' '{\"current\":{\"time\":\"2026-07-27T13:00\",\"temperature_2m\":16.3,\"weather_code\":3}}'\n"
+        "    ;;\n"
+        "  https://open.er-api.com/*)\n"
+        "    printf '%s\\n' '{\"time_last_update_utc\":\"Mon, 27 Jul 2026 00:02:31 +0000\",\"rates\":{\"CLP\":946.527902}}'\n"
+        "    ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    for name, body in clients.items():
+        command = commands / name
+        command.write_text(body)
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": model_alias}]}),
+        "CALLS": str(calls),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": str(commands),
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "check-with-agents.sh", *arguments],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config, calls
+
+
+def test_make_help_lists_check_with_agents() -> None:
+    assert "make check-with-agents" in (ROOT / "Makefile").read_text()
+
+
+def test_agent_check_fails_when_no_supported_client_is_installed(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The opt-in check must reject a PATH without Pi or OpenCode."""
+    result, _, _ = run_agent_check(tmp_path, clients={})
+
+    assert result.returncode != 0
+    assert "fail no supported agent is installed" in result.stderr
+    assert result.stdout.count("SKIP client=") == 2
+
+
+def test_agent_check_fetches_public_snapshots_and_models_before_no_client_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The no-client gate must still validate all matrix inputs first."""
+    result, _, calls = run_agent_check(tmp_path, clients={})
+
+    assert result.returncode != 0
+    recorded = calls.read_text()
+    assert "https://api.open-meteo.com/" in recorded
+    assert "https://open.er-api.com/" in recorded
+    assert "http://127.0.0.1:8000/v1/models" in recorded
+
+
+def test_agent_check_rejects_arguments_without_echoing_them(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Secrets supplied as arguments must be rejected without disclosure."""
+    forbidden_argument = "must-not-be-accepted-or-printed"
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={},
+        arguments=(forbidden_argument,),
+    )
+
+    assert result.returncode != 0
+    assert "accepts no arguments" in result.stderr
+    assert forbidden_argument not in result.stdout
+    assert forbidden_argument not in result.stderr
+
+
+def test_agent_check_builds_a_failure_row_for_each_present_client_matrix_cell(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An unimplemented detected client must fail every model-source cell."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": "#!/usr/bin/bash\\nexit 0\\n"},
+    )
+
+    assert result.returncode != 0
+    assert "SKIP client=opencode" in result.stdout
+    assert "FAIL client=pi model=gemma4 check=weather reason=agent-failed" in result.stdout
+    assert "FAIL client=pi model=gemma4 check=fx reason=agent-failed" in result.stdout
+    assert "unsupported client" in result.stderr
+
+
+def test_agent_check_dispatches_an_alias_that_cannot_form_an_output_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A model alias must not prevent dispatch through an unsafe output filename."""
+    model_alias = "nested/model"
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": "#!/usr/bin/bash\\nexit 0\\n"},
+        model_alias=model_alias,
+    )
+
+    assert result.returncode != 0
+    assert f"FAIL client=pi model={model_alias} check=weather reason=agent-failed" in result.stdout
+    assert f"FAIL client=pi model={model_alias} check=fx reason=agent-failed" in result.stdout
+    assert "unsupported client: pi" in result.stderr
