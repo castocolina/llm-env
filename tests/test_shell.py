@@ -579,6 +579,7 @@ def run_diagnostic_helper(
     api_key: str = "fixture-secret",
     keep: bool = False,
     unreadable_nested: bool = False,
+    unreadable_regular_file: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run shared diagnostics with an isolated configuration and temporary directory."""
     config = tmp_path / "models.yml"
@@ -598,6 +599,14 @@ def run_diagnostic_helper(
         "  printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$nested_directory/raw.txt\"\n"
         "  chmod 000 \"$nested_directory\"\n"
         "fi\n"
+        "if [ \"$UNREADABLE_REGULAR_FILE\" = 1 ]; then\n"
+        "  secret_directory=\"${diagnostic_directory}/secret-directory-${DIAGNOSTIC_TEXT}\"\n"
+        "  mkdir \"$secret_directory\"\n"
+        "  chmod 755 \"$secret_directory\"\n"
+        "  unreadable_file=\"${secret_directory}/unreadable-diagnostic.txt\"\n"
+        "  printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$unreadable_file\"\n"
+        "  chmod 000 \"$unreadable_file\"\n"
+        "fi\n"
         "log_command \"$DIAGNOSTIC_TEXT\"\n"
         "log_block 'Raw result' \"$DIAGNOSTIC_TEXT\"\n"
         "log_block 'Empty result' ''\n"
@@ -611,6 +620,7 @@ def run_diagnostic_helper(
         "LLM_ENV_KEEP_CHECK_ARTIFACTS": "1" if keep else "",
         "TEST_REPO_DIR": str(ROOT),
         "UNREADABLE_NESTED": "1" if unreadable_nested else "0",
+        "UNREADABLE_REGULAR_FILE": "1" if unreadable_regular_file else "0",
         "TMPDIR": str(temporary_directory),
     }
     result = subprocess.run(
@@ -701,6 +711,29 @@ def test_diagnostic_helper_discards_artifacts_when_traversal_fails(
     assert bearer_token not in result.stdout + result.stderr
     assert "Diagnostics retained:" not in result.stdout
     assert not artifact.exists()
+    assert not any(temporary_directory.iterdir())
+
+
+def test_diagnostic_helper_discards_unreadable_regular_files_without_path_leaks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An unreadable regular file must not expose paths or leave its file list."""
+    secret = "unreadable-regular-file-secret"
+    result, artifact, temporary_directory = run_diagnostic_helper(
+        tmp_path,
+        secret,
+        api_key=secret,
+        keep=True,
+        unreadable_regular_file=True,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert secret not in output
+    assert "unreadable-diagnostic.txt" not in output
+    assert "Diagnostics retained:" not in result.stdout
+    assert not artifact.exists()
+    assert not list(temporary_directory.glob("llm-env-diagnostic-files.*"))
     assert not any(temporary_directory.iterdir())
 
 

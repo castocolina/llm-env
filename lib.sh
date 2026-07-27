@@ -65,7 +65,10 @@ _discard_diagnostic_dir() {
 }
 
 _fail_diagnostic_dir() {
-    local directory="$1" message="$2"
+    local directory="$1" message="$2" file_list="${3:-}"
+    if [ -n "$file_list" ]; then
+        rm -f -- "$file_list" >/dev/null 2>&1 || true
+    fi
     _discard_diagnostic_dir "$directory" || true
     die "$message"
 }
@@ -81,7 +84,7 @@ prepare_diagnostic_dir() {
 }
 
 finish_diagnostic_dir() {
-    local directory="$1" file file_list temporary_file
+    local directory="$1" file file_list temporary_file error_message
     if [ "${LLM_ENV_KEEP_CHECK_ARTIFACTS:-}" != "1" ]; then
         if ! _discard_diagnostic_dir "$directory"; then
             die "could not remove diagnostic directory"
@@ -97,36 +100,43 @@ finish_diagnostic_dir() {
         _fail_diagnostic_dir "$directory" "could not prepare diagnostic artifact list"
     fi
     if ! chmod 600 -- "$file_list" 2>/dev/null; then
-        rm -f -- "$file_list" >/dev/null 2>&1 || true
-        _fail_diagnostic_dir "$directory" "could not secure diagnostic artifact list"
+        _fail_diagnostic_dir "$directory" "could not secure diagnostic artifact list" "$file_list"
     fi
     if ! find "$directory" -type f -print0 > "$file_list" 2>/dev/null; then
-        rm -f -- "$file_list" >/dev/null 2>&1 || true
-        _fail_diagnostic_dir "$directory" "could not traverse diagnostic artifacts"
+        _fail_diagnostic_dir "$directory" "could not traverse diagnostic artifacts" "$file_list"
     fi
 
+    error_message=""
     while IFS= read -r -d '' file; do
         if [[ "$file" != "$directory/"* ]] || [ ! -f "$file" ]; then
-            _fail_diagnostic_dir "$directory" "could not verify diagnostic artifact"
+            error_message="could not verify diagnostic artifact"
+            break
         fi
         if ! temporary_file="$(mktemp "${file}.XXXXXX" 2>/dev/null)"; then
-            _fail_diagnostic_dir "$directory" "could not prepare diagnostic artifact"
+            error_message="could not prepare diagnostic artifact"
+            break
         fi
-        if ! _redact_stream < "$file" > "$temporary_file"; then
+        if ! _redact_stream 2>/dev/null < "$file" > "$temporary_file"; then
             rm -f -- "$temporary_file" >/dev/null 2>&1 || true
-            _fail_diagnostic_dir "$directory" "could not redact diagnostic artifact"
+            error_message="could not redact diagnostic artifact"
+            break
         fi
         if ! mv -- "$temporary_file" "$file" 2>/dev/null; then
             rm -f -- "$temporary_file" >/dev/null 2>&1 || true
-            _fail_diagnostic_dir "$directory" "could not retain diagnostic artifact"
+            error_message="could not retain diagnostic artifact"
+            break
         fi
         if ! chmod 600 -- "$file" 2>/dev/null; then
-            _fail_diagnostic_dir "$directory" "could not secure diagnostic artifact"
+            error_message="could not secure diagnostic artifact"
+            break
         fi
     done < "$file_list"
 
+    if [ -n "$error_message" ]; then
+        _fail_diagnostic_dir "$directory" "$error_message" "$file_list"
+    fi
     if ! rm -f -- "$file_list" 2>/dev/null; then
-        _fail_diagnostic_dir "$directory" "could not remove diagnostic artifact list"
+        _fail_diagnostic_dir "$directory" "could not remove diagnostic artifact list" "$file_list"
     fi
 
     printf 'Diagnostics retained: '
