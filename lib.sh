@@ -24,12 +24,14 @@ log_error() { printf '%s fail%s %s\n' "$RED"  "$NC" "$*" >&2; }
 _redact_stream() {
     local key escaped
     key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH" 2>/dev/null)"
-    if [ -n "$key" ]; then
-        escaped="$(printf '%s' "$key" | sed 's/[][\\.^$*\/]/\\&/g')"
-        sed "s/${escaped}/<redacted>/g"
-    else
-        cat
-    fi | sed -E 's/(Authorization:[[:space:]]*Bearer)[[:space:]]+[^[:space:]"'"'"']+/\1 <redacted>/g'
+
+    sed -E 's/(Authorization:[[:space:]]*Bearer)[[:space:]]+[^[:space:]"'"'"']+/\1 <redacted>/g' |
+        if [ -n "$key" ]; then
+            escaped="$(printf '%s' "$key" | sed 's/[][\\.^$*\/]/\\&/g')"
+            sed "s/${escaped}/<redacted>/g"
+        else
+            cat
+        fi
 }
 
 redact_text() {
@@ -56,42 +58,76 @@ log_block() {
     fi
 }
 
+_discard_diagnostic_dir() {
+    local directory="$1"
+    chmod -R u+rwx -- "$directory" >/dev/null 2>&1 || true
+    rm -rf -- "$directory" >/dev/null 2>&1
+}
+
+_fail_diagnostic_dir() {
+    local directory="$1" message="$2"
+    _discard_diagnostic_dir "$directory" || true
+    die "$message"
+}
+
 prepare_diagnostic_dir() {
     local name="$1" directory
-    directory="$(mktemp -d "${TMPDIR:-/tmp}/llm-env-${name}.XXXXXX")" \
+    directory="$(mktemp -d "${TMPDIR:-/tmp}/llm-env-${name}.XXXXXX" 2>/dev/null)" \
         || die "could not create private diagnostic directory"
-    chmod 700 "$directory"
+    if ! chmod 700 -- "$directory" 2>/dev/null; then
+        _fail_diagnostic_dir "$directory" "could not secure diagnostic directory"
+    fi
     printf '%s\n' "$directory"
 }
 
 finish_diagnostic_dir() {
-    local directory="$1" file temporary_file
+    local directory="$1" file file_list temporary_file
     if [ "${LLM_ENV_KEEP_CHECK_ARTIFACTS:-}" != "1" ]; then
-        rm -rf "$directory"
+        if ! _discard_diagnostic_dir "$directory"; then
+            die "could not remove diagnostic directory"
+        fi
         return
     fi
 
-    if ! chmod 700 "$directory"; then
-        rm -rf "$directory"
-        die "could not secure diagnostic directory"
+    if ! chmod 700 -- "$directory" 2>/dev/null; then
+        _fail_diagnostic_dir "$directory" "could not secure diagnostic directory"
+    fi
+
+    if ! file_list="$(mktemp "${TMPDIR:-/tmp}/llm-env-diagnostic-files.XXXXXX" 2>/dev/null)"; then
+        _fail_diagnostic_dir "$directory" "could not prepare diagnostic artifact list"
+    fi
+    if ! chmod 600 -- "$file_list" 2>/dev/null; then
+        rm -f -- "$file_list" >/dev/null 2>&1 || true
+        _fail_diagnostic_dir "$directory" "could not secure diagnostic artifact list"
+    fi
+    if ! find "$directory" -type f -print0 > "$file_list" 2>/dev/null; then
+        rm -f -- "$file_list" >/dev/null 2>&1 || true
+        _fail_diagnostic_dir "$directory" "could not traverse diagnostic artifacts"
     fi
 
     while IFS= read -r -d '' file; do
-        if ! temporary_file="$(mktemp "${file}.XXXXXX")"; then
-            rm -rf "$directory"
-            die "could not prepare diagnostic artifact"
+        if [[ "$file" != "$directory/"* ]] || [ ! -f "$file" ]; then
+            _fail_diagnostic_dir "$directory" "could not verify diagnostic artifact"
+        fi
+        if ! temporary_file="$(mktemp "${file}.XXXXXX" 2>/dev/null)"; then
+            _fail_diagnostic_dir "$directory" "could not prepare diagnostic artifact"
         fi
         if ! _redact_stream < "$file" > "$temporary_file"; then
-            rm -f "$temporary_file"
-            rm -rf "$directory"
-            die "could not redact diagnostic artifact"
+            rm -f -- "$temporary_file" >/dev/null 2>&1 || true
+            _fail_diagnostic_dir "$directory" "could not redact diagnostic artifact"
         fi
-        if ! mv "$temporary_file" "$file"; then
-            rm -f "$temporary_file"
-            rm -rf "$directory"
-            die "could not retain diagnostic artifact"
+        if ! mv -- "$temporary_file" "$file" 2>/dev/null; then
+            rm -f -- "$temporary_file" >/dev/null 2>&1 || true
+            _fail_diagnostic_dir "$directory" "could not retain diagnostic artifact"
         fi
-    done < <(find "$directory" -type f -print0)
+        if ! chmod 600 -- "$file" 2>/dev/null; then
+            _fail_diagnostic_dir "$directory" "could not secure diagnostic artifact"
+        fi
+    done < "$file_list"
+
+    if ! rm -f -- "$file_list" 2>/dev/null; then
+        _fail_diagnostic_dir "$directory" "could not remove diagnostic artifact list"
+    fi
 
     printf 'Diagnostics retained: '
     redact_text "$directory"

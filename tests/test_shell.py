@@ -578,7 +578,8 @@ def run_diagnostic_helper(
     *,
     api_key: str = "fixture-secret",
     keep: bool = False,
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    unreadable_nested: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run shared diagnostics with an isolated configuration and temporary directory."""
     config = tmp_path / "models.yml"
     config.write_text(f"server:\n  api_key: {api_key}\n")
@@ -591,6 +592,12 @@ def run_diagnostic_helper(
         "source \"$TEST_REPO_DIR/lib.sh\"\n"
         "diagnostic_directory=\"$(prepare_diagnostic_dir diagnostic-helper)\"\n"
         "printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$diagnostic_directory/raw.txt\"\n"
+        "if [ \"$UNREADABLE_NESTED\" = 1 ]; then\n"
+        "  nested_directory=\"${diagnostic_directory}/unreadable-${DIAGNOSTIC_TEXT}\"\n"
+        "  mkdir \"$nested_directory\"\n"
+        "  printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$nested_directory/raw.txt\"\n"
+        "  chmod 000 \"$nested_directory\"\n"
+        "fi\n"
         "log_command \"$DIAGNOSTIC_TEXT\"\n"
         "log_block 'Raw result' \"$DIAGNOSTIC_TEXT\"\n"
         "log_block 'Empty result' ''\n"
@@ -603,6 +610,7 @@ def run_diagnostic_helper(
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_KEEP_CHECK_ARTIFACTS": "1" if keep else "",
         "TEST_REPO_DIR": str(ROOT),
+        "UNREADABLE_NESTED": "1" if unreadable_nested else "0",
         "TMPDIR": str(temporary_directory),
     }
     result = subprocess.run(
@@ -618,21 +626,24 @@ def run_diagnostic_helper(
         if artifact_path_file.exists()
         else tmp_path / "missing-artifact"
     )
-    return result, artifact
+    return result, artifact, temporary_directory
 
 
 def test_diagnostic_helpers_redact_api_keys_and_bearer_headers(
     tmp_path: pathlib.Path,
 ) -> None:
     """Displayed diagnostics must not expose API keys or bearer-header values."""
-    result, artifact = run_diagnostic_helper(
+    api_key = "Bearer"
+    bearer_token = "distinct-bearer-token"
+    result, artifact, _ = run_diagnostic_helper(
         tmp_path,
-        "fixture-secret Authorization: Bearer another-secret",
+        f"{api_key} Authorization: Bearer {bearer_token}",
+        api_key=api_key,
     )
 
     assert result.returncode == 0, result.stderr
-    assert "fixture-secret" not in result.stdout + result.stderr
-    assert "another-secret" not in result.stdout + result.stderr
+    assert api_key not in result.stdout + result.stderr
+    assert bearer_token not in result.stdout + result.stderr
     assert "Command: " in result.stdout
     assert "Raw result:" in result.stdout
     assert "Empty result:\n  (empty)" in result.stdout
@@ -645,7 +656,7 @@ def test_diagnostic_helper_treats_api_keys_as_fixed_text(
 ) -> None:
     """A regex metacharacter in an API key must not prevent its redaction."""
     api_key = "fixture+secret"
-    result, artifact = run_diagnostic_helper(
+    result, artifact, _ = run_diagnostic_helper(
         tmp_path,
         api_key,
         api_key=api_key,
@@ -661,15 +672,36 @@ def test_diagnostic_helper_keeps_only_private_redacted_artifacts(
     tmp_path: pathlib.Path,
 ) -> None:
     """Retained diagnostics must be private and redact the configured API key."""
-    result, artifact = run_diagnostic_helper(tmp_path, "fixture-secret", keep=True)
+    result, artifact, _ = run_diagnostic_helper(
+        tmp_path, "fixture-secret", keep=True
+    )
 
     assert result.returncode == 0, result.stderr
     assert artifact.is_dir()
     assert stat.S_IMODE(artifact.stat().st_mode) == 0o700
     assert str(artifact) in result.stdout
-    assert "fixture-secret" not in "".join(
-        path.read_text() for path in artifact.rglob("*") if path.is_file()
+    retained_files = [path for path in artifact.rglob("*") if path.is_file()]
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in retained_files)
+    assert "fixture-secret" not in "".join(path.read_text() for path in retained_files)
+
+
+def test_diagnostic_helper_discards_artifacts_when_traversal_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An unreadable nested directory must fail without leaking or retaining data."""
+    bearer_token = "traversal-bearer-token"
+    result, artifact, temporary_directory = run_diagnostic_helper(
+        tmp_path,
+        f"Authorization: Bearer {bearer_token}",
+        keep=True,
+        unreadable_nested=True,
     )
+
+    assert result.returncode != 0
+    assert bearer_token not in result.stdout + result.stderr
+    assert "Diagnostics retained:" not in result.stdout
+    assert not artifact.exists()
+    assert not any(temporary_directory.iterdir())
 
 
 def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
