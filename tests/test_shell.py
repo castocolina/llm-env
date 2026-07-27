@@ -818,6 +818,7 @@ def run_agent_check(
     clients: dict[str, str],
     arguments: tuple[str, ...] = (),
     model_alias: str = "gemma4",
+    model_aliases: tuple[str, ...] | None = None,
     weather_body: str | None = None,
     fx_body: str | None = None,
     api_key: str = "test-key-not-a-secret",
@@ -833,6 +834,8 @@ def run_agent_check(
     commands.mkdir()
     calls = tmp_path / "calls"
     calls.touch()
+    artifacts = tmp_path / "agent-artifacts"
+    artifacts.mkdir()
     config = tmp_path / "models.yml"
     config.write_text(
         "server:\n"
@@ -844,6 +847,7 @@ def run_agent_check(
     for name, executable in {
         "chmod": "/usr/bin/chmod",
         "jq": real_jq,
+        "mkdir": "/usr/bin/mkdir",
         "mktemp": "/usr/bin/mktemp",
         "rm": "/usr/bin/rm",
         "yq": real_yq,
@@ -875,18 +879,36 @@ def run_agent_check(
         command.write_text(body)
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
 
+    aliases = model_aliases if model_aliases is not None else (model_alias,)
     environment = os.environ | {
-        "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": model_alias}]}),
+        "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": alias} for alias in aliases]}),
         "AGENT_CHECK_WEATHER_BODY": weather_body
         if weather_body is not None
         else '{"current":{"time":"2026-07-27T13:00","temperature_2m":16.3,"weather_code":3}}',
         "AGENT_CHECK_FX_BODY": fx_body
         if fx_body is not None
         else '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000","rates":{"CLP":946.527902}}',
+        "AGENT_CHECK_WEATHER_EVIDENCE": json.dumps(
+            {
+                "source_url": "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",
+                "source_timestamp": "2026-07-27T13:00",
+                "temperature_2m": 16.3,
+                "weather_code": 3,
+            }
+        ),
+        "AGENT_CHECK_FX_EVIDENCE": json.dumps(
+            {
+                "source_url": "https://open.er-api.com/v6/latest/USD",
+                "source_timestamp": "Mon, 27 Jul 2026 00:02:31 +0000",
+                "usd_to_clp": 946.527902,
+            }
+        ),
+        "ARTIFACTS": str(artifacts),
         "CALLS": str(calls),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
         "PATH": str(commands),
+        "XDG_CONFIG_HOME": str(tmp_path / "host-xdg-config"),
     }
     command = ["/usr/bin/bash"]
     if xtrace:
@@ -900,7 +922,38 @@ def run_agent_check(
         capture_output=True,
         check=False,
     )
-    return result, config, calls
+    return result, calls, artifacts
+
+
+def count_rows(output: str, prefix: str) -> int:
+    """Count result rows with the requested client prefix."""
+    return sum(line.startswith(prefix) for line in output.splitlines())
+
+
+VALID_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
+if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
+jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:($evidence | tojson)}]}}'
+"""
+
+VALID_OPENCODE_STUB = """#!/usr/bin/bash
+printf 'opencode %s xdg=%s\\n' "$*" "${XDG_CONFIG_HOME:-}" >> "$CALLS"
+printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc"
+if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
+jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:($evidence | tojson)}}'
+"""
+
+STALE_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
+if [[ "$*" == *weather* ]]; then
+    evidence="$(printf '%s' "$AGENT_CHECK_WEATHER_EVIDENCE" | jq -c '.source_timestamp = "stale"')"
+else
+    evidence="$AGENT_CHECK_FX_EVIDENCE"
+fi
+jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:($evidence | tojson)}]}}'
+"""
 
 
 def test_make_help_lists_check_with_agents() -> None:
@@ -922,7 +975,7 @@ def test_agent_check_fetches_public_snapshots_and_models_before_no_client_failur
     tmp_path: pathlib.Path,
 ) -> None:
     """The no-client gate must still validate all matrix inputs first."""
-    result, _, calls = run_agent_check(tmp_path, clients={})
+    result, calls, _ = run_agent_check(tmp_path, clients={})
 
     assert result.returncode != 0
     recorded = calls.read_text()
@@ -1015,6 +1068,82 @@ def test_agent_check_hides_api_key_when_shell_tracing_is_enabled(
     assert api_key not in result.stderr
 
 
+def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Path) -> None:
+    """Pi must use an isolated JSON-mode invocation for each matrix cell."""
+    api_key = "pi-adapter-fixture-secret"
+    result, calls, artifacts = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        model_aliases=("gemma4", "ornith"),
+        api_key=api_key,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, "PASS client=pi") == 4
+    recorded = calls.read_text()
+    assert "--no-session" in recorded
+    assert "--no-extensions" in recorded
+    assert "--no-skills" in recorded
+    assert "--no-prompt-templates" in recorded
+    assert "--no-context-files" in recorded
+    assert "--tools bash" in recorded
+    assert "-p" in recorded and "--mode json" in recorded
+    assert "llm-env/gemma4" in recorded
+    configs = list(artifacts.glob("pi-*.json"))
+    assert len(configs) == 4
+    assert all(api_key not in path.read_text() for path in configs)
+    assert all('"apiKey": "!yq -r' in path.read_text() for path in configs)
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
+    assert api_key not in recorded
+
+
+def test_agent_check_runs_opencode_for_each_model_and_live_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    """OpenCode must use an isolated JSON-mode invocation for each matrix cell."""
+    api_key = "opencode-adapter-fixture-secret"
+    result, calls, artifacts = run_agent_check(
+        tmp_path,
+        clients={"opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        api_key=api_key,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, "PASS client=opencode") == 4
+    recorded = calls.read_text()
+    assert "run --format json --model llm-env/gemma4" in recorded
+    assert f"xdg={tmp_path / 'host-xdg-config'}" not in recorded
+    configs = list(artifacts.glob("opencode-*.jsonc"))
+    assert len(configs) == 4
+    assert all(api_key not in path.read_text() for path in configs)
+    assert all("{env:OPENCODE_API_KEY}" in path.read_text() for path in configs)
+    assert all(json.loads(path.read_text())["tools"] == {"*": False, "bash": True} for path in configs)
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
+    assert api_key not in recorded
+
+
+def test_agent_check_rejects_stale_or_hardcoded_source_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Evidence differing from the fresh source must fail its matrix row."""
+    api_key = "stale-evidence-fixture-secret"
+    result, calls, artifacts = run_agent_check(
+        tmp_path,
+        clients={"pi": STALE_PI_STUB},
+        api_key=api_key,
+    )
+
+    assert result.returncode != 0
+    assert "fail client=pi model=gemma4 check=weather source evidence differs" in result.stderr
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
+    assert api_key not in calls.read_text()
+    assert all(api_key not in path.read_text() for path in artifacts.iterdir())
+
+
 def test_agent_check_builds_a_failure_row_for_each_present_client_matrix_cell(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1028,7 +1157,7 @@ def test_agent_check_builds_a_failure_row_for_each_present_client_matrix_cell(
     assert "SKIP client=opencode" in result.stdout
     assert "FAIL client=pi model=gemma4 check=weather reason=agent-failed" in result.stdout
     assert "FAIL client=pi model=gemma4 check=fx reason=agent-failed" in result.stdout
-    assert "unsupported client" in result.stderr
+    assert "agent invocation failed" in result.stderr
 
 
 def test_agent_check_dispatches_an_alias_that_cannot_form_an_output_path(
@@ -1045,4 +1174,4 @@ def test_agent_check_dispatches_an_alias_that_cannot_form_an_output_path(
     assert result.returncode != 0
     assert f"FAIL client=pi model={model_alias} check=weather reason=agent-failed" in result.stdout
     assert f"FAIL client=pi model={model_alias} check=fx reason=agent-failed" in result.stdout
-    assert "unsupported client: pi" in result.stderr
+    assert "agent invocation failed" in result.stderr

@@ -68,10 +68,123 @@ run_agent() {
     local check_name="$3"
     local prompt="$4"
     local snapshot="$5"
+    local client_base="http://llm.local:${port}/v1"
+    local config_dir config_file config_key_command
 
     case "$client" in
+        pi)
+            config_dir="$workspace/pi"
+            config_file="$config_dir/models.json"
+            mkdir -p "$config_dir" || return 1
+            chmod 700 "$config_dir" || return 1
+            printf -v config_key_command "!yq -r '.server.api_key' %q" "$CONFIG_PATH"
+            jq -n \
+                --arg base_url "$client_base" \
+                --arg api_key_command "$config_key_command" \
+                --arg alias "$alias" \
+                '{providers: {"llm-env": {
+                    baseUrl: $base_url,
+                    api: "openai-completions",
+                    apiKey: $api_key_command,
+                    compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
+                    models: [{id: $alias}]
+                }}}' > "$config_file" || return 1
+            chmod 600 "$config_file" || return 1
+            (
+                cd "$workspace" || exit 1
+                PI_CODING_AGENT_DIR="$config_dir" pi \
+                    --no-session \
+                    --no-extensions \
+                    --no-skills \
+                    --no-prompt-templates \
+                    --no-context-files \
+                    --tools bash \
+                    -p \
+                    --mode json \
+                    --model "llm-env/${alias}" \
+                    "$prompt"
+            ) 2>"$workspace/pi-agent-error" |
+                jq -rce '
+                    [select(.type == "message_end" and .message.role == "assistant")
+                     | [.message.content[]? | select(.type == "text") | .text] | join("")]
+                    | last // empty
+                ' 2>"$workspace/pi-agent-parse-error" |
+                jq -ce 'select(type == "object")' 2>>"$workspace/pi-agent-parse-error" || {
+                    printf '%s\n' 'agent invocation failed' >&2
+                    return 1
+                }
+            ;;
+        opencode)
+            config_dir="$workspace/opencode"
+            config_file="$config_dir/opencode.jsonc"
+            mkdir -p "$config_dir" "$workspace/opencode-home" "$workspace/opencode-config" "$workspace/opencode-data" "$workspace/opencode-state" || return 1
+            chmod 700 "$config_dir" "$workspace/opencode-home" "$workspace/opencode-config" "$workspace/opencode-data" "$workspace/opencode-state" || return 1
+            jq -n \
+                --arg base_url "$client_base" \
+                --arg alias "$alias" \
+                '{"$schema": "https://opencode.ai/config.json", tools: {"*": false, bash: true}, provider: {"llm-env": {
+                    npm: "@ai-sdk/openai-compatible",
+                    name: "llm-env",
+                    options: {baseURL: $base_url, apiKey: "{env:OPENCODE_API_KEY}"},
+                    models: {($alias): {name: $alias}}
+                }}}' > "$config_file" || return 1
+            chmod 600 "$config_file" || return 1
+            (
+                cd "$workspace" || exit 1
+                export HOME="$workspace/opencode-home"
+                export XDG_CONFIG_HOME="$workspace/opencode-config"
+                export XDG_DATA_HOME="$workspace/opencode-data"
+                export XDG_STATE_HOME="$workspace/opencode-state"
+                export OPENCODE_CONFIG="$config_file"
+                export OPENCODE_API_KEY="$api_key"
+                opencode run --format json --model "llm-env/${alias}" "$prompt"
+            ) 2>"$workspace/opencode-agent-error" |
+                jq -rce '
+                    reduce (select(.type == "text" and .part.type == "text") | .part) as $part
+                    ({message_id: null, text: ""};
+                     if .message_id == $part.messageID then .text += $part.text
+                     else {message_id: $part.messageID, text: $part.text}
+                     end)
+                    | .text
+                ' 2>"$workspace/opencode-agent-parse-error" |
+                jq -ce 'select(type == "object")' 2>>"$workspace/opencode-agent-parse-error" || {
+                    printf '%s\n' 'agent invocation failed' >&2
+                    return 1
+                }
+            ;;
         *)
-            printf 'unsupported client: %s\n' "$client" >&2
+            printf '%s\n' 'agent invocation failed' >&2
+            return 1
+            ;;
+    esac
+}
+
+source_evidence_matches() {
+    local check_name="$1"
+    local snapshot="$2"
+    local evidence_file="$3"
+
+    case "$check_name" in
+        weather)
+            jq -ce --argjson snapshot "$snapshot" '
+                select(type == "object")
+                | select(.source_url == $snapshot.source_url)
+                | select(.source_timestamp == $snapshot.source_timestamp)
+                | select(.weather_code == $snapshot.weather_code)
+                | select(.temperature_2m | type == "number")
+                | select(.temperature_2m == $snapshot.temperature_2m)
+            ' "$evidence_file" >/dev/null 2>&1
+            ;;
+        fx)
+            jq -ce --argjson snapshot "$snapshot" '
+                select(type == "object")
+                | select(.source_url == $snapshot.source_url)
+                | select(.source_timestamp == $snapshot.source_timestamp)
+                | select(.usd_to_clp | type == "number")
+                | select(.usd_to_clp == $snapshot.usd_to_clp)
+            ' "$evidence_file" >/dev/null 2>&1
+            ;;
+        *)
             return 1
             ;;
     esac
@@ -116,8 +229,16 @@ for client in "${clients[@]}"; do
 
             if run_agent "$client" "$alias" "$check_name" "$prompt" "$snapshot" \
                 > "$workspace/agent-output.json"; then
-                printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
-                    "$client" "$alias" "$check_name"
+                if source_evidence_matches "$check_name" "$snapshot" "$workspace/agent-output.json"; then
+                    printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
+                        "$client" "$alias" "$check_name"
+                else
+                    printf 'fail client=%s model=%s check=%s source evidence differs\n' \
+                        "$client" "$alias" "$check_name" >&2
+                    printf 'FAIL client=%s model=%s check=%s reason=source-evidence-differs\n' \
+                        "$client" "$alias" "$check_name"
+                    failures=$((failures + 1))
+                fi
             else
                 printf 'FAIL client=%s model=%s check=%s reason=agent-failed\n' \
                     "$client" "$alias" "$check_name"
