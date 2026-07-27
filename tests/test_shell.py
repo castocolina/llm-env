@@ -9,6 +9,8 @@ import shutil
 import stat
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -816,6 +818,10 @@ def run_agent_check(
     clients: dict[str, str],
     arguments: tuple[str, ...] = (),
     model_alias: str = "gemma4",
+    weather_body: str | None = None,
+    fx_body: str | None = None,
+    api_key: str = "test-key-not-a-secret",
+    xtrace: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
@@ -831,7 +837,7 @@ def run_agent_check(
     config.write_text(
         "server:\n"
         "  port: 8000\n"
-        "  api_key: test-key-not-a-secret\n"
+        f"  api_key: {api_key}\n"
     )
 
     _mock_dirname(commands)
@@ -854,10 +860,10 @@ def run_agent_check(
         "case \"$url\" in\n"
         "  */v1/models) printf '%s\\n' \"$AGENT_CHECK_MODELS\" ;;\n"
         "  https://api.open-meteo.com/*)\n"
-        "    printf '%s\\n' '{\"current\":{\"time\":\"2026-07-27T13:00\",\"temperature_2m\":16.3,\"weather_code\":3}}'\n"
+        "    printf '%s\\n' \"$AGENT_CHECK_WEATHER_BODY\"\n"
         "    ;;\n"
         "  https://open.er-api.com/*)\n"
-        "    printf '%s\\n' '{\"time_last_update_utc\":\"Mon, 27 Jul 2026 00:02:31 +0000\",\"rates\":{\"CLP\":946.527902}}'\n"
+        "    printf '%s\\n' \"$AGENT_CHECK_FX_BODY\"\n"
         "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
@@ -871,13 +877,23 @@ def run_agent_check(
 
     environment = os.environ | {
         "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": model_alias}]}),
+        "AGENT_CHECK_WEATHER_BODY": weather_body
+        if weather_body is not None
+        else '{"current":{"time":"2026-07-27T13:00","temperature_2m":16.3,"weather_code":3}}',
+        "AGENT_CHECK_FX_BODY": fx_body
+        if fx_body is not None
+        else '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000","rates":{"CLP":946.527902}}',
         "CALLS": str(calls),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
         "PATH": str(commands),
     }
+    command = ["/usr/bin/bash"]
+    if xtrace:
+        command.append("-x")
+    command.extend(("check-with-agents.sh", *arguments))
     result = subprocess.run(
-        ["/usr/bin/bash", "check-with-agents.sh", *arguments],
+        command,
         cwd=ROOT,
         env=environment,
         text=True,
@@ -930,6 +946,73 @@ def test_agent_check_rejects_arguments_without_echoing_them(
     assert "accepts no arguments" in result.stderr
     assert forbidden_argument not in result.stdout
     assert forbidden_argument not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("weather_body", "fx_body", "expected_error"),
+    [
+        ("{}", None, "could not fetch a valid weather snapshot"),
+        (None, "{}", "could not fetch a valid FX snapshot"),
+        (
+            '{"current":{"time":null,"temperature_2m":16.3,"weather_code":3}}',
+            None,
+            "could not fetch a valid weather snapshot",
+        ),
+        (
+            '{"current":{"time":"2026-07-27T13:00","temperature_2m":"16.3","weather_code":3}}',
+            None,
+            "could not fetch a valid weather snapshot",
+        ),
+        (
+            '{"current":{"time":"2026-07-27T13:00","temperature_2m":16.3,"weather_code":"3"}}',
+            None,
+            "could not fetch a valid weather snapshot",
+        ),
+        (
+            None,
+            '{"time_last_update_utc":null,"rates":{"CLP":946.527902}}',
+            "could not fetch a valid FX snapshot",
+        ),
+        (
+            None,
+            '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000","rates":{"CLP":"946.527902"}}',
+            "could not fetch a valid FX snapshot",
+        ),
+    ],
+)
+def test_agent_check_rejects_malformed_source_bodies(
+    tmp_path: pathlib.Path,
+    weather_body: str | None,
+    fx_body: str | None,
+    expected_error: str,
+) -> None:
+    """Public-source snapshots must contain typed timestamp and value fields."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={},
+        weather_body=weather_body,
+        fx_body=fx_body,
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+def test_agent_check_hides_api_key_when_shell_tracing_is_enabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Shell tracing must never expose the curl authentication secret."""
+    api_key = "xtrace-fixture-api-key"
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={},
+        api_key=api_key,
+        xtrace=True,
+    )
+
+    assert result.returncode != 0
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
 
 
 def test_agent_check_builds_a_failure_row_for_each_present_client_matrix_cell(

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # check-with-agents.sh — ask installed coding agents to independently verify public data.
+set +x
 set -uo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -41,14 +42,23 @@ fetch_models() {
 
 source_weather() {
     curl -fsS --max-time 20 "$weather_url" | jq -ce \
-        '{source_url: $url, source_timestamp: .current.time,
-          temperature_2m: .current.temperature_2m, weather_code: .current.weather_code}' \
+        '. as $source
+         | select(($source.current.time | strings | length) > 0)
+         | select($source.current.temperature_2m | numbers)
+         | select($source.current.weather_code | numbers)
+         | {source_url: $url, source_timestamp: $source.current.time,
+            temperature_2m: $source.current.temperature_2m,
+            weather_code: $source.current.weather_code}' \
         --arg url "$weather_url"
 }
 
 source_fx() {
     curl -fsS --max-time 20 "$fx_url" | jq -ce \
-        '{source_url: $url, source_timestamp: .time_last_update_utc, usd_to_clp: .rates.CLP}' \
+        '. as $source
+         | select(($source.time_last_update_utc | strings | length) > 0)
+         | select($source.rates.CLP | numbers)
+         | {source_url: $url, source_timestamp: $source.time_last_update_utc,
+            usd_to_clp: $source.rates.CLP}' \
         --arg url "$fx_url"
 }
 
