@@ -64,7 +64,7 @@ while read -r alias; do
     body="$(jq -n --arg m "$alias" \
         '{model: $m,
           messages: [{role: "user", content: "Reply with exactly: ready"}],
-          max_tokens: 16, stream: false}')"
+          max_tokens: 256, stream: false}')"
 
     response="$(curl -fsS --max-time 120 \
         -K "$auth_conf" \

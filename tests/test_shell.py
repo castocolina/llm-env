@@ -810,6 +810,7 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     )
 
     assert result.returncode == 0, result.stderr
+    assert "max_tokens: 256, stream: false" in (ROOT / "check-server.sh").read_text()
 
 
 def run_agent_check(
