@@ -109,7 +109,7 @@ run_agent() {
                      | [.message.content[]? | select(.type == "text") | .text] | join("")]
                     | last // empty
                 ' 2>"$workspace/pi-agent-parse-error" |
-                jq -ce 'select(type == "object")' 2>>"$workspace/pi-agent-parse-error" || {
+                jq -sce 'select(length == 1 and (.[0] | type == "object")) | .[0]' 2>>"$workspace/pi-agent-parse-error" || {
                     printf '%s\n' 'agent invocation failed' >&2
                     return 1
                 }
@@ -147,7 +147,7 @@ run_agent() {
                      end)
                     | .text
                 ' 2>"$workspace/opencode-agent-parse-error" |
-                jq -ce 'select(type == "object")' 2>>"$workspace/opencode-agent-parse-error" || {
+                jq -sce 'select(length == 1 and (.[0] | type == "object")) | .[0]' 2>>"$workspace/opencode-agent-parse-error" || {
                     printf '%s\n' 'agent invocation failed' >&2
                     return 1
                 }

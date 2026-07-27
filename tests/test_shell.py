@@ -822,6 +822,8 @@ def run_agent_check(
     weather_body: str | None = None,
     fx_body: str | None = None,
     api_key: str = "test-key-not-a-secret",
+    agent_response_prefix: str = "",
+    agent_response_suffix: str = "",
     xtrace: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
@@ -903,6 +905,8 @@ def run_agent_check(
                 "usd_to_clp": 946.527902,
             }
         ),
+        "AGENT_CHECK_RESPONSE_PREFIX": agent_response_prefix,
+        "AGENT_CHECK_RESPONSE_SUFFIX": agent_response_suffix,
         "ARTIFACTS": str(artifacts),
         "CALLS": str(calls),
         "HOME": str(tmp_path / "home"),
@@ -934,14 +938,14 @@ VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
 if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
-jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:($evidence | tojson)}]}}'
+jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}]}}'
 """
 
 VALID_OPENCODE_STUB = """#!/usr/bin/bash
 printf 'opencode %s xdg=%s\\n' "$*" "${XDG_CONFIG_HOME:-}" >> "$CALLS"
 printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc"
 if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
-jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:($evidence | tojson)}}'
+jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
 """
 
 STALE_PI_STUB = """#!/usr/bin/bash
@@ -1123,6 +1127,47 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in recorded
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+def test_agent_check_permits_only_surrounding_agent_json_whitespace(
+    tmp_path: pathlib.Path, client: str, stub: str
+) -> None:
+    """Whitespace around one agent JSON object must remain valid."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_response_prefix=" \n\t",
+        agent_response_suffix="\r\n ",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, f"PASS client={client}") == 2
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+@pytest.mark.parametrize(
+    "additional_value", ("{}", "[]", "0", '{"second": true}')
+)
+def test_agent_check_rejects_every_extra_agent_json_value(
+    tmp_path: pathlib.Path, client: str, stub: str, additional_value: str
+) -> None:
+    """A parser accepting any trailing JSON value would pass this invalid reply."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_response_suffix=additional_value,
+    )
+
+    assert result.returncode != 0
+    assert count_rows(result.stdout, f"FAIL client={client}") == 2
+    assert "agent invocation failed" in result.stderr
 
 
 def test_agent_check_rejects_stale_or_hardcoded_source_evidence(
