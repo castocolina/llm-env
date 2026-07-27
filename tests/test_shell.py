@@ -572,6 +572,106 @@ def yq_value(config: pathlib.Path, expression: str) -> str:
     ).stdout.strip()
 
 
+def run_diagnostic_helper(
+    tmp_path: pathlib.Path,
+    text: str,
+    *,
+    api_key: str = "fixture-secret",
+    keep: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run shared diagnostics with an isolated configuration and temporary directory."""
+    config = tmp_path / "models.yml"
+    config.write_text(f"server:\n  api_key: {api_key}\n")
+    temporary_directory = tmp_path / "temporary"
+    temporary_directory.mkdir()
+    artifact_path_file = tmp_path / "artifact-path"
+    helper = tmp_path / "diagnostic-helper.sh"
+    helper.write_text(
+        "#!/usr/bin/env bash\n"
+        "source \"$TEST_REPO_DIR/lib.sh\"\n"
+        "diagnostic_directory=\"$(prepare_diagnostic_dir diagnostic-helper)\"\n"
+        "printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$diagnostic_directory/raw.txt\"\n"
+        "log_command \"$DIAGNOSTIC_TEXT\"\n"
+        "log_block 'Raw result' \"$DIAGNOSTIC_TEXT\"\n"
+        "log_block 'Empty result' ''\n"
+        "finish_diagnostic_dir \"$diagnostic_directory\"\n"
+        "printf '%s' \"$diagnostic_directory\" > \"$ARTIFACT_PATH\"\n"
+    )
+    environment = os.environ | {
+        "ARTIFACT_PATH": str(artifact_path_file),
+        "DIAGNOSTIC_TEXT": text,
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_KEEP_CHECK_ARTIFACTS": "1" if keep else "",
+        "TEST_REPO_DIR": str(ROOT),
+        "TMPDIR": str(temporary_directory),
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", str(helper)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    artifact = (
+        pathlib.Path(artifact_path_file.read_text())
+        if artifact_path_file.exists()
+        else tmp_path / "missing-artifact"
+    )
+    return result, artifact
+
+
+def test_diagnostic_helpers_redact_api_keys_and_bearer_headers(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Displayed diagnostics must not expose API keys or bearer-header values."""
+    result, artifact = run_diagnostic_helper(
+        tmp_path,
+        "fixture-secret Authorization: Bearer another-secret",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "fixture-secret" not in result.stdout + result.stderr
+    assert "another-secret" not in result.stdout + result.stderr
+    assert "Command: " in result.stdout
+    assert "Raw result:" in result.stdout
+    assert "Empty result:\n  (empty)" in result.stdout
+    assert "<redacted>" in result.stdout
+    assert not artifact.exists()
+
+
+def test_diagnostic_helper_treats_api_keys_as_fixed_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A regex metacharacter in an API key must not prevent its redaction."""
+    api_key = "fixture+secret"
+    result, artifact = run_diagnostic_helper(
+        tmp_path,
+        api_key,
+        api_key=api_key,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert api_key not in result.stdout + result.stderr
+    assert "<redacted>" in result.stdout
+    assert not artifact.exists()
+
+
+def test_diagnostic_helper_keeps_only_private_redacted_artifacts(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Retained diagnostics must be private and redact the configured API key."""
+    result, artifact = run_diagnostic_helper(tmp_path, "fixture-secret", keep=True)
+
+    assert result.returncode == 0, result.stderr
+    assert artifact.is_dir()
+    assert stat.S_IMODE(artifact.stat().st_mode) == 0o700
+    assert str(artifact) in result.stdout
+    assert "fixture-secret" not in "".join(
+        path.read_text() for path in artifact.rglob("*") if path.is_file()
+    )
+
+
 def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     """Starting an unconfigured server must persist a secret without printing it."""
     result, config, calls = run_lifecycle_script(
