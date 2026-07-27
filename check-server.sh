@@ -63,8 +63,8 @@ while read -r alias; do
     [ -n "$alias" ] || continue
     body="$(jq -n --arg m "$alias" \
         '{model: $m,
-          messages: [{role: "user", content: "Reply with the single word: ready"}],
-          max_tokens: 256, stream: false}')"
+          messages: [{role: "user", content: "Reply with exactly: ready"}],
+          max_tokens: 16, stream: false}')"
 
     response="$(curl -fsS --max-time 120 \
         -K "$auth_conf" \
@@ -77,14 +77,14 @@ while read -r alias; do
     fi
 
     content="$(jq -r '.choices[0].message.content // empty' <<<"$response")"
-    reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' <<<"$response")"
-    finish="$(jq -r '.choices[0].finish_reason // empty' <<<"$response")"
-    if [ -n "$content" ]; then
-        ok "${alias}: returned $(printf '%.40s' "$content")"
-    elif [ -n "$reasoning" ]; then
-        ok "${alias}: reasoning-only response, finish_reason=${finish}"
+    normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
+        sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
+    if [ "$normalized" = ready ]; then
+        ok "${alias}: returned ready"
+    elif [ -z "$content" ]; then
+        bad "${alias}: empty assistant content"
     else
-        bad "${alias}: empty content and no reasoning — $(jq -c '.error // .' <<<"$response" | head -c 120)"
+        bad "${alias}: expected ready, got $(printf '%.80s' "$content")"
     fi
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 

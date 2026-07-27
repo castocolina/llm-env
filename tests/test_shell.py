@@ -670,3 +670,141 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "http://127.0.0.1:8000/health" in unit
     assert "avahi-publish -s llm _http._tcp 8000" in unit
     assert "systemctl --user daemon-reload" in calls.read_text()
+
+
+def run_check_server(
+    tmp_path: pathlib.Path, completion_body: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run the online contract check with deterministic API command stubs."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    enabled: true\n"
+        "  - alias: ornith\n"
+        "    enabled: true\n"
+    )
+
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+        "url=\"${!#}\"\n"
+        "case \"$url\" in\n"
+        "  */health) exit 0 ;;\n"
+        "  */v1/models) printf '%s\\n' '{\"data\":[{\"id\":\"gemma4\"},{\"id\":\"ornith\"}]}' ;;\n"
+        "  */v1/chat/completions)\n"
+        "    for argument in \"$@\"; do\n"
+        "      [ \"$argument\" != '%{http_code}' ] || { printf '401'; exit 0; }\n"
+        "    done\n"
+        "    for argument in \"$@\"; do\n"
+        "      if [ \"${previous:-}\" = -d ]; then model=\"$argument\"; fi\n"
+        "      previous=\"$argument\"\n"
+        "    done\n"
+        "    case \"$model\" in\n"
+        "      gemma4) content=\"$GEMMA4_CONTENT\" ;;\n"
+        "      ornith) content=\"$ORNITH_CONTENT\" ;;\n"
+        "      *) exit 64 ;;\n"
+        "    esac\n"
+        "    printf '{\"choices\":[{\"message\":{\"content\":%s}}]}\\n' \"$content\" ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    jq = commands / "jq"
+    jq.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$1\" in\n"
+        "  -n)\n"
+        "    while [ \"$#\" -gt 0 ]; do\n"
+        "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = m ]; then\n"
+        "        printf '%s\\n' \"${3:-}\"\n"
+        "        exit 0\n"
+        "      fi\n"
+        "      shift\n"
+        "    done\n"
+        "    ;;\n"
+        "  -r)\n"
+        "    case \"$2\" in\n"
+        "      '[.data[].id] | sort | join(\",\")') printf '%s\\n' 'gemma4,ornith' ;;\n"
+        "      '.choices[0].message.content // empty')\n"
+        "        response=\"$(cat)\"\n"
+        "        content=\"${response#*\\\"content\\\":}\"\n"
+        "        content=\"${content#\\\"}\"\n"
+        "        content=\"${content%%\\\"*}\"\n"
+        "        printf '%b\\n' \"$content\"\n"
+        "        ;;\n"
+        "      *) exit 64 ;;\n"
+        "    esac\n"
+        "    ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    jq.chmod(jq.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$2\" in\n"
+        "  '.server.port') printf '%s\\n' 8000 ;;\n"
+        "  '.server.api_key') printf '\\n' ;;\n"
+        "  '[.models[] | select(.enabled) | .alias] | sort | join(\",\")')\n"
+        "    printf '%s\\n' 'gemma4,ornith'\n"
+        "    ;;\n"
+        "  '.models[] | select(.enabled) | .alias') printf '%s\\n' gemma4 ornith ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "GEMMA4_CONTENT": json.dumps(completion_body["gemma4"]),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "ORNITH_CONTENT": json.dumps(completion_body["ornith"]),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "check-server.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_check_server_requires_normalized_ready_for_every_enabled_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An enabled model returning another phrase must fail the contract."""
+    result, calls = run_check_server(
+        tmp_path,
+        {"gemma4": " Ready!\n", "ornith": "not ready"},
+    )
+
+    assert result.returncode != 0
+    assert "gemma4: returned ready" in result.stdout
+    assert "ornith: expected ready" in result.stderr
+    assert calls.read_text().count("/v1/chat/completions") == 3
+
+
+def test_check_server_accepts_normalized_ready_for_every_enabled_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Punctuation and case must not prevent a valid ready response."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "READY.", "ornith": " ready "},
+    )
+
+    assert result.returncode == 0, result.stderr
