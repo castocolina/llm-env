@@ -1269,6 +1269,7 @@ def run_check_server(
     config.write_text(
         "server:\n"
         "  port: 8000\n"
+        "  api_key: fixture-secret\n"
         "models:\n"
         "  - alias: gemma4\n"
         "    enabled: true\n"
@@ -1280,24 +1281,38 @@ def run_check_server(
     curl.write_text(
         "#!/usr/bin/bash\n"
         "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
-        "url=\"${!#}\"\n"
+        "url=\"\"\n"
+        "body_file=\"\"\n"
+        "data=\"\"\n"
+        "auth_conf=\"\"\n"
+        "for argument in \"$@\"; do\n"
+        "  case \"$argument\" in http://*|https://*) url=\"$argument\" ;; esac\n"
+        "  case \"${previous:-}\" in\n"
+        "    -o) body_file=\"$argument\" ;;\n"
+        "    -K) auth_conf=\"$argument\" ;;\n"
+        "    -d|--data-raw) data=\"$argument\" ;;\n"
+        "  esac\n"
+        "  previous=\"$argument\"\n"
+        "done\n"
+        "write_response() {\n"
+        "  if [ -n \"$body_file\" ]; then printf '%s\\n' \"$1\" > \"$body_file\"; else printf '%s\\n' \"$1\"; fi\n"
+        "}\n"
         "case \"$url\" in\n"
-        "  */health) exit 0 ;;\n"
-        "  */v1/models) printf '%s\\n' '{\"data\":[{\"id\":\"gemma4\"},{\"id\":\"ornith\"}]}' ;;\n"
+        "  */health) write_response '{\"status\":\"ok\"}'; printf '200' ;;\n"
+        "  */v1/models) write_response '{\"data\":[{\"id\":\"gemma4\"},{\"id\":\"ornith\"}]}'; printf '200' ;;\n"
         "  */v1/chat/completions)\n"
-        "    for argument in \"$@\"; do\n"
-        "      [ \"$argument\" != '%{http_code}' ] || { printf '401'; exit 0; }\n"
-        "    done\n"
-        "    for argument in \"$@\"; do\n"
-        "      if [ \"${previous:-}\" = -d ]; then model=\"$argument\"; fi\n"
-        "      previous=\"$argument\"\n"
-        "    done\n"
-        "    case \"$model\" in\n"
-        "      gemma4) content=\"$GEMMA4_CONTENT\" ;;\n"
-        "      ornith) content=\"$ORNITH_CONTENT\" ;;\n"
-        "      *) exit 64 ;;\n"
+        "    if [ -n \"$auth_conf\" ] && [[ \"$(<\"$auth_conf\")\" == *definitely-not-the-key* ]]; then\n"
+        "      write_response '{\"error\":\"unauthorized\"}'; printf '401'; exit 0\n"
+        "    fi\n"
+        "    case \"$data\" in\n"
+        "      *gemma4*) content=\"$GEMMA4_CONTENT\" ;;\n"
+        "      *ornith*) content=\"$ORNITH_CONTENT\" ;;\n"
+        "      *) write_response '{\"error\":\"unknown model\"}'; printf '400'; exit 0 ;;\n"
         "    esac\n"
-        "    printf '{\"choices\":[{\"message\":{\"content\":%s}}]}\\n' \"$content\" ;;\n"
+        "    write_response \"{\\\"choices\\\":[{\\\"message\\\":{\\\"content\\\":$content}}]}\"\n"
+        "    printf '200'\n"
+        "    [ \"${COMPLETION_CURL_EXIT:-0}\" = 0 ] || { printf 'completion curl failed\\n' >&2; exit \"$COMPLETION_CURL_EXIT\"; }\n"
+        "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
     )
@@ -1307,14 +1322,16 @@ def run_check_server(
     jq.write_text(
         "#!/usr/bin/bash\n"
         "case \"$1\" in\n"
+        "  -e) exit 0 ;;\n"
         "  -n)\n"
         "    while [ \"$#\" -gt 0 ]; do\n"
         "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = m ]; then\n"
-        "        printf '%s\\n' \"${3:-}\"\n"
+        "        printf '{\\\"model\\\":\\\"%s\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Reply with exactly: ready\\\"}],\\\"max_tokens\\\": 256,\\\"stream\\\":false}\\n' \"${3:-}\"\n"
         "        exit 0\n"
         "      fi\n"
         "      shift\n"
         "    done\n"
+        "    printf '%s\\n' '{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}'\n"
         "    ;;\n"
         "  -r)\n"
         "    case \"$2\" in\n"
@@ -1339,7 +1356,7 @@ def run_check_server(
         "#!/usr/bin/bash\n"
         "case \"$2\" in\n"
         "  '.server.port') printf '%s\\n' 8000 ;;\n"
-        "  '.server.api_key') printf '\\n' ;;\n"
+        "  '.server.api_key') printf '%s\\n' fixture-secret ;;\n"
         "  '[.models[] | select(.enabled) | .alias] | sort | join(\",\")')\n"
         "    printf '%s\\n' 'gemma4,ornith'\n"
         "    ;;\n"
@@ -1394,6 +1411,40 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
 
     assert result.returncode == 0, result.stderr
     assert "max_tokens: 256, stream: false" in (ROOT / "check-server.sh").read_text()
+
+
+def test_check_server_prints_redacted_request_response_and_curl_template(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Successful API checks must show complete, redacted diagnostic records."""
+    result, _ = run_check_server(tmp_path, {"gemma4": "ready", "ornith": "ready"})
+    combined = result.stdout + result.stderr
+
+    assert result.returncode == 0, result.stderr
+    assert "Command: curl --silent --show-error" in result.stdout
+    assert "Authorization: Bearer <redacted>" in result.stdout
+    assert '"content":"Reply with exactly: ready"' in result.stdout
+    assert '"max_tokens": 256' in result.stdout
+    assert "HTTP response:" in result.stdout
+    assert "Assistant content:\n  ready" in result.stdout
+    assert "Expectation:\n  normalized assistant content: ready" in result.stdout
+    assert "Verdict: PASS" in result.stdout
+    assert "fixture-secret" not in combined
+
+
+def test_check_server_reports_a_completion_failure_without_hiding_other_models(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed completion must not prevent records for later enabled models."""
+    result, _ = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "not ready"}
+    )
+
+    assert result.returncode != 0
+    assert "gemma4" in result.stdout and "Verdict: PASS" in result.stdout
+    assert "ornith" in result.stdout
+    assert "Verdict: FAIL stage=normalized-value mismatch" in result.stderr
+    assert "Results:" in result.stdout
 
 
 def run_agent_check(
