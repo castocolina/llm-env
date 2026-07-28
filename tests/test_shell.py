@@ -745,12 +745,12 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
     first_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
-        "--device Vulkan7 --n-gpu-layers 42 --single-turn -p Reply with exactly: ready -n 16"
+        "--device Vulkan7 --n-gpu-layers 42 --single-turn -p Reply with exactly: ready -n 256"
     )
     second_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
-        "--device Vulkan7 --n-gpu-layers 17 --single-turn -p Reply with exactly: ready -n 16"
+        "--device Vulkan7 --n-gpu-layers 17 --single-turn -p Reply with exactly: ready -n 256"
     )
     assert recorded.count(list_devices) == 1
     assert recorded.count(f"timeout 180 {first_inference}") == 1
