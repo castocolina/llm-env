@@ -18,7 +18,7 @@ log_identity() {
 record_command() {
     local identity="$1" command_text="$2" input="$3" expectation="$4"
     local expected_result="$5" stdout_label="$6" stderr_label="$7"
-    local stdout_file stderr_file status parsed
+    local stdout_file stderr_file status parsed normalized
     shift 7
 
     stdout_file="$(mktemp "${diagnostic_dir}/stdout.XXXXXX")" || die "could not create diagnostic stdout"
@@ -33,11 +33,11 @@ record_command() {
     log_block "$stderr_label" "$(<"$stderr_file")"
     log_block "Exit status" "$status"
     parsed="$(<"$stdout_file")"
+    log_block "Parsed result" "$parsed"
     if [ -n "$expected_result" ]; then
-        parsed="$(printf '%s' "$parsed" | tr '[:upper:]' '[:lower:]' | \
+        normalized="$(printf '%s' "$parsed" | tr '[:upper:]' '[:lower:]' | \
             sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
     fi
-    log_block "Parsed result" "$parsed"
     log_block "Expectation" "$expectation"
 
     if [ "$status" -ne 0 ]; then
@@ -45,8 +45,8 @@ record_command() {
         FAIL=$((FAIL + 1))
         return 1
     fi
-    if [ -n "$expected_result" ] && [ "$parsed" != "$expected_result" ]; then
-        log_error "Verdict: FAIL stage=parsed result reason=${identity%% *} returned ${parsed:-empty}"
+    if [ -n "$expected_result" ] && [ "$normalized" != "$expected_result" ]; then
+        log_error "Verdict: FAIL stage=parsed result reason=normalized assistant content mismatch expected=${expected_result}"
         FAIL=$((FAIL + 1))
         return 1
     fi

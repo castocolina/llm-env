@@ -613,9 +613,12 @@ def test_check_setup_never_requires_the_rocm_kernel_device(tmp_path: pathlib.Pat
 def run_check_setup_with_stubs(
     tmp_path: pathlib.Path,
     *,
+    api_key: str = "mixed-case-api-key",
     inference_stdout: str = "ready",
     inference_stderr: str = "",
     inference_exit: int = 0,
+    budget_exit: int = 0,
+    resolve_exit: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
@@ -645,14 +648,14 @@ def run_check_setup_with_stubs(
         "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
         "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"pci_address\":\"0000:03:00.0\",\"render_node\":\"renderD128\"}]}' ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
-        "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}'; exit \"$BUDGET_EXIT\" ;;\n"
         "  *' resolve-device'*)\n"
         "    for argument in \"$@\"; do\n"
         "      if [ \"$previous\" = --listing-file ]; then listing_file=\"$argument\"; fi\n"
         "      previous=\"$argument\"\n"
         "    done\n"
         "    [ \"$(cat \"$listing_file\")\" = 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ] || exit 65\n"
-        "    printf '%s\\n' '{\"device\":\"Vulkan7\"}' ;;\n"
+        "    printf '%s\\n' '{\"device\":\"Vulkan7\"}'; exit \"$RESOLVE_EXIT\" ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -674,6 +677,8 @@ def run_check_setup_with_stubs(
 
     config = tmp_path / "models.yml"
     config.write_text(
+        "server:\n"
+        f"  api_key: {api_key}\n"
         "gpu:\n"
         "  image: example.invalid/llama:latest\n"
         "  pci_address: 0000:03:00.0\n"
@@ -705,6 +710,8 @@ def run_check_setup_with_stubs(
         "INFERENCE_STDOUT": inference_stdout,
         "INFERENCE_STDERR": inference_stderr,
         "INFERENCE_EXIT": str(inference_exit),
+        "BUDGET_EXIT": str(budget_exit),
+        "RESOLVE_EXIT": str(resolve_exit),
     }
     result = subprocess.run(
         ["/usr/bin/bash", "check-setup.sh"],
@@ -794,6 +801,64 @@ def test_check_setup_keeps_independent_records_after_an_inference_failure(
     assert "Exit status:\n  17" in result.stdout
     assert "Inference stderr:\n  loader failed" in result.stdout
     assert "Verdict: FAIL stage=command exit reason=inference exited 17" in result.stderr
+    assert "Results:" in result.stdout
+
+
+def test_check_setup_redacts_mixed_case_inference_secrets(tmp_path: pathlib.Path) -> None:
+    """Raw inference records must redact a secret without lowercasing it first."""
+    api_key = "MiXeD-Api-Key"
+    result, _, _ = run_check_setup_with_stubs(
+        tmp_path,
+        api_key=api_key,
+        inference_stdout=f"assistant content: {api_key}",
+        inference_stderr=f"Authorization: Bearer {api_key}\n",
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert api_key not in combined
+    assert api_key.lower() not in combined
+    assert "Inference stdout:\n  assistant content: <redacted>" in result.stdout
+    assert "Inference stderr:\n  Authorization: Bearer <redacted>" in result.stdout
+
+
+def test_check_setup_reports_a_normalized_inference_mismatch(tmp_path: pathlib.Path) -> None:
+    """A successful non-ready response must identify a normalized-value mismatch."""
+    result, _, _ = run_check_setup_with_stubs(tmp_path, inference_stdout="not ready")
+
+    assert result.returncode != 0
+    assert "Parsed result:\n  not ready" in result.stdout
+    assert (
+        "Verdict: FAIL stage=parsed result "
+        "reason=normalized assistant content mismatch expected=ready"
+    ) in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("budget_exit", "resolve_exit", "reason"),
+    [
+        (19, 0, "VRAM budget check failed"),
+        (0, 23, "GPU device could not be resolved"),
+    ],
+)
+def test_check_setup_skips_each_enabled_inference_after_prerequisite_failure(
+    tmp_path: pathlib.Path,
+    budget_exit: int,
+    resolve_exit: int,
+    reason: str,
+) -> None:
+    """Failed inference prerequisites must skip every enabled model independently."""
+    result, _, _ = run_check_setup_with_stubs(
+        tmp_path,
+        budget_exit=budget_exit,
+        resolve_exit=resolve_exit,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout.count("Identity: inference ") == 2
+    assert result.stderr.count(f"Verdict: SKIP reason={reason}") == 2
+    assert "Identity: tooling command uv" in result.stdout
+    assert "Identity: GGUF validation" in result.stdout
     assert "Results:" in result.stdout
 
 
