@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# benchmark.sh — measure Vulkan vs ROCm, record the winner, fall back safely.
+# benchmark.sh — measure Vulkan throughput, record it, and fall back safely.
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -7,82 +7,71 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_cmd uv jq yq podman awk
 
 VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
-ROCM_IMAGE="ghcr.io/ggml-org/llama.cpp:server-rocm"
+CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 
 bench_model="$(yq -r '[.models[] | select(.enabled)] | sort_by(.size_bytes) | .[0].file' "$CONFIG_PATH")"
 [ -n "$bench_model" ] && [ "$bench_model" != "null" ] || die "no enabled models to benchmark"
-log_info "benchmarking with the smallest enabled model: ${bench_model}"
 
-# Runs `llama bench` in a container. Echoes "pp_tps<TAB>tg_tps" or returns non-zero.
-run_bench() {
-    local image="$1"; shift
-    local devices=("$@")
-    local args=()
-    for dev in "${devices[@]}"; do args+=(--device "$dev"); done
+record_vulkan() {
+    local pp="$1" tg="$2"
+    yq -i 'del(.gpu.benchmark.rocm)' "$CONFIG_PATH"
+    yq -i ".gpu.benchmark.vulkan.pp_tps = ${pp}" "$CONFIG_PATH"
+    yq -i ".gpu.benchmark.vulkan.tg_tps = ${tg}" "$CONFIG_PATH"
+    yq -i ".gpu.benchmark.vulkan.measured_at = \"$(date -Iseconds)\"" "$CONFIG_PATH"
+}
 
-    if ! podman run --rm --entrypoint /app/llama "$image" help all 2>/dev/null \
-         | grep -qE '^\s*bench\b'; then
-        log_warn "image ${image} has no 'bench' subcommand; skipping this backend"
+run_vulkan_bench() {
+    local output="$1" result status
+
+    log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} bench -m /models/${bench_model} -p 512 -n 128 -r 2 -o json"
+    if podman run --rm --device /dev/dri \
+        -v "${MODELS_DIR}:/models:ro,z" \
+        --entrypoint /app/llama \
+        "$VULKAN_IMAGE" bench -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json \
+        >"$output" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    log_block "Raw benchmark output" "$(cat "$output")"
+
+    if [ "$status" -ne 0 ]; then
+        log_warn "Vulkan benchmark exited ${status}"
+        return "$status"
+    fi
+
+    if ! result="$(jq -r '
+        [ (.[] | select(.n_prompt > 0) | .avg_ts),
+          (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv' \
+        "$output" 2>/dev/null \
+        | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }')"; then
+        log_warn "Vulkan benchmark exited ${status}; output did not contain prompt and generation throughput"
         return 1
     fi
 
-    podman run --rm "${args[@]}" \
-        -v "${MODELS_DIR}:/models:ro,z" \
-        --entrypoint /app/llama \
-        "$image" bench -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json 2>/dev/null \
-      | jq -r '
-          [ (.[] | select(.n_prompt > 0) | .avg_ts),
-            (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv' \
-      | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }'
+    BENCH_RESULT="$result"
 }
 
-record() {
-    local backend="$1" pp="$2" tg="$3"
-    yq -i ".gpu.benchmark.${backend}.pp_tps = ${pp}" "$CONFIG_PATH"
-    yq -i ".gpu.benchmark.${backend}.tg_tps = ${tg}" "$CONFIG_PATH"
-    yq -i ".gpu.benchmark.${backend}.measured_at = \"$(date -Iseconds)\"" "$CONFIG_PATH"
-}
+log_step "Vulkan benchmark"
+log_info "model: ${bench_model}"
+diagnostic_dir="$(prepare_diagnostic_dir benchmark)"
+trap 'status=$?; finish_diagnostic_dir "$diagnostic_dir"; exit "$status"' EXIT
+output="$(mktemp "${diagnostic_dir}/vulkan-benchmark-output.XXXXXX")" \
+    || die "could not create benchmark diagnostic output"
 
-winner_backend=""; winner_image=""; winner_tg="0"
-
-log_step "Trying ROCm"
-if [ ! -e /dev/kfd ]; then
-    log_warn "skipping ROCm: /dev/kfd is absent"
-elif [ ! -r /dev/kfd ]; then
-    log_warn "skipping ROCm: /dev/kfd is not readable by this user"
-else
-    log_info "pulling ${ROCM_IMAGE} (7.69 GB, this takes a while)"
-    if podman pull "$ROCM_IMAGE" >/dev/null 2>&1 \
-       && result="$(run_bench "$ROCM_IMAGE" /dev/dri /dev/kfd)" \
-       && [ -n "$result" ]; then
-        pp="$(cut -f1 <<<"$result")"; tg="$(cut -f2 <<<"$result")"
-        record rocm "$pp" "$tg"
-        winner_backend=rocm; winner_image="$ROCM_IMAGE"; winner_tg="$tg"
-        log_info "ROCm: ${pp} tok/s prompt, ${tg} tok/s generation"
-    else
-        log_warn "ROCm benchmark failed; falling back"
-    fi
-fi
-
-log_step "Trying Vulkan"
-log_info "pulling ${VULKAN_IMAGE} (0.31 GB)"
-if podman pull "$VULKAN_IMAGE" >/dev/null 2>&1 \
-   && result="$(run_bench "$VULKAN_IMAGE" /dev/dri)" \
-   && [ -n "$result" ]; then
-    pp="$(cut -f1 <<<"$result")"; tg="$(cut -f2 <<<"$result")"
-    record vulkan "$pp" "$tg"
+winner_backend="cpu"
+winner_image="$CPU_IMAGE"
+BENCH_RESULT=""
+if run_vulkan_bench "$output" && [ -n "$BENCH_RESULT" ]; then
+    pp="$(cut -f1 <<<"$BENCH_RESULT")"
+    tg="$(cut -f2 <<<"$BENCH_RESULT")"
+    record_vulkan "$pp" "$tg"
+    winner_backend="vulkan"
+    winner_image="$VULKAN_IMAGE"
     log_info "Vulkan: ${pp} tok/s prompt, ${tg} tok/s generation"
-    if [ -z "$winner_backend" ] || awk "BEGIN{exit !($tg > $winner_tg)}"; then
-        winner_backend=vulkan; winner_image="$VULKAN_IMAGE"; winner_tg="$tg"
-    fi
 else
-    log_warn "Vulkan benchmark failed"
-fi
-
-if [ -z "$winner_backend" ]; then
-    log_warn "no GPU backend worked; falling back to CPU. Expect very slow inference."
-    winner_backend=cpu; winner_image="ghcr.io/ggml-org/llama.cpp:server"
-    podman pull "$winner_image" >/dev/null || die "cannot pull the CPU image either"
+    log_warn "Vulkan benchmark failed; falling back to CPU. Expect very slow inference."
+    podman pull "$winner_image" >/dev/null || die "cannot pull the CPU image"
 fi
 
 log_step "Resolving the GPU device name"

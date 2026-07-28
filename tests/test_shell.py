@@ -198,7 +198,7 @@ def run_setup_with_numbered_selection(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
-        "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
         "  *' models select '*)\n"
         "    \"$REAL_YQ\" -i '.models[] |= (.enabled = (.alias == \"gemma4\" or .alias == \"ornith\")) | .runtime.models_max = 2' \"$CONFIG_PATH_TEST\"\n"
@@ -266,6 +266,19 @@ def run_setup_with_numbered_selection(
     return result, calls, config
 
 
+def test_setup_gpu_rows_include_measured_used_and_free_vram(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The GPU menu must disclose the total, used, and free VRAM before selection."""
+    result, _, _ = run_setup_with_numbered_selection(tmp_path, "1\n1\n1\n")
+
+    assert result.returncode == 0, result.stderr
+    assert "16384 MiB total" in result.stdout
+    assert "2048 MiB used" in result.stdout
+    assert "14336 MiB free" in result.stdout
+    assert "selected 0000:03:00.0 with 16384 MiB total, 2048 MiB used, 14336 MiB free" in result.stdout
+
+
 def test_setup_selects_zero_match_vulkan_device_and_persists_config(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -306,6 +319,272 @@ def test_setup_rejects_invalid_numbered_model_selection_before_download(
 
     assert result.returncode != 0
     assert "curl " not in calls.read_text()
+
+
+def run_benchmark_with_malformed_vulkan_output(
+    tmp_path: pathlib.Path,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run the benchmark with a malformed Vulkan payload and record Podman calls."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "gpu:\n"
+        "  backend: vulkan\n"
+        "  image: ghcr.io/ggml-org/llama.cpp:server-vulkan\n"
+        "  vram_total_mib: 16384\n"
+        "  benchmark:\n"
+        "    vulkan:\n"
+        "      pp_tps: null\n"
+        "      tg_tps: null\n"
+        "      measured_at: null\n"
+        "models:\n"
+        "  - alias: benchmark\n"
+        "    enabled: true\n"
+        "    file: benchmark.gguf\n"
+        "    size_bytes: 1\n"
+    )
+
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\nexit 0\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *'help all'*) printf '%s\\n' bench ;;\n"
+        "  *' bench '*) printf '%s\\n' 'malformed benchmark JSON' ;;\n"
+        "  *'--list-devices'*) printf '%s\\n' 'Vulkan0: Benchmark GPU (16384 MiB, 16000 MiB free)' ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "benchmark.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_benchmark_uses_only_vulkan_and_shows_malformed_output(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A malformed Vulkan result must be visible without trying ROCm."""
+    result, calls = run_benchmark_with_malformed_vulkan_output(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    observed = result.stdout + result.stderr + calls.read_text()
+    assert "server-rocm" not in observed.lower()
+    assert "/dev/kfd" not in observed.lower()
+    assert "rocm" not in observed.lower()
+    assert "Command: podman run --rm --device /dev/dri -v " in result.stdout
+    assert "Raw benchmark output:\n  malformed benchmark JSON" in result.stdout
+
+
+def run_cleanup_with_stubs(
+    tmp_path: pathlib.Path,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run cleanup in a temporary home and record every Podman invocation."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+
+    for name in ("systemctl",):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_cleanup_preserves_the_host_rocm_image(tmp_path: pathlib.Path) -> None:
+    """Project cleanup must not remove or otherwise reference the host ROCm image."""
+    result, calls = run_cleanup_with_stubs(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "rocm" not in (result.stdout + result.stderr + calls.read_text()).lower()
+
+
+def run_render_unit_with_legacy_rocm_config(
+    tmp_path: pathlib.Path,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Render a manually retained legacy backend config in an isolated home."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    home = tmp_path / "home"
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8000\n"
+        "  api_key: key\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "gpu:\n"
+        "  backend: rocm\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+    )
+
+    for name in ("podman", "systemctl", "uv"):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "render-unit.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, home / ".config/containers/systemd/llm-server.container"
+
+
+def test_render_unit_never_adds_the_rocm_kernel_device(tmp_path: pathlib.Path) -> None:
+    """A hand-edited legacy config must not pass the ROCm kernel device through."""
+    result, container = run_render_unit_with_legacy_rocm_config(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "/dev/kfd" not in container.read_text()
+
+
+def test_make_help_describes_a_vulkan_only_benchmark() -> None:
+    """The public benchmark command must not advertise an unsupported backend."""
+    result = subprocess.run(
+        ["make", "help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rocm" not in result.stdout.lower()
+
+
+def run_check_setup_with_legacy_rocm_config(
+    tmp_path: pathlib.Path,
+) -> subprocess.CompletedProcess[str]:
+    """Run the offline check far enough to expose any legacy ROCm requirement."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "server: {}\n"
+        "gpu:\n"
+        "  pci_address: 0000:03:00.0\n"
+        "  backend: rocm\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "models: []\n"
+    )
+
+    for name in ("curl", "podman", "systemctl"):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in *' budget '*) exit 1 ;; esac\n"
+        "exit 0\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    return subprocess.run(
+        ["/usr/bin/bash", "check-setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_check_setup_never_requires_the_rocm_kernel_device(tmp_path: pathlib.Path) -> None:
+    """Offline validation must not advertise a legacy ROCm device requirement."""
+    result = run_check_setup_with_legacy_rocm_config(tmp_path)
+
+    assert "rocm" not in (result.stdout + result.stderr).lower()
 
 
 def test_check_setup_runs_disposable_inference_for_each_enabled_model(

@@ -44,7 +44,6 @@ log_info "wrote ${presets_path}"
 log_step "Rendering the quadlet unit"
 mkdir -p "$QUADLET_DIR"
 device_lines="AddDevice=/dev/dri"
-[ "$backend" = "rocm" ] && device_lines="${device_lines}"$'\n'"AddDevice=/dev/kfd"
 
 mdns_unit="${HOME}/.config/systemd/user/${UNIT_NAME}-mdns.service"
 mdns_wants=""

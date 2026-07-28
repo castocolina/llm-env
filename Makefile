@@ -12,7 +12,7 @@ help:
 	@echo "make check-setup   Validate config, image, models, GPU (offline)"
 	@echo "make check-server  Validate the running server API (online)"
 	@echo "make check-with-agents Opt-in independent agent inference checks"
-	@echo "make benchmark     Benchmark Vulkan vs ROCm and record results"
+	@echo "make benchmark     Benchmark Vulkan and record results, with CPU fallback"
 	@echo "make key-reset     Generate a new API key"
 	@echo "make enable-boot   Start automatically at boot"
 	@echo "make disable-boot  Do not start at boot"

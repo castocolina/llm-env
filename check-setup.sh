@@ -37,11 +37,6 @@ else
     log_error "no render node found for ${pci}"
     FAIL=$((FAIL + 1))
 fi
-backend="$(yq -r '.gpu.backend' "$CONFIG_PATH" 2>/dev/null || echo unknown)"
-if [ "$backend" = "rocm" ]; then
-    check "/dev/kfd readable (required by ROCm)" test -r /dev/kfd
-fi
-
 log_step "Configured GPU is present"
 check "GPU ${pci} detected" bash -c \
     "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'"

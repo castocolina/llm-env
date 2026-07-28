@@ -36,7 +36,7 @@ gpu_count="$(echo "$facts" | jq '.gpus | length')"
 [ "$gpu_count" -gt 0 ] || die "no VRAM-backed GPUs detected"
 echo "$facts" | jq -r --arg green "$GREEN" --arg nc "$NC" '
   .gpus | to_entries[] |
-  "  \(.key + 1)) \($green)\(.value.card)\($nc)  \(.value.pci_address)  \(.value.vram_total_mib) MiB  \(.value.render_node)  " +
+  "  \(.key + 1)) \($green)\(.value.card)\($nc)  \(.value.pci_address)  \(.value.vram_total_mib) MiB total  \(.value.vram_used_mib) MiB used  \(.value.vram_total_mib - .value.vram_used_mib) MiB free  \(.value.render_node)  " +
   (if (.value.connected_outputs | length) > 0 then "displays: \(.value.connected_outputs | join(","))" else "headless" end)'
 default_gpu="$(echo "$facts" | jq -r '.gpus | to_entries | max_by(.value.vram_total_mib) | .key + 1')"
 gpu_choice="$(ask "  GPU number [${default_gpu}]: " "$default_gpu")"
@@ -45,7 +45,9 @@ gpu_choice="$(ask "  GPU number [${default_gpu}]: " "$default_gpu")"
 gpu="$(echo "$facts" | jq --argjson index "$gpu_choice" '.gpus[$index - 1]')"
 pci="$(echo "$gpu" | jq -r '.pci_address')"
 vram_total="$(echo "$gpu" | jq -r '.vram_total_mib')"
-log_info "selected ${pci} with ${vram_total} MiB VRAM"
+vram_used="$(echo "$gpu" | jq -r '.vram_used_mib')"
+vram_free="$((vram_total - vram_used))"
+log_info "selected ${pci} with ${vram_total} MiB total, ${vram_used} MiB used, ${vram_free} MiB free"
 
 log_step "Step 3/7  Selecting models"
 if [ -f "$CONFIG_PATH" ]; then

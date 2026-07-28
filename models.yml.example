@@ -21,10 +21,6 @@ gpu:
       pp_tps: null
       tg_tps: null
       measured_at: null
-    rocm:
-      pp_tps: null
-      tg_tps: null
-      measured_at: null
 
 runtime:
   models_max: 1

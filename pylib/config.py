@@ -24,12 +24,23 @@ REQUIRED_MODEL_KEYS = (
     "ctx_size",
     "n_gpu_layers",
 )
-VALID_BACKENDS = ("vulkan", "rocm", "cpu")
+VALID_BACKENDS = ("vulkan", "cpu")
 VRAM_BUDGET_RE = re.compile(r"^\s*\d+(\.\d+)?\s*(%|GB|MiB)\s*$", re.IGNORECASE)
 
 
 class ConfigError(Exception):
     """Raised when the configuration cannot be read or is structurally invalid."""
+
+
+def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Remove obsolete benchmark data from legacy generated configurations."""
+    gpu = cfg.get("gpu")
+    if not isinstance(gpu, dict):
+        return cfg
+    benchmark = gpu.get("benchmark")
+    if isinstance(benchmark, dict):
+        benchmark.pop("rocm", None)
+    return cfg
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
@@ -47,10 +58,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
 
     if not isinstance(data, dict):
         raise ConfigError(f"config root must be a mapping: {path}")
-    return data
+    return migrate_config(data)
 
 
 def save_config(cfg: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
+    cfg = migrate_config(cfg)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

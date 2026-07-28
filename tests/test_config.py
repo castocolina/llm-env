@@ -5,6 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pylib.config as config_module
 from pylib.config import (
     ConfigError,
     enabled_models,
@@ -35,6 +36,13 @@ def make_cfg(**overrides):
             "vram_total_mib": 16304,
             "reserve_mode": "auto",
             "reserve_floor_mib": 1024,
+            "benchmark": {
+                "vulkan": {
+                    "pp_tps": None,
+                    "tg_tps": None,
+                    "measured_at": None,
+                }
+            },
         },
         "runtime": {
             "models_max": 1,
@@ -77,6 +85,45 @@ def make_cfg(**overrides):
 
 def test_valid_config_has_no_errors():
     assert validate_config(make_cfg()) == []
+
+
+def test_vulkan_only_config_removes_legacy_rocm_benchmark():
+    """Migration must discard obsolete ROCm measurements from existing configs."""
+    cfg = make_cfg()
+    cfg["gpu"]["benchmark"]["rocm"] = {
+        "pp_tps": 1,
+        "tg_tps": 1,
+        "measured_at": "old",
+    }
+
+    migrate_config = getattr(config_module, "migrate_config", None)
+    assert migrate_config is not None, "configuration migration is missing"
+    migrated = migrate_config(cfg)
+
+    assert set(migrated["gpu"]["benchmark"]) == {"vulkan"}
+
+
+def test_config_save_and_load_migrate_legacy_rocm_benchmarks(tmp_path):
+    """Persisting a legacy config must remove its obsolete benchmark result."""
+    cfg = make_cfg()
+    cfg["gpu"]["benchmark"]["rocm"] = {
+        "pp_tps": 1,
+        "tg_tps": 1,
+        "measured_at": "old",
+    }
+
+    path = tmp_path / "models.yml"
+    save_config(cfg, path)
+
+    assert set(load_config(path)["gpu"]["benchmark"]) == {"vulkan"}
+
+
+def test_vulkan_only_schema_rejects_rocm_backend():
+    """A legacy backend must not remain an accepted configuration choice."""
+    cfg = make_cfg()
+    cfg["gpu"]["backend"] = "rocm"
+
+    assert "gpu.backend must be one of ('vulkan', 'cpu')" in validate_config(cfg)
 
 
 def test_model_requires_display_metadata():
