@@ -73,6 +73,5 @@ redacted private diagnostic artifacts; without it, the checks remove them
 after printing their contents.
 
 `make check-server` uses the fixed local prompt `Reply with exactly: ready`.
-`make check-with-agents` is an opt-in live check: Pi and OpenCode independently
-fetch public weather and USD-to-CLP data, then compare their evidence with a
-fresh source snapshot.
+`make check-with-agents` is an opt-in live check: Pi and OpenCode independently fetch public weather and USD-to-CLP data.
+It compares their evidence with a fresh source snapshot.
