@@ -15,7 +15,15 @@ require_cmd curl jq yq
 
 workspace="$(mktemp -d)" || die "could not create private workspace"
 chmod 700 "$workspace" || die "could not secure private workspace"
-trap 'rm -rf "$workspace"' EXIT
+diagnostic_dir="$(prepare_diagnostic_dir agents)"
+
+cleanup() {
+    local status=$?
+    finish_diagnostic_dir "$diagnostic_dir"
+    rm -rf "$workspace"
+    exit "$status"
+}
+trap cleanup EXIT
 
 auth_conf="$(mktemp "$workspace/auth.XXXXXX")" || die "could not create curl authentication config"
 chmod 600 "$auth_conf" || die "could not secure curl authentication config"
@@ -40,36 +48,64 @@ fetch_models() {
         jq -er '.data[]?.id'
 }
 
-source_weather() {
-    curl -fsS --max-time 20 "$weather_url" | jq -ce \
-        '. as $source
-         | select(($source.current.time | strings | length) > 0)
-         | select($source.current.temperature_2m | numbers)
-         | select($source.current.weather_code | numbers)
-         | {source_url: $url, source_timestamp: $source.current.time,
-            temperature_2m: $source.current.temperature_2m,
-            weather_code: $source.current.weather_code}' \
-        --arg url "$weather_url"
-}
+snapshot_for() {
+    local check_name="$1" stdout_file="$2" stderr_file="$3" parser_stderr_file="$4"
+    local url filter snapshot status
 
-source_fx() {
-    curl -fsS --max-time 20 "$fx_url" | jq -ce \
-        '. as $source
-         | select(($source.time_last_update_utc | strings | length) > 0)
-         | select($source.rates.CLP | numbers)
-         | {source_url: $url, source_timestamp: $source.time_last_update_utc,
-            usd_to_clp: $source.rates.CLP}' \
-        --arg url "$fx_url"
+    case "$check_name" in
+        weather)
+            url="$weather_url"
+            # shellcheck disable=SC2016 # jq variables must remain literal until jq evaluates them.
+            filter='. as $source | select(($source.current.time | strings | length) > 0) | select($source.current.temperature_2m | numbers) | select($source.current.weather_code | numbers) | {source_url: $url, source_timestamp: $source.current.time, temperature_2m: $source.current.temperature_2m, weather_code: $source.current.weather_code}'
+            ;;
+        fx)
+            url="$fx_url"
+            # shellcheck disable=SC2016 # jq variables must remain literal until jq evaluates them.
+            filter='. as $source | select(($source.time_last_update_utc | strings | length) > 0) | select($source.rates.CLP | numbers) | {source_url: $url, source_timestamp: $source.time_last_update_utc, usd_to_clp: $source.rates.CLP}'
+            ;;
+        *) return 64 ;;
+    esac
+
+    log_block "Identity" "source fetch check=${check_name}"
+    log_command "curl --fail --silent --show-error --max-time 20 ${url}"
+    log_block "Input" "(none)"
+    if curl -fsS --max-time 20 "$url" >"$stdout_file" 2>"$stderr_file"; then
+        status=0
+    else
+        status=$?
+    fi
+    log_block "Source stdout" "$(<"$stdout_file")"
+    log_block "Source stderr" "$(<"$stderr_file")"
+    log_block "Exit status" "$status"
+    if [ "$status" -ne 0 ]; then
+        log_error "Verdict: FAIL stage=source fetch reason=${check_name} source exited ${status}"
+        return 1
+    fi
+    if ! snapshot="$(jq -ce --arg url "$url" "$filter" "$stdout_file" 2>"$parser_stderr_file")"; then
+        log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+        log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
+        return 1
+    fi
+    log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+    log_block "Parsed result" "$snapshot"
+    log_block "Expectation" "a current typed ${check_name} source object"
+    log_info "Verdict: PASS"
+    SNAPSHOT_RESULT="$snapshot"
 }
 
 run_agent() {
     local client="$1"
     local alias="$2"
-    local check_name="$3"
-    local prompt="$4"
-    local snapshot="$5"
+    local prompt="$3"
+    local transcript_file="$4"
+    local stderr_file="$5"
+    local final_file="$6"
+    local parser_error_file="$7"
     local client_base="http://llm.local:${port}/v1"
-    local config_dir config_file config_key_command
+    local config_dir config_file config_key_command status
+
+    AGENT_FAILURE_STAGE="command exit"
+    DISPLAYED_CLIENT_COMMAND=""
 
     case "$client" in
         pi)
@@ -90,7 +126,8 @@ run_agent() {
                     models: [{id: $alias}]
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            (
+            DISPLAYED_CLIENT_COMMAND="PI_CODING_AGENT_DIR=<private> pi --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files --tools bash -p --mode json --model llm-env/${alias} <prompt>"
+            if (
                 cd "$workspace" || exit 1
                 PI_CODING_AGENT_DIR="$config_dir" pi \
                     --no-session \
@@ -103,16 +140,22 @@ run_agent() {
                     --mode json \
                     --model "llm-env/${alias}" \
                     "$prompt"
-            ) 2>"$workspace/pi-agent-error" |
-                jq -rce '
-                    [select(.type == "message_end" and .message.role == "assistant")
-                     | [.message.content[]? | select(.type == "text") | .text] | join("")]
-                    | last // empty
-                ' 2>"$workspace/pi-agent-parse-error" |
-                jq -sce 'select(length == 1 and (.[0] | type == "object")) | .[0]' 2>>"$workspace/pi-agent-parse-error" || {
-                    printf '%s\n' 'agent invocation failed' >&2
-                    return 1
-                }
+            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null; then
+                status=0
+            else
+                status=$?
+            fi
+            if [ "$status" -ne 0 ]; then
+                return 1
+            fi
+            if ! jq -rce '
+                [select(.type == "message_end" and .message.role == "assistant")
+                 | [.message.content[]? | select(.type == "text") | .text] | join("")]
+                | last // empty
+            ' "$transcript_file" >"$final_file" 2>"$parser_error_file"; then
+                AGENT_FAILURE_STAGE="response parsing"
+                return 1
+            fi
             ;;
         opencode)
             config_dir="$workspace/opencode"
@@ -129,7 +172,8 @@ run_agent() {
                     models: {($alias): {name: $alias}}
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            (
+            DISPLAYED_CLIENT_COMMAND="OPENCODE_CONFIG=<private> OPENCODE_API_KEY=<redacted> opencode run --format json --model llm-env/${alias} <prompt>"
+            if (
                 cd "$workspace" || exit 1
                 export HOME="$workspace/opencode-home"
                 export XDG_CONFIG_HOME="$workspace/opencode-config"
@@ -138,60 +182,78 @@ run_agent() {
                 export OPENCODE_CONFIG="$config_file"
                 export OPENCODE_API_KEY="$api_key"
                 opencode run --format json --model "llm-env/${alias}" "$prompt"
-            ) 2>"$workspace/opencode-agent-error" |
-                jq -rce '
-                    reduce (select(.type == "text" and .part.type == "text") | .part) as $part
-                    ({message_id: null, text: ""};
-                     if .message_id == $part.messageID then .text += $part.text
-                     else {message_id: $part.messageID, text: $part.text}
-                     end)
-                    | .text
-                ' 2>"$workspace/opencode-agent-parse-error" |
-                jq -sce 'select(length == 1 and (.[0] | type == "object")) | .[0]' 2>>"$workspace/opencode-agent-parse-error" || {
-                    printf '%s\n' 'agent invocation failed' >&2
-                    return 1
-                }
+            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null; then
+                status=0
+            else
+                status=$?
+            fi
+            if [ "$status" -ne 0 ]; then
+                return 1
+            fi
+            if ! jq -rce '
+                reduce (select(.type == "text" and .part.type == "text") | .part) as $part
+                ({message_id: null, text: ""};
+                 if .message_id == $part.messageID then .text += $part.text
+                 else {message_id: $part.messageID, text: $part.text}
+                 end)
+                | .text
+            ' "$transcript_file" >"$final_file" 2>"$parser_error_file"; then
+                AGENT_FAILURE_STAGE="response parsing"
+                return 1
+            fi
             ;;
         *)
-            printf '%s\n' 'agent invocation failed' >&2
+            printf '%s\n' 'unsupported client' >"$stderr_file"
             return 1
             ;;
     esac
 }
 
-source_evidence_matches() {
+parse_evidence() {
+    local assistant_text="$1" fenced fence_prefix='^[[:space:]]*```json'
+
+    if [[ "$assistant_text" =~ $fence_prefix ]]; then
+        if ! fenced="$(printf '%s' "$assistant_text" | jq -Rrse \
+            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body' 2>/dev/null)"; then
+            return 1
+        fi
+        [ -n "$fenced" ] || return 1
+        printf '%s' "$fenced" | jq -sce \
+            'select(length == 1 and (.[0] | type == "object")) | .[0]'
+        return
+    fi
+    printf '%s' "$assistant_text" | jq -sce \
+        'select(length == 1 and (.[0] | type == "object")) | .[0]'
+}
+
+source_evidence_differences() {
     local check_name="$1"
     local snapshot="$2"
-    local evidence_file="$3"
+    local evidence="$3"
+    local required_fields
 
     case "$check_name" in
         weather)
-            jq -ce --argjson snapshot "$snapshot" '
-                select(type == "object")
-                | select(.source_url == $snapshot.source_url)
-                | select(.source_timestamp == $snapshot.source_timestamp)
-                | select(.weather_code == $snapshot.weather_code)
-                | select(.temperature_2m | type == "number")
-                | select(.temperature_2m == $snapshot.temperature_2m)
-            ' "$evidence_file" >/dev/null 2>&1
+            required_fields='["source_url", "source_timestamp", "temperature_2m", "weather_code"]'
             ;;
         fx)
-            jq -ce --argjson snapshot "$snapshot" '
-                select(type == "object")
-                | select(.source_url == $snapshot.source_url)
-                | select(.source_timestamp == $snapshot.source_timestamp)
-                | select(.usd_to_clp | type == "number")
-                | select(.usd_to_clp == $snapshot.usd_to_clp)
-            ' "$evidence_file" >/dev/null 2>&1
+            required_fields='["source_url", "source_timestamp", "usd_to_clp"]'
             ;;
         *)
             return 1
             ;;
     esac
+
+    jq -nr --argjson expected "$snapshot" --argjson received "$evidence" \
+        --argjson fields "$required_fields" '
+        $fields[] as $field
+        | ($expected[$field] // "<missing>") as $want
+        | ($received[$field] // "<missing>") as $got
+        | select($want != $got)
+        | "field=\($field) expected=\($want | tojson) received=\($got | tojson)"
+    '
 }
 
-weather_snapshot="$(source_weather)" || die "could not fetch a valid weather snapshot"
-fx_snapshot="$(source_fx)" || die "could not fetch a valid FX snapshot"
 aliases="$(fetch_models "$auth_conf" "$base")" || die "could not fetch model aliases"
 [ -n "$aliases" ] || die "the server returned no model aliases"
 
@@ -214,36 +276,82 @@ for client in "${clients[@]}"; do
     while IFS= read -r alias; do
         [ -n "$alias" ] || continue
         for check_name in weather fx; do
+            source_stdout="$(mktemp "${diagnostic_dir}/source-stdout.XXXXXX")" || die "could not create source stdout"
+            source_stderr="$(mktemp "${diagnostic_dir}/source-stderr.XXXXXX")" || die "could not create source stderr"
+            source_parser_stderr="$(mktemp "${diagnostic_dir}/source-parser-stderr.XXXXXX")" || die "could not create source parser stderr"
             case "$check_name" in
                 weather)
-                    snapshot="$weather_snapshot"
+                    snapshot_for "$check_name" "$source_stdout" "$source_stderr" "$source_parser_stderr" || {
+                        log_error "Verdict: FAIL stage=source fetch reason=weather snapshot unavailable"
+                        failures=$((failures + 1))
+                        continue
+                    }
+                    snapshot="$SNAPSHOT_RESULT"
+                    source_url="$weather_url"
                     fields='source_url, source_timestamp, temperature_2m, and weather_code'
                     ;;
                 fx)
-                    snapshot="$fx_snapshot"
+                    snapshot_for "$check_name" "$source_stdout" "$source_stderr" "$source_parser_stderr" || {
+                        log_error "Verdict: FAIL stage=source fetch reason=FX snapshot unavailable"
+                        failures=$((failures + 1))
+                        continue
+                    }
+                    snapshot="$SNAPSHOT_RESULT"
+                    source_url="$fx_url"
                     fields='source_url, source_timestamp, and usd_to_clp'
                     ;;
             esac
             printf -v prompt '%s' \
-                "Fetch the public ${check_name} source yourself with a shell network command. Return exactly one JSON object with ${fields}. Public snapshot for comparison: ${snapshot}"
+                "Use a shell network command to fetch current data from ${source_url}. Return exactly one JSON object containing ${fields}."
 
-            if run_agent "$client" "$alias" "$check_name" "$prompt" "$snapshot" \
-                > "$workspace/agent-output.json"; then
-                if source_evidence_matches "$check_name" "$snapshot" "$workspace/agent-output.json"; then
-                    printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
-                        "$client" "$alias" "$check_name"
-                else
-                    printf 'fail client=%s model=%s check=%s source evidence differs\n' \
-                        "$client" "$alias" "$check_name" >&2
-                    printf 'FAIL client=%s model=%s check=%s reason=source-evidence-differs\n' \
-                        "$client" "$alias" "$check_name"
-                    failures=$((failures + 1))
+            transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
+            client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"
+            final_file="$(mktemp "${diagnostic_dir}/assistant-final.XXXXXX")" || die "could not create assistant final text"
+            parser_error_file="$(mktemp "${diagnostic_dir}/agent-parser-stderr.XXXXXX")" || die "could not create agent parser stderr"
+            evidence=""
+            agent_failed=0
+            if run_agent "$client" "$alias" "$prompt" "$transcript_file" \
+                "$client_stderr_file" "$final_file" "$parser_error_file"; then
+                if ! evidence="$(parse_evidence "$(<"$final_file")" 2>>"$parser_error_file")"; then
+                    AGENT_FAILURE_STAGE="agent evidence parsing"
+                    agent_failed=1
                 fi
             else
+                agent_failed=1
+            fi
+
+            log_block "Identity" "client=${client} model=${alias} check=${check_name}"
+            log_command "$DISPLAYED_CLIENT_COMMAND"
+            log_block "Input" "$prompt"
+            log_block "Client JSONL transcript" "$(<"$transcript_file")"
+            log_block "Client stderr" "$(<"$client_stderr_file")"
+            log_block "Assistant final text" "$(<"$final_file")"
+            log_block "Agent parser stderr" "$(<"$parser_error_file")"
+            log_block "Agent evidence" "$evidence"
+            log_block "Fresh source snapshot" "$snapshot"
+
+            if [ "$agent_failed" -ne 0 ]; then
+                log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=agent invocation failed"
                 printf 'FAIL client=%s model=%s check=%s reason=agent-failed\n' \
                     "$client" "$alias" "$check_name"
                 failures=$((failures + 1))
+                continue
             fi
+
+            differences="$(source_evidence_differences "$check_name" "$snapshot" "$evidence")"
+            if [ -z "$differences" ]; then
+                log_info "Verdict: PASS"
+                printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
+                    "$client" "$alias" "$check_name"
+                continue
+            fi
+            while IFS= read -r difference; do
+                [ -n "$difference" ] || continue
+                log_error "Verdict: FAIL stage=source-evidence mismatch client=${client} model=${alias} check=${check_name} ${difference}"
+                printf 'FAIL client=%s model=%s check=%s %s\n' \
+                    "$client" "$alias" "$check_name" "$difference"
+            done <<< "$differences"
+            failures=$((failures + 1))
         done
     done <<< "$aliases"
 done

@@ -1578,6 +1578,7 @@ def run_agent_check(
     api_key: str = "test-key-not-a-secret",
     agent_response_prefix: str = "",
     agent_response_suffix: str = "",
+    keep_artifacts: bool = False,
     xtrace: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
@@ -1592,6 +1593,10 @@ def run_agent_check(
     calls.touch()
     artifacts = tmp_path / "agent-artifacts"
     artifacts.mkdir()
+    diagnostic_tmpdir = tmp_path / "diagnostic-tmp"
+    diagnostic_tmpdir.mkdir()
+    source_counter = tmp_path / "source-counter"
+    source_counter.write_text("0\n")
     config = tmp_path / "models.yml"
     config.write_text(
         "server:\n"
@@ -1602,10 +1607,14 @@ def run_agent_check(
     _mock_dirname(commands)
     for name, executable in {
         "chmod": "/usr/bin/chmod",
+        "find": "/usr/bin/find",
         "jq": real_jq,
         "mkdir": "/usr/bin/mkdir",
         "mktemp": "/usr/bin/mktemp",
+        "mv": "/usr/bin/mv",
         "rm": "/usr/bin/rm",
+        "sed": "/usr/bin/sed",
+        "tee": "/usr/bin/tee",
         "yq": real_yq,
     }.items():
         command = commands / name
@@ -1620,10 +1629,26 @@ def run_agent_check(
         "case \"$url\" in\n"
         "  */v1/models) printf '%s\\n' \"$AGENT_CHECK_MODELS\" ;;\n"
         "  https://api.open-meteo.com/*)\n"
-        "    printf '%s\\n' \"$AGENT_CHECK_WEATHER_BODY\"\n"
+        "    if [ -n \"$AGENT_CHECK_WEATHER_BODY\" ]; then\n"
+        "      printf '%s\\n' \"$AGENT_CHECK_WEATHER_BODY\"\n"
+        "    else\n"
+        "      count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
+        "      count=$((count + 1))\n"
+        "      printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
+        "      printf -v seconds '%02d' \"$count\"\n"
+        "      jq -cn --arg seconds \"$seconds\" '{current:{time:(\"2026-07-27T13:00:\" + $seconds),temperature_2m:16.3,weather_code:3}}'\n"
+        "    fi\n"
         "    ;;\n"
         "  https://open.er-api.com/*)\n"
-        "    printf '%s\\n' \"$AGENT_CHECK_FX_BODY\"\n"
+        "    if [ -n \"$AGENT_CHECK_FX_BODY\" ]; then\n"
+        "      printf '%s\\n' \"$AGENT_CHECK_FX_BODY\"\n"
+        "    else\n"
+        "      count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
+        "      count=$((count + 1))\n"
+        "      printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
+        "      printf -v seconds '%02d' \"$count\"\n"
+        "      jq -cn --arg seconds \"$seconds\" '{time_last_update_utc:(\"2026-07-27T00:00:\" + $seconds),rates:{CLP:946.527902}}'\n"
+        "    fi\n"
         "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
@@ -1640,34 +1665,23 @@ def run_agent_check(
         "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": alias} for alias in aliases]}),
         "AGENT_CHECK_WEATHER_BODY": weather_body
         if weather_body is not None
-        else '{"current":{"time":"2026-07-27T13:00","temperature_2m":16.3,"weather_code":3}}',
+        else "",
         "AGENT_CHECK_FX_BODY": fx_body
         if fx_body is not None
-        else '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000","rates":{"CLP":946.527902}}',
-        "AGENT_CHECK_WEATHER_EVIDENCE": json.dumps(
-            {
-                "source_url": "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",
-                "source_timestamp": "2026-07-27T13:00",
-                "temperature_2m": 16.3,
-                "weather_code": 3,
-            }
-        ),
-        "AGENT_CHECK_FX_EVIDENCE": json.dumps(
-            {
-                "source_url": "https://open.er-api.com/v6/latest/USD",
-                "source_timestamp": "Mon, 27 Jul 2026 00:02:31 +0000",
-                "usd_to_clp": 946.527902,
-            }
-        ),
+        else "",
         "AGENT_CHECK_RESPONSE_PREFIX": agent_response_prefix,
         "AGENT_CHECK_RESPONSE_SUFFIX": agent_response_suffix,
         "ARTIFACTS": str(artifacts),
+        "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
         "CALLS": str(calls),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
         "PATH": str(commands),
+        "TMPDIR": str(diagnostic_tmpdir),
         "XDG_CONFIG_HOME": str(tmp_path / "host-xdg-config"),
     }
+    if keep_artifacts:
+        environment["LLM_ENV_KEEP_CHECK_ARTIFACTS"] = "1"
     command = ["/usr/bin/bash"]
     if xtrace:
         command.append("-x")
@@ -1691,24 +1705,56 @@ def count_rows(output: str, prefix: str) -> int:
 VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
-if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
+count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
+printf -v seconds '%02d' "$count"
+if [[ "$*" == *weather* ]]; then
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+else
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+fi
 jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}]}}'
 """
 
 VALID_OPENCODE_STUB = """#!/usr/bin/bash
 printf 'opencode %s xdg=%s\\n' "$*" "${XDG_CONFIG_HOME:-}" >> "$CALLS"
 printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc"
-if [[ "$*" == *weather* ]]; then evidence="$AGENT_CHECK_WEATHER_EVIDENCE"; else evidence="$AGENT_CHECK_FX_EVIDENCE"; fi
+count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
+printf -v seconds '%02d' "$count"
+if [[ "$*" == *weather* ]]; then
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+else
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+fi
 jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
+"""
+
+FENCED_JSON_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
+printf -v seconds '%02d' "$count"
+if [[ "$*" == *weather* ]]; then
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+else
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+fi
+jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:("```json\\n" + ($evidence | tojson) + "\\n```")}]}}'
+"""
+
+FAILING_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+printf 'Authorization: Bearer test-key-not-a-secret\\nagent transport failed\\n' >&2
+exit 17
 """
 
 STALE_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
+count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
+printf -v seconds '%02d' "$count"
 if [[ "$*" == *weather* ]]; then
-    evidence="$(printf '%s' "$AGENT_CHECK_WEATHER_EVIDENCE" | jq -c '.source_timestamp = "stale"')"
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:"stale",temperature_2m:16.3,weather_code:3}')"
 else
-    evidence="$AGENT_CHECK_FX_EVIDENCE"
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
 fi
 jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:($evidence | tojson)}]}}'
 """
@@ -1729,17 +1775,17 @@ def test_agent_check_fails_when_no_supported_client_is_installed(
     assert result.stdout.count("SKIP client=") == 2
 
 
-def test_agent_check_fetches_public_snapshots_and_models_before_no_client_failure(
+def test_agent_check_fetches_models_before_no_client_failure(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The no-client gate must still validate all matrix inputs first."""
+    """The no-client gate needs aliases but must not fetch unused public data."""
     result, calls, _ = run_agent_check(tmp_path, clients={})
 
     assert result.returncode != 0
     recorded = calls.read_text()
-    assert "https://api.open-meteo.com/" in recorded
-    assert "https://open.er-api.com/" in recorded
     assert "http://127.0.0.1:8000/v1/models" in recorded
+    assert "https://api.open-meteo.com/" not in recorded
+    assert "https://open.er-api.com/" not in recorded
 
 
 def test_agent_check_rejects_arguments_without_echoing_them(
@@ -1762,32 +1808,32 @@ def test_agent_check_rejects_arguments_without_echoing_them(
 @pytest.mark.parametrize(
     ("weather_body", "fx_body", "expected_error"),
     [
-        ("{}", None, "could not fetch a valid weather snapshot"),
-        (None, "{}", "could not fetch a valid FX snapshot"),
+        ("{}", None, "source fetch reason=weather source body is invalid"),
+        (None, "{}", "source fetch reason=fx source body is invalid"),
         (
             '{"current":{"time":null,"temperature_2m":16.3,"weather_code":3}}',
             None,
-            "could not fetch a valid weather snapshot",
+            "source fetch reason=weather source body is invalid",
         ),
         (
             '{"current":{"time":"2026-07-27T13:00","temperature_2m":"16.3","weather_code":3}}',
             None,
-            "could not fetch a valid weather snapshot",
+            "source fetch reason=weather source body is invalid",
         ),
         (
             '{"current":{"time":"2026-07-27T13:00","temperature_2m":16.3,"weather_code":"3"}}',
             None,
-            "could not fetch a valid weather snapshot",
+            "source fetch reason=weather source body is invalid",
         ),
         (
             None,
             '{"time_last_update_utc":null,"rates":{"CLP":946.527902}}',
-            "could not fetch a valid FX snapshot",
+            "source fetch reason=fx source body is invalid",
         ),
         (
             None,
             '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000","rates":{"CLP":"946.527902"}}',
-            "could not fetch a valid FX snapshot",
+            "source fetch reason=fx source body is invalid",
         ),
     ],
 )
@@ -1800,7 +1846,7 @@ def test_agent_check_rejects_malformed_source_bodies(
     """Public-source snapshots must contain typed timestamp and value fields."""
     result, _, _ = run_agent_check(
         tmp_path,
-        clients={},
+        clients={"pi": VALID_PI_STUB},
         weather_body=weather_body,
         fx_body=fx_body,
     )
@@ -1824,6 +1870,72 @@ def test_agent_check_hides_api_key_when_shell_tracing_is_enabled(
     assert result.returncode != 0
     assert api_key not in result.stdout
     assert api_key not in result.stderr
+
+
+def test_agent_check_fetches_snapshot_immediately_before_each_matrix_row(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Each client-model-check row must take a source snapshot just before its agent."""
+    result, calls, _ = run_agent_check(
+        tmp_path, clients={"pi": VALID_PI_STUB}, model_aliases=("gemma4", "ornith")
+    )
+
+    assert result.returncode == 0, result.stderr
+    source_calls = [
+        line
+        for line in calls.read_text().splitlines()
+        if line.startswith("curl ") and ("open-meteo" in line or "er-api" in line)
+    ]
+    assert len(source_calls) == 4
+    prompts = [line for line in calls.read_text().splitlines() if line.startswith("pi ")]
+    assert all("Public snapshot for comparison" not in line for line in prompts)
+
+
+def test_agent_check_accepts_exactly_one_json_fence(tmp_path: pathlib.Path) -> None:
+    """One JSON-marked fence is valid agent evidence."""
+    result, _, _ = run_agent_check(tmp_path, clients={"pi": FENCED_JSON_PI_STUB})
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_agent_check_prints_redacted_transcript_and_client_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Failed client rows must display redacted stderr and continue their matrix."""
+    result, _, _ = run_agent_check(tmp_path, clients={"pi": FAILING_PI_STUB})
+    combined = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert "Client stderr:" in result.stdout
+    assert "agent transport failed" in result.stdout
+    assert "Authorization: Bearer <redacted>" in combined
+    assert "test-key-not-a-secret" not in combined
+    assert "Verdict: FAIL stage=command exit" in result.stderr
+
+
+def test_agent_check_retains_only_redacted_private_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Opt-in retained evidence must remain private and omit client credentials."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        api_key="retained-fixture-key",
+        keep_artifacts=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    diagnostic_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    assert stat.S_IMODE(diagnostic_dir.stat().st_mode) == 0o700
+    files = [path for path in diagnostic_dir.rglob("*") if path.is_file()]
+    assert files
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files)
+    retained_text = "".join(path.read_text() for path in files)
+    assert "retained-fixture-key" not in retained_text
+    assert "Authorization: Bearer retained-fixture-key" not in retained_text
 
 
 def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Path) -> None:
@@ -1936,7 +2048,8 @@ def test_agent_check_rejects_stale_or_hardcoded_source_evidence(
     )
 
     assert result.returncode != 0
-    assert "fail client=pi model=gemma4 check=weather source evidence differs" in result.stderr
+    assert "FAIL client=pi model=gemma4 check=weather field=source_timestamp" in result.stdout
+    assert 'received="stale"' in result.stdout
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in calls.read_text()
