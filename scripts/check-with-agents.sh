@@ -250,15 +250,17 @@ source_evidence_differences() {
     local check_name="$1"
     local snapshot="$2"
     local evidence="$3"
-    local required_fields timestamp
+    local required_fields timestamp source_date source_timezone
     local timestamp_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])?$'
 
     case "$check_name" in
         weather)
             required_fields='["source_url", "temperature_2m", "weather_code"]'
+            source_timezone='America/Santiago'
             ;;
         fx)
             required_fields='["source_url", "usd_to_clp"]'
+            source_timezone='UTC'
             ;;
         *)
             return 1
@@ -266,20 +268,23 @@ source_evidence_differences() {
     esac
 
     if ! timestamp="$(jq -er '.source_timestamp | strings' <<<"$evidence")" \
-        || ! [[ "$timestamp" =~ $timestamp_pattern ]] \
-        || ! date --date "$timestamp" +%s >/dev/null 2>&1; then
-        printf 'field=source_timestamp expected=ISO-8601 received=%s\n' \
-            "$(jq -cn --arg value "${timestamp:-}" '$value')"
+        || ! [[ "$timestamp" =~ $timestamp_pattern ]]; then
+        printf '%s\n' 'field=source_timestamp expected=ISO-8601 received="<redacted>"'
+        return
+    fi
+    # Calendar-day comparisons must use the timezone in which the source publishes data.
+    if ! source_date="$(TZ="$source_timezone" date --date "$timestamp" +%F 2>/dev/null)"; then
+        printf '%s\n' 'field=source_timestamp expected=ISO-8601 received="<redacted>"'
         return
     fi
 
     jq -nr --argjson expected "$snapshot" --argjson received "$evidence" \
-        --argjson fields "$required_fields" '
+        --arg source_date "$source_date" --argjson fields "$required_fields" '
         [
           (($expected.source_date // "<missing>") as $want_date
-           | ($received.source_timestamp[0:10] // "<missing>") as $got_date
+           | $source_date as $got_date
            | select($want_date != $got_date)
-           | "field=source_timestamp expected_date=\($want_date | tojson) received_date=\($got_date | tojson)"),
+           | "field=source_timestamp expected_date=\($want_date | tojson) received_date=\"<redacted>\""),
           ($fields[] as $field
            | ($expected[$field] // "<missing>") as $want
            | ($received[$field] // "<missing>") as $got

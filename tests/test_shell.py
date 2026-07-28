@@ -2120,7 +2120,7 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
         ("2026-07-27T09:00:45-04:00", True, ""),
         ("2026-07-27Tnot-a-time", False, "expected=ISO-8601"),
         ("not-a-timestamp", False, "expected=ISO-8601"),
-        ("2026-07-28T00:00:00Z", False, 'expected_date="2026-07-27"'),
+        ("2026-07-28T04:00:00Z", False, 'expected_date="2026-07-27"'),
     ),
 )
 def test_agent_check_requires_full_iso_timestamp_and_matching_source_date(
@@ -2145,6 +2145,59 @@ def test_agent_check_requires_full_iso_timestamp_and_matching_source_date(
         assert count_rows(result.stdout, f"FAIL client={client}") == 2
         assert "field=source_timestamp" in result.stdout
         assert expected_difference in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("weather_override", "fx_override"),
+    (
+        ('{"source_timestamp":"2026-07-28T03:30:00Z"}', None),
+        (None, '{"source_timestamp":"2026-07-26T20:30:00-04:00"}'),
+    ),
+)
+def test_agent_check_compares_timestamp_dates_in_the_source_timezone(
+    tmp_path: pathlib.Path,
+    weather_override: str | None,
+    fx_override: str | None,
+) -> None:
+    """Boundary offsets must resolve to the weather or FX source calendar date."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_weather_evidence_override=weather_override,
+        agent_fx_evidence_override=fx_override,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, "PASS client=pi") == 2
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_diagnostic", "failure_count"),
+    (
+        ("agent-supplied-invalid-timestamp", 'received="<redacted>"', 2),
+        ("2026-07-28T00:00:00Z", 'received_date="<redacted>"', 1),
+    ),
+)
+def test_agent_check_redacts_agent_timestamps_from_mismatch_rows(
+    tmp_path: pathlib.Path,
+    timestamp: str,
+    expected_diagnostic: str,
+    failure_count: int,
+) -> None:
+    """Failure rows must not repeat agent-controlled timestamp values."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_source_timestamp=timestamp,
+    )
+
+    mismatch_rows = "\n".join(
+        line for line in result.stdout.splitlines() if line.startswith("FAIL client=pi")
+    )
+    assert result.returncode != 0
+    assert count_rows(result.stdout, "FAIL client=pi") == failure_count
+    assert timestamp not in mismatch_rows
+    assert expected_diagnostic in mismatch_rows
 
 
 @pytest.mark.parametrize(
@@ -2258,7 +2311,7 @@ def test_agent_check_rejects_stale_or_hardcoded_source_evidence(
 
     assert result.returncode != 0
     assert "FAIL client=pi model=gemma4 check=weather field=source_timestamp" in result.stdout
-    assert 'received="stale"' in result.stdout
+    assert 'received="<redacted>"' in result.stdout
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in calls.read_text()
