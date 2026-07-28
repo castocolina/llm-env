@@ -48,7 +48,7 @@ A failed model request or mismatched response fails the target and identifies it
 
 ### Command and presence policy
 
-Add `make check-with-agents`, delegated to `check-with-agents.sh`. The script detects Pi and OpenCode independently:
+Add `make check-with-agents`, delegated to `scripts/check-with-agents.sh`. The script detects Pi and OpenCode independently:
 
 - A present client enters the test matrix.
 - A missing client is reported as `skip` with its installation/configuration prerequisite.
@@ -149,7 +149,7 @@ Examples use `<alias>` and dynamically read the configured port. They never use 
 ## Testing
 
 - Add shell-level command-construction tests for deterministic `ready` normalization and every error result.
-- Add isolated tests for `check-with-agents.sh`: detection, skip/report policy, no-client failure, full agent/model/prompt matrix construction, temporary-directory cleanup, no key in logs, and source comparison failures.
+- Add isolated tests for `scripts/check-with-agents.sh`: detection, skip/report policy, no-client failure, full agent/model/prompt matrix construction, temporary-directory cleanup, no key in logs, and source comparison failures.
 - Mock agent binaries and public-source curl responses in automated tests. Live Internet and real-agent checks run only when the user invokes `make check-with-agents`.
 - Run `make validate && make test` after shell and Python changes.
 - Manually run the full lifecycle for Gemma4 alone and Ornith alone. For each enabled model, run `make check-with-agents` with every installed agent and preserve only redacted result evidence.

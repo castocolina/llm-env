@@ -106,7 +106,7 @@ Add or update tests for:
 - `check-setup` disposable inference command construction for every enabled model
 - `make start` creating a missing key without printing it
 - `make key-reset` restarting only an active service
-- `make enable-boot` using the render-only path rather than `start.sh`
+- `make enable-boot` using the render-only path rather than `scripts/start.sh`
 
 Run `make validate` and `make test` after implementation. The end-to-end sequence is:
 

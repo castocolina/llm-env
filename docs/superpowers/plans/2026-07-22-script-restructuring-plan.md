@@ -23,9 +23,9 @@
 | File | Action | Responsibility |
 |------|--------|----------------|
 | `models.sh` | Create | Single source of truth: paths, config, model definitions, functions |
-| `setup.sh` | Rewrite | Dynamic menu, download, build, validate, write presets |
+| `setup/setup.sh` | Rewrite | Dynamic menu, download, build, validate, write presets |
 | `setup-test.sh` | Create | Inference test based on downloaded models |
-| `start.sh` | Rewrite | Launch server from presets.ini |
+| `scripts/start.sh` | Rewrite | Launch server from presets.ini |
 | `server-test.sh` | Create | Live test forcing internet access |
 | `test.sh` | Delete | Replaced by server-test.sh |
 | `Makefile` | Update | New targets: setup-test, server-test |
@@ -174,20 +174,20 @@ and helper functions. All scripts will source this file."
 
 ---
 
-### Task 2: Rewrite `setup.sh` — Dynamic from models.sh
+### Task 2: Rewrite `setup/setup.sh` — Dynamic from models.sh
 
 **Files:**
-- Rewrite: `setup.sh`
+- Rewrite: `setup/setup.sh`
 
 **Interfaces:**
 - Consumes: `models.sh` (all functions and arrays)
 - Produces: `presets.ini`, `.config`, downloaded models, compiled llama.cpp
 
-- [ ] **Step 1: Create new setup.sh that sources models.sh**
+- [ ] **Step 1: Create new setup/setup.sh that sources models.sh**
 
 ```bash
 #!/usr/bin/env bash
-# setup.sh — Download models, build llama.cpp, validate
+# setup/setup.sh — Download models, build llama.cpp, validate
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -397,8 +397,8 @@ echo -e "${GREEN}Selected models: ${SELECTED_MODELS}${NC}"
 echo ""
 echo "Quick start commands:"
 echo -e "  ${BLUE}Test inference:${NC} ./setup-test.sh"
-echo -e "  ${BLUE}Start server:${NC}   ./start.sh"
-echo -e "  ${BLUE}Stop server:${NC}    ./stop.sh"
+echo -e "  ${BLUE}Start server:${NC}   scripts/start.sh"
+echo -e "  ${BLUE}Stop server:${NC}    scripts/stop.sh"
 echo -e "  ${BLUE}Test server:${NC}    ./server-test.sh"
 echo -e "  ${BLUE}Enter container:${NC} distrobox enter ${CONTAINER_NAME}"
 echo ""
@@ -406,16 +406,16 @@ echo "Workspace: ${WORKSPACE_DIR}"
 echo "Presets: ${PRESETS_FILE}"
 ```
 
-- [ ] **Step 2: Run shellcheck on setup.sh**
+- [ ] **Step 2: Run shellcheck on setup/setup.sh**
 
-Run: `shellcheck -s bash setup.sh`
+Run: `shellcheck -s bash setup/setup.sh`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add setup.sh
-git commit -m "refactor: rewrite setup.sh to source models.sh
+git add setup/setup.sh
+git commit -m "refactor: rewrite setup/setup.sh to source models.sh
 
 Dynamic menu, presets, validation all derive from ALL_MODELS array.
 Added validate_models step to verify llama.cpp sees downloaded files."
@@ -454,7 +454,7 @@ fi
 
 if [ -z "$DOWNLOADED" ]; then
     echo -e "${RED}No models found in ${WORKSPACE_DIR}/models/${NC}"
-    echo "Run ./setup.sh first to download models."
+    echo "Run setup/setup.sh first to download models."
     exit 1
 fi
 
@@ -527,20 +527,20 @@ Tests each downloaded model with multiple prompts.
 
 ---
 
-### Task 4: Rewrite `start.sh` — Use presets.ini
+### Task 4: Rewrite `scripts/start.sh` — Use presets.ini
 
 **Files:**
-- Rewrite: `start.sh`
+- Rewrite: `scripts/start.sh`
 
 **Interfaces:**
 - Consumes: `models.sh` (paths, config variables)
 - Produces: Running llama-server process, PID file
 
-- [ ] **Step 1: Create new start.sh**
+- [ ] **Step 1: Create new scripts/start.sh**
 
 ```bash
 #!/usr/bin/env bash
-# start.sh — Launch server based on presets.ini
+# scripts/start.sh — Launch server based on presets.ini
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -552,14 +552,14 @@ LOG_FILE="${WORKSPACE_DIR}/.config/server.log"
 # Check config exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Config file not found at ${CONFIG_FILE}${NC}"
-    echo "Run ./setup.sh first."
+    echo "Run setup/setup.sh first."
     exit 1
 fi
 
 # Check presets file
 if [ ! -f "$PRESETS_FILE" ]; then
     echo -e "${RED}Error: Presets file not found at ${PRESETS_FILE}${NC}"
-    echo "Run ./setup.sh first."
+    echo "Run setup/setup.sh first."
     exit 1
 fi
 
@@ -632,16 +632,16 @@ echo -e "${YELLOW}Check logs:${NC} cat ${LOG_FILE}"
 exit 1
 ```
 
-- [ ] **Step 2: Run shellcheck on start.sh**
+- [ ] **Step 2: Run shellcheck on scripts/start.sh**
 
-Run: `shellcheck -s bash start.sh`
+Run: `shellcheck -s bash scripts/start.sh`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add start.sh
-git commit -m "refactor: rewrite start.sh to use presets.ini
+git add scripts/start.sh
+git commit -m "refactor: rewrite scripts/start.sh to use presets.ini
 
 Reads presets.ini to discover models. Launches router mode server.
 Sources models.sh for all config values."
@@ -673,7 +673,7 @@ show_status "Server Test — Live Agent Check"
 # Check server is running
 if ! curl -s "http://localhost:${SERVER_PORT}/health" > /dev/null 2>&1; then
     echo -e "${RED}✗ Server not running at http://localhost:${SERVER_PORT}${NC}"
-    echo "  Start with: ./start.sh"
+    echo "  Start with: scripts/start.sh"
     exit 1
 fi
 echo -e "${GREEN}✓ Server is running${NC}"
@@ -808,16 +808,16 @@ all: setup setup-test start server-test
 
 setup:
 	@echo "Starting LLM environment setup..."
-	@bash setup.sh
+	@bash setup/setup.sh
 
 setup-test:
 	@bash setup-test.sh
 
 start:
-	@bash start.sh
+	@bash scripts/start.sh
 
 stop:
-	@bash stop.sh
+	@bash scripts/stop.sh
 
 server-test:
 	@bash server-test.sh
@@ -994,11 +994,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ```
 models.sh      ← Single source of truth (model definitions + helpers)
-setup.sh       ← Download models, build llama.cpp, validate
+setup/setup.sh       ← Download models, build llama.cpp, validate
 setup-test.sh  ← Inference test based on downloaded models
-start.sh       ← Launch server based on presets.ini
+scripts/start.sh       ← Launch server based on presets.ini
 server-test.sh ← Live test forcing internet access
-stop.sh        ← Server shutdown
+scripts/stop.sh        ← Server shutdown
 ```
 
 ## Workspace

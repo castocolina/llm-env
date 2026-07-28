@@ -4,7 +4,7 @@
 
 **Goal:** Verify deterministic API inference for every enabled model, add opt-in live agent checks, and document only tested local-client integrations.
 
-**Architecture:** `check-server.sh` remains a deterministic local curl contract test. A new `check-with-agents.sh` owns opt-in Internet-dependent agent checks, obtains its model list from the running API, and creates a mode-700 workspace per run. Client research is an explicit gate: its evidence determines which precise client snippets appear in `QUICK_START.md`.
+**Architecture:** `scripts/check-server.sh` remains a deterministic local curl contract test. A new `scripts/check-with-agents.sh` owns opt-in Internet-dependent agent checks, obtains its model list from the running API, and creates a mode-700 workspace per run. Client research is an explicit gate: its evidence determines which precise client snippets appear in `QUICK_START.md`.
 
 **Tech Stack:** Bash, shellcheck, curl, jq, Mike Farah yq v4, pytest, llama.cpp OpenAI-compatible API, Pi, OpenCode, Open-Meteo, ExchangeRate-API.
 
@@ -25,8 +25,8 @@
 
 | File | Responsibility |
 |---|---|
-| `check-server.sh` | Local health, authentication, model-list, and normalized deterministic inference contract |
-| `check-with-agents.sh` | Opt-in, redacted live-source agent matrix and source comparison |
+| `scripts/check-server.sh` | Local health, authentication, model-list, and normalized deterministic inference contract |
+| `scripts/check-with-agents.sh` | Opt-in, redacted live-source agent matrix and source comparison |
 | `Makefile` | `check-with-agents` target and help entry |
 | `tests/test_shell.py` | Stubbed shell-contract tests for both checks; no real API key, agent, or Internet call |
 | `docs/client-compatibility.md` | Dated evidence and results for required client research order |
@@ -36,7 +36,7 @@
 ## Task 1: Deterministic authenticated curl inference
 
 **Files:**
-- Modify: `check-server.sh`, `tests/test_shell.py`
+- Modify: `scripts/check-server.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - `normalize_ready(value: string)` is a Bash pipeline that lowercases and strips leading/trailing whitespace and ASCII punctuation.
@@ -69,7 +69,7 @@ Expected: FAIL because `not ready` is currently accepted as nonempty assistant c
 
 - [ ] **Step 3: Implement strict response extraction and normalization**
 
-Replace the `content/reasoning/finish` acceptance branch in `check-server.sh` with this behavior:
+Replace the `content/reasoning/finish` acceptance branch in `scripts/check-server.sh` with this behavior:
 
 ```bash
 content="$(jq -r '.choices[0].message.content // empty' <<<"$response")"
@@ -99,18 +99,18 @@ Expected: PASS.
 Run: `make validate && make test`
 
 ```bash
-git add check-server.sh tests/test_shell.py
+git add scripts/check-server.sh tests/test_shell.py
 git commit -m "test: require deterministic server inference responses"
 ```
 
 ## Task 2: Agent check helpers and safe matrix shell contract
 
 **Files:**
-- Create: `check-with-agents.sh`
+- Create: `scripts/check-with-agents.sh`
 - Modify: `Makefile`, `tests/test_shell.py`
 
 **Interfaces:**
-- `check-with-agents.sh` accepts no secret arguments.
+- `scripts/check-with-agents.sh` accepts no secret arguments.
 - `fetch_models(auth_conf, base) -> newline-delimited aliases` reads `/v1/models`.
 - `source_weather() -> JSON` and `source_fx() -> JSON` emit validated public-source snapshots.
 - `run_agent(client, alias, check_name, prompt, snapshot) -> JSON` is the one client-specific dispatch point; Task 3 implements its Pi/OpenCode cases.
@@ -141,7 +141,7 @@ Expected: FAIL because the target and script do not exist.
 
 - [ ] **Step 3: Implement safe initialization and source fetches**
 
-In `check-with-agents.sh`, source `lib.sh`, require `curl jq yq`, create `workspace="$(mktemp -d)"`, then `chmod 700 "$workspace"` and `trap 'rm -rf "$workspace"' EXIT`. Create mode-600 curl config files exactly as `check-server.sh` does.
+In `scripts/check-with-agents.sh`, source `tools/lib.sh`, require `curl jq yq`, create `workspace="$(mktemp -d)"`, then `chmod 700 "$workspace"` and `trap 'rm -rf "$workspace"' EXIT`. Create mode-600 curl config files exactly as `scripts/check-server.sh` does.
 
 Use:
 
@@ -179,7 +179,7 @@ Add `check-with-agents` to `.PHONY`, `make help`, and a one-line body:
 
 ```make
 check-with-agents:
-	@bash check-with-agents.sh
+	@bash scripts/check-with-agents.sh
 ```
 
 Run: `uv run --with pytest pytest tests/test_shell.py -k 'agent_check or check_with_agents' -v`
@@ -191,14 +191,14 @@ Expected: PASS for no-client/target behavior.
 Run: `make validate && make test`
 
 ```bash
-git add check-with-agents.sh Makefile tests/test_shell.py
+git add scripts/check-with-agents.sh Makefile tests/test_shell.py
 git commit -m "feat: add opt-in agent inference check scaffold"
 ```
 
 ## Task 3: Pi and OpenCode non-interactive adapters
 
 **Files:**
-- Modify: `check-with-agents.sh`, `tests/test_shell.py`
+- Modify: `scripts/check-with-agents.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - `run_agent pi <alias> <check> <prompt> <snapshot>` writes only `${workspace}/pi/models.json` and invokes Pi JSON mode.
@@ -292,7 +292,7 @@ Also assert output, call logs, and generated config contents do not contain the 
 Run: `make validate && make test`
 
 ```bash
-git add check-with-agents.sh tests/test_shell.py
+git add scripts/check-with-agents.sh tests/test_shell.py
 git commit -m "feat: run live inference checks through local agents"
 ```
 

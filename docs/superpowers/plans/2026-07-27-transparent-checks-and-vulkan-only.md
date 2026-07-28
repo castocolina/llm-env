@@ -4,7 +4,7 @@
 
 **Goal:** Make setup and every check explain its exact work and results, fix the live-agent check from real evidence, and document Vulkan-only benchmarking with CPU fallback.
 
-**Architecture:** Bash check scripts render redacted execution records before and after each operation. A shared redaction helper removes the configured API key and bearer values from displayed or retained output. `benchmark.sh` has one supported GPU backend—Vulkan—then preserves CPU fallback. `check-with-agents.sh` fetches a fresh public-source snapshot per matrix row and compares it to one parsed, optionally fenced JSON object from each agent.
+**Architecture:** Bash check scripts render redacted execution records before and after each operation. A shared redaction helper removes the configured API key and bearer values from displayed or retained output. `scripts/benchmark.sh` has one supported GPU backend—Vulkan—then preserves CPU fallback. `scripts/check-with-agents.sh` fetches a fresh public-source snapshot per matrix row and compares it to one parsed, optionally fenced JSON object from each agent.
 
 **Tech Stack:** Bash, shellcheck, curl, jq, Mike Farah yq v4, pytest, Podman, llama.cpp Vulkan image, Pi, OpenCode, Open-Meteo, ExchangeRate-API.
 
@@ -26,12 +26,12 @@
 
 | File | Responsibility |
 |---|---|
-| `lib.sh` | Shared redaction, command display, diagnostic workspace, and artifact-retention helpers |
-| `setup.sh` | Numbered GPU rows with measured total, used, and free VRAM |
-| `benchmark.sh` | Vulkan-only benchmark with visible command/output and CPU fallback |
-| `check-setup.sh` | Detailed static, device-resolution, budget, and offline inference records |
-| `check-server.sh` | Detailed redacted curl request/response records and normalized `ready` contract |
-| `check-with-agents.sh` | Detailed agent matrix trace, per-row live snapshots, fenced-object parsing, and evidence comparisons |
+| `tools/lib.sh` | Shared redaction, command display, diagnostic workspace, and artifact-retention helpers |
+| `setup/setup.sh` | Numbered GPU rows with measured total, used, and free VRAM |
+| `scripts/benchmark.sh` | Vulkan-only benchmark with visible command/output and CPU fallback |
+| `scripts/check-setup.sh` | Detailed static, device-resolution, budget, and offline inference records |
+| `scripts/check-server.sh` | Detailed redacted curl request/response records and normalized `ready` contract |
+| `scripts/check-with-agents.sh` | Detailed agent matrix trace, per-row live snapshots, fenced-object parsing, and evidence comparisons |
 | `models.yml.example` | Vulkan-only benchmark configuration |
 | `pylib/config.py` | Accept/migrate Vulkan-only benchmark schema |
 | `tests/test_shell.py` | Shell command, redaction, agent parsing, and diagnostic regression tests |
@@ -41,7 +41,7 @@
 ## Task 1: Shared safe diagnostic rendering
 
 **Files:**
-- Modify: `lib.sh`, `tests/test_shell.py`
+- Modify: `tools/lib.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - `redact_text <text>` writes text with the current `.server.api_key` and `Authorization: Bearer <value>` replaced by `<redacted>`.
@@ -51,7 +51,7 @@
 
 - [ ] **Step 1: Add failing redaction and artifact tests**
 
-Add a shell harness test that configures `api_key: fixture-secret` and invokes a tiny sourced `lib.sh` script:
+Add a shell harness test that configures `api_key: fixture-secret` and invokes a tiny sourced `tools/lib.sh` script:
 
 ```python
 def test_diagnostic_helpers_redact_api_keys_and_bearer_headers(tmp_path):
@@ -82,7 +82,7 @@ Expected: FAIL because the helper functions do not exist.
 
 - [ ] **Step 3: Implement redaction and artifact helpers**
 
-Add safe helpers to `lib.sh`. `redact_text` must read the key without printing it, then redact fixed-string values using `sed` with escaped input. It must also redact generic bearer values:
+Add safe helpers to `tools/lib.sh`. `redact_text` must read the key without printing it, then redact fixed-string values using `sed` with escaped input. It must also redact generic bearer values:
 
 ```bash
 redact_text() {
@@ -109,19 +109,19 @@ Run: `make validate && make test`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib.sh tests/test_shell.py
+git add tools/lib.sh tests/test_shell.py
 git commit -m "feat: add redacted diagnostic helpers"
 ```
 
 ## Task 2: Measured VRAM selection and Vulkan-only benchmark
 
 **Files:**
-- Modify: `setup.sh`, `benchmark.sh`, `models.yml.example`, `pylib/config.py`
+- Modify: `setup/setup.sh`, `scripts/benchmark.sh`, `models.yml.example`, `pylib/config.py`
 - Modify: `tests/test_shell.py`, `tests/test_config.py`
 
 **Interfaces:**
 - GPU menu row format: `N) cardN PCI total <MiB> used <MiB> free <MiB> render node displays`.
-- `benchmark.sh` consumes the smallest enabled model and runs only `ghcr.io/ggml-org/llama.cpp:server-vulkan` before CPU fallback.
+- `scripts/benchmark.sh` consumes the smallest enabled model and runs only `ghcr.io/ggml-org/llama.cpp:server-vulkan` before CPU fallback.
 - `gpu.benchmark` contains only `vulkan` after initialization or migration.
 
 - [ ] **Step 1: Add failing GPU-row and Vulkan-only schema tests**
@@ -148,7 +148,7 @@ Expected: FAIL because setup hides used/free VRAM and no migration exists.
 
 - [ ] **Step 3: Display free VRAM before selection**
 
-Change the existing `jq` GPU row renderer in `setup.sh` to use the detector’s existing `vram_used_mib` field and calculate `vram_total_mib - vram_used_mib`. Include those three measured values in the selection confirmation. Preserve default selection by largest measured total VRAM.
+Change the existing `jq` GPU row renderer in `setup/setup.sh` to use the detector’s existing `vram_used_mib` field and calculate `vram_total_mib - vram_used_mib`. Include those three measured values in the selection confirmation. Preserve default selection by largest measured total VRAM.
 
 - [ ] **Step 4: Use the Vulkan-only schema/template and migrate generated configs**
 
@@ -179,14 +179,14 @@ Expected: PASS.
 Run: `make validate && make test`
 
 ```bash
-git add setup.sh benchmark.sh models.yml.example pylib/config.py tests/test_shell.py tests/test_config.py
+git add setup/setup.sh scripts/benchmark.sh models.yml.example pylib/config.py tests/test_shell.py tests/test_config.py
 git commit -m "refactor: use Vulkan as the sole GPU backend"
 ```
 
 ## Task 3: Transparent offline and server inference
 
 **Files:**
-- Modify: `check-setup.sh`, `check-server.sh`, `tests/test_shell.py`
+- Modify: `scripts/check-setup.sh`, `scripts/check-server.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - Every enabled-model inference prints command, prompt/payload, raw output, parsed output, expectation, and verdict.
@@ -235,14 +235,14 @@ Run: `make validate && make test`
 - [ ] **Step 6: Commit**
 
 ```bash
-git add check-setup.sh check-server.sh tests/test_shell.py
+git add scripts/check-setup.sh scripts/check-server.sh tests/test_shell.py
 git commit -m "feat: show complete redacted inference diagnostics"
 ```
 
 ## Task 4: Correct and expose live agent checks
 
 **Files:**
-- Modify: `check-with-agents.sh`, `tests/test_shell.py`
+- Modify: `scripts/check-with-agents.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - `snapshot_for <weather|fx>` fetches authoritative JSON immediately before a single client/model/check row.
@@ -315,7 +315,7 @@ Add a test with `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` that asserts retained transcrip
 Run: `make validate && make test`
 
 ```bash
-git add check-with-agents.sh tests/test_shell.py
+git add scripts/check-with-agents.sh tests/test_shell.py
 git commit -m "fix: expose and validate live agent evidence"
 ```
 

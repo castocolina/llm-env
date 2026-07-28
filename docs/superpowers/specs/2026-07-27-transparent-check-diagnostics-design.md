@@ -6,7 +6,7 @@ Make every check show what it ran, what it asked, what it received, how it evalu
 
 ## Scope
 
-This design changes `setup.sh`, `benchmark.sh`, `check-setup.sh`, `check-server.sh`, and `check-with-agents.sh`. It also fixes the live-agent harness defects found in real execution: stale matrix snapshots, expected-value leakage in prompts, fenced JSON rejection, and generic agent failure messages.
+This design changes `setup/setup.sh`, `scripts/benchmark.sh`, `scripts/check-setup.sh`, `scripts/check-server.sh`, and `scripts/check-with-agents.sh`. It also fixes the live-agent harness defects found in real execution: stale matrix snapshots, expected-value leakage in prompts, fenced JSON rejection, and generic agent failure messages.
 
 ## Safety Rules
 

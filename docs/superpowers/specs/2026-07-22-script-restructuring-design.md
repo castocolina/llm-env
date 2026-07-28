@@ -8,11 +8,11 @@ Restructure the LLM environment scripts into focused, single-responsibility comp
 
 ```
 models.sh      ← Single source of truth (definitions + helpers + config)
-setup.sh       ← Download models, build llama.cpp, validate
+setup/setup.sh       ← Download models, build llama.cpp, validate
 setup-test.sh  ← Inference test based on downloaded models
-start.sh       ← Launch server based on presets.ini
+scripts/start.sh       ← Launch server based on presets.ini
 server-test.sh ← Live test forcing internet access
-stop.sh        ← Server shutdown (unchanged)
+scripts/stop.sh        ← Server shutdown (unchanged)
 Makefile       ← Updated targets
 ```
 
@@ -77,7 +77,7 @@ SERVER_TEST_PROMPTS=("What's the current weather in Tokyo?" "What time is it in 
 2. **Configurable timeouts**: `SETUP_TEST_TIMEOUT` and `SERVER_TEST_TIMEOUT` at top of file.
 3. **Test prompts as arrays**: Easy to add/remove without touching logic.
 
-## `setup.sh` — Download & Build
+## `setup/setup.sh` — Download & Build
 
 ### Responsibilities
 1. Source `models.sh`
@@ -199,7 +199,7 @@ echo -n "  Testing: ${prompt} "
 # When done, print result on same line
 ```
 
-## `start.sh` — Launch Server
+## `scripts/start.sh` — Launch Server
 
 ### Responsibilities
 1. Source `models.sh` (for config paths)
@@ -228,7 +228,7 @@ source "$(dirname "$0")/models.sh"
 
 # Check server is running
 if ! curl -s "http://localhost:${SERVER_PORT}/health" > /dev/null 2>&1; then
-    echo "✗ Server not running. Start with: ./start.sh"
+    echo "✗ Server not running. Start with: scripts/start.sh"
     exit 1
 fi
 
@@ -283,19 +283,19 @@ all: setup setup-test start server-test
 	@echo "Full setup complete!"
 
 setup:
-	@bash setup.sh
+	@bash setup/setup.sh
 
 setup-test:
 	@bash setup-test.sh
 
 start:
-	@bash start.sh
+	@bash scripts/start.sh
 
 server-test:
 	@bash server-test.sh
 
 stop:
-	@bash stop.sh
+	@bash scripts/stop.sh
 ```
 
 ## Files to Create/Modify
@@ -303,12 +303,12 @@ stop:
 | File | Action |
 |------|--------|
 | `models.sh` | **Create** — shared library |
-| `setup.sh` | **Rewrite** — dynamic from models.sh |
+| `setup/setup.sh` | **Rewrite** — dynamic from models.sh |
 | `setup-test.sh` | **Create** — inference test |
-| `start.sh` | **Rewrite** — use presets.ini |
+| `scripts/start.sh` | **Rewrite** — use presets.ini |
 | `server-test.sh` | **Create** — live agent test |
 | `test.sh` | **Delete** — replaced by server-test.sh |
-| `stop.sh` | **Keep** — no changes |
+| `scripts/stop.sh` | **Keep** — no changes |
 | `Makefile` | **Update** — new targets |
 | `README.md` | **Update** — new workflow |
 | `QUICK_START.md` | **Update** — new workflow |

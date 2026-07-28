@@ -43,7 +43,7 @@ with `podman-user-generator` wired in (verified by dry-run), `python 3.14.6`,
   `--models-autoload`, `--models-dir` (`common/arg.cpp:3427`, `tools/server/README.md:220`).
 - Preset INI format requires `version = 1` and supports a `[*]` global section
   (`tools/server/README.md:1654`).
-- `--list-models` **does not exist**. The current `setup.sh:88` call is invalid.
+- `--list-models` **does not exist**. The current `setup/setup.sh:88` call is invalid.
 - Device selection: `-dev, --device <dev1,dev2,...>` by device *name*, plus
   `--list-devices`, env `LLAMA_ARG_DEVICE` (`common/arg.cpp:2535`).
 - Vulkan device names are **index-based** (`Vulkan0`, `Vulkan1`) — `ggml-vulkan.cpp:6670`.
@@ -77,12 +77,12 @@ with `podman-user-generator` wired in (verified by dry-run), `python 3.14.6`,
 ### Entry points (Makefile = thin dispatcher, ≤3 lines per target)
 
 ```
-make setup          → setup.sh
-make start          → start.sh
-make stop           → stop.sh
-make check-setup    → check-setup.sh
-make check-server   → check-server.sh
-make benchmark      → benchmark.sh
+make setup          → setup/setup.sh
+make start          → scripts/start.sh
+make stop           → scripts/stop.sh
+make check-setup    → scripts/check-setup.sh
+make check-server   → scripts/check-server.sh
+make benchmark      → scripts/benchmark.sh
 make enable-boot    → inline (2 lines)
 make disable-boot   → inline (2 lines)
 make status         → inline (1 line)
@@ -98,13 +98,13 @@ Any target body exceeding 3 lines must delegate to a `.sh` file.
 
 | File | Responsibility |
 |---|---|
-| `lib.sh` | Logging, colours, YAML reads via `yq`, error trap |
-| `setup.sh` | Interactive configurator; orchestrates detection, selection, pull, benchmark, config write |
-| `start.sh` | Resolve device, compute budget, render quadlet, start unit, gate on health |
-| `stop.sh` | Stop the systemd unit |
-| `check-setup.sh` | Offline validation |
-| `check-server.sh` | Online API contract validation |
-| `benchmark.sh` | Re-run backend benchmark on demand |
+| `tools/lib.sh` | Logging, colours, YAML reads via `yq`, error trap |
+| `setup/setup.sh` | Interactive configurator; orchestrates detection, selection, pull, benchmark, config write |
+| `scripts/start.sh` | Resolve device, compute budget, render quadlet, start unit, gate on health |
+| `scripts/stop.sh` | Stop the systemd unit |
+| `scripts/check-setup.sh` | Offline validation |
+| `scripts/check-server.sh` | Online API contract validation |
+| `scripts/benchmark.sh` | Re-run backend benchmark on demand |
 
 ### Python layer — single `llmenv.py`, invoked as `uv run llmenv.py <cmd>`
 
@@ -143,7 +143,7 @@ gpu:
   vram_total_mib: 16304
   reserve_mode: auto            # auto = re-measure compositor each start
   reserve_floor_mib: 1024
-  benchmark:                    # recorded evidence, written by benchmark.sh
+  benchmark:                    # recorded evidence, written by scripts/benchmark.sh
     vulkan: { pp_tps: null, tg_tps: null, measured_at: null }
 
 runtime:
@@ -214,7 +214,7 @@ pin the compositor to the iGPU). It does not silently reduce `models_max`.
 
 ## 6. Backend Selection
 
-`benchmark.sh` runs `llama-bench` on the smallest enabled model and records
+`scripts/benchmark.sh` runs `llama-bench` on the smallest enabled model and records
 Vulkan prompt-processing and generation throughput.
 
 Fallback behavior — failures are logged with a reason and return nonzero:
@@ -235,7 +235,7 @@ Quadlet unit at `~/.config/containers/systemd/llm-server.container`, rendered fr
 `models.yml` at `make start`. Uses `--device /dev/dri`, mounts the models directory
 read-only, and health-gates on `/health` via `HealthCmd`.
 
-Removes: `PID_FILE`, stale-PID handling, the manual `curl` health loop, and `stop.sh`'s
+Removes: `PID_FILE`, stale-PID handling, the manual `curl` health loop, and `scripts/stop.sh`'s
 kill/`kill -9` escalation. Boot start is opt-in via `loginctl enable-linger` +
 `systemctl --user enable`.
 
@@ -252,11 +252,11 @@ localhost and LAN, plus paste-ready OpenAI-compatible client config
 
 ## 9. Validation
 
-**`check-setup.sh` (offline):** config parses against schema; image present locally;
+**`scripts/check-setup.sh` (offline):** config parses against schema; image present locally;
 GGUF magic bytes valid for enabled models; stored PCI address resolves to a live
 device; VRAM budget feasible for `models_max`.
 
-**`check-server.sh` (online):** `/health` responds; `/v1/models` lists exactly the
+**`scripts/check-server.sh` (online):** `/health` responds; `/v1/models` lists exactly the
 enabled aliases; one completion per model returns non-empty content; a bad API key is
 rejected. All request bodies built with `jq -n --arg`.
 
@@ -271,22 +271,22 @@ the substring `am`, so it passes on hallucinations.
 | Defect | Location | Resolution |
 |---|---|---|
 | `${TEST_PASS + TEST_FAIL}` → `bad substitution`, always exit 1 | `setup-test.sh:66,68`, `server-test.sh:80,82` | Scripts rewritten |
-| llama.cpp cloned into repo (CWD never set to `$WORK_DIR`) | `setup.sh:155` | Build pipeline deleted |
+| llama.cpp cloned into repo (CWD never set to `$WORK_DIR`) | `setup/setup.sh:155` | Build pipeline deleted |
 | 1.5 GB untracked clone, `.gitignore` has only `tmp/` | repo root | Removed; `.gitignore` extended |
 | `EXIT_CODE=$?` after `|| true` always 0 | `debug-inference.sh:53` | Script deleted |
 | Capability test masquerading as API test | `server-test.sh` | Replaced with contract test |
-| `--list-models` is not a real flag | `setup.sh:88` | Replaced by `validate-gguf` |
-| `cd llama.cpp && git pull \|\| true && cd ..` precedence bug | `setup.sh:173` | Deleted |
-| Hardcoded `case 1/2/3` vs dynamic model list | `setup.sh:16-33` | YAML-driven selection |
-| `.config` written but never read | `setup.sh:70`, `start.sh:12` | Single `models.yml` |
+| `--list-models` is not a real flag | `setup/setup.sh:88` | Replaced by `validate-gguf` |
+| `cd llama.cpp && git pull \|\| true && cd ..` precedence bug | `setup/setup.sh:173` | Deleted |
+| Hardcoded `case 1/2/3` vs dynamic model list | `setup/setup.sh:16-33` | YAML-driven selection |
+| `.config` written but never read | `setup/setup.sh:70`, `scripts/start.sh:12` | Single `models.yml` |
 | `stat -c%s` despite documented `get_file_size` rule | `models.sh:71` | Python helper |
-| `hostname -I` is Linux-only | `start.sh:73` | Python detection |
+| `hostname -I` is Linux-only | `scripts/start.sh:73` | Python detection |
 | Unescaped prompt interpolation into JSON | `server-test.sh:44` | `jq -n --arg` |
 | `cd` without subshell leaks CWD | `models.sh:83` | Rewritten |
 | `presets.ini` missing `version = 1` / `[*]` | generated file | `configparser` |
 | No device pinning; iGPU/llvmpipe may receive layers | all inference calls | `--device` from resolved PCI |
 | `models-max 2` exceeds VRAM | `models.sh` | Budget model |
-| No auth on `0.0.0.0` | `start.sh` | `--api-key` |
+| No auth on `0.0.0.0` | `scripts/start.sh` | `--api-key` |
 
 ### Documentation drift to correct
 
@@ -311,7 +311,7 @@ reality; macOS support is dropped from the docs rather than claimed.
 5. **Rootless podman GPU access.** Confirmed: the user's groups are `bazzite wheel` only —
    **not** `render` or `video`. This works today solely because Bazzite ships
    `/dev/dri/renderD*` as mode `0666`. That is distro policy and could change
-   on an update. `check-setup.sh` verifies device readability explicitly rather than assuming
+   on an update. `scripts/check-setup.sh` verifies device readability explicitly rather than assuming
    group membership.
 
 ---

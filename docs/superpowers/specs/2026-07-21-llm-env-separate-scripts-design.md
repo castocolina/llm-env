@@ -29,7 +29,7 @@ Server PID stored at: `~/llm-workspace/.config/server.pid`
 
 ## Scripts
 
-### setup.sh
+### setup/setup.sh
 
 Download/compile only. Does NOT start server.
 
@@ -44,7 +44,7 @@ Steps:
 
 Checkpoints stored at: `~/llm-workspace/.cache/checkpoints/`
 
-### start.sh
+### scripts/start.sh
 
 Launch server and wait for it to be ready.
 
@@ -66,7 +66,7 @@ Steps:
    - OpenCode config: model endpoint URL
 7. On failure: print logs, exit 1
 
-### stop.sh
+### scripts/stop.sh
 
 Kill running server.
 
@@ -93,9 +93,9 @@ Steps:
 ## Makefile Targets
 
 ```makefile
-setup:       # Run setup.sh
-start:       # Run start.sh
-stop:        # Run stop.sh
+setup:       # Run setup/setup.sh
+start:       # Run scripts/start.sh
+stop:        # Run scripts/stop.sh
 test:        # Run test.sh
 validate:    # Run shellcheck on all .sh files
 shell:       # Enter distrobox container
@@ -106,7 +106,7 @@ clean:       # Remove everything
 
 ## Files to Remove
 
-None. Old `setup-dev.sh` gets replaced by `setup.sh` (same location, root directory).
+None. Old `setup-dev.sh` gets replaced by `setup/setup.sh` (same location, root directory).
 
 ## Remote Access (macOS to Linux)
 
@@ -115,14 +115,14 @@ No SSH tunnel needed if on same network. macOS connects directly:
 http://<linux-ip>:8000/docs
 ```
 
-The start.sh script prints the network URL after server starts.
+The scripts/start.sh script prints the network URL after server starts.
 
 ## Error Handling
 
 - All scripts use `set -e`
-- setup.sh uses checkpoint system for idempotency
-- start.sh checks for existing server before starting
-- stop.sh handles missing PID file gracefully
+- setup/setup.sh uses checkpoint system for idempotency
+- scripts/start.sh checks for existing server before starting
+- scripts/stop.sh handles missing PID file gracefully
 - test.sh reports pass/fail for each test
 
 ## Language

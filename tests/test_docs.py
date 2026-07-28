@@ -2,6 +2,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTORY_LAYOUT = re.compile(r"(?ms)^## Directory Layout\n.*?(?=^## |\Z)")
 RELOCATED_SHELL_PATHS = {
@@ -72,15 +74,17 @@ def test_current_docs_describe_vulkan_only_diagnostics() -> None:
     assert all("rocm" not in path.read_text().lower() for path in historical_docs)
 
 
-def test_tracked_markdown_uses_relocated_script_paths() -> None:
-    tracked_markdown = [
+@pytest.mark.parametrize(
+    "path",
+    [
         ROOT / path
         for path in subprocess.check_output(
             ["git", "ls-files", "--", "*.md"], text=True
         ).splitlines()
-    ]
-    for path in tracked_markdown:
-        assert not _has_invalid_relocated_script_reference(path.read_text()), path
+    ],
+)
+def test_tracked_markdown_uses_relocated_script_paths(path: Path) -> None:
+    assert not _has_invalid_relocated_script_reference(path.read_text()), path
 
 
 def test_relocation_matcher_rejects_moved_scripts_outside_approved_directories() -> None:

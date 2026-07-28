@@ -26,12 +26,12 @@ source snapshot.
 
 | File | Current behavior |
 |---|---|
-| `benchmark.sh` | Vulkan-only throughput measurement; CPU fallback and nonzero status on failure |
-| `check-setup.sh` | Offline validation with complete redacted inference records |
-| `check-server.sh` | Deterministic local OpenAI-compatible API records for the `ready` contract |
-| `check-with-agents.sh` | Opt-in Pi/OpenCode live weather and FX evidence checks with per-row source snapshots |
-| `setup.sh` | Numbered GPU/model setup with measured total, used, and free VRAM |
-| `lib.sh` | Redaction and private diagnostic-artifact helpers |
+| `scripts/benchmark.sh` | Vulkan-only throughput measurement; CPU fallback and nonzero status on failure |
+| `scripts/check-setup.sh` | Offline validation with complete redacted inference records |
+| `scripts/check-server.sh` | Deterministic local OpenAI-compatible API records for the `ready` contract |
+| `scripts/check-with-agents.sh` | Opt-in Pi/OpenCode live weather and FX evidence checks with per-row source snapshots |
+| `setup/setup.sh` | Numbered GPU/model setup with measured total, used, and free VRAM |
+| `tools/lib.sh` | Redaction and private diagnostic-artifact helpers |
 
 ## Completed Commits
 

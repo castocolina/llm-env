@@ -4,7 +4,7 @@
 
 **Goal:** Separate model-environment setup from server lifecycle, add confirmed prerequisite installation and offline model smoke tests, and make the interactive flow use numbered GPU and model choices.
 
-**Architecture:** Python owns configuration mutations and parsing llama.cpp device listings. Bash orchestrates host checks, downloads, Podman, systemd, and user prompts. `setup.sh` prepares a GPU-pinned Vulkan environment only; `start.sh` owns API-key generation, service startup, and LAN exposure. A render-only unit helper is shared by start and boot enablement.
+**Architecture:** Python owns configuration mutations and parsing llama.cpp device listings. Bash orchestrates host checks, downloads, Podman, systemd, and user prompts. `setup/setup.sh` prepares a GPU-pinned Vulkan environment only; `scripts/start.sh` owns API-key generation, service startup, and LAN exposure. A render-only unit helper is shared by start and boot enablement.
 
 **Tech Stack:** Bash, shellcheck, Python 3.11+ through uv, PyYAML, pytest, ruff, Podman Quadlet, systemd user units, jq, Mike Farah yq v4, firewalld, Avahi.
 
@@ -30,14 +30,14 @@
 | `models.yml.example` | Model metadata and default generated configuration; Gemma4 and Ornith only |
 | `pylib/config.py` | Validate model display metadata and replace the enabled model set |
 | `llmenv.py` | JSON CLI for selecting model aliases and parsing/resolving llama.cpp devices |
-| `prerequisites.sh` | Detect, explain, and install missing Bazzite/Fedora host tools after confirmation |
-| `setup.sh` | Numbered GPU/model selection, downloads, Vulkan preparation, and budget check |
-| `check-setup.sh` | Static validation plus disposable offline inference for every enabled model |
-| `render-unit.sh` | Generate the Quadlet unit and presets without budget checks or service actions |
-| `start.sh` | Generate a missing API key, budget-check, render/start service, then expose LAN access |
-| `network.sh` | Firewall consent, mDNS service, and post-health usage output |
-| `key-reset.sh` | Rotate the API key and restart an active service |
-| `enable-boot.sh` | Enable boot using `render-unit.sh`, never `start.sh` |
+| `setup/prerequisites.sh` | Detect, explain, and install missing Bazzite/Fedora host tools after confirmation |
+| `setup/setup.sh` | Numbered GPU/model selection, downloads, Vulkan preparation, and budget check |
+| `scripts/check-setup.sh` | Static validation plus disposable offline inference for every enabled model |
+| `setup/render-unit.sh` | Generate the Quadlet unit and presets without budget checks or service actions |
+| `scripts/start.sh` | Generate a missing API key, budget-check, render/start service, then expose LAN access |
+| `setup/network.sh` | Firewall consent, mDNS service, and post-health usage output |
+| `scripts/key-reset.sh` | Rotate the API key and restart an active service |
+| `setup/enable-boot.sh` | Enable boot using `setup/render-unit.sh`, never `scripts/start.sh` |
 | `tests/test_config.py` | Configuration and enabled-set unit tests |
 | `tests/test_cli.py` | Device-list parsing and model-selection CLI tests |
 | `tests/test_shell.py` | Shell lifecycle, prerequisite, and command-construction regression tests |
@@ -170,13 +170,13 @@ git commit -m "feat: add numbered model selection metadata"
 ## Task 2: Confirmed prerequisite detection and installation
 
 **Files:**
-- Create: `prerequisites.sh`
-- Modify: `Makefile`, `setup.sh`, `tests/test_shell.py`, `README.md`
+- Create: `setup/prerequisites.sh`
+- Modify: `Makefile`, `setup/setup.sh`, `tests/test_shell.py`, `README.md`
 
 **Interfaces:**
 - Produces `make prerequisites`.
-- `prerequisites.sh --check` exits 0 only when all required runtime tools are usable.
-- `prerequisites.sh` lists missing commands and package names, then requires `yes` before calling `sudo rpm-ostree install`.
+- `setup/prerequisites.sh --check` exits 0 only when all required runtime tools are usable.
+- `setup/prerequisites.sh` lists missing commands and package names, then requires `yes` before calling `sudo rpm-ostree install`.
 
 - [ ] **Step 1: Write failing shell regression tests**
 
@@ -202,11 +202,11 @@ The stubbed `rpm-ostree` records arguments and exits 0; no real host command run
 
 Run: `uv run --with pytest pytest tests/test_shell.py -v`
 
-Expected: FAIL because `prerequisites.sh` does not exist.
+Expected: FAIL because `setup/prerequisites.sh` does not exist.
 
-- [ ] **Step 3: Implement `prerequisites.sh`**
+- [ ] **Step 3: Implement `setup/prerequisites.sh`**
 
-Use `set -euo pipefail` and source `lib.sh`. Check these command/package pairs:
+Use `set -euo pipefail` and source `tools/lib.sh`. Check these command/package pairs:
 
 ```bash
 RUNTIME=("uv:uv" "jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
@@ -224,25 +224,25 @@ Prompt `Install these packages? (yes/no) `. Only `yes` runs it. After a successf
 
 - [ ] **Step 4: Add Makefile and setup integration**
 
-Add `prerequisites` to `.PHONY`, help output, and a one-line target delegating to `prerequisites.sh`. At the start of `setup.sh`, run `bash "${REPO_DIR}/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"` before any config mutation.
+Add `prerequisites` to `.PHONY`, help output, and a one-line target delegating to `setup/prerequisites.sh`. At the start of `setup/setup.sh`, run `bash "${REPO_DIR}/setup/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"` before any config mutation.
 
 - [ ] **Step 5: Run verification**
 
-Run: `make validate && make test && bash prerequisites.sh --check`
+Run: `make validate && make test && bash setup/prerequisites.sh --check`
 
 Expected: validation and tests pass; the local host reports its installed/missing status without installing anything.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add prerequisites.sh setup.sh Makefile tests/test_shell.py README.md
+git add setup/prerequisites.sh setup/setup.sh Makefile tests/test_shell.py README.md
 git commit -m "feat: add confirmed host prerequisite setup"
 ```
 
 ## Task 3: Numbered, preparation-only setup
 
 **Files:**
-- Modify: `setup.sh`, `tests/test_shell.py`
+- Modify: `setup/setup.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - Consumes Task 1 `models select` and `list-devices` JSON commands.
@@ -290,14 +290,14 @@ Expected: all checks pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add setup.sh tests/test_shell.py
+git add setup/setup.sh tests/test_shell.py
 git commit -m "feat: make setup prepare models without server state"
 ```
 
 ## Task 4: Offline inference in check-setup
 
 **Files:**
-- Modify: `check-setup.sh`, `tests/test_shell.py`
+- Modify: `scripts/check-setup.sh`, `tests/test_shell.py`
 
 **Interfaces:**
 - Consumes config fields `gpu.image`, `gpu.device_name`, and every enabled model’s file and `n_gpu_layers`.
@@ -306,7 +306,7 @@ git commit -m "feat: make setup prepare models without server state"
 
 - [ ] **Step 1: Write failing command-construction tests**
 
-Mock `podman` and assert that `check-setup.sh` resolves the saved device name to a transient device ID, then runs once per enabled model with `run --rm`, `--device /dev/dri`, a read-only model mount, `/app/llama cli`, the model path, transient device ID, and `n_gpu_layers`. Assert no `podman exec` command appears.
+Mock `podman` and assert that `scripts/check-setup.sh` resolves the saved device name to a transient device ID, then runs once per enabled model with `run --rm`, `--device /dev/dri`, a read-only model mount, `/app/llama cli`, the model path, transient device ID, and `n_gpu_layers`. Assert no `podman exec` command appears.
 
 - [ ] **Step 2: Run the shell tests and verify they fail**
 
@@ -337,20 +337,20 @@ Expected: all checks pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add check-setup.sh tests/test_shell.py
+git add scripts/check-setup.sh tests/test_shell.py
 git commit -m "test: smoke test every enabled model before start"
 ```
 
 ## Task 5: Runtime key, LAN, and boot lifecycle
 
 **Files:**
-- Create: `render-unit.sh`, `network.sh`, `key-reset.sh`
-- Modify: `start.sh`, `enable-boot.sh`, `Makefile`, `tests/test_shell.py`
+- Create: `setup/render-unit.sh`, `setup/network.sh`, `scripts/key-reset.sh`
+- Modify: `scripts/start.sh`, `setup/enable-boot.sh`, `Makefile`, `tests/test_shell.py`
 
 **Interfaces:**
-- `render-unit.sh` renders presets and `${QUADLET_DIR}/${UNIT_NAME}.container` without starting, stopping, or budget-checking.
-- `network.sh` configures optional firewall/mDNS after health succeeds.
-- `key-reset.sh` restarts an active server after rotation.
+- `setup/render-unit.sh` renders presets and `${QUADLET_DIR}/${UNIT_NAME}.container` without starting, stopping, or budget-checking.
+- `setup/network.sh` configures optional firewall/mDNS after health succeeds.
+- `scripts/key-reset.sh` restarts an active server after rotation.
 
 - [ ] **Step 1: Write failing lifecycle tests**
 
@@ -358,7 +358,7 @@ Add tests that prove:
 
 ```python
 def test_start_generates_key_only_when_empty(tmp_path):
-    result, config, calls = run_lifecycle_script(tmp_path, "start.sh", api_key="")
+    result, config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh", api_key="")
     assert result.returncode == 0
     assert yq_value(config, ".server.api_key")
     assert yq_value(config, ".server.api_key") not in result.stdout
@@ -366,23 +366,23 @@ def test_start_generates_key_only_when_empty(tmp_path):
 
 
 def test_key_reset_restarts_an_active_server(tmp_path):
-    result, _, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=True)
+    result, _, calls = run_lifecycle_script(tmp_path, "scripts/key-reset.sh", active=True)
     assert result.returncode == 0
     assert "systemctl --user stop llm-server.service" in calls.read_text()
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
 
 def test_key_reset_does_not_start_an_inactive_server(tmp_path):
-    result, _, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=False)
+    result, _, calls = run_lifecycle_script(tmp_path, "scripts/key-reset.sh", active=False)
     assert result.returncode == 0
     assert "systemctl --user start llm-server.service" not in calls.read_text()
 
 
 def test_enable_boot_calls_render_unit_not_start(tmp_path):
-    result, _, calls = run_lifecycle_script(tmp_path, "enable-boot.sh")
+    result, _, calls = run_lifecycle_script(tmp_path, "setup/enable-boot.sh")
     assert result.returncode == 0
-    assert "render-unit.sh" in calls.read_text()
-    assert "start.sh" not in calls.read_text()
+    assert "setup/render-unit.sh" in calls.read_text()
+    assert "scripts/start.sh" not in calls.read_text()
 ```
 
 Add `run_lifecycle_script` to `tests/test_shell.py`; it writes a minimal mode-600 YAML config, installs command stubs that append their arguments to `calls`, and returns the completed process, config path, and call log. Stub `systemctl`, `yq`, `podman`, and `curl`; assert the generated API key never appears in captured output.
@@ -391,23 +391,23 @@ Add `run_lifecycle_script` to `tests/test_shell.py`; it writes a minimal mode-60
 
 Run: `uv run --with pytest pytest tests/test_shell.py -v`
 
-Expected: FAIL because these scripts do not exist and boot enablement calls `start.sh`.
+Expected: FAIL because these scripts do not exist and boot enablement calls `scripts/start.sh`.
 
 - [ ] **Step 3: Extract render-only unit generation**
 
-Move device resolution, presets generation, Quadlet heredoc, mode `0600`, and `systemctl --user daemon-reload` from `start.sh` into `render-unit.sh`. `render-unit.sh` reads configuration but does not run the budget command or start a service.
+Move device resolution, presets generation, Quadlet heredoc, mode `0600`, and `systemctl --user daemon-reload` from `scripts/start.sh` into `setup/render-unit.sh`. `setup/render-unit.sh` reads configuration but does not run the budget command or start a service.
 
 - [ ] **Step 4: Move missing-key generation and LAN work to runtime**
 
-In `start.sh`, generate and save a random key only when `.server.api_key` is empty, run the budget check before service startup, call `render-unit.sh`, start and health-check the unit, then call `network.sh`.
+In `scripts/start.sh`, generate and save a random key only when `.server.api_key` is empty, run the budget check before service startup, call `setup/render-unit.sh`, start and health-check the unit, then call `setup/network.sh`.
 
-Move firewall and Avahi logic plus usage examples from `setup.sh` to `network.sh`. Firewall remains opt-in when closed; mDNS starts after health. Print `127.0.0.1`, LAN IP, and `.local` endpoints only after successful health.
+Move firewall and Avahi logic plus usage examples from `setup/setup.sh` to `setup/network.sh`. Firewall remains opt-in when closed; mDNS starts after health. Print `127.0.0.1`, LAN IP, and `.local` endpoints only after successful health.
 
 - [ ] **Step 5: Add key-reset and safe boot enablement**
 
-Implement `key-reset.sh`: generate/save a new key with mode `0600`; if `systemctl --user is-active --quiet` succeeds, call `stop.sh` then `start.sh`; otherwise report that the key applies on the next start. Add `key-reset` to Makefile help and `.PHONY`.
+Implement `scripts/key-reset.sh`: generate/save a new key with mode `0600`; if `systemctl --user is-active --quiet` succeeds, call `scripts/stop.sh` then `scripts/start.sh`; otherwise report that the key applies on the next start. Add `key-reset` to Makefile help and `.PHONY`.
 
-Change `enable-boot.sh` to set `server.start_at_boot = true`, call `render-unit.sh`, then enable lingering. It must not call `start.sh`, so it cannot see the running model’s VRAM as compositor usage.
+Change `setup/enable-boot.sh` to set `server.start_at_boot = true`, call `setup/render-unit.sh`, then enable lingering. It must not call `scripts/start.sh`, so it cannot see the running model’s VRAM as compositor usage.
 
 - [ ] **Step 6: Run verification**
 
@@ -418,7 +418,7 @@ Expected: all checks pass.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add render-unit.sh network.sh key-reset.sh start.sh enable-boot.sh Makefile tests/test_shell.py
+git add setup/render-unit.sh setup/network.sh scripts/key-reset.sh scripts/start.sh setup/enable-boot.sh Makefile tests/test_shell.py
 git commit -m "feat: separate server key and network lifecycle"
 ```
 
@@ -445,7 +445,7 @@ Document `make key-reset`, that setup does not start a server, and that `.local`
 
 - [ ] **Step 2: Update architecture documentation**
 
-Describe `prerequisites.sh`, `render-unit.sh`, `network.sh`, and `key-reset.sh`. State that setup uses the Vulkan image for disposable pre-benchmark smoke tests and benchmark selects the persistent backend.
+Describe `setup/prerequisites.sh`, `setup/render-unit.sh`, `setup/network.sh`, and `scripts/key-reset.sh`. State that setup uses the Vulkan image for disposable pre-benchmark smoke tests and benchmark selects the persistent backend.
 
 - [ ] **Step 3: Run static verification**
 

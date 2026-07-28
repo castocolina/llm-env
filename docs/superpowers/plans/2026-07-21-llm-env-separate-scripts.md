@@ -24,27 +24,27 @@
 
 | File | Action | Responsibility |
 |------|--------|----------------|
-| `setup.sh` | Create | Download/compile (idempotent, checkpointed) |
-| `start.sh` | Create | Launch server, wait for health, print connection info |
-| `stop.sh` | Create | Kill server process, clean up PID file |
+| `setup/setup.sh` | Create | Download/compile (idempotent, checkpointed) |
+| `scripts/start.sh` | Create | Launch server, wait for health, print connection info |
+| `scripts/stop.sh` | Create | Kill server process, clean up PID file |
 | `test.sh` | Create | curl test + opencode integration test |
 | `Makefile` | Modify | Add new targets, remove old setup-dev |
-| `setup-dev.sh` | Delete | Replaced by setup.sh |
+| `setup-dev.sh` | Delete | Replaced by setup/setup.sh |
 | `README.md` | Modify | Update for new scripts |
 | `QUICK_START.md` | Modify | Update for new scripts |
 
 ---
 
-### Task 1: Create setup.sh
+### Task 1: Create setup/setup.sh
 
 **Files:**
-- Create: `setup.sh`
+- Create: `setup/setup.sh`
 
 **Interfaces:**
 - Consumes: `MODEL_ALIAS` env var (optional, overrides interactive prompt)
 - Produces: `~/llm-workspace/.config` (config file)
 
-- [ ] **Step 1: Create setup.sh with header and config system**
+- [ ] **Step 1: Create setup/setup.sh with header and config system**
 
 ```bash
 #!/usr/bin/env bash
@@ -303,8 +303,8 @@ echo ""
 echo -e "${GREEN}Your LLM environment is ready!${NC}"
 echo ""
 echo "Quick start commands:"
-echo -e "  ${BLUE}Start server:${NC} ./start.sh"
-echo -e "  ${BLUE}Stop server:${NC}  ./stop.sh"
+echo -e "  ${BLUE}Start server:${NC} scripts/start.sh"
+echo -e "  ${BLUE}Stop server:${NC}  scripts/stop.sh"
 echo -e "  ${BLUE}Test server:${NC}  ./test.sh"
 echo -e "  ${BLUE}Enter container:${NC} distrobox enter ${CONTAINER_NAME}"
 echo ""
@@ -316,29 +316,29 @@ echo "Model: ${WORKSPACE_DIR}/models/${MODEL_NAME}"
 - [ ] **Step 7: Make executable and run shellcheck**
 
 ```bash
-chmod +x setup.sh
+chmod +x setup/setup.sh
 make validate
 ```
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add setup.sh
-git commit -m "feat: add setup.sh with config file and 12B model presets"
+git add setup/setup.sh
+git commit -m "feat: add setup/setup.sh with config file and 12B model presets"
 ```
 
 ---
 
-### Task 2: Create start.sh
+### Task 2: Create scripts/start.sh
 
 **Files:**
-- Create: `start.sh`
+- Create: `scripts/start.sh`
 
 **Interfaces:**
-- Consumes: `~/llm-workspace/.config` (from setup.sh)
+- Consumes: `~/llm-workspace/.config` (from setup/setup.sh)
 - Produces: `~/llm-workspace/.config/server.pid`
 
-- [ ] **Step 1: Create start.sh with full implementation**
+- [ ] **Step 1: Create scripts/start.sh with full implementation**
 
 ```bash
 #!/usr/bin/env bash
@@ -359,7 +359,7 @@ NC='\033[0m'
 # Check config exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Config file not found at ${CONFIG_FILE}${NC}"
-    echo "Run ./setup.sh first to configure your environment."
+    echo "Run setup/setup.sh first to configure your environment."
     exit 1
 fi
 
@@ -433,28 +433,28 @@ exit 1
 - [ ] **Step 2: Make executable and run shellcheck**
 
 ```bash
-chmod +x start.sh
+chmod +x scripts/start.sh
 make validate
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add start.sh
-git commit -m "feat: add start.sh for server lifecycle management"
+git add scripts/start.sh
+git commit -m "feat: add scripts/start.sh for server lifecycle management"
 ```
 
 ---
 
-### Task 3: Create stop.sh
+### Task 3: Create scripts/stop.sh
 
 **Files:**
-- Create: `stop.sh`
+- Create: `scripts/stop.sh`
 
 **Interfaces:**
 - Consumes: `~/llm-workspace/.config/server.pid`
 
-- [ ] **Step 1: Create stop.sh**
+- [ ] **Step 1: Create scripts/stop.sh**
 
 ```bash
 #!/usr/bin/env bash
@@ -494,15 +494,15 @@ fi
 - [ ] **Step 2: Make executable and run shellcheck**
 
 ```bash
-chmod +x stop.sh
+chmod +x scripts/stop.sh
 make validate
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add stop.sh
-git commit -m "feat: add stop.sh for server shutdown"
+git add scripts/stop.sh
+git commit -m "feat: add scripts/stop.sh for server shutdown"
 ```
 
 ---
@@ -538,7 +538,7 @@ FAIL=0
 # Check config
 if [ ! -f "$CONFIG_FILE" ]; then
     echo -e "${RED}Error: Config file not found at ${CONFIG_FILE}${NC}"
-    echo "Run ./setup.sh first."
+    echo "Run setup/setup.sh first."
     exit 1
 fi
 
@@ -554,7 +554,7 @@ if curl -s "${SERVER_URL}/health" > /dev/null 2>&1; then
     PASS=$((PASS + 1))
 else
     echo -e "${RED}✗ Server not responding at ${SERVER_URL}${NC}"
-    echo "  Start server with: ./start.sh"
+    echo "  Start server with: scripts/start.sh"
     FAIL=$((FAIL + 1))
 fi
 
@@ -688,13 +688,13 @@ help:
 
 setup:
 	@echo "Starting LLM environment setup..."
-	@bash setup.sh
+	@bash setup/setup.sh
 
 start:
-	@bash start.sh
+	@bash scripts/start.sh
 
 stop:
-	@bash stop.sh
+	@bash scripts/stop.sh
 
 test:
 	@bash test.sh
@@ -772,7 +772,7 @@ rm setup-dev.sh
 
 ```bash
 git add -A setup-dev.sh
-git commit -m "chore: remove old setup-dev.sh replaced by setup.sh"
+git commit -m "chore: remove old setup-dev.sh replaced by setup/setup.sh"
 ```
 
 ---

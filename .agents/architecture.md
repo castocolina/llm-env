@@ -10,13 +10,13 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | File | Responsibility |
 |---|---|
 | `Makefile` | Thin dispatcher, no logic beyond 3 lines |
-| `lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
-| `setup.sh` | Interactive configuration, downloads, network exposure |
-| `benchmark.sh` | Vulkan-only measurement with CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
-| `start.sh` | Budget check, device resolution, quadlet render, health gate |
-| `stop.sh` / `clean.sh` | Lifecycle |
-| `check-setup.sh` | Offline validation |
-| `check-server.sh` | Online API contract validation |
+| `tools/lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
+| `setup/setup.sh` | Interactive configuration, downloads, network exposure |
+| `scripts/benchmark.sh` | Vulkan-only measurement with CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
+| `scripts/start.sh` | Budget check, device resolution, quadlet render, health gate |
+| `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
+| `scripts/check-setup.sh` | Offline validation |
+| `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
 | `pylib/config.py` | Schema, enable/disable, `models_max` sync |
 | `pylib/gguf.py` | GGUF header parsing, KV geometry |

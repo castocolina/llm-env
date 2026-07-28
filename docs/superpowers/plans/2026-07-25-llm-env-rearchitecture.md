@@ -40,13 +40,13 @@
 | `pylib/detect.py` | GPU enumeration from `/sys/class/drm`, compositor render node |
 | `pylib/budget.py` | VRAM budget arithmetic and feasibility verdict |
 | `pylib/presets.py` | `presets.ini` generation via `configparser` |
-| `lib.sh` | Shared bash logging, colours, config path resolution |
-| `setup.sh` | Interactive configurator |
-| `start.sh` | Device resolution, quadlet render, unit start, health gate |
-| `stop.sh` | Stop the systemd unit |
-| `check-setup.sh` | Offline validation |
-| `check-server.sh` | Online API contract validation |
-| `benchmark.sh` | Backend benchmark with fallback chain |
+| `tools/lib.sh` | Shared bash logging, colours, config path resolution |
+| `setup/setup.sh` | Interactive configurator |
+| `scripts/start.sh` | Device resolution, quadlet render, unit start, health gate |
+| `scripts/stop.sh` | Stop the systemd unit |
+| `scripts/check-setup.sh` | Offline validation |
+| `scripts/check-server.sh` | Online API contract validation |
+| `scripts/benchmark.sh` | Backend benchmark with fallback chain |
 | `tests/test_*.py` | pytest suites, one per `pylib` module |
 
 **Deleted:** `models.sh`, `setup-test.sh`, `server-test.sh`, `debug-inference.sh`, `presets.ini`, `llama.cpp/` (1.5 GB untracked clone).
@@ -111,24 +111,24 @@ help:
 	@echo "make clean         Remove config, unit, and images"
 
 setup:
-	@bash setup.sh
+	@bash setup/setup.sh
 
 start:
-	@bash start.sh
+	@bash scripts/start.sh
 
 stop:
-	@bash stop.sh
+	@bash scripts/stop.sh
 
 restart: stop start
 
 check-setup:
-	@bash check-setup.sh
+	@bash scripts/check-setup.sh
 
 check-server:
-	@bash check-server.sh
+	@bash scripts/check-server.sh
 
 benchmark:
-	@bash benchmark.sh
+	@bash scripts/benchmark.sh
 
 enable-boot:
 	@loginctl enable-linger "$$USER"
@@ -154,7 +154,7 @@ test:
 	@uv run --with pytest pytest tests/ -v
 
 clean:
-	@bash clean.sh
+	@bash scripts/clean.sh
 ```
 
 - [ ] **Step 4: Verify targets exist and help runs**
@@ -168,7 +168,7 @@ Expected: help text prints; `make -n validate` echoes the shellcheck and ruff co
 git add -A Makefile .gitignore
 git commit -m "chore: rewrite Makefile as thin dispatcher, drop vendored llama.cpp
 
-Removes the 1.5 GB untracked llama.cpp clone that setup.sh created by
+Removes the 1.5 GB untracked llama.cpp clone that setup/setup.sh created by
 cloning into the host CWD, plus the unused presets.ini and the
 debug-inference.sh script whose exit-code capture was always 0."
 ```
@@ -1929,18 +1929,18 @@ subcommands for the bash layer to consume with jq."
 ## Task 8: Shared bash library and interactive setup
 
 **Files:**
-- Create: `lib.sh`, `setup.sh`
+- Create: `tools/lib.sh`, `setup/setup.sh`
 - Delete: `models.sh`, `setup-test.sh`, `server-test.sh`
 
 **Interfaces:**
 - Consumes: `llmenv.py init`, `models`, `detect`, `validate-gguf`
-- Produces: `lib.sh` exporting `log_info`, `log_warn`, `log_error`, `log_step`, `die`, `require_cmd`, and the variables `CONFIG_PATH`, `MODELS_DIR`, `REPO_DIR`, `UNIT_NAME`
+- Produces: `tools/lib.sh` exporting `log_info`, `log_warn`, `log_error`, `log_step`, `die`, `require_cmd`, and the variables `CONFIG_PATH`, `MODELS_DIR`, `REPO_DIR`, `UNIT_NAME`
 
-- [ ] **Step 1: Write `lib.sh`**
+- [ ] **Step 1: Write `tools/lib.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# lib.sh — shared helpers. Source, do not execute.
+# tools/lib.sh — shared helpers. Source, do not execute.
 
 set -euo pipefail
 
@@ -1970,19 +1970,19 @@ require_cmd() {
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 ```
 
-- [ ] **Step 2: Verify lib.sh passes shellcheck**
+- [ ] **Step 2: Verify tools/lib.sh passes shellcheck**
 
-Run: `shellcheck -s bash lib.sh`
+Run: `shellcheck -s bash tools/lib.sh`
 Expected: no output (clean).
 
-- [ ] **Step 3: Write `setup.sh`**
+- [ ] **Step 3: Write `setup/setup.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# setup.sh — interactive configurator.
+# setup/setup.sh — interactive configurator.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 
 require_cmd uv jq podman curl
 
@@ -2076,13 +2076,13 @@ git rm -f models.sh setup-test.sh server-test.sh
 
 - [ ] **Step 5: Verify shellcheck passes**
 
-Run: `shellcheck -s bash lib.sh setup.sh`
+Run: `shellcheck -s bash tools/lib.sh setup/setup.sh`
 Expected: no output.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib.sh setup.sh
+git add tools/lib.sh setup/setup.sh
 git commit -m "feat: add shared bash library and interactive setup
 
 Replaces models.sh globals, the hardcoded 1/2/3 model menu, and the
@@ -2095,20 +2095,20 @@ budget check are all driven from models.yml."
 ## Task 9: Backend benchmark with fallback chain
 
 **Files:**
-- Create: `benchmark.sh`
+- Create: `scripts/benchmark.sh`
 
 **Interfaces:**
-- Consumes: `lib.sh`, `llmenv.py resolve-device`
+- Consumes: `tools/lib.sh`, `llmenv.py resolve-device`
 - Produces: writes `gpu.backend`, `gpu.image`, `gpu.device_name`, and `gpu.benchmark.<backend>` into `models.yml`
 
-- [ ] **Step 1: Write `benchmark.sh`**
+- [ ] **Step 1: Write `scripts/benchmark.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# benchmark.sh — measure Vulkan and configure CPU fallback on failure.
+# scripts/benchmark.sh — measure Vulkan and configure CPU fallback on failure.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 
 require_cmd uv jq yq podman
 
@@ -2174,7 +2174,7 @@ if [ -n "$device_name" ]; then
     yq -i ".gpu.device_name = \"${device_name}\"" "$CONFIG_PATH"
     log_info "device name recorded: ${device_name}  (pci ${pci})"
 else
-    log_warn "could not resolve a device name; start.sh will offload to all devices"
+    log_warn "could not resolve a device name; scripts/start.sh will offload to all devices"
 fi
 
 yq -i ".gpu.backend = \"${winner_backend}\"" "$CONFIG_PATH"
@@ -2184,18 +2184,18 @@ log_info "backend set to ${winner_backend} (${winner_image})"
 
 - [ ] **Step 2: Verify shellcheck passes**
 
-Run: `shellcheck -s bash benchmark.sh`
+Run: `shellcheck -s bash scripts/benchmark.sh`
 Expected: no output.
 
 - [ ] **Step 3: Verify the Vulkan failure fallback path**
 
-Run: `LLM_ENV_CONFIG="$HOME/.config/llm-env/models.yml" bash -n benchmark.sh && echo "syntax ok"`
+Run: `LLM_ENV_CONFIG="$HOME/.config/llm-env/models.yml" bash -n scripts/benchmark.sh && echo "syntax ok"`
 Expected: `syntax ok`. Full execution is deferred to Task 14 acceptance, since it pulls 8 GB.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add benchmark.sh
+git add scripts/benchmark.sh
 git commit -m "feat: benchmark Vulkan with CPU fallback
 
 Records Vulkan prompt and generation throughput in models.yml so
@@ -2208,21 +2208,21 @@ Vulkan failures configure CPU fallback and log a reason."
 ## Task 10: Quadlet service, start and stop
 
 **Files:**
-- Create: `start.sh`, `stop.sh`, `clean.sh`
-- Delete: nothing (old `start.sh`/`stop.sh` are overwritten)
+- Create: `scripts/start.sh`, `scripts/stop.sh`, `scripts/clean.sh`
+- Delete: nothing (old `scripts/start.sh`/`scripts/stop.sh` are overwritten)
 
 **Interfaces:**
-- Consumes: `lib.sh`, `llmenv.py resolve-device`, `llmenv.py presets`, `llmenv.py budget`
+- Consumes: `tools/lib.sh`, `llmenv.py resolve-device`, `llmenv.py presets`, `llmenv.py budget`
 - Produces: `${HOME}/.config/containers/systemd/llm-server.container`
 
-- [ ] **Step 1: Write `start.sh`**
+- [ ] **Step 1: Write `scripts/start.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# start.sh — render the quadlet unit and start the server.
+# scripts/start.sh — render the quadlet unit and start the server.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 
 require_cmd uv jq yq podman systemctl
 
@@ -2274,7 +2274,7 @@ mkdir -p "$QUADLET_DIR"
 device_lines="AddDevice=/dev/dri"
 
 cat > "${QUADLET_DIR}/${UNIT_NAME}.container" <<EOF
-# Generated by start.sh from ${CONFIG_PATH}. Edits will be overwritten.
+# Generated by scripts/start.sh from ${CONFIG_PATH}. Edits will be overwritten.
 [Unit]
 Description=llama.cpp router server (${backend})
 After=network-online.target
@@ -2335,14 +2335,14 @@ echo "  Logs: journalctl --user -u ${UNIT_NAME}.service -n 50"
 exit 1
 ```
 
-- [ ] **Step 2: Write `stop.sh`**
+- [ ] **Step 2: Write `scripts/stop.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# stop.sh — stop the server.
+# scripts/stop.sh — stop the server.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 
 require_cmd systemctl
 
@@ -2359,14 +2359,14 @@ else
 fi
 ```
 
-- [ ] **Step 3: Write `clean.sh`**
+- [ ] **Step 3: Write `scripts/clean.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# clean.sh — remove the unit, config, and images. Keeps downloaded models.
+# scripts/clean.sh — remove the unit, config, and images. Keeps downloaded models.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 
 echo "This removes:"
 echo "  unit    ${QUADLET_DIR}/${UNIT_NAME}.container"
@@ -2388,7 +2388,7 @@ log_info "cleanup complete"
 
 - [ ] **Step 4: Verify shellcheck passes**
 
-Run: `shellcheck -s bash start.sh stop.sh clean.sh`
+Run: `shellcheck -s bash scripts/start.sh scripts/stop.sh scripts/clean.sh`
 Expected: no output.
 
 - [ ] **Step 5: Verify the quadlet renders to a valid unit**
@@ -2402,7 +2402,7 @@ Expected: after `make start` has run once, this prints a generated `llm-server.s
 - [ ] **Step 6: Commit**
 
 ```bash
-git add start.sh stop.sh clean.sh
+git add scripts/start.sh scripts/stop.sh scripts/clean.sh
 git commit -m "feat: replace PID-file lifecycle with a podman quadlet unit
 
 Removes the PID file, stale-PID handling, the kill/kill -9 escalation,
@@ -2415,20 +2415,20 @@ sleep-idle model eviction."
 ## Task 11: Offline validation
 
 **Files:**
-- Create: `check-setup.sh`
+- Create: `scripts/check-setup.sh`
 
 **Interfaces:**
-- Consumes: `lib.sh`, `llmenv.py validate-gguf`, `llmenv.py budget`, `llmenv.py detect`
+- Consumes: `tools/lib.sh`, `llmenv.py validate-gguf`, `llmenv.py budget`, `llmenv.py detect`
 - Produces: exit 0 when every check passes, 1 otherwise
 
-- [ ] **Step 1: Write `check-setup.sh`**
+- [ ] **Step 1: Write `scripts/check-setup.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# check-setup.sh — offline validation. No server required.
+# scripts/check-setup.sh — offline validation. No server required.
 set -uo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 set +e
 
 PASS=0; FAIL=0
@@ -2496,7 +2496,7 @@ log_step "Results: ${PASS} passed, ${FAIL} failed"
 
 - [ ] **Step 2: Verify shellcheck passes**
 
-Run: `shellcheck -s bash check-setup.sh`
+Run: `shellcheck -s bash scripts/check-setup.sh`
 Expected: no output.
 
 - [ ] **Step 3: Run it against the current system**
@@ -2507,7 +2507,7 @@ Expected: a pass/fail table. Before `make setup` has run, config checks fail and
 - [ ] **Step 4: Commit**
 
 ```bash
-git add check-setup.sh
+git add scripts/check-setup.sh
 git commit -m "feat: add offline setup validation
 
 Verifies tooling, config schema, GPU presence, render-node readability,
@@ -2520,20 +2520,20 @@ access directly rather than assuming render/video group membership."
 ## Task 12: Online API contract validation
 
 **Files:**
-- Create: `check-server.sh`
+- Create: `scripts/check-server.sh`
 
 **Interfaces:**
-- Consumes: `lib.sh`
+- Consumes: `tools/lib.sh`
 - Produces: exit 0 when every assertion passes, 1 otherwise
 
-- [ ] **Step 1: Write `check-server.sh`**
+- [ ] **Step 1: Write `scripts/check-server.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# check-server.sh — assert the running server honours its API contract.
+# scripts/check-server.sh — assert the running server honours its API contract.
 set -uo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tools/lib.sh
+source "$(git rev-parse --show-toplevel)/tools/lib.sh"
 set +e
 
 require_cmd curl jq yq
@@ -2609,7 +2609,7 @@ Note the arithmetic: counters use `$((PASS + 1))`, never `${PASS + 1}`, which is
 
 - [ ] **Step 2: Verify shellcheck passes**
 
-Run: `shellcheck -s bash check-server.sh`
+Run: `shellcheck -s bash scripts/check-server.sh`
 Expected: no output.
 
 - [ ] **Step 3: Verify the summary arithmetic cannot regress**
@@ -2620,7 +2620,7 @@ Expected: `1/3`. Confirm no `${X + Y}` form appears: `! grep -nE '\$\{[A-Za-z_]+
 - [ ] **Step 4: Commit**
 
 ```bash
-git add check-server.sh
+git add scripts/check-server.sh
 git commit -m "test: replace capability test with an API contract test
 
 The previous server-test.sh asserted the model knew live weather, which
@@ -2634,13 +2634,13 @@ model listing, and non-empty completions, with jq-built request bodies."
 ## Task 13: Network exposure — firewall and mDNS
 
 **Files:**
-- Modify: `setup.sh` (append a network step; renumber the step banners to 1/8..8/8)
+- Modify: `setup/setup.sh` (append a network step; renumber the step banners to 1/8..8/8)
 
 **Interfaces:**
-- Consumes: `lib.sh`
+- Consumes: `tools/lib.sh`
 - Produces: an open firewall port and an avahi alias
 
-- [ ] **Step 1: Append the network step to `setup.sh`**
+- [ ] **Step 1: Append the network step to `setup/setup.sh`**
 
 Insert before the final `log_info "Setup complete..."` line:
 
@@ -2718,20 +2718,20 @@ EOF
 Change `Step 1/7` through `Step 7/7` to `Step 1/8` through `Step 7/8`:
 
 ```bash
-sed -i 's|Step \([1-7]\)/7|Step \1/8|g' setup.sh
-grep -n "Step .*/8" setup.sh
+sed -i 's|Step \([1-7]\)/7|Step \1/8|g' setup/setup.sh
+grep -n "Step .*/8" setup/setup.sh
 ```
 Expected: eight banners, numbered 1/8 through 8/8.
 
 - [ ] **Step 3: Verify shellcheck passes**
 
-Run: `shellcheck -s bash setup.sh`
+Run: `shellcheck -s bash setup/setup.sh`
 Expected: no output.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add setup.sh
+git add setup/setup.sh
 git commit -m "feat: add firewall, mDNS, and usage examples to setup
 
 Opens the port with consent, publishes <name>.local via avahi so LAN
@@ -2823,13 +2823,13 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | File | Responsibility |
 |---|---|
 | `Makefile` | Thin dispatcher, no logic beyond 3 lines |
-| `lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
-| `setup.sh` | Interactive configuration, downloads, network exposure |
-| `benchmark.sh` | Vulkan-only measurement with CPU fallback |
-| `start.sh` | Budget check, device resolution, quadlet render, health gate |
-| `stop.sh` / `clean.sh` | Lifecycle |
-| `check-setup.sh` | Offline validation |
-| `check-server.sh` | Online API contract validation |
+| `tools/lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
+| `setup/setup.sh` | Interactive configuration, downloads, network exposure |
+| `scripts/benchmark.sh` | Vulkan-only measurement with CPU fallback |
+| `scripts/start.sh` | Budget check, device resolution, quadlet render, health gate |
+| `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
+| `scripts/check-setup.sh` | Offline validation |
+| `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
 | `pylib/config.py` | Schema, enable/disable, `models_max` sync |
 | `pylib/gguf.py` | GGUF header parsing, KV geometry |
@@ -3010,6 +3010,6 @@ support, none of which existed."
 
 **Every defect in spec §10 has an owning task.** `${A + B}` → Task 12 Step 3 asserts the pattern is absent repo-wide. Wrong-CWD clone → Task 1. `.gitignore` → Task 1. `debug-inference.sh` → Task 1. Capability test → Task 12. `--list-models` → Task 3. `git pull` precedence → Task 1 (deleted). Hardcoded menu → Task 8. Dead `.config` → Task 2. `stat -c%s` → Task 5. `hostname -I` → Task 10 uses `ip -json` + jq. JSON injection → Task 12. `cd` leak → Task 8. Missing `version = 1` → Task 6. Device pinning → Tasks 7, 10. `models-max` vs VRAM → Task 5. No auth → Tasks 10, 12.
 
-**Type consistency.** `enabled_models`, `sync_models_max`, `set_model_enabled`, `load_config`, `save_config`, `validate_config` are defined in Task 2 and used identically in Tasks 6 and 7. `kv_geometry` returns the same four keys in Task 3 that Task 5 consumes. `compute_budget` returns `available_mib`/`required_mib`/`shortfall_mib`/`feasible`/`remedies` in Task 5, consumed with those exact names in Tasks 7, 8, 10, 11. `SPIKE_HEADROOM_MIB` is defined once. `UNIT_NAME`, `CONFIG_PATH`, `MODELS_DIR`, `QUADLET_DIR` come from `lib.sh` in Task 8 and are used unchanged thereafter.
+**Type consistency.** `enabled_models`, `sync_models_max`, `set_model_enabled`, `load_config`, `save_config`, `validate_config` are defined in Task 2 and used identically in Tasks 6 and 7. `kv_geometry` returns the same four keys in Task 3 that Task 5 consumes. `compute_budget` returns `available_mib`/`required_mib`/`shortfall_mib`/`feasible`/`remedies` in Task 5, consumed with those exact names in Tasks 7, 8, 10, 11. `SPIKE_HEADROOM_MIB` is defined once. `UNIT_NAME`, `CONFIG_PATH`, `MODELS_DIR`, `QUADLET_DIR` come from `tools/lib.sh` in Task 8 and are used unchanged thereafter.
 
-**Two gaps found and fixed inline:** `clean.sh` was referenced by the Makefile in Task 1 but had no task — added to Task 10. `models.yml.example` was referenced by `llmenv.py init` but unwritten — added to Task 2 Step 6.
+**Two gaps found and fixed inline:** `scripts/clean.sh` was referenced by the Makefile in Task 1 but had no task — added to Task 10. `models.yml.example` was referenced by `llmenv.py init` but unwritten — added to Task 2 Step 6.
