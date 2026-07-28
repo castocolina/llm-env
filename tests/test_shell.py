@@ -786,6 +786,20 @@ def test_check_setup_prints_complete_static_and_inference_records(
     assert "Verdict: PASS" in result.stdout
 
 
+def test_check_setup_accepts_ready_after_visible_reasoning(tmp_path: pathlib.Path) -> None:
+    """Offline inference accepts the final answer after visible reasoning."""
+    result, _, _ = run_check_setup_with_stubs(
+        tmp_path,
+        inference_stdout="[Start thinking]\nThe user requires one word.\nready\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Inference stdout:\n  [Start thinking]" in result.stdout
+    assert "  The user requires one word." in result.stdout
+    assert "Parsed result:\n  ready" in result.stdout
+    assert "Verdict: PASS" in result.stdout
+
+
 def test_check_setup_keeps_independent_records_after_an_inference_failure(
     tmp_path: pathlib.Path,
 ) -> None:

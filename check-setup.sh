@@ -33,11 +33,17 @@ record_command() {
     log_block "$stderr_label" "$(<"$stderr_file")"
     log_block "Exit status" "$status"
     parsed="$(<"$stdout_file")"
-    log_block "Parsed result" "$parsed"
     if [ -n "$expected_result" ]; then
+        parsed=""
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [ -n "${line//[[:space:]]/}" ]; then
+                parsed="$line"
+            fi
+        done < "$stdout_file"
         normalized="$(printf '%s' "$parsed" | tr '[:upper:]' '[:lower:]' | \
             sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
     fi
+    log_block "Parsed result" "$parsed"
     log_block "Expectation" "$expectation"
 
     if [ "$status" -ne 0 ]; then
