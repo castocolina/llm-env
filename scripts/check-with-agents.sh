@@ -12,7 +12,7 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 
-require_cmd curl jq yq
+require_cmd curl jq yq date
 
 workspace="$(mktemp -d)" || die "could not create private workspace"
 chmod 700 "$workspace" || die "could not secure private workspace"
@@ -51,13 +51,23 @@ fetch_models() {
 
 snapshot_for() {
     local check_name="$1" stdout_file="$2" stderr_file="$3" parser_stderr_file="$4"
-    local url filter snapshot status
+    local url filter snapshot status source_date
 
     case "$check_name" in
         weather)
             url="$weather_url"
             # shellcheck disable=SC2016 # jq variables must remain literal until jq evaluates them.
-            filter='. as $source | select(($source.current.time | strings | length) > 0) | select($source.current.temperature_2m | numbers) | select($source.current.weather_code | numbers) | {source_url: $url, source_timestamp: $source.current.time, temperature_2m: $source.current.temperature_2m, weather_code: $source.current.weather_code}'
+            filter='. as $source
+                | select(($source.current.time | strings | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")))
+                | ($source.current.time[0:10]) as $source_date
+                | select(($source_date | strptime("%Y-%m-%d") | strftime("%Y-%m-%d")) == $source_date)
+                | select($source.current.temperature_2m | numbers)
+                | select($source.current.weather_code | numbers)
+                | {source_url: $url,
+                   source_timestamp: $source.current.time,
+                   source_date: ($source.current.time | .[0:10]),
+                   temperature_2m: $source.current.temperature_2m,
+                   weather_code: $source.current.weather_code}'
             ;;
         fx)
             url="$fx_url"
@@ -87,7 +97,16 @@ snapshot_for() {
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
         return 1
     fi
-    log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+    if [ "$check_name" = fx ]; then
+        if ! source_date="$(date -u --date "$(jq -r '.source_timestamp' <<<"$snapshot")" +%F \
+            2>>"$parser_stderr_file")" \
+            || ! snapshot="$(jq -ce --arg source_date "$source_date" '. + {source_date: $source_date}' \
+                <<<"$snapshot" 2>>"$parser_stderr_file")"; then
+            log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+            log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
+            return 1
+        fi
+    fi
     log_block "Parsed result" "$snapshot"
     log_block "Expectation" "a current typed ${check_name} source object"
     log_info "Verdict: PASS"
@@ -231,27 +250,43 @@ source_evidence_differences() {
     local check_name="$1"
     local snapshot="$2"
     local evidence="$3"
-    local required_fields
+    local required_fields timestamp
+    local timestamp_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])?$'
 
     case "$check_name" in
         weather)
-            required_fields='["source_url", "source_timestamp", "temperature_2m", "weather_code"]'
+            required_fields='["source_url", "temperature_2m", "weather_code"]'
             ;;
         fx)
-            required_fields='["source_url", "source_timestamp", "usd_to_clp"]'
+            required_fields='["source_url", "usd_to_clp"]'
             ;;
         *)
             return 1
             ;;
     esac
 
+    if ! timestamp="$(jq -er '.source_timestamp | strings' <<<"$evidence")" \
+        || ! [[ "$timestamp" =~ $timestamp_pattern ]] \
+        || ! date --date "$timestamp" +%s >/dev/null 2>&1; then
+        printf 'field=source_timestamp expected=ISO-8601 received=%s\n' \
+            "$(jq -cn --arg value "${timestamp:-}" '$value')"
+        return
+    fi
+
     jq -nr --argjson expected "$snapshot" --argjson received "$evidence" \
         --argjson fields "$required_fields" '
-        $fields[] as $field
-        | ($expected[$field] // "<missing>") as $want
-        | ($received[$field] // "<missing>") as $got
-        | select($want != $got)
-        | "field=\($field) expected=\($want | tojson) received=\($got | tojson)"
+        [
+          (($expected.source_date // "<missing>") as $want_date
+           | ($received.source_timestamp[0:10] // "<missing>") as $got_date
+           | select($want_date != $got_date)
+           | "field=source_timestamp expected_date=\($want_date | tojson) received_date=\($got_date | tojson)"),
+          ($fields[] as $field
+           | ($expected[$field] // "<missing>") as $want
+           | ($received[$field] // "<missing>") as $got
+           | select($want != $got)
+           | "field=\($field) expected=\($want | tojson) received=\($got | tojson)")
+        ]
+        | .[]
     '
 }
 
@@ -302,8 +337,7 @@ for client in "${clients[@]}"; do
                     fields='source_url, source_timestamp, and usd_to_clp'
                     ;;
             esac
-            printf -v prompt '%s' \
-                "Use a shell network command to fetch current data from ${source_url}. Return exactly one JSON object containing ${fields}."
+            printf -v prompt '%s' "Run a shell network command against this literal URL: ${source_url}. Do not substitute the source or modify its query. Return fields from that response only. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"
