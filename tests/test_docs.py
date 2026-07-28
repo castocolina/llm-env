@@ -3,6 +3,38 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+DIRECTORY_LAYOUT = re.compile(r"(?ms)^## Directory Layout\n.*?(?=^## |\Z)")
+RELOCATED_SHELL_PATHS = {
+    "tools/lib.sh",
+    "setup/disable-boot.sh",
+    "setup/enable-boot.sh",
+    "setup/network.sh",
+    "setup/prerequisites.sh",
+    "setup/render-unit.sh",
+    "setup/setup.sh",
+    "scripts/benchmark.sh",
+    "scripts/check-server.sh",
+    "scripts/check-setup.sh",
+    "scripts/check-with-agents.sh",
+    "scripts/clean.sh",
+    "scripts/key-reset.sh",
+    "scripts/start.sh",
+    "scripts/stop.sh",
+}
+RELOCATED_SCRIPT_REFERENCE = re.compile(
+    r"(?<![\w-])(?P<path>(?:\./)?(?:[\w.-]+/)*(?:"
+    r"benchmark|check-server|check-setup|check-with-agents|clean|disable-boot|"
+    r"enable-boot|key-reset|lib|network|prerequisites|render-unit|setup|start|stop"
+    r")\.sh)\b"
+)
+
+
+def _has_invalid_relocated_script_reference(markdown: str) -> bool:
+    for match in RELOCATED_SCRIPT_REFERENCE.finditer(DIRECTORY_LAYOUT.sub("", markdown)):
+        path = match["path"].removeprefix("./")
+        if path not in RELOCATED_SHELL_PATHS:
+            return True
+    return False
 
 
 def test_current_docs_describe_vulkan_only_diagnostics() -> None:
@@ -47,13 +79,16 @@ def test_tracked_markdown_uses_relocated_script_paths() -> None:
             ["git", "ls-files", "--", "*.md"], text=True
         ).splitlines()
     ]
-    directory_layout = re.compile(
-        r"(?ms)^## Directory Layout\n.*?(?=^## |\Z)"
-    )
-    root_script_reference = re.compile(
-        r"(?<![./\w-])(?:[A-Za-z0-9-]+\.sh)\b"
-    )
-
     for path in tracked_markdown:
-        markdown = directory_layout.sub("", path.read_text())
-        assert not root_script_reference.search(markdown), path
+        assert not _has_invalid_relocated_script_reference(path.read_text()), path
+
+
+def test_relocation_matcher_rejects_moved_scripts_outside_approved_directories() -> None:
+    assert _has_invalid_relocated_script_reference("`start.sh`")
+    assert _has_invalid_relocated_script_reference("`./start.sh`")
+    assert _has_invalid_relocated_script_reference("`archive/start.sh`")
+
+
+def test_relocation_matcher_permits_approved_and_unrelated_shell_paths() -> None:
+    assert not _has_invalid_relocated_script_reference("`scripts/start.sh`")
+    assert not _has_invalid_relocated_script_reference("`other-tool.sh`")
