@@ -54,7 +54,9 @@ request_record() {
 
     log_block "Identity" "$identity"
     log_command "$display_command"
-    log_block "Request payload" "$payload"
+    if [[ "$display_command" != *"--data-raw"* ]]; then
+        log_block "Request payload" "$payload"
+    fi
     log_block "HTTP response" "$(<"$body_file")"
     log_block "HTTP stderr" "$(<"$stderr_file")"
     log_block "HTTP status" "$http_status"
