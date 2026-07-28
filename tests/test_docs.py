@@ -19,14 +19,15 @@ def test_current_docs_describe_vulkan_only_diagnostics() -> None:
 
     assert "vulkan-only benchmark" in readme
     assert "cpu fallback and exits nonzero" in readme
-    assert "redacted command" in quick_start
-    assert "input" in quick_start
-    assert "stdout" in quick_start
-    assert "stderr" in quick_start
-    assert "parsed value" in quick_start
-    assert "expectation" in quick_start
-    assert "verdict" in quick_start
-    assert "llm_env_keep_check_artifacts=1" in quick_start
+    assert (
+        "every check prints its redacted command, input, stdout, stderr, parsed value,\n"
+        "expectation, and verdict."
+    ) in quick_start
+    assert (
+        "`llm_env_keep_check_artifacts=1` retains only the\n"
+        "redacted private diagnostic artifacts; without it, the checks remove them\n"
+        "after printing their contents."
+    ) in quick_start
     assert "check-with-agents" in quick_start
     assert "fixed local prompt `reply with exactly: ready`" in quick_start
     assert "opt-in live check" in quick_start
