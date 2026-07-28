@@ -8,7 +8,7 @@ podman quadlet on Bazzite.
 ```bash
 make prerequisites  # confirm and install Bazzite/Fedora host tools
 make setup       # choose GPU and models, download, generate config
-make benchmark   # measure Vulkan vs ROCm, record the winner
+make benchmark   # measure Vulkan throughput; CPU fallback still reports a failed Vulkan benchmark
 make start       # start the server
 make check-server
 ```
@@ -19,7 +19,8 @@ make check-server
   Clients pick a model with the `model` field.
 - Detects your GPU, VRAM, and compositor usage, then computes a VRAM budget
   and refuses to start a configuration that cannot fit.
-- Benchmarks Vulkan against ROCm and records tokens/sec in `models.yml`.
+- Uses a Vulkan-only benchmark and records tokens/sec in `models.yml`. If the
+  Vulkan benchmark fails, it configures CPU fallback and exits nonzero.
 - Runs as a systemd user service. Manual by default; `make enable-boot`
   makes it start with the machine.
 - Exposes an OpenAI-compatible API on the LAN with an API key and an

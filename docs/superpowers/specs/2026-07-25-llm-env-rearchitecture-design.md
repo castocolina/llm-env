@@ -51,9 +51,8 @@ with `podman-user-generator` wired in (verified by dry-run), `python 3.14.6`,
 - `GGML_VK_VISIBLE_DEVICES` is honoured (`ggml-vulkan.cpp:7170`).
 - `--sleep-idle-seconds` unloads idle models (`tools/server/README.md:236`).
 - KV quantization `-ctk/-ctv` and flash attention `-fa` are available.
-- Official ROCm images build for `gfx1201` (`.devops/rocm.Dockerfile:37`, ROCm 7.2.1).
-- Image download sizes (linux/amd64, compressed, measured via skopeo):
-  `server-vulkan` **0.31 GB** / 6 layers; `server-rocm` **7.69 GB** / 8 layers.
+- The Vulkan image builds for `gfx1201`.
+- The `server-vulkan` image is **0.31 GB** compressed with 6 layers.
 - `KWIN_DRM_DEVICES` exists in `libkwin.so` (currently unset).
 
 ---
@@ -65,7 +64,7 @@ with `podman-user-generator` wired in (verified by dry-run), `python 3.14.6`,
 | D1 | Manual start/stop by default, opt-in boot | User choice (C). `loginctl enable-linger` gates boot start. |
 | D2 | Prebuilt images only; no source build | Deletes the entire build pipeline, where every discovered bug lives. |
 | D3 | Bash orchestrates; one Python helper for parsing/config | `jq` + `yq` cover shell-side JSON/YAML; Python owns schema, arithmetic, INI generation. |
-| D4 | Benchmark Vulkan vs ROCm at setup, with fallback chain | gfx1201 is officially supported but relative performance is unknown; measure, don't guess. |
+| D4 | Benchmark Vulkan at setup, with CPU fallback | Measure Vulkan throughput and record failure details rather than assuming GPU inference works. |
 | D5 | VRAM budget measured at every start | Compositor usage is dynamic (observed 1403 → 2026 MiB during design). |
 | D6 | `models_max` = count of enabled models | Hard user requirement; feasibility is validated and reported, not silently overridden. |
 | D7 | Store PCI address, resolve device index at runtime | Vulkan indices are unstable; PCI addresses are not. |
@@ -139,14 +138,13 @@ server:
 gpu:
   pci_address: "0000:03:00.0"
   device_name: "AMD Radeon RX 9070 XT (RADV GFX1201)"
-  backend: vulkan               # vulkan | rocm | cpu — set by benchmark
+  backend: vulkan               # vulkan | cpu — set by benchmark
   image: ghcr.io/ggml-org/llama.cpp:server-vulkan
   vram_total_mib: 16304
   reserve_mode: auto            # auto = re-measure compositor each start
   reserve_floor_mib: 1024
   benchmark:                    # recorded evidence, written by benchmark.sh
     vulkan: { pp_tps: null, tg_tps: null, measured_at: null }
-    rocm:   { pp_tps: null, tg_tps: null, measured_at: null }
 
 runtime:
   models_max: 2                 # derived: count(enabled models) — 2 enabled below
@@ -217,16 +215,14 @@ pin the compositor to the iGPU). It does not silently reduce `models_max`.
 ## 6. Backend Selection
 
 `benchmark.sh` runs `llama-bench` on the smallest enabled model and records
-prompt-processing and generation throughput per backend.
+Vulkan prompt-processing and generation throughput.
 
-Fallback chain — each guarded, failures logged with a reason, never fatal:
+Fallback behavior — failures are logged with a reason and return nonzero:
 
 ```
-ROCm   requires /dev/kfd + gfx1201 + container start + bench success
-  ↓
 Vulkan requires /dev/dri/renderD* + container start + bench success
   ↓
-CPU    always available; emits a loud warning
+CPU    is configured as fallback; the benchmark still exits nonzero
 ```
 
 Results are written to `gpu.benchmark` so the choice is auditable and re-runnable.
@@ -236,8 +232,8 @@ Results are written to `gpu.benchmark` so the choice is auditable and re-runnabl
 ## 7. Service Model
 
 Quadlet unit at `~/.config/containers/systemd/llm-server.container`, rendered from
-`models.yml` at `make start`. Uses `--device /dev/dri` (plus `/dev/kfd` for ROCm),
-mounts the models directory read-only, and health-gates on `/health` via `HealthCmd`.
+`models.yml` at `make start`. Uses `--device /dev/dri`, mounts the models directory
+read-only, and health-gates on `/health` via `HealthCmd`.
 
 Removes: `PID_FILE`, stale-PID handling, the manual `curl` health loop, and `stop.sh`'s
 kill/`kill -9` escalation. Boot start is opt-in via `loginctl enable-linger` +
@@ -306,15 +302,15 @@ reality; macOS support is dropped from the docs rather than claimed.
 1. **Model provenance unverified.** `bartowski/gemma-4-12B-it-GGUF` and
    `deepreinforce-ai/Ornith-1.0-9B-GGUF` could not be confirmed upstream. Files exist
    locally at plausible sizes. Mitigated by `validate-gguf`; the YAML makes replacement trivial.
-2. **ROCm image cost.** 7.69 GB compressed for an unknown gain. Benchmark is opt-in and
-   the image is removable if Vulkan wins.
+2. **Vulkan benchmark failure.** GPU initialization or throughput parsing can fail. The
+   benchmark records CPU fallback, emits complete diagnostics, and exits nonzero.
 3. **Compositor pinning is disruptive.** `KWIN_DRM_DEVICES=/dev/dri/card0` would blank the
    dGPU DP monitor. Documented as an option, not applied automatically.
 4. **`models_max` vs VRAM.** Honouring the user rule can produce an infeasible config;
    resolved by reporting loudly at setup rather than overriding.
 5. **Rootless podman GPU access.** Confirmed: the user's groups are `bazzite wheel` only —
    **not** `render` or `video`. This works today solely because Bazzite ships
-   `/dev/dri/renderD*` and `/dev/kfd` as mode `0666`. That is distro policy and could change
+   `/dev/dri/renderD*` as mode `0666`. That is distro policy and could change
    on an update. `check-setup.sh` verifies device readability explicitly rather than assuming
    group membership.
 

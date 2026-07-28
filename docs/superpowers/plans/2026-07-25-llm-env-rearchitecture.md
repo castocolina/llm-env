@@ -18,7 +18,7 @@
 - Makefile target bodies longer than 3 lines MUST delegate to a `.sh` file. Trivial targets may stay inline.
 - Python is invoked only as `uv run llmenv.py <subcommand>`. Never `python3 llmenv.py`.
 - Tests run as `uv run --with pytest pytest tests/ -v`.
-- No source builds of llama.cpp. Prebuilt images only: `ghcr.io/ggml-org/llama.cpp:server-vulkan` (0.31 GB) or `:server-rocm` (7.69 GB).
+- No source builds of llama.cpp. Use the prebuilt `ghcr.io/ggml-org/llama.cpp:server-vulkan` image.
 - `runtime.models_max` is ALWAYS recomputed as the count of enabled models. Never hardcoded, never silently overridden.
 - `spike_headroom` is the constant `1024` MiB. Defined once in `pylib/budget.py`.
 - Vulkan device indices (`Vulkan0`) are unstable and MUST NOT be persisted. Persist the PCI address (`0000:03:00.0`) and resolve the index at runtime.
@@ -101,7 +101,7 @@ help:
 	@echo "make restart       Restart the LLM server"
 	@echo "make check-setup   Validate config, image, models, GPU (offline)"
 	@echo "make check-server  Validate the running server API (online)"
-	@echo "make benchmark     Benchmark Vulkan vs ROCm and record results"
+	@echo "make benchmark     Benchmark Vulkan; CPU fallback exits nonzero"
 	@echo "make enable-boot   Start automatically at boot"
 	@echo "make disable-boot  Do not start at boot"
 	@echo "make status        Show service status"
@@ -365,7 +365,7 @@ REQUIRED_MODEL_KEYS = (
     "ctx_size",
     "n_gpu_layers",
 )
-VALID_BACKENDS = ("vulkan", "rocm", "cpu")
+VALID_BACKENDS = ("vulkan", "cpu")
 VRAM_BUDGET_RE = re.compile(r"^\s*\d+(\.\d+)?\s*(%|GB|MiB)\s*$", re.IGNORECASE)
 
 
@@ -487,10 +487,6 @@ gpu:
   reserve_floor_mib: 1024
   benchmark:
     vulkan:
-      pp_tps: null
-      tg_tps: null
-      measured_at: null
-    rocm:
       pp_tps: null
       tg_tps: null
       measured_at: null
@@ -2109,7 +2105,7 @@ budget check are all driven from models.yml."
 
 ```bash
 #!/usr/bin/env bash
-# benchmark.sh — measure Vulkan vs ROCm, record the winner, fall back safely.
+# benchmark.sh — measure Vulkan and configure CPU fallback on failure.
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -2117,7 +2113,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 require_cmd uv jq yq podman
 
 VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
-ROCM_IMAGE="ghcr.io/ggml-org/llama.cpp:server-rocm"
 
 bench_model="$(yq -r '[.models[] | select(.enabled)] | sort_by(.size_bytes) | .[0].file' "$CONFIG_PATH")"
 [ -n "$bench_model" ] && [ "$bench_model" != "null" ] || die "no enabled models to benchmark"
@@ -2146,26 +2141,7 @@ record() {
     yq -i ".gpu.benchmark.${backend}.measured_at = \"$(date -Iseconds)\"" "$CONFIG_PATH"
 }
 
-winner_backend=""; winner_image=""; winner_tg="0"
-
-log_step "Trying ROCm"
-if [ ! -e /dev/kfd ]; then
-    log_warn "skipping ROCm: /dev/kfd is absent"
-elif [ ! -r /dev/kfd ]; then
-    log_warn "skipping ROCm: /dev/kfd is not readable by this user"
-else
-    log_info "pulling ${ROCM_IMAGE} (7.69 GB, this takes a while)"
-    if podman pull "$ROCM_IMAGE" >/dev/null 2>&1 \
-       && result="$(run_bench "$ROCM_IMAGE" /dev/dri /dev/kfd)" \
-       && [ -n "$result" ]; then
-        pp="$(cut -f1 <<<"$result")"; tg="$(cut -f2 <<<"$result")"
-        record rocm "$pp" "$tg"
-        winner_backend=rocm; winner_image="$ROCM_IMAGE"; winner_tg="$tg"
-        log_info "ROCm: ${pp} tok/s prompt, ${tg} tok/s generation"
-    else
-        log_warn "ROCm benchmark failed; falling back"
-    fi
-fi
+winner_backend=""; winner_image=""
 
 log_step "Trying Vulkan"
 log_info "pulling ${VULKAN_IMAGE} (0.31 GB)"
@@ -2175,9 +2151,7 @@ if podman pull "$VULKAN_IMAGE" >/dev/null 2>&1 \
     pp="$(cut -f1 <<<"$result")"; tg="$(cut -f2 <<<"$result")"
     record vulkan "$pp" "$tg"
     log_info "Vulkan: ${pp} tok/s prompt, ${tg} tok/s generation"
-    if [ -z "$winner_backend" ] || awk "BEGIN{exit !($tg > $winner_tg)}"; then
-        winner_backend=vulkan; winner_image="$VULKAN_IMAGE"; winner_tg="$tg"
-    fi
+    winner_backend=vulkan; winner_image="$VULKAN_IMAGE"
 else
     log_warn "Vulkan benchmark failed"
 fi
@@ -2213,7 +2187,7 @@ log_info "backend set to ${winner_backend} (${winner_image})"
 Run: `shellcheck -s bash benchmark.sh`
 Expected: no output.
 
-- [ ] **Step 3: Verify the fallback path with ROCm forced unavailable**
+- [ ] **Step 3: Verify the Vulkan failure fallback path**
 
 Run: `LLM_ENV_CONFIG="$HOME/.config/llm-env/models.yml" bash -n benchmark.sh && echo "syntax ok"`
 Expected: `syntax ok`. Full execution is deferred to Task 14 acceptance, since it pulls 8 GB.
@@ -2222,11 +2196,11 @@ Expected: `syntax ok`. Full execution is deferred to Task 14 acceptance, since i
 
 ```bash
 git add benchmark.sh
-git commit -m "feat: benchmark Vulkan vs ROCm with a guarded fallback chain
+git commit -m "feat: benchmark Vulkan with CPU fallback
 
-Records prompt and generation throughput per backend in models.yml so
-the backend choice is evidence rather than assumption. Falls back
-ROCm -> Vulkan -> CPU, logging a reason at each step."
+Records Vulkan prompt and generation throughput in models.yml so
+the configured result is evidence rather than assumption. Falls back
+Vulkan failures configure CPU fallback and log a reason."
 ```
 
 ---
@@ -2298,7 +2272,6 @@ log_info "wrote ${presets_path}"
 log_step "Rendering the quadlet unit"
 mkdir -p "$QUADLET_DIR"
 device_lines="AddDevice=/dev/dri"
-[ "$backend" = "rocm" ] && device_lines="${device_lines}"$'\n'"AddDevice=/dev/kfd"
 
 cat > "${QUADLET_DIR}/${UNIT_NAME}.container" <<EOF
 # Generated by start.sh from ${CONFIG_PATH}. Edits will be overwritten.
@@ -2409,7 +2382,6 @@ rm -f "${QUADLET_DIR}/${UNIT_NAME}.container"
 systemctl --user daemon-reload
 rm -f "$CONFIG_PATH" "${HOME}/.config/llm-env/presets.ini"
 podman rmi -f ghcr.io/ggml-org/llama.cpp:server-vulkan \
-                ghcr.io/ggml-org/llama.cpp:server-rocm \
                 ghcr.io/ggml-org/llama.cpp:server 2>/dev/null || true
 log_info "cleanup complete"
 ```
@@ -2483,10 +2455,6 @@ check "config parses and validates" bash -c \
 log_step "GPU access"
 check "/dev/dri exists" test -d /dev/dri
 check "a render node is readable" bash -c 'ls /dev/dri/renderD* >/dev/null 2>&1 && head -c0 /dev/dri/renderD128'
-backend="$(yq -r '.gpu.backend' "$CONFIG_PATH" 2>/dev/null || echo unknown)"
-if [ "$backend" = "rocm" ]; then
-    check "/dev/kfd readable (required by ROCm)" test -r /dev/kfd
-fi
 
 log_step "Configured GPU is present"
 pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || echo "")"
@@ -2798,7 +2766,7 @@ quadlet with GPU acceleration. Configuration lives in `models.yml`.
 
 ```bash
 make setup         # Interactive configuration
-make benchmark     # Measure Vulkan vs ROCm, record the winner
+make benchmark     # Measure Vulkan; CPU fallback exits nonzero
 make start         # Start the server
 make stop          # Stop the server
 make check-setup   # Offline validation
@@ -2831,8 +2799,9 @@ Do not assume. Before implementing anything that is not 100% clear:
 
 Silent failures from unresearched assumptions waste more time than asking.
 
-Never hardcode a value that can be measured. GPU device, VRAM totals,
-compositor usage, and backend choice are all detected at runtime.
+Never hardcode a value that can be measured. GPU device, VRAM totals, and
+compositor usage are all detected at runtime. Benchmarking uses Vulkan only;
+an unsuccessful Vulkan benchmark configures CPU fallback and exits nonzero.
 
 ## Detailed Instructions
 
@@ -2856,7 +2825,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `Makefile` | Thin dispatcher, no logic beyond 3 lines |
 | `lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
 | `setup.sh` | Interactive configuration, downloads, network exposure |
-| `benchmark.sh` | Backend measurement with ROCm -> Vulkan -> CPU fallback |
+| `benchmark.sh` | Vulkan-only measurement with CPU fallback |
 | `start.sh` | Budget check, device resolution, quadlet render, health gate |
 | `stop.sh` / `clean.sh` | Lifecycle |
 | `check-setup.sh` | Offline validation |
@@ -2893,7 +2862,7 @@ podman quadlet on Bazzite.
 
 ```bash
 make setup       # choose GPU and models, download, generate config
-make benchmark   # measure Vulkan vs ROCm, record the winner
+make benchmark   # measure Vulkan throughput; CPU fallback exits nonzero
 make start       # start the server
 make check-server
 ```
@@ -2904,7 +2873,8 @@ make check-server
   Clients pick a model with the `model` field.
 - Detects your GPU, VRAM, and compositor usage, then computes a VRAM budget
   and refuses to start a configuration that cannot fit.
-- Benchmarks Vulkan against ROCm and records tokens/sec in `models.yml`.
+- Benchmarks Vulkan and records tokens/sec in `models.yml`. A Vulkan failure
+  configures CPU fallback and exits nonzero.
 - Runs as a systemd user service. Manual by default; `make enable-boot`
   makes it start with the machine.
 - Exposes an OpenAI-compatible API on the LAN with an API key and an

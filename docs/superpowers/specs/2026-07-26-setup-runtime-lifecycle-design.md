@@ -71,11 +71,11 @@ podman run --rm --device /dev/dri \
 
 The command uses a bounded timeout. A successful process with non-empty model output passes. The check does not test a live fact, such as current weather, because local models do not have web access. It does not bind a port, create a service, require an API key, or require mDNS.
 
-The image is Vulkan before benchmark. Benchmark may later select ROCm or CPU for the persistent service.
+The image is Vulkan before benchmark. A failed Vulkan benchmark configures CPU fallback for the persistent service and exits nonzero.
 
 ## Runtime Workflow
 
-`make benchmark` remains responsible for measuring ROCm and Vulkan and selecting the persistent backend.
+`make benchmark` measures Vulkan throughput. It selects the Vulkan image on success; on failure, it configures CPU fallback and exits nonzero.
 
 `make start` performs these actions in order:
 

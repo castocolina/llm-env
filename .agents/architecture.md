@@ -12,7 +12,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `Makefile` | Thin dispatcher, no logic beyond 3 lines |
 | `lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
 | `setup.sh` | Interactive configuration, downloads, network exposure |
-| `benchmark.sh` | Backend measurement with ROCm -> Vulkan -> CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
+| `benchmark.sh` | Vulkan-only measurement with CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
 | `start.sh` | Budget check, device resolution, quadlet render, health gate |
 | `stop.sh` / `clean.sh` | Lifecycle |
 | `check-setup.sh` | Offline validation |
@@ -34,6 +34,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
   `llama-server` treats every INI section as a model preset and would
   register a phantom model.
 - Host-side probes use `127.0.0.1`, never `localhost`.
+- A failed Vulkan benchmark configures CPU fallback and exits nonzero.
 
 ## Platform
 

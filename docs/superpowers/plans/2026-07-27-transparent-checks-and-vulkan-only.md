@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make setup and every check explain its exact work and results, fix the live-agent check from real evidence, and remove unsupported ROCm behavior while retaining the user’s existing host image.
+**Goal:** Make setup and every check explain its exact work and results, fix the live-agent check from real evidence, and document Vulkan-only benchmarking with CPU fallback.
 
 **Architecture:** Bash check scripts render redacted execution records before and after each operation. A shared redaction helper removes the configured API key and bearer values from displayed or retained output. `benchmark.sh` has one supported GPU backend—Vulkan—then preserves CPU fallback. `check-with-agents.sh` fetches a fresh public-source snapshot per matrix row and compares it to one parsed, optionally fenced JSON object from each agent.
 
@@ -16,7 +16,7 @@
 - Never display or retain the local API key, curl config content, or bearer header value. Render them as `<redacted>`.
 - `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only a mode-700 redacted diagnostic directory; default cleanup removes it.
 - `make check-server` remains local and deterministic. `make check-with-agents` is the only Internet-dependent target.
-- Remove ROCm from project behavior and generated configuration. Do not run `podman rmi`, alter host ROCm, or delete the existing host ROCm image.
+- Use Vulkan as the sole GPU benchmark path. A Vulkan failure configures CPU fallback and exits nonzero.
 - Every shell change requires `make validate`; every Python/test change requires `make validate && make test`.
 - Makefile targets longer than three lines delegate to shell scripts.
 
@@ -124,7 +124,7 @@ git commit -m "feat: add redacted diagnostic helpers"
 - `benchmark.sh` consumes the smallest enabled model and runs only `ghcr.io/ggml-org/llama.cpp:server-vulkan` before CPU fallback.
 - `gpu.benchmark` contains only `vulkan` after initialization or migration.
 
-- [ ] **Step 1: Add failing GPU-row and ROCm-schema tests**
+- [ ] **Step 1: Add failing GPU-row and Vulkan-only schema tests**
 
 ```python
 def test_setup_gpu_rows_include_measured_used_and_free_vram(tmp_path):
@@ -134,9 +134,8 @@ def test_setup_gpu_rows_include_measured_used_and_free_vram(tmp_path):
     assert "14336 MiB free" in result.stdout
 
 
-def test_vulkan_only_config_removes_legacy_rocm_benchmark():
+def test_vulkan_only_config_contains_only_vulkan_benchmark():
     cfg = make_valid_config()
-    cfg["gpu"]["benchmark"]["rocm"] = {"pp_tps": 1, "tg_tps": 1, "measured_at": "old"}
     migrated = migrate_config(cfg)
     assert set(migrated["gpu"]["benchmark"]) == {"vulkan"}
 ```
@@ -151,13 +150,13 @@ Expected: FAIL because setup hides used/free VRAM and no migration exists.
 
 Change the existing `jq` GPU row renderer in `setup.sh` to use the detector’s existing `vram_used_mib` field and calculate `vram_total_mib - vram_used_mib`. Include those three measured values in the selection confirmation. Preserve default selection by largest measured total VRAM.
 
-- [ ] **Step 4: Remove ROCm from schema/template and migrate generated configs**
+- [ ] **Step 4: Use the Vulkan-only schema/template and migrate generated configs**
 
-Delete `benchmark.rocm` from `models.yml.example`. Add `migrate_config(cfg)` in `pylib/config.py`; it removes `cfg["gpu"]["benchmark"]["rocm"]` and returns the config. Call it from config load/save paths before validation. Update valid configuration fixtures to include only Vulkan.
+Keep only `benchmark.vulkan` in `models.yml.example`. Add `migrate_config(cfg)` in `pylib/config.py`; it returns configuration with only the Vulkan benchmark record. Call it from config load/save paths before validation. Update valid configuration fixtures to include only Vulkan.
 
 - [ ] **Step 5: Rewrite benchmark as Vulkan-only and transparent**
 
-Delete `ROCM_IMAGE`, `/dev/kfd` checks, ROCm pull/run/record branches, ROCm winner comparisons, and all ROCm messages. Before execution print:
+Use only the Vulkan image and `/dev/dri`. Before execution print:
 
 ```bash
 log_step "Vulkan benchmark"
@@ -165,11 +164,11 @@ log_info "model: ${bench_model}"
 log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} bench -m /models/${bench_model} -p 512 -n 128 -r 2 -o json"
 ```
 
-Capture combined output in a private diagnostic file, then `log_block "Raw benchmark output" "$(cat "$output")"`. Parse throughput only after output is captured. On failure print `Vulkan benchmark exited <status>` plus complete redacted output, then perform the existing CPU fallback. Do not pull or remove a ROCm image.
+Capture stdout and stderr in separate private diagnostic files, then print each redacted stream. Parse throughput only from stdout. On failure print `Vulkan benchmark exited <status>` plus complete redacted output, then configure CPU fallback and exit nonzero.
 
 - [ ] **Step 6: Add benchmark command tests and verify**
 
-Add a Podman stub test that asserts no command/call/text contains `server-rocm`, `/dev/kfd`, or `rocm`, and that Vulkan output appears when the stub returns malformed benchmark JSON. Run:
+Add a Podman stub test that asserts the Vulkan command uses `/dev/dri` and that CPU fallback is configured when the stub returns malformed benchmark JSON. Run:
 
 `uv run --with pytest pytest tests/test_shell.py -k 'benchmark or setup_gpu_rows' -v`
 
@@ -334,7 +333,7 @@ def test_docs_describe_transparent_vulkan_checks():
     readme = (ROOT / "README.md").read_text().lower()
     quick = (ROOT / "QUICK_START.md").read_text().lower()
     assert "vulkan" in readme
-    assert "rocm" not in readme
+    assert "vulkan-only" in readme
     assert "llm_env_keep_check_artifacts=1" in quick
     assert "check-with-agents" in quick
 ```
@@ -343,11 +342,11 @@ def test_docs_describe_transparent_vulkan_checks():
 
 Run: `uv run --with pytest pytest tests/test_docs.py -v`
 
-Expected: FAIL because current documents describe ROCm and lack diagnostic artifacts.
+Expected: FAIL because current documents lack Vulkan-only diagnostic artifacts.
 
 - [ ] **Step 3: Document Vulkan-only and transparent checks**
 
-Rewrite benchmark language as Vulkan-only with CPU fallback. State that the project does not remove existing host images. Document setup’s total/used/free GPU rows; check output sections; redacted diagnostics; and `LLM_ENV_KEEP_CHECK_ARTIFACTS=1`.
+Rewrite benchmark language as Vulkan-only with CPU fallback. Document setup’s total/used/free GPU rows; check output sections; redacted diagnostics; and `LLM_ENV_KEEP_CHECK_ARTIFACTS=1`.
 
 Update the client compatibility evidence with real Pi/OpenCode live results only after Task 4 passes. State that each agent row shows its command, prompt, transcript, parsed evidence, and source comparison.
 
@@ -365,7 +364,7 @@ LLM_ENV_KEEP_CHECK_ARTIFACTS=1 make check-with-agents
 make stop
 ```
 
-Verify each command displays the required records, no output/artifact contains the API key, Vulkan remains selected, and existing `server-rocm` remains present locally without a project command touching it.
+Verify each command displays the required records, no output/artifact contains the API key, Vulkan remains selected after a successful benchmark, and a failed Vulkan benchmark configures CPU fallback with a nonzero result.
 
 - [ ] **Step 5: Final verification and commit**
 
@@ -378,6 +377,6 @@ git commit -m "docs: explain transparent Vulkan inference checks"
 
 ## Self-Review
 
-- **Spec coverage:** Task 1 supplies safe rendering. Task 2 covers measured setup VRAM and removes ROCm without host deletion. Task 3 adds offline/server transparency. Task 4 fixes actual live-agent failures and diagnostics. Task 5 documents behavior and runs two-model acceptance.
+- **Spec coverage:** Task 1 supplies safe rendering. Task 2 covers measured setup VRAM and Vulkan-only CPU fallback. Task 3 adds offline/server transparency. Task 4 fixes actual live-agent failures and diagnostics. Task 5 documents behavior and runs two-model acceptance.
 - **Placeholder scan:** Every code-changing task has explicit files, failing tests, commands, expected result, implementation behavior, and commit command.
 - **Interface consistency:** Task 1 produces helpers used by Tasks 2–4. Task 4 consumes per-row snapshots and passes parsed evidence to the existing comparison function. Task 5 validates the public behavior created by all prior tasks.

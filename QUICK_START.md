@@ -4,7 +4,7 @@
 
 ```bash
 make setup       # 1. pick GPU + models, download, write config
-make benchmark   # 2. measure backends (pulls up to 8 GB, once)
+make benchmark   # 2. measure Vulkan throughput; CPU fallback exits nonzero
 make start       # 3. start
 make check-server
 ```
@@ -61,7 +61,18 @@ make restart
 ## When something breaks
 
 ```bash
-make check-setup     # config, GPU, images, model files, VRAM budget
-make check-server    # health, auth, model listing, completions
+make check-setup                         # offline config, GPU, image, model, and inference records
+make check-server                        # local deterministic OpenAI-compatible API records
+LLM_ENV_KEEP_CHECK_ARTIFACTS=1 make check-with-agents  # Pi/OpenCode live weather and USD-to-CLP checks
 make logs
 ```
+
+Every check prints its redacted command, input, stdout, stderr, parsed value,
+expectation, and verdict. `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the
+redacted private diagnostic artifacts; without it, the checks remove them
+after printing their contents.
+
+`make check-server` uses the fixed local prompt `Reply with exactly: ready`.
+`make check-with-agents` is an opt-in live check: Pi and OpenCode independently
+fetch public weather and USD-to-CLP data, then compare their evidence with a
+fresh source snapshot.
