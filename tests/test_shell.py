@@ -407,6 +407,7 @@ def test_benchmark_parses_valid_stdout_despite_vulkan_stderr_warning(
     assert '"avg_ts":123.4' in result.stdout
     assert "Benchmark stderr:" in result.stdout
     assert "WARNING: radv" in result.stdout
+    assert "Benchmark parser stderr:\n  (empty)" in result.stdout
     assert yq_value(config, ".gpu.backend") == "vulkan"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
     assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()

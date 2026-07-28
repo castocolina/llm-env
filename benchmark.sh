@@ -37,6 +37,7 @@ run_vulkan_bench() {
     log_block "Benchmark stderr" "$(<"$stderr_file")"
     log_block "Exit status" "$status"
     if [ "$status" -ne 0 ]; then
+        log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
         log_error "Vulkan benchmark failure: command exit ${status}"
         return 1
     fi
@@ -45,6 +46,7 @@ run_vulkan_bench() {
         log_error "Vulkan benchmark failure: response parsing"
         return 1
     fi
+    log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
     BENCH_RESULT="$result"
 }
 
