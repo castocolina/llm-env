@@ -1258,7 +1258,13 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
 
 
 def run_check_server(
-    tmp_path: pathlib.Path, completion_body: dict[str, str]
+    tmp_path: pathlib.Path,
+    completion_body: dict[str, str],
+    *,
+    completion_curl_exits: dict[str, int] | None = None,
+    completion_responses: dict[str, str] | None = None,
+    completion_statuses: dict[str, int] | None = None,
+    model_list_body: str = '{"data":[{"id":"gemma4"},{"id":"ornith"}]}',
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
     commands = tmp_path / "bin"
@@ -1299,19 +1305,19 @@ def run_check_server(
         "}\n"
         "case \"$url\" in\n"
         "  */health) write_response '{\"status\":\"ok\"}'; printf '200' ;;\n"
-        "  */v1/models) write_response '{\"data\":[{\"id\":\"gemma4\"},{\"id\":\"ornith\"}]}'; printf '200' ;;\n"
+        "  */v1/models) write_response \"$MODEL_LIST_BODY\"; printf '200' ;;\n"
         "  */v1/chat/completions)\n"
         "    if [ -n \"$auth_conf\" ] && [[ \"$(<\"$auth_conf\")\" == *definitely-not-the-key* ]]; then\n"
         "      write_response '{\"error\":\"unauthorized\"}'; printf '401'; exit 0\n"
         "    fi\n"
         "    case \"$data\" in\n"
-        "      *gemma4*) content=\"$GEMMA4_CONTENT\" ;;\n"
-        "      *ornith*) content=\"$ORNITH_CONTENT\" ;;\n"
+        "      *gemma4*) response=\"$GEMMA4_RESPONSE\"; status=\"$GEMMA4_STATUS\"; exit_code=\"$GEMMA4_CURL_EXIT\" ;;\n"
+        "      *ornith*) response=\"$ORNITH_RESPONSE\"; status=\"$ORNITH_STATUS\"; exit_code=\"$ORNITH_CURL_EXIT\" ;;\n"
         "      *) write_response '{\"error\":\"unknown model\"}'; printf '400'; exit 0 ;;\n"
         "    esac\n"
-        "    write_response \"{\\\"choices\\\":[{\\\"message\\\":{\\\"content\\\":$content}}]}\"\n"
-        "    printf '200'\n"
-        "    [ \"${COMPLETION_CURL_EXIT:-0}\" = 0 ] || { printf 'completion curl failed\\n' >&2; exit \"$COMPLETION_CURL_EXIT\"; }\n"
+        "    write_response \"$response\"\n"
+        "    printf '%s' \"$status\"\n"
+        "    [ \"$exit_code\" = 0 ] || { printf 'completion curl failed\\n' >&2; exit \"$exit_code\"; }\n"
         "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
@@ -1322,7 +1328,10 @@ def run_check_server(
     jq.write_text(
         "#!/usr/bin/bash\n"
         "case \"$1\" in\n"
-        "  -e) exit 0 ;;\n"
+        "  .)\n"
+        "    response=\"$(<\"$2\")\"\n"
+        "    case \"$response\" in not-json) printf 'parse error: invalid literal\\n' >&2; exit 4 ;; esac\n"
+        "    ;;\n"
         "  -n)\n"
         "    while [ \"$#\" -gt 0 ]; do\n"
         "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = m ]; then\n"
@@ -1335,14 +1344,20 @@ def run_check_server(
         "    ;;\n"
         "  -r)\n"
         "    case \"$2\" in\n"
-        "      '[.data[].id] | sort | join(\",\")') printf '%s\\n' 'gemma4,ornith' ;;\n"
-        "      '.choices[0].message.content // empty')\n"
+        "      '[.data[].id] | sort | join(\",\")')\n"
         "        response=\"$(cat)\"\n"
+        "        case \"$response\" in not-json) printf 'parse error: invalid literal\\n' >&2; exit 4 ;; esac\n"
+        "        printf '%s\\n' 'gemma4,ornith'\n"
+        "        ;;\n"
+        "      '.choices?[0]?.message?.content? // empty')\n"
+        "        response=\"$(cat)\"\n"
+        "        case \"$response\" in *\\\"content\\\":*) ;; *) exit 0 ;; esac\n"
         "        content=\"${response#*\\\"content\\\":}\"\n"
         "        content=\"${content#\\\"}\"\n"
         "        content=\"${content%%\\\"*}\"\n"
         "        printf '%b\\n' \"$content\"\n"
         "        ;;\n"
+        "      '.choices?[0]?.message?.reasoning_content? // empty') exit 0 ;;\n"
         "      *) exit 64 ;;\n"
         "    esac\n"
         "    ;;\n"
@@ -1366,12 +1381,34 @@ def run_check_server(
     )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
+    completion_responses = completion_responses or {}
+    completion_statuses = completion_statuses or {}
+    completion_curl_exits = completion_curl_exits or {}
+    gemma4_response = completion_responses.get(
+        "gemma4",
+        json.dumps(
+            {"choices": [{"message": {"content": completion_body["gemma4"]}}]},
+            separators=(",", ":"),
+        ),
+    )
+    ornith_response = completion_responses.get(
+        "ornith",
+        json.dumps(
+            {"choices": [{"message": {"content": completion_body["ornith"]}}]},
+            separators=(",", ":"),
+        ),
+    )
     environment = os.environ | {
         "CALLS": str(calls),
-        "GEMMA4_CONTENT": json.dumps(completion_body["gemma4"]),
+        "GEMMA4_CURL_EXIT": str(completion_curl_exits.get("gemma4", 0)),
+        "GEMMA4_RESPONSE": gemma4_response,
+        "GEMMA4_STATUS": str(completion_statuses.get("gemma4", 200)),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
-        "ORNITH_CONTENT": json.dumps(completion_body["ornith"]),
+        "MODEL_LIST_BODY": model_list_body,
+        "ORNITH_CURL_EXIT": str(completion_curl_exits.get("ornith", 0)),
+        "ORNITH_RESPONSE": ornith_response,
+        "ORNITH_STATUS": str(completion_statuses.get("ornith", 200)),
         "PATH": f"{commands}:/usr/bin:/bin",
     }
     result = subprocess.run(
@@ -1445,6 +1482,88 @@ def test_check_server_reports_a_completion_failure_without_hiding_other_models(
     assert "ornith" in result.stdout
     assert "Verdict: FAIL stage=normalized-value mismatch" in result.stderr
     assert "Results:" in result.stdout
+
+
+def test_check_server_reports_completion_curl_failure(tmp_path: pathlib.Path) -> None:
+    """A curl exit must retain its captured stderr and fail that completion."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        completion_curl_exits={"gemma4": 7},
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=curl failure" in result.stderr
+    assert "HTTP stderr:\n  completion curl failed" in result.stdout
+    assert "server completion model=ornith" in result.stdout
+
+
+def test_check_server_reports_non_2xx_completion(tmp_path: pathlib.Path) -> None:
+    """An HTTP failure must be distinct from a curl failure."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        completion_responses={"gemma4": '{"error":"unavailable"}'},
+        completion_statuses={"gemma4": 503},
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=HTTP response" in result.stderr
+    assert "status=503" in result.stderr
+
+
+def test_check_server_reports_invalid_completion_json(tmp_path: pathlib.Path) -> None:
+    """Malformed completion JSON must expose the parsing failure."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        completion_responses={"gemma4": "not-json"},
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=invalid JSON" in result.stderr
+    assert "Response parsing stderr:\n  parse error: invalid literal" in result.stdout
+
+
+def test_check_server_reports_missing_assistant_content(tmp_path: pathlib.Path) -> None:
+    """A valid completion object without content must fail explicitly."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        completion_responses={"gemma4": '{"choices":[{"message":{}}]}'},
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=missing assistant content" in result.stderr
+
+
+@pytest.mark.parametrize("response", ["null", "false"])
+def test_check_server_treats_valid_scalar_responses_as_missing_content(
+    tmp_path: pathlib.Path, response: str
+) -> None:
+    """Valid scalar JSON is not malformed, but cannot contain assistant content."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        completion_responses={"gemma4": response},
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=missing assistant content" in result.stderr
+    assert "Verdict: FAIL stage=invalid JSON" not in result.stderr
+
+
+def test_check_server_reports_malformed_model_listing(tmp_path: pathlib.Path) -> None:
+    """A malformed successful model list must retain its jq diagnostic."""
+    result, _ = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        model_list_body="not-json",
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=response parsing identity=server model listing" in result.stderr
+    assert "Response parsing stderr:\n  parse error: invalid literal" in result.stdout
 
 
 def run_agent_check(

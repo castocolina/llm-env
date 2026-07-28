@@ -120,8 +120,14 @@ log_block "Expectation" "$REQUEST_EXPECTATION"
 if request_failed 200 "server model listing"; then
     :
 else
-    listed="$(jq -r '[.data[].id] | sort | join(",")' < "$REQUEST_BODY_FILE")"
-    if [ "$listed" = "$expected" ]; then
+    model_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
+    listed="$(jq -r '[.data[].id] | sort | join(",")' \
+        < "$REQUEST_BODY_FILE" 2>"$model_parse_stderr")"
+    model_parse_status=$?
+    log_block "Response parsing stderr" "$(<"$model_parse_stderr")"
+    if [ "$model_parse_status" -ne 0 ]; then
+        bad "Verdict: FAIL stage=response parsing identity=server model listing"
+    elif [ "$listed" = "$expected" ]; then
         ok "Verdict: PASS identity=server model listing /v1/models lists exactly: ${expected}"
     else
         bad "Verdict: FAIL stage=model-list mismatch listed='${listed}' expected='${expected}'"
@@ -151,17 +157,20 @@ while read -r alias; do
     normalized=""
     failure_stage=""
     failure_detail=""
+    completion_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
     if [ "$REQUEST_CURL_STATUS" -ne 0 ]; then
         failure_stage="curl failure"
         failure_detail="exit=${REQUEST_CURL_STATUS}"
     elif [[ ! "$REQUEST_HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
         failure_stage="HTTP response"
         failure_detail="status=${REQUEST_HTTP_STATUS}"
-    elif ! jq -e . "$REQUEST_BODY_FILE" >/dev/null 2>&1; then
+    elif ! jq . "$REQUEST_BODY_FILE" >/dev/null 2>"$completion_parse_stderr"; then
         failure_stage="invalid JSON"
     else
-        content="$(jq -r '.choices[0].message.content // empty' < "$REQUEST_BODY_FILE")"
-        reasoning="$(jq -r '.choices[0].message.reasoning_content // empty' < "$REQUEST_BODY_FILE")"
+        content="$(jq -r '.choices?[0]?.message?.content? // empty' \
+            < "$REQUEST_BODY_FILE" 2>>"$completion_parse_stderr")"
+        reasoning="$(jq -r '.choices?[0]?.message?.reasoning_content? // empty' \
+            < "$REQUEST_BODY_FILE" 2>>"$completion_parse_stderr")"
         normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
             sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
         if [ -z "$content" ]; then
@@ -175,6 +184,7 @@ while read -r alias; do
     log_block "Assistant content" "$content"
     log_block "Reasoning content" "$reasoning"
     log_block "Normalized content" "$normalized"
+    log_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
     log_block "Expectation" "$REQUEST_EXPECTATION"
     if [ -n "$failure_stage" ]; then
         bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
