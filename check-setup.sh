@@ -36,7 +36,7 @@ record_command() {
     if [ -n "$expected_result" ]; then
         parsed=""
         while IFS= read -r line || [ -n "$line" ]; do
-            if [ -n "${line//[[:space:]]/}" ]; then
+            if [ -n "${line//[[:space:]]/}" ] && [ "$line" != "Exiting..." ]; then
                 parsed="$line"
             fi
         done < "$stdout_file"
@@ -77,7 +77,7 @@ record_inference_skip() {
 
 inference_command() {
     local file="$1" device="$2" layers="$3"
-    printf 'timeout 180 podman run --rm --device /dev/dri -v %q:/models:ro,z --entrypoint /app/llama %q cli -m %q --device %q --n-gpu-layers %q --single-turn -p %q -n 256' \
+    printf 'timeout 180 podman run --rm --device /dev/dri -v %q:/models:ro,z --entrypoint /app/llama %q cli -m %q --device %q --n-gpu-layers %q --single-turn --no-show-timings -p %q -n 256' \
         "$MODELS_DIR" "$image" "/models/${file}" "$device" "$layers" "Reply with exactly: ready"
 }
 
@@ -96,7 +96,8 @@ record_inferences() {
                 -v "${MODELS_DIR}:/models:ro,z" \
                 --entrypoint /app/llama "$image" cli \
                 -m "/models/${file}" --device "$device" \
-                --n-gpu-layers "$layers" --single-turn -p "Reply with exactly: ready" -n 256 || true
+                --n-gpu-layers "$layers" --single-turn --no-show-timings \
+                -p "Reply with exactly: ready" -n 256 || true
         fi
     done < <(yq -r '.models[] | select(.enabled) | [.alias, .file, .n_gpu_layers] | @tsv' "$CONFIG_PATH")
 }

@@ -745,12 +745,14 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
     first_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
-        "--device Vulkan7 --n-gpu-layers 42 --single-turn -p Reply with exactly: ready -n 256"
+        "--device Vulkan7 --n-gpu-layers 42 --single-turn --no-show-timings "
+        "-p Reply with exactly: ready -n 256"
     )
     second_inference = (
         f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
         "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
-        "--device Vulkan7 --n-gpu-layers 17 --single-turn -p Reply with exactly: ready -n 256"
+        "--device Vulkan7 --n-gpu-layers 17 --single-turn --no-show-timings "
+        "-p Reply with exactly: ready -n 256"
     )
     assert recorded.count(list_devices) == 1
     assert recorded.count(f"timeout 180 {first_inference}") == 1
@@ -798,6 +800,20 @@ def test_check_setup_accepts_ready_after_visible_reasoning(tmp_path: pathlib.Pat
     assert "  The user requires one word." in result.stdout
     assert "Parsed result:\n  ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
+
+
+def test_check_setup_ignores_llama_exit_footer_after_ready(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_check_setup_with_stubs(
+        tmp_path,
+        inference_stdout="[Start thinking]\nreasoning\nready\n\nExiting...\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Parsed result:\n  ready" in result.stdout
+    assert "Exiting..." in result.stdout
+    assert "--no-show-timings" in calls.read_text()
 
 
 def test_check_setup_keeps_independent_records_after_an_inference_failure(
