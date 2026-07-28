@@ -610,10 +610,14 @@ def test_check_setup_never_requires_the_rocm_kernel_device(tmp_path: pathlib.Pat
     assert "rocm" not in (result.stdout + result.stderr).lower()
 
 
-def test_check_setup_runs_disposable_inference_for_each_enabled_model(
+def run_check_setup_with_stubs(
     tmp_path: pathlib.Path,
-) -> None:
-    """Offline setup validation must resolve and smoke-test every enabled model."""
+    *,
+    inference_stdout: str = "ready",
+    inference_stderr: str = "",
+    inference_exit: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
     assert real_yq is not None
 
@@ -663,7 +667,7 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'--list-devices'*) printf '%s\\n' 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ;;\n"
-        "  *' cli '*) printf '%s\\n' 'ready' ;;\n"
+        "  *' cli '*) printf '%s' \"$INFERENCE_STDOUT\"; printf '%s' \"$INFERENCE_STDERR\" >&2; exit \"$INFERENCE_EXIT\" ;;\n"
         "esac\n"
     )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
@@ -698,6 +702,9 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         "LLM_ENV_MODELS_DIR": str(models_dir),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
+        "INFERENCE_STDOUT": inference_stdout,
+        "INFERENCE_STDERR": inference_stderr,
+        "INFERENCE_EXIT": str(inference_exit),
     }
     result = subprocess.run(
         ["/usr/bin/bash", "check-setup.sh"],
@@ -707,6 +714,14 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         capture_output=True,
         check=False,
     )
+    return result, calls, models_dir
+
+
+def test_check_setup_runs_disposable_inference_for_each_enabled_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Offline setup validation must resolve and smoke-test every enabled model."""
+    result, calls, models_dir = run_check_setup_with_stubs(tmp_path)
 
     assert result.returncode == 0, result.stderr
     recorded = calls.read_text()
@@ -744,6 +759,42 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         assert "--publish" not in arguments
         assert "-p" not in arguments[: arguments.index("example.invalid/llama:latest")]
     assert "podman exec" not in recorded
+
+
+def test_check_setup_prints_complete_static_and_inference_records(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Offline validation must expose complete evidence for every checked command."""
+    result, _, _ = run_check_setup_with_stubs(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Identity: tooling command uv" in result.stdout
+    assert "Command: command -v uv" in result.stdout
+    assert "Parsed result:" in result.stdout
+    assert "Command: podman run --rm --device /dev/dri" in result.stdout
+    assert "Input:\n  Reply with exactly: ready" in result.stdout
+    assert "Inference stdout:\n  ready" in result.stdout
+    assert "Inference stderr:\n  (empty)" in result.stdout
+    assert "Expectation:\n  normalized assistant content: ready" in result.stdout
+    assert "Verdict: PASS" in result.stdout
+
+
+def test_check_setup_keeps_independent_records_after_an_inference_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An inference failure must not hide its evidence or the final result."""
+    result, _, _ = run_check_setup_with_stubs(
+        tmp_path,
+        inference_stdout="",
+        inference_stderr="loader failed\n",
+        inference_exit=17,
+    )
+
+    assert result.returncode != 0
+    assert "Exit status:\n  17" in result.stdout
+    assert "Inference stderr:\n  loader failed" in result.stdout
+    assert "Verdict: FAIL stage=command exit reason=inference exited 17" in result.stderr
+    assert "Results:" in result.stdout
 
 
 def run_lifecycle_script(

@@ -6,102 +6,181 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
 
 PASS=0; FAIL=0
+diagnostic_dir="$(prepare_diagnostic_dir check-setup)"
+trap 'status=$?; finish_diagnostic_dir "$diagnostic_dir"; exit "$status"' EXIT
 
-check() {
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        log_info "$label"; PASS=$((PASS + 1))
-    else
-        log_error "$label"; FAIL=$((FAIL + 1))
+log_identity() {
+    printf 'Identity: '
+    redact_text "$1"
+    printf '\n'
+}
+
+record_command() {
+    local identity="$1" command_text="$2" input="$3" expectation="$4"
+    local expected_result="$5" stdout_label="$6" stderr_label="$7"
+    local stdout_file stderr_file status parsed
+    shift 7
+
+    stdout_file="$(mktemp "${diagnostic_dir}/stdout.XXXXXX")" || die "could not create diagnostic stdout"
+    stderr_file="$(mktemp "${diagnostic_dir}/stderr.XXXXXX")" || die "could not create diagnostic stderr"
+    record_stdout_file="$stdout_file"
+
+    log_identity "$identity"
+    log_command "$command_text"
+    log_block "Input" "$input"
+    if "$@" >"$stdout_file" 2>"$stderr_file"; then status=0; else status=$?; fi
+    log_block "$stdout_label" "$(<"$stdout_file")"
+    log_block "$stderr_label" "$(<"$stderr_file")"
+    log_block "Exit status" "$status"
+    parsed="$(<"$stdout_file")"
+    if [ -n "$expected_result" ]; then
+        parsed="$(printf '%s' "$parsed" | tr '[:upper:]' '[:lower:]' | \
+            sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
     fi
+    log_block "Parsed result" "$parsed"
+    log_block "Expectation" "$expectation"
+
+    if [ "$status" -ne 0 ]; then
+        log_error "Verdict: FAIL stage=command exit reason=${identity%% *} exited ${status}"
+        FAIL=$((FAIL + 1))
+        return 1
+    fi
+    if [ -n "$expected_result" ] && [ "$parsed" != "$expected_result" ]; then
+        log_error "Verdict: FAIL stage=parsed result reason=${identity%% *} returned ${parsed:-empty}"
+        FAIL=$((FAIL + 1))
+        return 1
+    fi
+
+    log_info "Verdict: PASS"
+    PASS=$((PASS + 1))
+}
+
+record_inference_skip() {
+    local alias="$1" command_text="$2" reason="$3"
+
+    log_identity "inference ${alias}"
+    log_command "$command_text"
+    log_block "Input" "Reply with exactly: ready"
+    log_block "Inference stdout" ""
+    log_block "Inference stderr" ""
+    log_block "Exit status" "SKIP"
+    log_block "Parsed result" ""
+    log_block "Expectation" "normalized assistant content: ready"
+    log_warn "Verdict: SKIP reason=${reason}"
+}
+
+inference_command() {
+    local file="$1" device="$2" layers="$3"
+    printf 'timeout 180 podman run --rm --device /dev/dri -v %q:/models:ro,z --entrypoint /app/llama %q cli -m %q --device %q --n-gpu-layers %q --single-turn -p %q -n 16' \
+        "$MODELS_DIR" "$image" "/models/${file}" "$device" "$layers" "Reply with exactly: ready"
+}
+
+record_inferences() {
+    local device="$1" skip_reason="${2:-}" alias file layers command_text
+
+    log_step "Offline inference"
+    while IFS=$'\t' read -r alias file layers; do
+        command_text="$(inference_command "$file" "$device" "$layers")"
+        if [ -n "$skip_reason" ]; then
+            record_inference_skip "$alias" "$command_text" "$skip_reason"
+        else
+            record_command "inference ${alias}" "$command_text" "Reply with exactly: ready" \
+                "normalized assistant content: ready" "ready" "Inference stdout" "Inference stderr" \
+                timeout 180 podman run --rm --device /dev/dri \
+                -v "${MODELS_DIR}:/models:ro,z" \
+                --entrypoint /app/llama "$image" cli \
+                -m "/models/${file}" --device "$device" \
+                --n-gpu-layers "$layers" --single-turn -p "Reply with exactly: ready" -n 16 || true
+        fi
+    done < <(yq -r '.models[] | select(.enabled) | [.alias, .file, .n_gpu_layers] | @tsv' "$CONFIG_PATH")
 }
 
 log_step "Tooling"
 for cmd in uv jq yq podman systemctl curl; do
-    check "command available: ${cmd}" command -v "$cmd"
+    record_command "tooling command ${cmd}" "command -v ${cmd}" "" \
+        "exit status: 0" "" "Command stdout" "Command stderr" command -v "$cmd" || true
 done
 
 log_step "Configuration"
-check "config exists at ${CONFIG_PATH}" test -f "$CONFIG_PATH"
-check "config parses and validates" bash -c \
-    "uv run '${REPO_DIR}/llmenv.py' --config '${CONFIG_PATH}' models list"
+record_command "configuration file" "test -f ${CONFIG_PATH}" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" test -f "$CONFIG_PATH" || true
+record_command "configuration validation" \
+    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} models list" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" \
+    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" models list || true
+
+pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || true)"
+image="$(yq -r '.gpu.image' "$CONFIG_PATH" 2>/dev/null || true)"
 
 log_step "GPU access"
-check "/dev/dri exists" test -d /dev/dri
-pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || echo "")"
-render_node="$(uv run "${REPO_DIR}/llmenv.py" detect 2>/dev/null \
-  | jq -r --arg p "$pci" '.gpus[] | select(.pci_address==$p) | .render_node')"
-if [ -n "$render_node" ] && [ "$render_node" != "null" ]; then
-    check "render node /dev/dri/${render_node} is readable" test -r "/dev/dri/${render_node}"
+record_command "GPU directory" "test -d /dev/dri" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" test -d /dev/dri || true
+record_command "GPU detection" \
+    "uv run ${REPO_DIR}/llmenv.py detect" "configured PCI address: ${pci}" \
+    "GPU record for ${pci}" "" "Command stdout" "Command stderr" \
+    uv run "${REPO_DIR}/llmenv.py" detect
+detect_status=$?
+detected_gpus="$(<"$record_stdout_file")"
+render_node="$(jq -r --arg p "$pci" '.gpus[] | select(.pci_address==$p) | .render_node' <<<"$detected_gpus")"
+if [ "$detect_status" -eq 0 ] && [ -n "$render_node" ] && [ "$render_node" != "null" ]; then
+    record_command "GPU render node" "test -r /dev/dri/${render_node}" "" \
+        "exit status: 0" "" "Command stdout" "Command stderr" test -r "/dev/dri/${render_node}" || true
 else
-    log_error "no render node found for ${pci}"
-    FAIL=$((FAIL + 1))
+    log_identity "GPU render node"
+    log_command "test -r /dev/dri/<resolved-render-node>"
+    log_block "Input" "configured PCI address: ${pci}"
+    log_block "Command stdout" ""
+    log_block "Command stderr" ""
+    log_block "Exit status" "SKIP"
+    log_block "Parsed result" ""
+    log_block "Expectation" "a detected readable render node"
+    log_warn "Verdict: SKIP reason=GPU detection did not provide a render node"
 fi
+
 log_step "Configured GPU is present"
-check "GPU ${pci} detected" bash -c \
-    "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'"
+record_command "configured GPU" \
+    "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address==\$p)'" \
+    "configured PCI address: ${pci}" "exit status: 0" "" "Command stdout" "Command stderr" \
+    bash -c "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'" || true
 
 log_step "Container image"
-image="$(yq -r '.gpu.image' "$CONFIG_PATH" 2>/dev/null || echo "")"
-check "image ${image} present locally" podman image exists "$image"
+record_command "container image" "podman image exists ${image}" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" podman image exists "$image" || true
 
 log_step "Model files"
-if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
-          validate-gguf --models-dir "$MODELS_DIR" 2>/dev/null)"; then
-    echo "$out" | jq -r '.results[] | "  ok   \(.alias)"'
-    PASS=$((PASS + 1))
-else
-    echo "$out" | jq -r '.results[]? | "  \(if .valid then "ok  " else "FAIL" end) \(.alias): \(.message)"'
-    log_error "one or more model files are invalid"
-    FAIL=$((FAIL + 1))
-fi
+record_command "GGUF validation" \
+    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} validate-gguf --models-dir ${MODELS_DIR}" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" \
+    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" || true
 
 log_step "VRAM budget"
-if out="$(uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" \
-          budget --models-dir "$MODELS_DIR" 2>/dev/null)"; then
-    echo "$out" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
-    log_info "budget is feasible for models_max=$(echo "$out" | jq -r .models_max)"
-    PASS=$((PASS + 1))
-
-    log_step "Offline inference"
-    device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || echo "")"
-    listing_file="$(mktemp)"
-    podman run --rm --device /dev/dri \
-        "$image" --list-devices >"$listing_file" 2>/dev/null || true
-    if resolved="$(uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" \
-                    --listing-file "$listing_file")"; then
-        device="$(echo "$resolved" | jq -r '.device')"
-        log_info "resolved ${device_name} to ${device}"
-        while IFS=$'\t' read -r alias file layers; do
-            if output="$(timeout 180 podman run --rm --device /dev/dri \
-                -v "${MODELS_DIR}:/models:ro,z" \
-                --entrypoint /app/llama "$image" cli \
-                -m "/models/${file}" --device "$device" \
-                --n-gpu-layers "$layers" --single-turn -p "Reply with exactly: ready" -n 16 2>&1)" \
-                && [ -n "$output" ]; then
-                log_info "inference ${alias}"
-                PASS=$((PASS + 1))
-            else
-                diagnostic="$(printf '%s' "$output" | head -c 1000)"
-                [ -n "$diagnostic" ] || diagnostic="no output"
-                log_error "inference ${alias} failed: ${diagnostic}"
-                FAIL=$((FAIL + 1))
-            fi
-        done < <(yq -r '.models[] | select(.enabled) | [.alias, .file, .n_gpu_layers] | @tsv' "$CONFIG_PATH")
-    else
-        log_error "could not resolve GPU device ${device_name}"
-        FAIL=$((FAIL + 1))
-    fi
-    rm -f "$listing_file"
+record_command "VRAM budget" \
+    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} budget --models-dir ${MODELS_DIR}" "" \
+    "exit status: 0" "" "Command stdout" "Command stderr" \
+    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR"
+budget_status=$?
+if [ "$budget_status" -ne 0 ]; then
+    record_inferences "" "VRAM budget check failed"
 else
-    if err="$(echo "$out" | jq -r '.error // empty' 2>/dev/null)" && [ -n "$err" ]; then
-        log_error "budget check failed: ${err}"
+    device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || true)"
+    record_command "GPU device listing" \
+        "podman run --rm --device /dev/dri ${image} --list-devices" "" \
+        "exit status: 0" "" "Command stdout" "Command stderr" \
+        podman run --rm --device /dev/dri "$image" --list-devices
+    listing_status=$?
+    listing_file="$record_stdout_file"
+    record_command "GPU device resolution" \
+        "uv run ${REPO_DIR}/llmenv.py resolve-device --device-name ${device_name} --listing-file ${listing_file}" \
+        "device name: ${device_name}" "exit status: 0" "" "Command stdout" "Command stderr" \
+        uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" --listing-file "$listing_file"
+    resolve_status=$?
+    resolved="$(<"$record_stdout_file")"
+    device="$(jq -r '.device // empty' <<<"$resolved")"
+    if [ "$listing_status" -eq 0 ] && [ "$resolve_status" -eq 0 ] && [ -n "$device" ]; then
+        record_inferences "$device"
     else
-        echo "$out" | jq -r '"  short by \(.shortfall_mib) MiB"' 2>/dev/null
-        echo "$out" | jq -r '.remedies[]? | "    - \(.)"' 2>/dev/null
-        log_error "budget exceeded"
+        record_inferences "" "GPU device could not be resolved"
     fi
-    FAIL=$((FAIL + 1))
 fi
 
 echo
