@@ -1515,6 +1515,10 @@ def test_check_server_prints_redacted_request_response_and_curl_template(
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
     assert "fixture-secret" not in combined
+    assert combined.count("Request payload:") == 2
+    assert 'Request payload:\n  {"model":"x"' not in combined
+    assert 'Request payload:\n  {"model":"gemma4"' not in combined
+    assert 'Request payload:\n  {"model":"ornith"' not in combined
 
 
 def test_check_server_reports_a_completion_failure_without_hiding_other_models(
@@ -1624,6 +1628,9 @@ def run_agent_check(
     weather_body: str | None = None,
     fx_body: str | None = None,
     api_key: str = "test-key-not-a-secret",
+    agent_source_timestamp: str | None = None,
+    agent_weather_evidence_override: str | None = None,
+    agent_fx_evidence_override: str | None = None,
     agent_response_prefix: str = "",
     agent_response_suffix: str = "",
     keep_artifacts: bool = False,
@@ -1632,8 +1639,10 @@ def run_agent_check(
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
     real_yq = shutil.which("yq")
+    real_date = shutil.which("date")
     assert real_jq is not None
     assert real_yq is not None
+    assert real_date is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -1655,6 +1664,7 @@ def run_agent_check(
     _mock_dirname(commands)
     for name, executable in {
         "chmod": "/usr/bin/chmod",
+        "date": real_date,
         "find": "/usr/bin/find",
         "jq": real_jq,
         "mkdir": "/usr/bin/mkdir",
@@ -1719,6 +1729,10 @@ def run_agent_check(
         else "",
         "AGENT_CHECK_RESPONSE_PREFIX": agent_response_prefix,
         "AGENT_CHECK_RESPONSE_SUFFIX": agent_response_suffix,
+        "AGENT_CHECK_SOURCE_TIMESTAMP": agent_source_timestamp or "",
+        "AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE": agent_weather_evidence_override
+        or "{}",
+        "AGENT_CHECK_FX_EVIDENCE_OVERRIDE": agent_fx_evidence_override or "{}",
         "ARTIFACTS": str(artifacts),
         "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
         "CALLS": str(calls),
@@ -1756,9 +1770,9 @@ printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASH
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
 if [[ "$*" == *weather* ]]; then
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+    evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T13:00:" + $seconds) else $source_timestamp end),temperature_2m:16.3,weather_code:3} | . + $evidence_override')"
 else
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+    evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_FX_EVIDENCE_OVERRIDE" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T00:00:" + $seconds) else $source_timestamp end),usd_to_clp:946.527902} | . + $evidence_override')"
 fi
 jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}]}}'
 """
@@ -1769,9 +1783,9 @@ printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
 if [[ "$*" == *weather* ]]; then
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+    evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T13:00:" + $seconds) else $source_timestamp end),temperature_2m:16.3,weather_code:3} | . + $evidence_override')"
 else
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+    evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_FX_EVIDENCE_OVERRIDE" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T00:00:" + $seconds) else $source_timestamp end),usd_to_clp:946.527902} | . + $evidence_override')"
 fi
 jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
 """
@@ -1901,6 +1915,58 @@ def test_agent_check_rejects_malformed_source_bodies(
 
     assert result.returncode != 0
     assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize(
+    "weather_body",
+    (
+        '{"current":{"time":"2026-02-30T13:00","temperature_2m":16.3,"weather_code":3}}',
+        '{"current":{"time":"2026/07/27T13:00","temperature_2m":16.3,"weather_code":3}}',
+    ),
+)
+def test_agent_check_rejects_noncanonical_weather_source_dates(
+    tmp_path: pathlib.Path, weather_body: str
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        weather_body=weather_body,
+    )
+
+    assert result.returncode != 0
+    assert "source fetch reason=weather source body is invalid" in result.stderr
+
+
+def test_agent_check_accepts_rfc_style_fx_source_timestamp(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        fx_body=(
+            '{"time_last_update_utc":"Mon, 27 Jul 2026 00:02:31 +0000",'
+            '"rates":{"CLP":946.527902}}'
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, "PASS client=pi") == 2
+    assert '"source_date":"2026-07-27"' in result.stdout
+
+
+def test_agent_check_rejects_unparseable_typed_fx_source_timestamp(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        fx_body='{"time_last_update_utc":"not-a-date","rates":{"CLP":946.527902}}',
+    )
+
+    assert result.returncode != 0
+    assert "source fetch reason=fx source body is invalid" in result.stderr
+    assert "Source parser stderr:" in result.stdout
+    assert "Source parser stderr:\n  (empty)" not in result.stdout
 
 
 def test_agent_check_hides_api_key_when_shell_tracing_is_enabled(
@@ -2041,6 +2107,101 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in recorded
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+@pytest.mark.parametrize(
+    ("timestamp", "passes", "expected_difference"),
+    (
+        ("2026-07-27T13:00:45.123Z", True, ""),
+        ("2026-07-27T09:00:45-04:00", True, ""),
+        ("2026-07-27Tnot-a-time", False, "expected=ISO-8601"),
+        ("not-a-timestamp", False, "expected=ISO-8601"),
+        ("2026-07-28T00:00:00Z", False, 'expected_date="2026-07-27"'),
+    ),
+)
+def test_agent_check_requires_full_iso_timestamp_and_matching_source_date(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+    timestamp: str,
+    passes: bool,
+    expected_difference: str,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_source_timestamp=timestamp,
+    )
+
+    if passes:
+        assert result.returncode == 0, result.stderr
+        assert count_rows(result.stdout, f"PASS client={client}") == 2
+    else:
+        assert result.returncode != 0
+        assert count_rows(result.stdout, f"FAIL client={client}") == 2
+        assert "field=source_timestamp" in result.stdout
+        assert expected_difference in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+@pytest.mark.parametrize(
+    ("weather_override", "fx_override", "expected_field"),
+    (
+        ('{"source_url":"https://example.invalid/weather"}', None, "source_url"),
+        (None, '{"source_url":"https://example.invalid/fx"}', "source_url"),
+        ('{"temperature_2m":-999999}', None, "temperature_2m"),
+        ('{"weather_code":-999999}', None, "weather_code"),
+        (None, '{"usd_to_clp":-999999}', "usd_to_clp"),
+    ),
+)
+def test_agent_check_keeps_exact_source_url_and_numeric_evidence_checks(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+    weather_override: str | None,
+    fx_override: str | None,
+    expected_field: str,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_weather_evidence_override=weather_override,
+        agent_fx_evidence_override=fx_override,
+    )
+
+    assert result.returncode != 0
+    assert count_rows(result.stdout, f"FAIL client={client}") == 1
+    assert count_rows(result.stdout, f"PASS client={client}") == 1
+    assert f"field={expected_field}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+def test_agent_check_prompt_requires_literal_source_evidence(
+    tmp_path: pathlib.Path, client: str, stub: str
+) -> None:
+    result, calls, _ = run_agent_check(tmp_path, clients={client: stub})
+
+    assert result.returncode == 0, result.stderr
+    prompts = [line for line in calls.read_text().splitlines() if line.startswith(f"{client} ")]
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert "Run a shell network command against this literal URL:" in prompt
+        assert "Do not substitute the source or modify its query." in prompt
+        assert "Return fields from that response only." in prompt
+        assert "Return source_timestamp as ISO-8601." in prompt
+        assert "Return exactly one JSON object containing" in prompt
+    assert any("https://api.open-meteo.com/v1/forecast?" in prompt for prompt in prompts)
+    assert any("https://open.er-api.com/v6/latest/USD" in prompt for prompt in prompts)
 
 
 @pytest.mark.parametrize(
