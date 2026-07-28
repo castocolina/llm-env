@@ -103,6 +103,27 @@ def test_vulkan_only_config_removes_legacy_rocm_benchmark():
     assert set(migrated["gpu"]["benchmark"]) == {"vulkan"}
 
 
+def test_load_config_migrates_legacy_rocm_benchmark_from_yaml(tmp_path):
+    """Loading a legacy YAML file must discard only its ROCm measurement."""
+    path = tmp_path / "models.yml"
+    path.write_text(
+        "gpu:\n"
+        "  benchmark:\n"
+        "    rocm:\n"
+        "      pp_tps: 1\n"
+        "      tg_tps: 1\n"
+        "      measured_at: old\n"
+        "    vulkan:\n"
+        "      pp_tps: 2\n"
+        "      tg_tps: 2\n"
+        "      measured_at: current\n"
+    )
+
+    assert load_config(path)["gpu"]["benchmark"] == {
+        "vulkan": {"pp_tps": 2, "tg_tps": 2, "measured_at": "current"}
+    }
+
+
 def test_config_save_and_load_migrate_legacy_rocm_benchmarks(tmp_path):
     """Persisting a legacy config must remove its obsolete benchmark result."""
     cfg = make_cfg()

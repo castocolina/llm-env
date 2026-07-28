@@ -403,6 +403,23 @@ def test_benchmark_uses_only_vulkan_and_shows_malformed_output(
     assert "Command: podman run --rm --device /dev/dri -v " in result.stdout
     assert "Raw benchmark output:\n  malformed benchmark JSON" in result.stdout
 
+    call_log = calls.read_text().splitlines()
+    vulkan_benchmark_index = next(
+        index
+        for index, command in enumerate(call_log)
+        if "server-vulkan bench " in command
+    )
+    cpu_pull = "podman pull ghcr.io/ggml-org/llama.cpp:server"
+    cpu_device_listing = (
+        "podman run --rm --device /dev/dri --entrypoint /app/llama-server "
+        "ghcr.io/ggml-org/llama.cpp:server --list-devices"
+    )
+    assert call_log.count(cpu_pull) == 1
+    assert call_log.count(cpu_device_listing) == 1
+    assert vulkan_benchmark_index < call_log.index(cpu_pull) < call_log.index(
+        cpu_device_listing
+    )
+
 
 def run_cleanup_with_stubs(
     tmp_path: pathlib.Path,
