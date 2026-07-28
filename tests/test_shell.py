@@ -321,10 +321,10 @@ def test_setup_rejects_invalid_numbered_model_selection_before_download(
     assert "curl " not in calls.read_text()
 
 
-def run_benchmark_with_malformed_vulkan_output(
-    tmp_path: pathlib.Path,
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
-    """Run the benchmark with a malformed Vulkan payload and record Podman calls."""
+def run_benchmark(
+    tmp_path: pathlib.Path, benchmark_stdout: str, benchmark_stderr: str = ""
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run the benchmark with controlled Vulkan streams and record Podman calls."""
     real_yq = shutil.which("yq")
     assert real_yq is not None
 
@@ -364,7 +364,8 @@ def run_benchmark_with_malformed_vulkan_output(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'help all'*) printf '%s\\n' bench ;;\n"
-        "  *' bench '*) printf '%s\\n' 'malformed benchmark JSON' ;;\n"
+        "  *' bench '*) printf '%s' \"$BENCHMARK_STDOUT\"; "
+        "printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
         "  *'--list-devices'*) printf '%s\\n' 'Vulkan0: Benchmark GPU (16384 MiB, 16000 MiB free)' ;;\n"
         "esac\n"
     )
@@ -377,6 +378,8 @@ def run_benchmark_with_malformed_vulkan_output(
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
+        "BENCHMARK_STDOUT": benchmark_stdout,
+        "BENCHMARK_STDERR": benchmark_stderr,
     }
     result = subprocess.run(
         ["/usr/bin/bash", "benchmark.sh"],
@@ -386,39 +389,41 @@ def run_benchmark_with_malformed_vulkan_output(
         capture_output=True,
         check=False,
     )
-    return result, calls
+    return result, calls, config
 
 
-def test_benchmark_uses_only_vulkan_and_shows_malformed_output(
+def test_benchmark_parses_valid_stdout_despite_vulkan_stderr_warning(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A malformed Vulkan result must be visible without trying ROCm."""
-    result, calls = run_benchmark_with_malformed_vulkan_output(tmp_path)
+    """Vulkan warnings must not corrupt an otherwise valid JSON benchmark."""
+    result, calls, config = run_benchmark(
+        tmp_path,
+        '[{"n_prompt":512,"avg_ts":123.4},{"n_gen":128,"avg_ts":56.7}]',
+        "WARNING: radv is not a conformant Vulkan implementation\n",
+    )
 
     assert result.returncode == 0, result.stderr
-    observed = result.stdout + result.stderr + calls.read_text()
-    assert "server-rocm" not in observed.lower()
-    assert "/dev/kfd" not in observed.lower()
-    assert "rocm" not in observed.lower()
-    assert "Command: podman run --rm --device /dev/dri -v " in result.stdout
-    assert "Raw benchmark output:\n  malformed benchmark JSON" in result.stdout
+    assert "Benchmark stdout:" in result.stdout
+    assert '"avg_ts":123.4' in result.stdout
+    assert "Benchmark stderr:" in result.stdout
+    assert "WARNING: radv" in result.stdout
+    assert yq_value(config, ".gpu.backend") == "vulkan"
+    assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
+    assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()
 
-    call_log = calls.read_text().splitlines()
-    vulkan_benchmark_index = next(
-        index
-        for index, command in enumerate(call_log)
-        if "server-vulkan bench " in command
-    )
-    cpu_pull = "podman pull ghcr.io/ggml-org/llama.cpp:server"
-    cpu_device_listing = (
-        "podman run --rm --device /dev/dri --entrypoint /app/llama-server "
-        "ghcr.io/ggml-org/llama.cpp:server --list-devices"
-    )
-    assert call_log.count(cpu_pull) == 1
-    assert call_log.count(cpu_device_listing) == 1
-    assert vulkan_benchmark_index < call_log.index(cpu_pull) < call_log.index(
-        cpu_device_listing
-    )
+
+def test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An invalid Vulkan response must configure CPU and fail the benchmark."""
+    result, calls, config = run_benchmark(tmp_path, "not benchmark JSON\n")
+
+    assert result.returncode != 0
+    assert "Benchmark stdout:\n  not benchmark JSON" in result.stdout
+    assert "Vulkan benchmark failure: response parsing" in result.stderr
+    assert yq_value(config, ".gpu.backend") == "cpu"
+    assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
+    assert "podman pull ghcr.io/ggml-org/llama.cpp:server" in calls.read_text()
 
 
 def run_cleanup_with_stubs(

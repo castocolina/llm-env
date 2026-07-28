@@ -21,34 +21,30 @@ record_vulkan() {
 }
 
 run_vulkan_bench() {
-    local output="$1" result status
+    local stdout_file="$1" stderr_file="$2" parser_stderr_file="$3" status result
 
     log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} bench -m /models/${bench_model} -p 512 -n 128 -r 2 -o json"
     if podman run --rm --device /dev/dri \
         -v "${MODELS_DIR}:/models:ro,z" \
         --entrypoint /app/llama \
         "$VULKAN_IMAGE" bench -m "/models/${bench_model}" -p 512 -n 128 -r 2 -o json \
-        >"$output" 2>&1; then
+        >"$stdout_file" 2>"$stderr_file"; then
         status=0
     else
         status=$?
     fi
-    log_block "Raw benchmark output" "$(cat "$output")"
-
+    log_block "Benchmark stdout" "$(<"$stdout_file")"
+    log_block "Benchmark stderr" "$(<"$stderr_file")"
+    log_block "Exit status" "$status"
     if [ "$status" -ne 0 ]; then
-        log_warn "Vulkan benchmark exited ${status}"
-        return "$status"
-    fi
-
-    if ! result="$(jq -r '
-        [ (.[] | select(.n_prompt > 0) | .avg_ts),
-          (.[] | select(.n_gen    > 0) | .avg_ts) ] | @tsv' \
-        "$output" 2>/dev/null \
-        | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }')"; then
-        log_warn "Vulkan benchmark exited ${status}; output did not contain prompt and generation throughput"
+        log_error "Vulkan benchmark failure: command exit ${status}"
         return 1
     fi
-
+    if ! result="$(jq -r '[ (.[] | select(.n_prompt > 0) | .avg_ts), (.[] | select(.n_gen > 0) | .avg_ts) ] | @tsv' "$stdout_file" 2>"$parser_stderr_file" | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }')"; then
+        log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
+        log_error "Vulkan benchmark failure: response parsing"
+        return 1
+    fi
     BENCH_RESULT="$result"
 }
 
@@ -56,18 +52,24 @@ log_step "Vulkan benchmark"
 log_info "model: ${bench_model}"
 diagnostic_dir="$(prepare_diagnostic_dir benchmark)"
 trap 'status=$?; finish_diagnostic_dir "$diagnostic_dir"; exit "$status"' EXIT
-output="$(mktemp "${diagnostic_dir}/vulkan-benchmark-output.XXXXXX")" \
-    || die "could not create benchmark diagnostic output"
+vulkan_stdout="$(mktemp "${diagnostic_dir}/vulkan-benchmark-stdout.XXXXXX")" \
+    || die "could not create Vulkan benchmark stdout diagnostic"
+vulkan_stderr="$(mktemp "${diagnostic_dir}/vulkan-benchmark-stderr.XXXXXX")" \
+    || die "could not create Vulkan benchmark stderr diagnostic"
+vulkan_parser_stderr="$(mktemp "${diagnostic_dir}/vulkan-benchmark-parser-stderr.XXXXXX")" \
+    || die "could not create Vulkan benchmark parser diagnostic"
 
 winner_backend="cpu"
 winner_image="$CPU_IMAGE"
 BENCH_RESULT=""
-if run_vulkan_bench "$output" && [ -n "$BENCH_RESULT" ]; then
+benchmark_status=1
+if run_vulkan_bench "$vulkan_stdout" "$vulkan_stderr" "$vulkan_parser_stderr" && [ -n "$BENCH_RESULT" ]; then
     pp="$(cut -f1 <<<"$BENCH_RESULT")"
     tg="$(cut -f2 <<<"$BENCH_RESULT")"
     record_vulkan "$pp" "$tg"
     winner_backend="vulkan"
     winner_image="$VULKAN_IMAGE"
+    benchmark_status=0
     log_info "Vulkan: ${pp} tok/s prompt, ${tg} tok/s generation"
 else
     log_warn "Vulkan benchmark failed; falling back to CPU. Expect very slow inference."
@@ -104,3 +106,4 @@ fi
 yq -i ".gpu.backend = \"${winner_backend}\"" "$CONFIG_PATH"
 yq -i ".gpu.image = \"${winner_image}\"" "$CONFIG_PATH"
 log_info "backend set to ${winner_backend} (${winner_image})"
+exit "$benchmark_status"
