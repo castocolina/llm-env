@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # benchmark.sh — measure Vulkan throughput, record it, and fall back safely.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd uv jq yq podman awk
 

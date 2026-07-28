@@ -86,7 +86,7 @@ def run_prerequisites_with_stubs(
         "CALLS": str(calls),
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "prerequisites.sh", *arguments],
+        ["/usr/bin/bash", "setup/prerequisites.sh", *arguments],
         cwd=ROOT,
         env=environment,
         input=f"{response}\n",
@@ -182,7 +182,7 @@ def test_setup_stops_for_missing_prerequisites_before_mutating_config(
         "PATH": f"{commands}:/usr/bin:/bin",
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "setup.sh"],
+        ["/usr/bin/bash", "setup/setup.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -273,7 +273,7 @@ def run_setup_with_numbered_selection(
         "REAL_YQ": real_yq,
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "setup.sh"],
+        ["/usr/bin/bash", "setup/setup.sh"],
         cwd=ROOT,
         env=environment,
         input=selection,
@@ -400,7 +400,7 @@ def run_benchmark(
         "BENCHMARK_STDERR": benchmark_stderr,
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "benchmark.sh"],
+        ["/usr/bin/bash", "scripts/benchmark.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -474,7 +474,7 @@ def run_cleanup_with_stubs(
         "PATH": f"{commands}:/usr/bin:/bin",
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "clean.sh"],
+        ["/usr/bin/bash", "scripts/clean.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -534,7 +534,7 @@ def run_render_unit_with_legacy_rocm_config(
         "REAL_YQ": real_yq,
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "render-unit.sh"],
+        ["/usr/bin/bash", "setup/render-unit.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -612,7 +612,7 @@ def run_check_setup_with_legacy_rocm_config(
         "REAL_YQ": real_yq,
     }
     return subprocess.run(
-        ["/usr/bin/bash", "check-setup.sh"],
+        ["/usr/bin/bash", "scripts/check-setup.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -732,7 +732,7 @@ def run_check_setup_with_stubs(
         "RESOLVE_EXIT": str(resolve_exit),
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "check-setup.sh"],
+        ["/usr/bin/bash", "scripts/check-setup.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -750,7 +750,7 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
 
     assert result.returncode == 0, result.stderr
     recorded = calls.read_text()
-    check_setup = (ROOT / "check-setup.sh").read_text()
+    check_setup = (ROOT / "scripts/check-setup.sh").read_text()
     assert 'uv run "${REPO_DIR}/llmenv.py" resolve-device' in check_setup
     assert (
         f"uv run {ROOT / 'llmenv.py'} resolve-device --device-name Selected Radeon "
@@ -1056,7 +1056,7 @@ def run_diagnostic_helper(
     helper = tmp_path / "diagnostic-helper.sh"
     helper.write_text(
         "#!/usr/bin/env bash\n"
-        "source \"$TEST_REPO_DIR/lib.sh\"\n"
+        "source \"$TEST_REPO_DIR/tools/lib.sh\"\n"
         "diagnostic_directory=\"$(prepare_diagnostic_dir diagnostic-helper)\"\n"
         "printf '%s' \"$DIAGNOSTIC_TEXT\" > \"$diagnostic_directory/raw.txt\"\n"
         "if [ \"$UNREADABLE_NESTED\" = 1 ]; then\n"
@@ -1206,7 +1206,7 @@ def test_diagnostic_helper_discards_unreadable_regular_files_without_path_leaks(
 def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     """Starting an unconfigured server must persist a secret without printing it."""
     result, config, calls = run_lifecycle_script(
-        tmp_path, "start.sh", api_key="", config_mode=0o644
+        tmp_path, "scripts/start.sh", api_key="", config_mode=0o644
     )
 
     assert result.returncode == 0, result.stderr
@@ -1221,8 +1221,8 @@ def test_key_writes_secure_config_before_persisting_a_secret(
     tmp_path: pathlib.Path,
 ) -> None:
     """A generated or reset key must never be written to a mode-0644 config."""
-    for script, api_key in (("start.sh", ""), ("key-reset.sh", "existing-key")):
-        case_path = tmp_path / script
+    for script, api_key in (("scripts/start.sh", ""), ("scripts/key-reset.sh", "existing-key")):
+        case_path = tmp_path / pathlib.Path(script).stem
         case_path.mkdir()
         result, config, calls = run_lifecycle_script(
             case_path, script, api_key=api_key, config_mode=0o644
@@ -1241,7 +1241,7 @@ def test_key_writes_secure_config_before_persisting_a_secret(
 
 def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
     """Starting with a configured key must not replace that credential."""
-    result, config, _ = run_lifecycle_script(tmp_path, "start.sh")
+    result, config, _ = run_lifecycle_script(tmp_path, "scripts/start.sh")
 
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key") == "existing-key"
@@ -1250,7 +1250,7 @@ def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
 def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
     """Rotating an active server key must load the replacement immediately."""
     result, config, calls = run_lifecycle_script(
-        tmp_path, "key-reset.sh", active=True, config_mode=0o644
+        tmp_path, "scripts/key-reset.sh", active=True, config_mode=0o644
     )
 
     assert result.returncode == 0, result.stderr
@@ -1262,7 +1262,7 @@ def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
 
 def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> None:
     """Rotating a stopped server key must preserve its stopped state."""
-    result, _, calls = run_lifecycle_script(tmp_path, "key-reset.sh", active=False)
+    result, _, calls = run_lifecycle_script(tmp_path, "scripts/key-reset.sh", active=False)
 
     assert result.returncode == 0, result.stderr
     assert "systemctl --user start llm-server.service" not in calls.read_text()
@@ -1271,13 +1271,13 @@ def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> 
 def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Path) -> None:
     """Boot setup must create a private key without starting or budget-checking."""
     result, config, calls = run_lifecycle_script(
-        tmp_path, "enable-boot.sh", api_key="", config_mode=0o644
+        tmp_path, "setup/enable-boot.sh", api_key="", config_mode=0o644
     )
 
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key")
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert "render-unit.sh" in calls.read_text()
+    assert f"bash {ROOT / 'setup/render-unit.sh'}" in calls.read_text()
     assert "start.sh" not in calls.read_text()
     assert " budget " not in calls.read_text()
 
@@ -1286,7 +1286,7 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     tmp_path: pathlib.Path,
 ) -> None:
     """Boot setup must make mDNS discoverable as a reloaded user unit."""
-    result, config, calls = run_lifecycle_script(tmp_path, "enable-boot.sh")
+    result, config, calls = run_lifecycle_script(tmp_path, "setup/enable-boot.sh")
     mdns_unit = config.parent.parent / "systemd/user/llm-server-mdns.service"
 
     assert result.returncode == 0, result.stderr
@@ -1460,7 +1460,7 @@ def run_check_server(
         "PATH": f"{commands}:/usr/bin:/bin",
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "check-server.sh"],
+        ["/usr/bin/bash", "scripts/check-server.sh"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -1495,7 +1495,7 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "max_tokens: 256, stream: false" in (ROOT / "check-server.sh").read_text()
+    assert "max_tokens: 256, stream: false" in (ROOT / "scripts/check-server.sh").read_text()
 
 
 def test_check_server_prints_redacted_request_response_and_curl_template(
@@ -1733,7 +1733,7 @@ def run_agent_check(
     command = ["/usr/bin/bash"]
     if xtrace:
         command.append("-x")
-    command.extend(("check-with-agents.sh", *arguments))
+    command.extend(("scripts/check-with-agents.sh", *arguments))
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -1809,7 +1809,7 @@ jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assist
 
 
 def test_make_help_lists_check_with_agents() -> None:
-    assert "make check-with-agents" in (ROOT / "Makefile").read_text()
+    assert "make check-with-agents" in (SCRIPT_DIR / "help.sh").read_text()
 
 
 def test_agent_check_fails_when_no_supported_client_is_installed(

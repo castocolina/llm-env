@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # enable-boot.sh — start the server automatically at boot.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd yq loginctl systemctl
 
@@ -10,7 +11,7 @@ require_cmd yq loginctl systemctl
 
 yq -i '.server.start_at_boot = true' "$CONFIG_PATH"
 ensure_api_key
-bash "${REPO_DIR}/render-unit.sh"
+bash "${REPO_DIR}/setup/render-unit.sh"
 log_info "unit rendered with [Install]"
 
 loginctl enable-linger "$USER"

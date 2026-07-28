@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # network.sh — configure optional LAN access after the server is healthy.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd ip jq yq
 

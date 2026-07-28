@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # render-unit.sh — generate presets and the Quadlet unit without starting it.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd uv jq yq podman systemctl
 

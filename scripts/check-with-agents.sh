@@ -2,8 +2,9 @@
 # check-with-agents.sh — ask installed coding agents to independently verify public data.
 set +x
 set -uo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 set +e
 
 if [ "$#" -ne 0 ]; then

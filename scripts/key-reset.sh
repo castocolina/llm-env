@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # key-reset.sh — rotate the server API key without changing service state.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd yq systemctl
 
@@ -12,8 +13,8 @@ reset_api_key
 log_info "API key reset"
 
 if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
-    bash "${REPO_DIR}/stop.sh"
-    bash "${REPO_DIR}/start.sh"
+    bash "${REPO_DIR}/scripts/stop.sh"
+    bash "${REPO_DIR}/scripts/start.sh"
 else
     log_info "the new API key will apply on the next start"
 fi

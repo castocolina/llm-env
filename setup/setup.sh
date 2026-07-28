@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # setup.sh — interactive configurator.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 ASSUME_YES="${LLM_ENV_ASSUME_YES:-0}"
 
-bash "${REPO_DIR}/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"
+bash "${REPO_DIR}/setup/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"
 
 # ask PROMPT DEFAULT -> echoes the answer, or DEFAULT when running unattended
 ask() {

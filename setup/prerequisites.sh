@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # prerequisites.sh — detect and optionally install Bazzite/Fedora host tools.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 RUNTIME=("uv:uv" "jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
 DEVELOPMENT=("git:git" "shellcheck:ShellCheck")

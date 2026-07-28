@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "make prerequisites Confirm and install host prerequisites"
+echo "make setup         Interactive configuration"
+echo "make start         Start the LLM server"
+echo "make stop          Stop the LLM server"
+echo "make restart       Restart the LLM server"
+echo "make check-setup   Validate config, image, models, GPU (offline)"
+echo "make check-server  Validate the running server API (online)"
+echo "make check-with-agents Opt-in independent agent inference checks"
+echo "make benchmark     Benchmark Vulkan and record results, with CPU fallback"
+echo "make key-reset     Generate a new API key"
+echo "make enable-boot   Start automatically at boot"
+echo "make disable-boot  Do not start at boot"
+echo "make status        Show service status"
+echo "make logs          Follow service logs"
+echo "make validate      Run shellcheck and ruff"
+echo "make test          Run the Python test suite"
+echo "make clean         Remove config, unit, and images"

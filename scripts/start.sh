@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # start.sh — generate the runtime key, render, and start the server.
 set -euo pipefail
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=../tools/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd uv jq yq systemctl curl
 
@@ -21,7 +22,7 @@ if ! budget="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR")
 fi
 echo "$budget" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
 
-bash "${REPO_DIR}/render-unit.sh"
+bash "${REPO_DIR}/setup/render-unit.sh"
 
 port="$(yq -r '.server.port' "$CONFIG_PATH")"
 log_step "Starting the service"
@@ -33,7 +34,7 @@ log_step "Waiting for health"
 for _ in $(seq 1 60); do
     if curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null; then
         log_info "server is ready"
-        bash "${REPO_DIR}/network.sh"
+        bash "${REPO_DIR}/setup/network.sh"
         exit 0
     fi
     sleep 1
