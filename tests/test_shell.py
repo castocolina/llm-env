@@ -12,6 +12,24 @@ import subprocess
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPT_DIR = ROOT / "scripts"
+SETUP_DIR = ROOT / "setup"
+TOOLS_DIR = ROOT / "tools"
+
+
+def test_shell_scripts_use_the_approved_directories() -> None:
+    assert not list(ROOT.glob("*.sh"))
+    assert (TOOLS_DIR / "lib.sh").is_file()
+    assert (SETUP_DIR / "setup.sh").is_file()
+    assert (SCRIPT_DIR / "check-server.sh").is_file()
+
+
+def test_makefile_dispatches_relocated_entrypoints() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+
+    assert "@bash scripts/help.sh" in makefile
+    assert "@bash setup/setup.sh" in makefile
+    assert "@bash scripts/check-server.sh" in makefile
 
 
 def _mock_command(directory: pathlib.Path, name: str) -> None:

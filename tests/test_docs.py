@@ -1,3 +1,5 @@
+import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,3 +38,22 @@ def test_current_docs_describe_vulkan_only_diagnostics() -> None:
     assert "vulkan vs rocm" not in agent_instructions
     assert "rocm -> vulkan" not in architecture
     assert all("rocm" not in path.read_text().lower() for path in historical_docs)
+
+
+def test_tracked_markdown_uses_relocated_script_paths() -> None:
+    tracked_markdown = [
+        ROOT / path
+        for path in subprocess.check_output(
+            ["git", "ls-files", "--", "*.md"], text=True
+        ).splitlines()
+    ]
+    directory_layout = re.compile(
+        r"(?ms)^## Directory Layout\n.*?(?=^## |\Z)"
+    )
+    root_script_reference = re.compile(
+        r"(?<![./\w-])(?:[A-Za-z0-9-]+\.sh)\b"
+    )
+
+    for path in tracked_markdown:
+        markdown = directory_layout.sub("", path.read_text())
+        assert not root_script_reference.search(markdown), path
