@@ -423,11 +423,13 @@ def test_benchmark_parses_valid_stdout_despite_vulkan_stderr_warning(
     assert result.returncode == 0, result.stderr
     assert "Benchmark stdout:" in result.stdout
     assert '"avg_ts":123.4' in result.stdout
-    assert "Benchmark stderr:" in result.stdout
-    assert "WARNING: radv" in result.stdout
-    assert "Benchmark parser stderr:\n  (empty)" in result.stdout
+    assert 'Parsed metrics:\n  {"pp_tps":123.4,"tg_tps":56.7}' in result.stdout
+    assert "Benchmark stderr:\n  WARNING: radv" in result.stdout
+    assert "Benchmark parser stderr:" not in result.stdout
     assert yq_value(config, ".gpu.backend") == "vulkan"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
+    assert yq_value(config, ".gpu.benchmark.vulkan.pp_tps") == "123.4"
+    assert yq_value(config, ".gpu.benchmark.vulkan.tg_tps") == "56.7"
     assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()
 
 
@@ -439,6 +441,7 @@ def test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid(
 
     assert result.returncode != 0
     assert "Benchmark stdout:\n  not benchmark JSON" in result.stdout
+    assert "Benchmark parser stderr:\n  parse error:" in result.stdout
     assert "Vulkan benchmark failure: response parsing" in result.stderr
     assert yq_value(config, ".gpu.backend") == "cpu"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
@@ -797,11 +800,17 @@ def test_check_setup_prints_complete_static_and_inference_records(
     assert result.returncode == 0, result.stderr
     assert "Identity: tooling command uv" in result.stdout
     assert "Command: command -v uv" in result.stdout
-    assert "Parsed result:" in result.stdout
+    tooling_record = result.stdout.split("Identity: tooling command uv", 1)[1].split(
+        "Identity:", 1
+    )[0]
+    assert "Command stdout:" in tooling_record
+    assert "Parsed result:" not in tooling_record
+    assert "Command stderr:" not in tooling_record
     assert "Command: podman run --rm --device /dev/dri" in result.stdout
     assert "Input:\n  Reply with exactly: ready" in result.stdout
     assert "Inference stdout:\n  ready" in result.stdout
-    assert "Inference stderr:\n  (empty)" in result.stdout
+    assert "Parsed result:\n  ready" in result.stdout
+    assert "Inference stderr:" not in result.stdout
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
 
@@ -1125,6 +1134,38 @@ def test_diagnostic_helpers_redact_api_keys_and_bearer_headers(
     assert "Empty result:\n  (empty)" in result.stdout
     assert "<redacted>" in result.stdout
     assert not artifact.exists()
+
+
+def test_log_nonempty_block_omits_empty_text_and_returns_zero_under_set_e(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = tmp_path / "models.yml"
+    config.write_text("server:\n  api_key: fixture-secret\n")
+    helper = tmp_path / "nonempty-block.sh"
+    helper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        'source "$TEST_REPO_DIR/tools/lib.sh"\n'
+        'log_nonempty_block "Empty stderr" ""\n'
+        'log_nonempty_block "Client stderr" "client warning"\n'
+        "printf 'continued\\n'\n"
+    )
+    helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(helper)],
+        cwd=ROOT,
+        env=os.environ
+        | {"LLM_ENV_CONFIG": str(config), "TEST_REPO_DIR": str(ROOT)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Empty stderr:" not in result.stdout
+    assert "Client stderr:\n  client warning" in result.stdout
+    assert "continued" in result.stdout
 
 
 def test_diagnostic_helper_treats_api_keys_as_fixed_text(
@@ -1511,6 +1552,8 @@ def test_check_server_prints_redacted_request_response_and_curl_template(
     assert '"content":"Reply with exactly: ready"' in result.stdout
     assert '"max_tokens": 256' in result.stdout
     assert "HTTP response:" in result.stdout
+    assert "HTTP stderr:" not in result.stdout
+    assert "Response parsing stderr:\n  (empty)" not in result.stdout
     assert "Assistant content:\n  ready" in result.stdout
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
