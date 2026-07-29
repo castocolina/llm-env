@@ -77,7 +77,7 @@ snapshot_for() {
         *) return 64 ;;
     esac
 
-    log_block "Identity" "source fetch check=${check_name}"
+    log_block "Source" "fetch check=${check_name}"
     log_command "curl --fail --silent --show-error --max-time 20 ${url}"
     log_block "Input" "(none)"
     if curl -fsS --max-time 20 "$url" >"$stdout_file" 2>"$stderr_file"; then
@@ -86,14 +86,14 @@ snapshot_for() {
         status=$?
     fi
     log_block "Source stdout" "$(<"$stdout_file")"
-    log_block "Source stderr" "$(<"$stderr_file")"
+    log_nonempty_block "Source stderr" "$(<"$stderr_file")"
     log_block "Exit status" "$status"
     if [ "$status" -ne 0 ]; then
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source exited ${status}"
         return 1
     fi
     if ! snapshot="$(jq -ce --arg url "$url" "$filter" "$stdout_file" 2>"$parser_stderr_file")"; then
-        log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+        log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
         return 1
     fi
@@ -102,15 +102,39 @@ snapshot_for() {
             2>>"$parser_stderr_file")" \
             || ! snapshot="$(jq -ce --arg source_date "$source_date" '. + {source_date: $source_date}' \
                 <<<"$snapshot" 2>>"$parser_stderr_file")"; then
-            log_block "Source parser stderr" "$(<"$parser_stderr_file")"
+            log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
             log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
             return 1
         fi
     fi
+    log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
     log_block "Parsed result" "$snapshot"
     log_block "Expectation" "a current typed ${check_name} source object"
     log_info "Verdict: PASS"
     SNAPSHOT_RESULT="$snapshot"
+}
+
+log_agent_configuration() {
+    local client="$1" alias="$2" client_base="$3" credential
+
+    case "$client" in
+        pi) credential='Credential: <private>/models.json configures the Pi apiKey' ;;
+        opencode) credential='Credential: OPENCODE_API_KEY=<redacted> from the environment' ;;
+    esac
+    log_block "Configuration" "Provider: llm-env
+Base URL: ${client_base}
+Model: ${alias}
+Tools: bash
+${credential}"
+}
+
+log_validation_facts() {
+    local check_name="$1" snapshot="$2"
+
+    case "$check_name" in
+        weather) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\ntemperature_2m=\(.temperature_2m)\nweather_code=\(.weather_code)"' <<<"$snapshot" ;;
+        fx) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\nusd_to_clp=\(.usd_to_clp)"' <<<"$snapshot" ;;
+    esac
 }
 
 run_agent() {
@@ -121,16 +145,21 @@ run_agent() {
     local stderr_file="$5"
     local final_file="$6"
     local parser_error_file="$7"
-    local client_base="http://llm.local:${port}/v1"
-    local config_dir config_file config_key_command status
+    local client_base config_dir config_file config_key_command status quoted_prompt
+    local -a pipeline_statuses
 
     AGENT_FAILURE_STAGE="command exit"
+    AGENT_EXIT_STATUS="NOT RUN"
+    AGENT_CLIENT_BASE="http://llm.local:${port}/v1"
+    client_base="$AGENT_CLIENT_BASE"
+    printf -v quoted_prompt '%q' "$prompt"
     DISPLAYED_CLIENT_COMMAND=""
 
     case "$client" in
         pi)
             config_dir="$workspace/pi"
             config_file="$config_dir/models.json"
+            DISPLAYED_CLIENT_COMMAND="PI_CODING_AGENT_DIR=<private> pi --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files --tools bash -p --mode json --model llm-env/${alias} ${quoted_prompt}"
             mkdir -p "$config_dir" || return 1
             chmod 700 "$config_dir" || return 1
             printf -v config_key_command "!yq -r '.server.api_key' %q" "$CONFIG_PATH"
@@ -146,8 +175,8 @@ run_agent() {
                     models: [{id: $alias}]
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            DISPLAYED_CLIENT_COMMAND="PI_CODING_AGENT_DIR=<private> pi --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files --tools bash -p --mode json --model llm-env/${alias} <prompt>"
-            if (
+            # The first pipe element is Pi; the second is tee.
+            (
                 cd "$workspace" || exit 1
                 PI_CODING_AGENT_DIR="$config_dir" pi \
                     --no-session \
@@ -160,10 +189,13 @@ run_agent() {
                     --mode json \
                     --model "llm-env/${alias}" \
                     "$prompt"
-            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null; then
-                status=0
-            else
-                status=$?
+            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
+            pipeline_statuses=("${PIPESTATUS[@]}")
+            status="${pipeline_statuses[0]}"
+            AGENT_EXIT_STATUS="$status"
+            if [ "${pipeline_statuses[1]}" -ne 0 ]; then
+                AGENT_FAILURE_STAGE="transcript capture"
+                return 1
             fi
             if [ "$status" -ne 0 ]; then
                 return 1
@@ -180,6 +212,7 @@ run_agent() {
         opencode)
             config_dir="$workspace/opencode"
             config_file="$config_dir/opencode.jsonc"
+            DISPLAYED_CLIENT_COMMAND="HOME=<private> XDG_CONFIG_HOME=<private> XDG_DATA_HOME=<private> XDG_STATE_HOME=<private> OPENCODE_CONFIG=<private> OPENCODE_API_KEY=<redacted> opencode run --format json --model llm-env/${alias} ${quoted_prompt}"
             mkdir -p "$config_dir" "$workspace/opencode-home" "$workspace/opencode-config" "$workspace/opencode-data" "$workspace/opencode-state" || return 1
             chmod 700 "$config_dir" "$workspace/opencode-home" "$workspace/opencode-config" "$workspace/opencode-data" "$workspace/opencode-state" || return 1
             jq -n \
@@ -192,8 +225,7 @@ run_agent() {
                     models: {($alias): {name: $alias}}
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            DISPLAYED_CLIENT_COMMAND="OPENCODE_CONFIG=<private> OPENCODE_API_KEY=<redacted> opencode run --format json --model llm-env/${alias} <prompt>"
-            if (
+            (
                 cd "$workspace" || exit 1
                 export HOME="$workspace/opencode-home"
                 export XDG_CONFIG_HOME="$workspace/opencode-config"
@@ -202,10 +234,13 @@ run_agent() {
                 export OPENCODE_CONFIG="$config_file"
                 export OPENCODE_API_KEY="$api_key"
                 opencode run --format json --model "llm-env/${alias}" "$prompt"
-            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null; then
-                status=0
-            else
-                status=$?
+            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
+            pipeline_statuses=("${PIPESTATUS[@]}")
+            status="${pipeline_statuses[0]}"
+            AGENT_EXIT_STATUS="$status"
+            if [ "${pipeline_statuses[1]}" -ne 0 ]; then
+                AGENT_FAILURE_STAGE="transcript capture"
+                return 1
             fi
             if [ "$status" -ne 0 ]; then
                 return 1
@@ -234,7 +269,7 @@ parse_evidence() {
 
     if [[ "$assistant_text" =~ $fence_prefix ]]; then
         if ! fenced="$(printf '%s' "$assistant_text" | jq -Rrse \
-            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body' 2>/dev/null)"; then
+            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body')"; then
             return 1
         fi
         [ -n "$fenced" ] || return 1
@@ -330,6 +365,7 @@ for client in "${clients[@]}"; do
                     snapshot="$SNAPSHOT_RESULT"
                     source_url="$weather_url"
                     fields='source_url, source_timestamp, temperature_2m, and weather_code'
+                    agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched weather source'
                     ;;
                 fx)
                     snapshot_for "$check_name" "$source_stdout" "$source_stderr" "$source_parser_stderr" || {
@@ -340,6 +376,7 @@ for client in "${clients[@]}"; do
                     snapshot="$SNAPSHOT_RESULT"
                     source_url="$fx_url"
                     fields='source_url, source_timestamp, and usd_to_clp'
+                    agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
                     ;;
             esac
             printf -v prompt '%s' "Run a shell network command against this literal URL: ${source_url}. Do not substitute the source or modify its query. Return fields from that response only. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
@@ -360,17 +397,18 @@ for client in "${clients[@]}"; do
                 agent_failed=1
             fi
 
-            log_block "Identity" "client=${client} model=${alias} check=${check_name}"
+            log_block "Agent" "client=${client} model=${alias} check=${check_name}"
+            log_agent_configuration "$client" "$alias" "$AGENT_CLIENT_BASE"
             log_command "$DISPLAYED_CLIENT_COMMAND"
             log_block "Input" "$prompt"
-            log_block "Client JSONL transcript" "$(<"$transcript_file")"
-            log_block "Client stderr" "$(<"$client_stderr_file")"
-            log_block "Assistant final text" "$(<"$final_file")"
-            log_block "Agent parser stderr" "$(<"$parser_error_file")"
-            log_block "Agent evidence" "$evidence"
-            log_block "Fresh source snapshot" "$snapshot"
+            log_block "Exit status" "$AGENT_EXIT_STATUS"
+            log_block "Expectation" "$agent_expectation"
 
             if [ "$agent_failed" -ne 0 ]; then
+                log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
+                log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
+                log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
+                log_nonempty_block "Response" "$(<"$final_file")"
                 log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=agent invocation failed"
                 printf 'FAIL client=%s model=%s check=%s reason=agent-failed\n' \
                     "$client" "$alias" "$check_name"
@@ -380,11 +418,20 @@ for client in "${clients[@]}"; do
 
             differences="$(source_evidence_differences "$check_name" "$snapshot" "$evidence")"
             if [ -z "$differences" ]; then
+                log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
+                log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
+                log_block "Response" "$(<"$final_file")"
+                log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
                 log_info "Verdict: PASS"
                 printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
                     "$client" "$alias" "$check_name"
                 continue
             fi
+            log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
+            log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
+            log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
+            log_nonempty_block "Response" "$(<"$final_file")"
+            log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
             while IFS= read -r difference; do
                 [ -n "$difference" ] || continue
                 log_error "Verdict: FAIL stage=source-evidence mismatch client=${client} model=${alias} check=${check_name} ${difference}"

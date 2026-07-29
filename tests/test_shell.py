@@ -1711,14 +1711,22 @@ def run_agent_check(
     agent_response_suffix: str = "",
     keep_artifacts: bool = False,
     xtrace: bool = False,
+    agent_client_stderr: str = "",
+    agent_parser_stderr: str = "",
+    fenced_parser_stderr: str = "",
+    source_parser_stderr: str = "",
+    tee_exit: int = 0,
+    fail_pi_configuration: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
     real_yq = shutil.which("yq")
     real_date = shutil.which("date")
+    real_tee = shutil.which("tee")
     assert real_jq is not None
     assert real_yq is not None
     assert real_date is not None
+    assert real_tee is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -1742,18 +1750,45 @@ def run_agent_check(
         "chmod": "/usr/bin/chmod",
         "date": real_date,
         "find": "/usr/bin/find",
-        "jq": real_jq,
         "mkdir": "/usr/bin/mkdir",
         "mktemp": "/usr/bin/mktemp",
         "mv": "/usr/bin/mv",
         "rm": "/usr/bin/rm",
         "sed": "/usr/bin/sed",
-        "tee": "/usr/bin/tee",
         "yq": real_yq,
     }.items():
         command = commands / name
         command.write_text(f"#!/usr/bin/bash\nexec {executable!s} \"$@\"\n")
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    jq = commands / "jq"
+    jq.write_text(
+        "#!/usr/bin/bash\n"
+        '"$REAL_JQ" "$@"\n'
+        "status=$?\n"
+        'if [ -n "$AGENT_CHECK_PARSER_STDERR" ] '
+        '&& [[ "$*" == *\'[select(.type == "message_end"\'* ]]; then\n'
+        '    printf "%s\\n" "$AGENT_CHECK_PARSER_STDERR" >&2\n'
+        "fi\n"
+        'if [ -n "$AGENT_CHECK_FENCED_PARSER_STDERR" ] '
+        '&& [[ "$*" == *\'capture("^[[:space:]]*```json\'* ]]; then\n'
+        '    printf "%s\\n" "$AGENT_CHECK_FENCED_PARSER_STDERR" >&2\n'
+        "fi\n"
+        'if [ -n "$AGENT_CHECK_SOURCE_PARSER_STDERR" ] '
+        '&& [[ "${!#}" == *source-stdout.* ]]; then\n'
+        '    printf "%s\\n" "$AGENT_CHECK_SOURCE_PARSER_STDERR" >&2\n'
+        "fi\n"
+        'exit "$status"\n'
+    )
+    jq.chmod(jq.stat().st_mode | stat.S_IXUSR)
+
+    tee = commands / "tee"
+    tee.write_text(
+        "#!/usr/bin/bash\n"
+        '"$REAL_TEE" "$@"\n'
+        'exit "$AGENT_CHECK_TEE_EXIT"\n'
+    )
+    tee.chmod(tee.stat().st_mode | stat.S_IXUSR)
 
     curl = commands / "curl"
     curl.write_text(
@@ -1809,6 +1844,11 @@ def run_agent_check(
         "AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE": agent_weather_evidence_override
         or "{}",
         "AGENT_CHECK_FX_EVIDENCE_OVERRIDE": agent_fx_evidence_override or "{}",
+        "AGENT_CHECK_CLIENT_STDERR": agent_client_stderr,
+        "AGENT_CHECK_PARSER_STDERR": agent_parser_stderr,
+        "AGENT_CHECK_FENCED_PARSER_STDERR": fenced_parser_stderr,
+        "AGENT_CHECK_SOURCE_PARSER_STDERR": source_parser_stderr,
+        "AGENT_CHECK_TEE_EXIT": str(tee_exit),
         "ARTIFACTS": str(artifacts),
         "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
         "CALLS": str(calls),
@@ -1817,9 +1857,19 @@ def run_agent_check(
         "PATH": str(commands),
         "TMPDIR": str(diagnostic_tmpdir),
         "XDG_CONFIG_HOME": str(tmp_path / "host-xdg-config"),
+        "REAL_JQ": real_jq,
+        "REAL_TEE": real_tee,
     }
     if keep_artifacts:
         environment["LLM_ENV_KEEP_CHECK_ARTIFACTS"] = "1"
+    if fail_pi_configuration:
+        command = commands / "mkdir"
+        command.write_text(
+            "#!/usr/bin/bash\n"
+            'if [[ "${*: -1}" == */pi ]]; then exit 1; fi\n'
+            'exec /usr/bin/mkdir "$@"\n'
+        )
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
     command = ["/usr/bin/bash"]
     if xtrace:
         command.append("-x")
@@ -1840,8 +1890,39 @@ def count_rows(output: str, prefix: str) -> int:
     return sum(line.startswith(prefix) for line in output.splitlines())
 
 
+def agent_rows(output: str) -> list[str]:
+    """Return the details of each structured agent row."""
+    return output.split("Agent:\n")[1:]
+
+
+def assert_common_agent_fields(
+    row: str, *, client: str, exit_status: str
+) -> None:
+    """Assert the fields required before agent success or failure evidence."""
+    credentials = {
+        "pi": "Credential: <private>/models.json configures the Pi apiKey",
+        "opencode": "Credential: OPENCODE_API_KEY=<redacted> from the environment",
+    }
+
+    assert f"client={client} model=gemma4 check=" in row
+    assert (
+        "Configuration:\n  Provider: llm-env\n  Base URL: http://llm.local:8000/v1\n"
+        "  Model: gemma4\n  Tools: bash\n  " + credentials[client]
+    ) in row
+    assert "Command: " in row
+    assert "Input:\n  Run a shell network command against this literal URL: https://" in row
+    assert f"Exit status:\n  {exit_status}" in row
+    assert (
+        "Expectation:\n  exactly one JSON object whose source URL, canonical source date, "
+        "and required source values match the fetched "
+    ) in row
+
+
 VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
+if [ -n "${AGENT_CHECK_CLIENT_STDERR:-}" ]; then
+    printf '%s\n' "$AGENT_CHECK_CLIENT_STDERR" >&2
+fi
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
@@ -1878,10 +1959,27 @@ fi
 jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:("```json\\n" + ($evidence | tojson) + "\\n```")}]}}'
 """
 
+MALFORMED_FENCED_JSON_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
+printf -v seconds '%02d' "$count"
+if [[ "$*" == *weather* ]]; then
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
+else
+    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
+fi
+jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:("```json\\n" + ($evidence | tojson) + "\\n``` trailing")}]}}'
+"""
+
 FAILING_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
 printf 'Authorization: Bearer test-key-not-a-secret\\nagent transport failed\\n' >&2
 exit 17
+"""
+
+INVALID_FINAL_PI_STUB = """#!/usr/bin/bash
+printf 'pi %s\\n' "$*" >> "$CALLS"
+printf '%s\\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"not JSON"}]}}'
 """
 
 STALE_PI_STUB = """#!/usr/bin/bash
@@ -2088,6 +2186,30 @@ def test_agent_check_accepts_exactly_one_json_fence(tmp_path: pathlib.Path) -> N
     assert result.returncode == 0, result.stderr
 
 
+def test_agent_check_retains_malformed_fenced_response_parser_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": MALFORMED_FENCED_JSON_PI_STUB},
+        fenced_parser_stderr="parse error: Authorization: Bearer test-key-not-a-secret",
+    )
+    combined = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client="pi", exit_status="0")
+        assert (
+            "Agent parser stderr:\n  parse error: Authorization: Bearer <redacted>"
+        ) in row
+        assert "Client stderr:" not in row
+        assert "Response:\n  ```json" in row
+    assert "test-key-not-a-secret" not in combined
+    assert "Verdict: FAIL stage=agent evidence parsing" in result.stderr
+
+
 def test_agent_check_prints_redacted_transcript_and_client_failure(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -2100,6 +2222,108 @@ def test_agent_check_prints_redacted_transcript_and_client_failure(
     assert "agent transport failed" in result.stdout
     assert "Authorization: Bearer <redacted>" in combined
     assert "test-key-not-a-secret" not in combined
+    assert "Verdict: FAIL stage=command exit" in result.stderr
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client="pi", exit_status="17")
+        assert "Client stderr:\n  Authorization: Bearer <redacted>" in row
+        assert "Client JSONL transcript:" not in row
+        assert "Agent parser stderr:" not in row
+        assert "Response:" not in row
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"), (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB))
+)
+def test_agent_check_reports_client_exit_when_transcript_capture_fails(
+    tmp_path: pathlib.Path, client: str, stub: str
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        tee_exit=41,
+    )
+
+    assert result.returncode != 0
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client=client, exit_status="0")
+        assert "Client JSONL transcript:\n  {\"type\":" in row
+        assert "Client stderr:" not in row
+        assert "Agent parser stderr:" not in row
+        assert "Response:" not in row
+    assert "Verdict: FAIL stage=transcript capture" in result.stderr
+
+
+def test_agent_check_retains_final_response_parser_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(tmp_path, clients={"pi": INVALID_FINAL_PI_STUB})
+
+    assert result.returncode != 0
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client="pi", exit_status="0")
+        assert "Response:\n  not JSON" in row
+        assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in row
+        assert "Agent parser stderr:\n  " in row
+        assert "parse error:" in row
+        assert "Client stderr:" not in row
+    assert "Verdict: FAIL stage=agent evidence parsing" in result.stderr
+
+
+def test_agent_check_renders_concise_source_evidence_mismatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_weather_evidence_override='{"temperature_2m":-999999}',
+    )
+
+    assert result.returncode != 0
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    weather_row = next(row for row in rows if "check=weather" in row)
+    assert_common_agent_fields(weather_row, client="pi", exit_status="0")
+    assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in weather_row
+    assert "Response:\n  {" in weather_row
+    assert (
+        "Validated:\n  source_url=https://api.open-meteo.com/v1/forecast?"
+        "latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&"
+        "timezone=America%2FSantiago\n  source_date=2026-07-27\n  "
+        "temperature_2m=16.3\n  weather_code=3"
+    ) in weather_row
+    for legacy_block in (
+        "Identity:",
+        "Assistant final text:",
+        "Agent evidence:",
+        "Fresh source snapshot:",
+    ):
+        assert legacy_block not in weather_row
+
+
+def test_agent_check_marks_unlaunched_client_as_not_run(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        fail_pi_configuration=True,
+    )
+
+    assert result.returncode != 0
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client="pi", exit_status="NOT RUN")
+        assert "Client JSONL transcript:" not in row
+        assert "Client stderr:" not in row
+        assert "Agent parser stderr:" not in row
+        assert "Response:" not in row
     assert "Verdict: FAIL stage=command exit" in result.stderr
 
 
@@ -2183,6 +2407,85 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in recorded
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"), (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB))
+)
+def test_agent_check_renders_concise_success_rows(
+    tmp_path: pathlib.Path, client: str, stub: str
+) -> None:
+    result, _, _ = run_agent_check(tmp_path, clients={client: stub})
+
+    assert result.returncode == 0, result.stderr
+    assert "Source stderr:" not in result.stdout
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client=client, exit_status="0")
+        assert "Response:\n  {" in row
+        assert "Validated:\n  source_url=https://" in row
+        assert "Verdict: PASS" in row
+        assert "Client JSONL transcript:" not in row
+        assert "Client stderr:" not in row
+        assert "Agent parser stderr:" not in row
+        assert "Agent evidence:" not in row
+        assert "Fresh source snapshot:" not in row
+    if client == "pi":
+        assert "Command: PI_CODING_AGENT_DIR=<private> pi --no-session" in result.stdout
+        assert "OPENCODE_API_KEY=" not in result.stdout
+    else:
+        assert (
+            "Command: HOME=<private> XDG_CONFIG_HOME=<private> XDG_DATA_HOME=<private> "
+            "XDG_STATE_HOME=<private> OPENCODE_CONFIG=<private> "
+            "OPENCODE_API_KEY=<redacted> opencode run"
+        ) in result.stdout
+
+
+def test_agent_check_keeps_nonempty_success_source_parser_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        source_parser_stderr="source parser warning",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("Source parser stderr:\n  source parser warning") == 2
+
+
+def test_agent_check_omits_empty_success_source_parser_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(tmp_path, clients={"pi": VALID_PI_STUB})
+
+    assert result.returncode == 0, result.stderr
+    assert "Source parser stderr:" not in result.stdout
+    assert "Source parser stderr:\n  (empty)" not in result.stdout
+
+
+def test_agent_check_keeps_nonempty_success_diagnostics(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_client_stderr="client warning",
+        agent_parser_stderr="parser warning",
+    )
+
+    assert result.returncode == 0, result.stderr
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert_common_agent_fields(row, client="pi", exit_status="0")
+        assert "Client JSONL transcript:" not in row
+        assert "Client stderr:\n  client warning" in row
+        assert "Agent parser stderr:\n  parser warning" in row
+        assert "Response:\n  {" in row
+        assert "Validated:\n  source_url=https://" in row
+        assert "Verdict: PASS" in row
 
 
 @pytest.mark.parametrize(
