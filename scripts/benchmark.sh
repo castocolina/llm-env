@@ -35,19 +35,25 @@ run_vulkan_bench() {
         status=$?
     fi
     log_block "Benchmark stdout" "$(<"$stdout_file")"
-    log_block "Benchmark stderr" "$(<"$stderr_file")"
+    log_nonempty_block "Benchmark stderr" "$(<"$stderr_file")"
     log_block "Exit status" "$status"
     if [ "$status" -ne 0 ]; then
-        log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
+        log_nonempty_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
         log_error "Vulkan benchmark failure: command exit ${status}"
         return 1
     fi
-    if ! result="$(jq -r '[ (.[] | select(.n_prompt > 0) | .avg_ts), (.[] | select(.n_gen > 0) | .avg_ts) ] | @tsv' "$stdout_file" 2>"$parser_stderr_file" | awk -F'\t' 'NF == 2 && $1 != "" && $2 != "" { print; ok = 1 } END { exit !ok }')"; then
-        log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
+    if ! result="$(jq -ce '
+        [(.[] | select(.n_prompt > 0) | .avg_ts),
+         (.[] | select(.n_gen > 0) | .avg_ts)]
+        | select(length == 2 and all(.[]; type == "number"))
+        | {pp_tps: .[0], tg_tps: .[1]}
+    ' "$stdout_file" 2>"$parser_stderr_file")"; then
+        log_nonempty_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
         log_error "Vulkan benchmark failure: response parsing"
         return 1
     fi
-    log_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
+    log_nonempty_block "Benchmark parser stderr" "$(<"$parser_stderr_file")"
+    log_block "Parsed metrics" "$result"
     BENCH_RESULT="$result"
 }
 
@@ -67,8 +73,8 @@ winner_image="$CPU_IMAGE"
 BENCH_RESULT=""
 benchmark_status=1
 if run_vulkan_bench "$vulkan_stdout" "$vulkan_stderr" "$vulkan_parser_stderr" && [ -n "$BENCH_RESULT" ]; then
-    pp="$(cut -f1 <<<"$BENCH_RESULT")"
-    tg="$(cut -f2 <<<"$BENCH_RESULT")"
+    pp="$(jq -er '.pp_tps' <<<"$BENCH_RESULT")"
+    tg="$(jq -er '.tg_tps' <<<"$BENCH_RESULT")"
     record_vulkan "$pp" "$tg"
     winner_backend="vulkan"
     winner_image="$VULKAN_IMAGE"

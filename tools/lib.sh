@@ -58,6 +58,12 @@ log_block() {
     fi
 }
 
+log_nonempty_block() {
+    if [ -n "$2" ]; then
+        log_block "$1" "$2"
+    fi
+}
+
 _discard_diagnostic_dir() {
     local directory="$1"
     chmod -R u+rwx -- "$directory" >/dev/null 2>&1 || true

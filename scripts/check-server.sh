@@ -58,7 +58,7 @@ request_record() {
         log_block "Request payload" "$payload"
     fi
     log_block "HTTP response" "$(<"$body_file")"
-    log_block "HTTP stderr" "$(<"$stderr_file")"
+    log_nonempty_block "HTTP stderr" "$(<"$stderr_file")"
     log_block "HTTP status" "$http_status"
 
     REQUEST_CURL_STATUS="$curl_status"
@@ -127,7 +127,7 @@ else
     listed="$(jq -r '[.data[].id] | sort | join(",")' \
         < "$REQUEST_BODY_FILE" 2>"$model_parse_stderr")"
     model_parse_status=$?
-    log_block "Response parsing stderr" "$(<"$model_parse_stderr")"
+    log_nonempty_block "Response parsing stderr" "$(<"$model_parse_stderr")"
     if [ "$model_parse_status" -ne 0 ]; then
         bad "Verdict: FAIL stage=response parsing identity=server model listing"
     elif [ "$listed" = "$expected" ]; then
@@ -187,7 +187,7 @@ while read -r alias; do
     log_block "Assistant content" "$content"
     log_block "Reasoning content" "$reasoning"
     log_block "Normalized content" "$normalized"
-    log_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
+    log_nonempty_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
     log_block "Expectation" "$REQUEST_EXPECTATION"
     if [ -n "$failure_stage" ]; then
         bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"

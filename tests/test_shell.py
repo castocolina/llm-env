@@ -441,7 +441,8 @@ def test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid(
 
     assert result.returncode != 0
     assert "Benchmark stdout:\n  not benchmark JSON" in result.stdout
-    assert "Benchmark parser stderr:\n  parse error:" in result.stdout
+    assert "Benchmark parser stderr:" in result.stdout
+    assert "parse error:" in result.stdout
     assert "Vulkan benchmark failure: response parsing" in result.stderr
     assert yq_value(config, ".gpu.backend") == "cpu"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
@@ -640,10 +641,22 @@ def run_check_setup_with_stubs(
     inference_exit: int = 0,
     budget_exit: int = 0,
     resolve_exit: int = 0,
+    render_node: str | None = "renderD128",
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
     assert real_yq is not None
+
+    detected_gpu = json.dumps(
+        {
+            "gpus": [
+                {
+                    "pci_address": "0000:03:00.0",
+                    **({"render_node": render_node} if render_node is not None else {}),
+                }
+            ]
+        }
+    )
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -667,7 +680,7 @@ def run_check_setup_with_stubs(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
-        "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"pci_address\":\"0000:03:00.0\",\"render_node\":\"renderD128\"}]}' ;;\n"
+        "  *' detect'*) printf '%s\\n' \"$DETECTED_GPU\" ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}'; exit \"$BUDGET_EXIT\" ;;\n"
         "  *' resolve-device'*)\n"
@@ -733,6 +746,7 @@ def run_check_setup_with_stubs(
         "INFERENCE_EXIT": str(inference_exit),
         "BUDGET_EXIT": str(budget_exit),
         "RESOLVE_EXIT": str(resolve_exit),
+        "DETECTED_GPU": detected_gpu,
     }
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-setup.sh"],
@@ -813,6 +827,25 @@ def test_check_setup_prints_complete_static_and_inference_records(
     assert "Inference stderr:" not in result.stdout
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
+
+
+def test_check_setup_skips_unresolved_gpu_render_node_without_parsed_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_check_setup_with_stubs(tmp_path, render_node=None)
+    gpu_record = result.stdout.split("Identity: GPU render node", 1)[1].split(
+        "Identity:", 1
+    )[0]
+
+    assert result.returncode == 0, result.stderr
+    assert "Command: test -r /dev/dri/<resolved-render-node>" in gpu_record
+    assert "Input:\n  configured PCI address: 0000:03:00.0" in gpu_record
+    assert "Command stdout:\n  (empty)" in gpu_record
+    assert "Command stderr:" not in gpu_record
+    assert "Exit status:\n  SKIP" in gpu_record
+    assert "Parsed result:" not in gpu_record
+    assert "Expectation:\n  a detected readable render node" in gpu_record
+    assert "Verdict: SKIP reason=GPU detection did not provide a render node" in result.stderr
 
 
 def test_check_setup_accepts_ready_after_visible_reasoning(tmp_path: pathlib.Path) -> None:
