@@ -85,14 +85,17 @@ snapshot_for() {
     else
         status=$?
     fi
-    log_block "Source stdout" "$(<"$stdout_file")"
-    log_nonempty_block "Source stderr" "$(<"$stderr_file")"
-    log_block "Exit status" "$status"
     if [ "$status" -ne 0 ]; then
+        log_block "Source stdout" "$(<"$stdout_file")"
+        log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+        log_block "Exit status" "$status"
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source exited ${status}"
         return 1
     fi
     if ! snapshot="$(jq -ce --arg url "$url" "$filter" "$stdout_file" 2>"$parser_stderr_file")"; then
+        log_block "Source stdout" "$(<"$stdout_file")"
+        log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+        log_block "Exit status" "$status"
         log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
         return 1
@@ -102,11 +105,16 @@ snapshot_for() {
             2>>"$parser_stderr_file")" \
             || ! snapshot="$(jq -ce --arg source_date "$source_date" '. + {source_date: $source_date}' \
                 <<<"$snapshot" 2>>"$parser_stderr_file")"; then
+            log_block "Source stdout" "$(<"$stdout_file")"
+            log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+            log_block "Exit status" "$status"
             log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
             log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
             return 1
         fi
     fi
+    log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+    log_block "Exit status" "$status"
     log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
     log_block "Parsed result" "$snapshot"
     log_block "Expectation" "a current typed ${check_name} source object"
@@ -347,6 +355,7 @@ if [ "${#clients[@]}" -eq 0 ]; then
     exit 1
 fi
 
+passes=0
 failures=0
 for client in "${clients[@]}"; do
     while IFS= read -r alias; do
@@ -379,7 +388,7 @@ for client in "${clients[@]}"; do
                     agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
                     ;;
             esac
-            printf -v prompt '%s' "Run a shell network command against this literal URL: ${source_url}. Do not substitute the source or modify its query. Return fields from that response only. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
+            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"
@@ -408,7 +417,7 @@ for client in "${clients[@]}"; do
                 log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
                 log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
                 log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-                log_nonempty_block "Response" "$(<"$final_file")"
+                log_nonempty_block "Final response" "$(<"$final_file")"
                 log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=agent invocation failed"
                 printf 'FAIL client=%s model=%s check=%s reason=agent-failed\n' \
                     "$client" "$alias" "$check_name"
@@ -420,17 +429,18 @@ for client in "${clients[@]}"; do
             if [ -z "$differences" ]; then
                 log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
                 log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-                log_block "Response" "$(<"$final_file")"
+                log_block "Final response" "$(<"$final_file")"
                 log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
                 log_info "Verdict: PASS"
                 printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
                     "$client" "$alias" "$check_name"
+                passes=$((passes + 1))
                 continue
             fi
             log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
             log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
             log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-            log_nonempty_block "Response" "$(<"$final_file")"
+            log_nonempty_block "Final response" "$(<"$final_file")"
             log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
             while IFS= read -r difference; do
                 [ -n "$difference" ] || continue
@@ -443,4 +453,5 @@ for client in "${clients[@]}"; do
     done <<< "$aliases"
 done
 
+printf 'Results: %d passed, %d failed\n' "$passes" "$failures"
 [ "$failures" -eq 0 ]

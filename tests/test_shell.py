@@ -1910,7 +1910,7 @@ def assert_common_agent_fields(
         "  Model: gemma4\n  Tools: bash\n  " + credentials[client]
     ) in row
     assert "Command: " in row
-    assert "Input:\n  Run a shell network command against this literal URL: https://" in row
+    assert "Input:\n  You MUST use bash to execute this exact command verbatim" in row
     assert f"Exit status:\n  {exit_status}" in row
     assert (
         "Expectation:\n  exactly one JSON object whose source URL, canonical source date, "
@@ -2205,7 +2205,7 @@ def test_agent_check_retains_malformed_fenced_response_parser_diagnostics(
             "Agent parser stderr:\n  parse error: Authorization: Bearer <redacted>"
         ) in row
         assert "Client stderr:" not in row
-        assert "Response:\n  ```json" in row
+        assert "Final response:\n  ```json" in row
     assert "test-key-not-a-secret" not in combined
     assert "Verdict: FAIL stage=agent evidence parsing" in result.stderr
 
@@ -2230,7 +2230,7 @@ def test_agent_check_prints_redacted_transcript_and_client_failure(
         assert "Client stderr:\n  Authorization: Bearer <redacted>" in row
         assert "Client JSONL transcript:" not in row
         assert "Agent parser stderr:" not in row
-        assert "Response:" not in row
+        assert "Final response:" not in row
 
 
 @pytest.mark.parametrize(
@@ -2253,7 +2253,7 @@ def test_agent_check_reports_client_exit_when_transcript_capture_fails(
         assert "Client JSONL transcript:\n  {\"type\":" in row
         assert "Client stderr:" not in row
         assert "Agent parser stderr:" not in row
-        assert "Response:" not in row
+        assert "Final response:" not in row
     assert "Verdict: FAIL stage=transcript capture" in result.stderr
 
 
@@ -2267,7 +2267,7 @@ def test_agent_check_retains_final_response_parser_diagnostics(
     assert len(rows) == 2
     for row in rows:
         assert_common_agent_fields(row, client="pi", exit_status="0")
-        assert "Response:\n  not JSON" in row
+        assert "Final response:\n  not JSON" in row
         assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in row
         assert "Agent parser stderr:\n  " in row
         assert "parse error:" in row
@@ -2290,7 +2290,7 @@ def test_agent_check_renders_concise_source_evidence_mismatch(
     weather_row = next(row for row in rows if "check=weather" in row)
     assert_common_agent_fields(weather_row, client="pi", exit_status="0")
     assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in weather_row
-    assert "Response:\n  {" in weather_row
+    assert "Final response:\n  {" in weather_row
     assert (
         "Validated:\n  source_url=https://api.open-meteo.com/v1/forecast?"
         "latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&"
@@ -2323,7 +2323,7 @@ def test_agent_check_marks_unlaunched_client_as_not_run(
         assert "Client JSONL transcript:" not in row
         assert "Client stderr:" not in row
         assert "Agent parser stderr:" not in row
-        assert "Response:" not in row
+        assert "Final response:" not in row
     assert "Verdict: FAIL stage=command exit" in result.stderr
 
 
@@ -2419,11 +2419,12 @@ def test_agent_check_renders_concise_success_rows(
 
     assert result.returncode == 0, result.stderr
     assert "Source stderr:" not in result.stdout
+    assert "Source stdout:" not in result.stdout
     rows = agent_rows(result.stdout)
     assert len(rows) == 2
     for row in rows:
         assert_common_agent_fields(row, client=client, exit_status="0")
-        assert "Response:\n  {" in row
+        assert "Final response:\n  {" in row
         assert "Validated:\n  source_url=https://" in row
         assert "Verdict: PASS" in row
         assert "Client JSONL transcript:" not in row
@@ -2483,7 +2484,7 @@ def test_agent_check_keeps_nonempty_success_diagnostics(
         assert "Client JSONL transcript:" not in row
         assert "Client stderr:\n  client warning" in row
         assert "Agent parser stderr:\n  parser warning" in row
-        assert "Response:\n  {" in row
+        assert "Final response:\n  {" in row
         assert "Validated:\n  source_url=https://" in row
         assert "Verdict: PASS" in row
 
@@ -2627,13 +2628,35 @@ def test_agent_check_prompt_requires_literal_source_evidence(
     prompts = [line for line in calls.read_text().splitlines() if line.startswith(f"{client} ")]
     assert len(prompts) == 2
     for prompt in prompts:
-        assert "Run a shell network command against this literal URL:" in prompt
-        assert "Do not substitute the source or modify its query." in prompt
-        assert "Return fields from that response only." in prompt
+        assert "You MUST use bash to execute this exact command verbatim" in prompt
+        assert "as the only network request:" in prompt
+        assert "The URL argument must be copied byte-for-byte" in prompt
+        assert "Do not substitute any source, endpoint, proxy, mirror, or query." in prompt
+        assert "Return fields only from that command's response." in prompt
         assert "Return source_timestamp as ISO-8601." in prompt
         assert "Return exactly one JSON object containing" in prompt
-    assert any("https://api.open-meteo.com/v1/forecast?" in prompt for prompt in prompts)
-    assert any("https://open.er-api.com/v6/latest/USD" in prompt for prompt in prompts)
+    assert any(
+        "curl -fsS --max-time 20 -- 'https://api.open-meteo.com/v1/forecast?"
+        in prompt
+        for prompt in prompts
+    )
+    assert any(
+        "curl -fsS --max-time 20 -- 'https://open.er-api.com/v6/latest/USD'"
+        in prompt
+        for prompt in prompts
+    )
+
+
+def test_agent_check_reports_final_pass_and_fail_totals(tmp_path: pathlib.Path) -> None:
+    """The matrix summary must make mixed outcomes immediately visible."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_weather_evidence_override='{"temperature_2m":-999999}',
+    )
+
+    assert result.returncode != 0
+    assert "Results: 1 passed, 1 failed" in result.stdout
 
 
 @pytest.mark.parametrize(
