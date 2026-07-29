@@ -388,7 +388,7 @@ for client in "${clients[@]}"; do
                     agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
                     ;;
             esac
-            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
+            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. The source_url field must reproduce the literal URL byte-for-byte, including percent encoding. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"

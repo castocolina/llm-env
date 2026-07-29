@@ -2633,6 +2633,7 @@ def test_agent_check_prompt_requires_literal_source_evidence(
         assert "The URL argument must be copied byte-for-byte" in prompt
         assert "Do not substitute any source, endpoint, proxy, mirror, or query." in prompt
         assert "Return fields only from that command's response." in prompt
+        assert "The source_url field must reproduce the literal URL byte-for-byte" in prompt
         assert "Return source_timestamp as ISO-8601." in prompt
         assert "Return exactly one JSON object containing" in prompt
     assert any(
