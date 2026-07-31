@@ -1,7 +1,9 @@
+import copy
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -46,6 +48,8 @@ def make_cfg(**overrides):
         },
         "runtime": {
             "models_max": 1,
+            "parallel_slots": 1,
+            "ubatch_size": 512,
             "flash_attn": True,
             "cache_type_k": "q8_0",
             "cache_type_v": "q8_0",
@@ -62,6 +66,7 @@ def make_cfg(**overrides):
                 "size_bytes": 7660000000,
                 "vram_budget": "55%",
                 "ctx_size": 8192,
+                "client_max_output_tokens": 8192,
                 "n_gpu_layers": 99,
             },
             {
@@ -75,6 +80,7 @@ def make_cfg(**overrides):
                 "size_bytes": 5600000000,
                 "vram_budget": "40%",
                 "ctx_size": 8192,
+                "client_max_output_tokens": 8192,
                 "n_gpu_layers": 99,
             },
         ],
@@ -124,6 +130,90 @@ def test_load_config_migrates_legacy_rocm_benchmark_from_yaml(tmp_path):
     }
 
 
+def test_pre_feature_config_migration_is_additive_and_idempotent():
+    fixture = Path(__file__).parent / "fixtures/models-v1-pre-feature.yml"
+    original = yaml.safe_load(fixture.read_text())
+    migrate_config = getattr(config_module, "migrate_config", None)
+    require_valid_config = getattr(config_module, "require_valid_config", None)
+
+    assert migrate_config is not None, "configuration migration is missing"
+    assert require_valid_config is not None, "shared configuration enforcement is missing"
+    migrated = migrate_config(copy.deepcopy(original))
+
+    assert migrated["runtime"]["parallel_slots"] == 1
+    assert migrated["runtime"]["ubatch_size"] == 512
+    assert [model["client_max_output_tokens"] for model in migrated["models"]] == [
+        8192,
+        4096,
+    ]
+    assert migrated["server"]["api_key"] == "fixture-private-migration-key"
+    assert migrated["server"]["custom_server_field"] == "preserved"
+    assert migrated["models"][0]["custom_model_field"] == "preserved"
+    assert migrated["custom_top_level"] == {"retained": True}
+    assert migrate_config(copy.deepcopy(migrated)) == migrated
+    assert require_valid_config(migrated) is migrated
+
+
+def test_migration_reports_all_actionable_errors_when_defaults_are_not_safe():
+    cfg = make_cfg()
+    del cfg["runtime"]["parallel_slots"]
+    del cfg["models"][0]["client_max_output_tokens"]
+    cfg["models"][0]["ctx_size"] = True
+    require_valid_config = getattr(config_module, "require_valid_config", None)
+
+    assert require_valid_config is not None, "shared configuration enforcement is missing"
+    migrated = config_module.migrate_config(cfg)
+
+    with pytest.raises(ConfigError) as error:
+        require_valid_config(migrated)
+    assert "model gemma4 missing key: client_max_output_tokens" in str(error.value)
+    assert "model gemma4 ctx_size must be a positive integer" in str(error.value)
+    assert "model gemma4 client_max_output_tokens must be a positive integer" in str(
+        error.value
+    )
+
+
+def test_shared_validation_reports_non_mapping_model_records():
+    cfg = make_cfg()
+    cfg["models"].append("invalid-model-record")
+    require_valid_config = getattr(config_module, "require_valid_config", None)
+
+    assert require_valid_config is not None, "shared configuration enforcement is missing"
+    with pytest.raises(ConfigError, match="each model must be a mapping"):
+        require_valid_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("alias", ["gemma4"], "model at index 0 alias must be a non-empty string"),
+        ("alias", {"name": "gemma4"}, "model at index 0 alias must be a non-empty string"),
+        ("enabled", "true", "model gemma4 enabled must be a Boolean"),
+        ("enabled", 1, "model gemma4 enabled must be a Boolean"),
+    ],
+)
+def test_validation_is_total_for_malformed_alias_and_enabled_values(
+    field, value, expected
+):
+    cfg = make_cfg()
+    cfg["models"][0][field] = value
+
+    assert expected in validate_config(cfg)
+
+
+def test_enabled_models_requires_mapping_records_with_literal_true():
+    cfg = make_cfg()
+    cfg["models"].extend(
+        [
+            "not-a-mapping",
+            {"alias": "string-enabled", "enabled": "true"},
+            {"alias": "integer-enabled", "enabled": 1},
+        ]
+    )
+
+    assert [model["alias"] for model in enabled_models(cfg)] == ["gemma4"]
+
+
 def test_config_save_and_load_migrate_legacy_rocm_benchmarks(tmp_path):
     """Persisting a legacy config must remove its obsolete benchmark result."""
     cfg = make_cfg()
@@ -153,10 +243,83 @@ def test_model_requires_display_metadata():
     assert "model gemma4 missing key: label" in validate_config(cfg)
 
 
+def test_config_requires_positive_non_boolean_runtime_and_client_limits():
+    cases = [
+        ("models_max", 0),
+        ("models_max", True),
+        ("parallel_slots", False),
+        ("ubatch_size", -1),
+    ]
+    for key, value in cases:
+        cfg = make_cfg()
+        cfg["runtime"][key] = value
+        assert any(key in error for error in validate_config(cfg))
+
+    for key, value in (("ctx_size", True), ("client_max_output_tokens", 0)):
+        cfg = make_cfg()
+        cfg["models"][0][key] = value
+        assert any(key in error for error in validate_config(cfg))
+
+
+def test_config_enforces_output_residency_and_single_slot_constraints():
+    cfg = make_cfg()
+    cfg["models"][0]["client_max_output_tokens"] = 8193
+    cfg["models"][0]["ctx_size"] = 8192
+    assert (
+        "model gemma4 client_max_output_tokens must not exceed ctx_size"
+        in validate_config(cfg)
+    )
+
+    cfg = make_cfg()
+    cfg["runtime"]["models_max"] = 2
+    assert "runtime.models_max must not exceed enabled model count (1)" in validate_config(
+        cfg
+    )
+
+    cfg = make_cfg()
+    cfg["runtime"]["parallel_slots"] = 2
+    assert "runtime.parallel_slots must be 1" in validate_config(cfg)
+
+
+def test_config_rejects_zero_enabled_models():
+    cfg = make_cfg()
+    for model in cfg["models"]:
+        model["enabled"] = False
+    assert "at least one model must be enabled" in validate_config(cfg)
+
+
 def test_set_enabled_models_replaces_the_enabled_set():
     cfg = set_enabled_models(make_cfg(), ["ornith"])
     assert [m["alias"] for m in enabled_models(cfg)] == ["ornith"]
     assert cfg["runtime"]["models_max"] == 1
+
+
+def test_set_enabled_models_preserves_requested_order_before_unselected_models():
+    cfg = make_cfg()
+    for alias in ("third", "fourth"):
+        model = copy.deepcopy(cfg["models"][1])
+        model["alias"] = alias
+        cfg["models"].append(model)
+
+    set_enabled_models(cfg, ["ornith", "gemma4"])
+
+    assert [model["alias"] for model in cfg["models"]] == [
+        "ornith",
+        "gemma4",
+        "third",
+        "fourth",
+    ]
+    assert [model["alias"] for model in enabled_models(cfg)] == ["ornith", "gemma4"]
+
+
+def test_set_enabled_models_rejects_duplicate_request_without_mutation():
+    cfg = make_cfg()
+    original = copy.deepcopy(cfg)
+
+    with pytest.raises(ConfigError, match="duplicate model alias: ornith"):
+        set_enabled_models(cfg, ["ornith", "ornith"])
+
+    assert cfg == original
 
 
 def test_set_enabled_models_rejects_unknown_alias():
@@ -199,11 +362,30 @@ def test_set_model_enabled_unknown_alias_raises():
         set_model_enabled(make_cfg(), "nope", True)
 
 
-def test_sync_models_max_matches_enabled_count():
-    cfg = sync_models_max(make_cfg())
+def test_enabling_model_preserves_residency_limit():
+    cfg = sync_models_max(set_model_enabled(make_cfg(), "ornith", True))
+    assert [model["alias"] for model in enabled_models(cfg)] == ["gemma4", "ornith"]
     assert cfg["runtime"]["models_max"] == 1
-    cfg = sync_models_max(set_model_enabled(cfg, "ornith", True))
-    assert cfg["runtime"]["models_max"] == 2
+
+
+def test_selection_clamps_residency_only_when_enabled_count_shrinks():
+    cfg = make_cfg()
+    cfg["models"][1]["enabled"] = True
+    cfg["runtime"]["models_max"] = 2
+    cfg = set_enabled_models(cfg, ["ornith"])
+    assert cfg["runtime"]["models_max"] == 1
+
+
+def test_empty_selection_and_final_disable_are_atomic():
+    cfg = make_cfg()
+    original = copy.deepcopy(cfg)
+    with pytest.raises(ConfigError, match="at least one model"):
+        set_enabled_models(cfg, [])
+    assert cfg == original
+
+    with pytest.raises(ConfigError, match="final enabled model"):
+        set_model_enabled(cfg, "gemma4", False)
+    assert cfg == original
 
 
 def test_save_then_load_roundtrip(tmp_path):

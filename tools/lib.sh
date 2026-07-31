@@ -161,6 +161,14 @@ require_cmd() {
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 
+migrate_config_file() {
+    local response
+    if ! response="$(llmenv --config "$CONFIG_PATH" migrate-config)"; then
+        jq -r '.error // "configuration migration failed"' <<<"$response" >&2
+        return 1
+    fi
+}
+
 new_api_key() {
     head -c 32 /dev/urandom | base64 | tr -d '/+=\n'
 }

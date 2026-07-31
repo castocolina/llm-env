@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -16,11 +17,74 @@ SCRIPT_DIR = ROOT / "scripts"
 SETUP_DIR = ROOT / "setup"
 TOOLS_DIR = ROOT / "tools"
 
+VALID_AGENT_SETUP_CONFIG = """\
+version: 1
+server:
+  host: 0.0.0.0
+  port: 18123
+  api_key: fixture-local-api-key
+  mdns_name: llm
+  sleep_idle_seconds: 300
+gpu:
+  pci_address: 0000:03:00.0
+  device_name: Test GPU
+  backend: vulkan
+  image: example.invalid/llama:latest
+  vram_total_mib: 16384
+  reserve_mode: auto
+  reserve_floor_mib: 1024
+runtime:
+  models_max: 1
+  parallel_slots: 1
+  ubatch_size: 512
+  flash_attn: true
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+models:
+  - alias: gemma4
+    label: Gemma 4
+    parameters: 12B
+    quantization: Q4_K_M
+    enabled: true
+    file: gemma4.gguf
+    url: https://example.invalid/gemma4.gguf
+    size_bytes: 1
+    vram_budget: 55%
+    ctx_size: 131072
+    client_max_output_tokens: 8192
+    n_gpu_layers: 99
+  - alias: ornith
+    label: Ornith
+    parameters: 9B
+    quantization: Q4_K_M
+    enabled: true
+    file: ornith.gguf
+    url: https://example.invalid/ornith.gguf
+    size_bytes: 1
+    vram_budget: 40%
+    ctx_size: 131072
+    client_max_output_tokens: 8192
+    n_gpu_layers: 99
+  - alias: old-model
+    label: Old model
+    parameters: 1B
+    quantization: Q4_K_M
+    enabled: false
+    file: old.gguf
+    url: https://example.invalid/old.gguf
+    size_bytes: 1
+    vram_budget: 5%
+    ctx_size: 8192
+    client_max_output_tokens: 2048
+    n_gpu_layers: 99
+"""
+
 
 def test_shell_scripts_use_the_approved_directories() -> None:
     assert not list(ROOT.glob("*.sh"))
     assert (TOOLS_DIR / "lib.sh").is_file()
     assert (SETUP_DIR / "setup.sh").is_file()
+    assert (SETUP_DIR / "setup-local-llm-agents.sh").is_file()
     assert (SCRIPT_DIR / "check-server.sh").is_file()
 
 
@@ -29,6 +93,7 @@ def test_makefile_dispatches_relocated_entrypoints() -> None:
 
     assert "@bash scripts/help.sh" in makefile
     assert "@bash setup/setup.sh" in makefile
+    assert "@bash setup/setup-local-llm-agents.sh" in makefile
     assert "@bash scripts/check-server.sh" in makefile
 
 
@@ -147,6 +212,7 @@ def test_prerequisites_displays_a_distinct_purpose_for_every_command(
         "network address inspection",
         "source control for updates",
         "shell script validation",
+        "JSONC editor for OpenCode client configuration",
         "firewall configuration for LAN access",
         "LAN service discovery",
     )
@@ -196,7 +262,11 @@ def test_setup_stops_for_missing_prerequisites_before_mutating_config(
 
 
 def run_setup_with_numbered_selection(
-    tmp_path: pathlib.Path, selection: str
+    tmp_path: pathlib.Path,
+    selection: str,
+    *,
+    config_text: str | None = None,
+    real_models_select: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run setup against deterministic GPU, model, and Vulkan command stubs."""
     real_yq = shutil.which("yq")
@@ -219,8 +289,9 @@ def run_setup_with_numbered_selection(
         "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
         "  *' models select '*)\n"
-        "    \"$REAL_YQ\" -i '.models[] |= (.enabled = (.alias == \"gemma4\" or .alias == \"ornith\")) | .runtime.models_max = 2' \"$CONFIG_PATH_TEST\"\n"
-        "    printf '%s\\n' '{\"models_max\":2}' ;;\n"
+        "    if [ \"$REAL_MODELS_SELECT\" = 1 ]; then exec \"$REAL_UV\" \"$@\"; fi\n"
+        "    \"$REAL_YQ\" -i '.models[] |= (.enabled = (.alias == \"gemma4\" or .alias == \"ornith\")) | .runtime.models_max = 1' \"$CONFIG_PATH_TEST\"\n"
+        "    printf '%s\\n' '{\"models_max\":1}' ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
         "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":8192},{\"id\":\"Vulkan1\",\"name\":\"Fallback Radeon: \\\"safe\\\"\",\"total_mib\":32768}]}' ;;\n"
@@ -242,26 +313,29 @@ def run_setup_with_numbered_selection(
 
     config = tmp_path / "models.yml"
     config.write_text(
-        "gpu: {}\n"
-        "runtime:\n"
-        "  models_max: 0\n"
-        "models:\n"
-        "  - alias: gemma4\n"
-        "    label: Gemma 4\n"
-        "    parameters: 12B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 7660000000\n"
-        "    enabled: true\n"
-        "    file: gemma4.gguf\n"
-        "    url: https://example.invalid/gemma4.gguf\n"
-        "  - alias: ornith\n"
-        "    label: Ornith\n"
-        "    parameters: 9B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 5600000000\n"
-        "    enabled: false\n"
-        "    file: ornith.gguf\n"
-        "    url: https://example.invalid/ornith.gguf\n"
+        config_text
+        or (
+            "gpu: {}\n"
+            "runtime:\n"
+            "  models_max: 0\n"
+            "models:\n"
+            "  - alias: gemma4\n"
+            "    label: Gemma 4\n"
+            "    parameters: 12B\n"
+            "    quantization: Q4_K_M\n"
+            "    size_bytes: 7660000000\n"
+            "    enabled: true\n"
+            "    file: gemma4.gguf\n"
+            "    url: https://example.invalid/gemma4.gguf\n"
+            "  - alias: ornith\n"
+            "    label: Ornith\n"
+            "    parameters: 9B\n"
+            "    quantization: Q4_K_M\n"
+            "    size_bytes: 5600000000\n"
+            "    enabled: false\n"
+            "    file: ornith.gguf\n"
+            "    url: https://example.invalid/ornith.gguf\n"
+        )
     )
     environment = os.environ | {
         "CALLS": str(calls),
@@ -270,6 +344,8 @@ def run_setup_with_numbered_selection(
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_MODELS_SELECT": "1" if real_models_select else "0",
+        "REAL_UV": shutil.which("uv") or "uv",
         "REAL_YQ": real_yq,
     }
     result = subprocess.run(
@@ -325,7 +401,7 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
         "vram_total_mib": 16384,
         "device_name": 'Fallback Radeon: "safe"',
     }
-    assert persisted["runtime"]["models_max"] == 2
+    assert persisted["runtime"]["models_max"] == 1
     assert [model["enabled"] for model in persisted["models"]] == [True, True]
 
 
@@ -337,6 +413,48 @@ def test_setup_rejects_invalid_numbered_model_selection_before_download(
 
     assert result.returncode != 0
     assert "curl " not in calls.read_text()
+
+
+def test_reverse_setup_selection_drives_client_model_order(
+    tmp_path: pathlib.Path,
+) -> None:
+    setup_result, calls, config = run_setup_with_numbered_selection(
+        tmp_path,
+        "1\n2,1\n2\n",
+        config_text=VALID_AGENT_SETUP_CONFIG,
+        real_models_select=True,
+    )
+
+    assert setup_result.returncode == 0, setup_result.stderr
+    assert "models select ornith gemma4" in calls.read_text()
+    assert [model["alias"] for model in json.loads(
+        subprocess.run(
+            [shutil.which("yq") or "yq", "-o=json", ".", str(config)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )["models"]] == ["ornith", "gemma4", "old-model"]
+
+    result, _, pi_path, settings_path, opencode_paths, state_path = (
+        run_setup_local_llm_agents(tmp_path, config_text=config.read_text())
+    )
+
+    assert result.returncode == 0, result.stderr
+    pi_provider = json.loads(pi_path.read_text())["providers"]["local-llm-env"]
+    assert [model["id"] for model in pi_provider["models"]] == ["ornith", "gemma4"]
+    assert json.loads(settings_path.read_text())["enabledModels"] == [
+        "local-llm-env/ornith",
+        "local-llm-env/gemma4",
+    ]
+    opencode_provider = json.loads(opencode_paths[2].read_text())["provider"][
+        "local-llm-env"
+    ]
+    assert list(opencode_provider["models"]) == ["ornith", "gemma4"]
+    assert json.loads(state_path.read_text())["favorite"][:2] == [
+        {"providerID": "local-llm-env", "modelID": "ornith"},
+        {"providerID": "local-llm-env", "modelID": "gemma4"},
+    ]
 
 
 def run_benchmark(
@@ -959,10 +1077,13 @@ def run_lifecycle_script(
     api_key: str = "existing-key",
     active: bool = False,
     config_mode: int = 0o600,
+    parallel_slots: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
     assert real_yq is not None
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -972,6 +1093,7 @@ def run_lifecycle_script(
     config = home / ".config/llm-env/models.yml"
     config.parent.mkdir(parents=True)
     config.write_text(
+        "version: 1\n"
         "server:\n"
         "  host: 0.0.0.0\n"
         "  port: 8000\n"
@@ -980,14 +1102,33 @@ def run_lifecycle_script(
         "  sleep_idle_seconds: 300\n"
         "  start_at_boot: false\n"
         "gpu:\n"
+        "  pci_address: ''\n"
         "  backend: cpu\n"
         "  image: example.invalid/llama:latest\n"
         "  device_name: ''\n"
+        "  vram_total_mib: 0\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
         "runtime:\n"
         "  models_max: 1\n"
+        f"  parallel_slots: {parallel_slots}\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
         "models:\n"
         "  - alias: test\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
         "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
     )
     config.chmod(config_mode)
 
@@ -1029,6 +1170,7 @@ def run_lifecycle_script(
     uv.write_text(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;; esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -1058,6 +1200,7 @@ def run_lifecycle_script(
         "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
+        "REAL_UV": real_uv,
     }
     result = subprocess.run(
         ["/usr/bin/bash", script],
@@ -1068,6 +1211,1075 @@ def run_lifecycle_script(
         check=False,
     )
     return result, config, calls
+
+
+def run_opencode_config_editor(
+    tmp_path: pathlib.Path, config_text: str, provider: dict[str, object]
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    config = tmp_path / "opencode.jsonc"
+    provider_path = tmp_path / "provider.json"
+    output = tmp_path / "updated.jsonc"
+    config.write_text(config_text)
+    provider_path.write_text(json.dumps(provider))
+    result = subprocess.run(
+        [
+            shutil.which("node") or "node",
+            "setup/update-opencode-config.mjs",
+            "--replace-provider",
+            str(config),
+            str(provider_path),
+            str(output),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, output
+
+
+def run_opencode_state_editor(
+    tmp_path: pathlib.Path,
+    state_text: str,
+    models: list[dict[str, object]] | object,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    source = tmp_path / "model.json"
+    models_path = tmp_path / "models.json"
+    output = tmp_path / "updated-model.json"
+    source.write_text(state_text)
+    models_path.write_text(json.dumps(models))
+    result = subprocess.run(
+        [
+            shutil.which("node") or "node",
+            "setup/update-opencode-config.mjs",
+            "--update-model-state",
+            str(source),
+            str(models_path),
+            str(output),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, output
+
+
+def test_opencode_state_editor_replaces_local_favorites_and_preserves_other_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    state = {
+        "recent": [{"providerID": "other", "modelID": "recent"}],
+        "favorite": [
+            {"providerID": "other", "modelID": "first"},
+            {"providerID": "local-llm-env", "modelID": "stale"},
+            {"providerID": "other", "modelID": "second"},
+        ],
+        "variant": {"other/model": "high"},
+    }
+    models = [
+        {
+            "alias": "gemma4",
+            "ctx_size": 131072,
+            "client_max_output_tokens": 8192,
+        },
+        {
+            "alias": "ornith",
+            "ctx_size": 131072,
+            "client_max_output_tokens": 8192,
+        },
+    ]
+
+    result, output = run_opencode_state_editor(
+        tmp_path, json.dumps(state), models
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.read_text()) == {
+        "recent": [{"providerID": "other", "modelID": "recent"}],
+        "favorite": [
+            {"providerID": "local-llm-env", "modelID": "gemma4"},
+            {"providerID": "local-llm-env", "modelID": "ornith"},
+            {"providerID": "other", "modelID": "first"},
+            {"providerID": "other", "modelID": "second"},
+        ],
+        "variant": {"other/model": "high"},
+    }
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {},
+        {"recent": [], "favorite": "bad", "variant": {}},
+        {
+            "recent": [{"providerID": 1, "modelID": "x"}],
+            "favorite": [],
+            "variant": {},
+        },
+        {
+            "recent": [],
+            "favorite": [{"providerID": "other", "modelID": "x", "extra": True}],
+            "variant": {},
+        },
+        {"recent": [], "favorite": [], "variant": []},
+        {"recent": [], "favorite": [], "variant": {"other/model": 1}},
+        {"recent": [], "favorite": [], "variant": {}, "unknown": True},
+    ],
+)
+def test_opencode_state_editor_rejects_incompatible_shapes(
+    tmp_path: pathlib.Path, state: object
+) -> None:
+    result, output = run_opencode_state_editor(
+        tmp_path, json.dumps(state), [{"alias": "gemma4"}]
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "state_text",
+    [
+        '{"recent":[],"favorite":[],"variant":{},"variant":{}}',
+        '{"recent":[],"favorite":[],"variant":{"secret":"one","secret":"two"}}',
+        '// state-secret\n{"recent":[],"favorite":[],"variant":{}}',
+        '{"recent":[],"favorite":[],"variant":{},}',
+    ],
+)
+def test_opencode_state_editor_rejects_non_strict_or_duplicate_json(
+    tmp_path: pathlib.Path, state_text: str
+) -> None:
+    result, output = run_opencode_state_editor(
+        tmp_path, state_text, [{"alias": "gemma4"}]
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert "state-secret" not in result.stdout + result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        [],
+        [{"alias": ""}],
+        [{"alias": "gemma4"}, {"alias": "gemma4"}],
+        [{"alias": 1}],
+    ],
+)
+def test_opencode_state_editor_rejects_invalid_enabled_model_records(
+    tmp_path: pathlib.Path, models: list[dict[str, object]]
+) -> None:
+    result, output = run_opencode_state_editor(
+        tmp_path,
+        '{"recent":[],"favorite":[],"variant":{}}',
+        models,
+    )
+
+    assert result.returncode == 2
+    assert not output.exists()
+
+
+def test_opencode_config_editor_replaces_one_provider_and_keeps_comments(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, output = run_opencode_config_editor(
+        tmp_path,
+        "// keep this comment\n{\n  \"agent\": {\"review\": {\"mode\": \"subagent\"}},\n"
+        "  \"provider\": {\n    // replace only this value\n"
+        "    \"local-llm-env\": {\"models\": {\"old\": {\"name\": \"old\"}}},\n"
+        "    \"other\": {\"name\": \"other\"},\n  },\n}\n",
+        {
+            "npm": "@ai-sdk/openai-compatible",
+            "models": {"ornith": {"name": "ornith"}},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = output.read_text()
+    assert "// keep this comment" in text
+    assert "// replace only this value" in text
+    parsed = json.loads(
+        re.sub(r"//[^\n]*", "", text)
+        .replace(",\n  }", "\n  }")
+        .replace(",\n}", "\n}")
+    )
+    assert parsed["agent"]["review"]["mode"] == "subagent"
+    assert parsed["provider"]["other"] == {"name": "other"}
+    assert parsed["provider"]["local-llm-env"] == {
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {"ornith": {"name": "ornith"}},
+    }
+
+
+def test_opencode_config_editor_rejects_invalid_jsonc_without_output(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, output = run_opencode_config_editor(
+        tmp_path, '{"provider": {"broken": }', {"models": {}}
+    )
+
+    assert result.returncode == 2
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("invalid_whitespace", "whitespace_name"),
+    [("\v", "vertical tab"), ("\N{NO-BREAK SPACE}", "NBSP")],
+)
+def test_opencode_config_editor_rejects_non_jsonc_whitespace_without_output(
+    tmp_path: pathlib.Path,
+    invalid_whitespace: str,
+    whitespace_name: str,
+) -> None:
+    result, output = run_opencode_config_editor(
+        tmp_path,
+        f'{{"provider":{invalid_whitespace}{{"other":{{}}}}}}\n',
+        {"models": {}},
+    )
+
+    assert result.returncode == 2, whitespace_name
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert not output.exists()
+
+
+def test_opencode_config_editor_rejects_duplicate_local_provider_keys(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = tmp_path / "opencode.jsonc"
+    config.write_text('{"provider":{"local-llm-env":{},"local-llm-env":{}}}\n')
+
+    result = subprocess.run(
+        [
+            shutil.which("node") or "node",
+            "setup/update-opencode-config.mjs",
+            "--contains-provider",
+            str(config),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_opencode_config_editor_adds_provider_to_root_with_comments_and_trailing_comma(
+    tmp_path: pathlib.Path,
+) -> None:
+    provider = {
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {"ornith": {"name": "ornith"}},
+    }
+    result, output = run_opencode_config_editor(
+        tmp_path,
+        "// root comment\n{\n  \"agent\": {},\n  // provider belongs before this brace\n}\n",
+        provider,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = output.read_text()
+    assert "// root comment" in text
+    assert "// provider belongs before this brace" in text
+    parsed = json.loads(re.sub(r"//[^\n]*", "", text).replace(",\n}", "\n}"))
+    assert parsed["agent"] == {}
+    assert parsed["provider"]["local-llm-env"] == provider
+
+
+def test_opencode_config_editor_adds_provider_member_with_comments_and_trailing_comma(
+    tmp_path: pathlib.Path,
+) -> None:
+    provider = {
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {"gemma4": {"name": "gemma4"}},
+    }
+    result, output = run_opencode_config_editor(
+        tmp_path,
+        "{\n  \"provider\": {\n    \"other\": {},\n"
+        "    // local provider belongs before this brace\n  },\n}\n",
+        provider,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = output.read_text()
+    assert "// local provider belongs before this brace" in text
+    parsed = json.loads(
+        re.sub(r"//[^\n]*", "", text)
+        .replace(",\n  }", "\n  }")
+        .replace(",\n}", "\n}")
+    )
+    assert parsed["provider"]["other"] == {}
+    assert parsed["provider"]["local-llm-env"] == provider
+
+
+def run_setup_local_llm_agents(
+    tmp_path: pathlib.Path,
+    *,
+    config_text: str = VALID_AGENT_SETUP_CONFIG,
+    pi_text: str | None = None,
+    pi_settings_text: str | None = None,
+    opencode_config_json_text: str | None = None,
+    opencode_json_text: str | None = None,
+    opencode_jsonc_text: str | None = None,
+    opencode_state_text: str | None = None,
+    opencode_version: str = "1.18.10",
+    debug_state_dir: pathlib.Path | None = None,
+    fail_move_number: int | None = None,
+    health_exit: int = 0,
+    failing_command: str | None = None,
+) -> tuple[
+    subprocess.CompletedProcess[str],
+    pathlib.Path,
+    pathlib.Path,
+    pathlib.Path,
+    tuple[pathlib.Path, pathlib.Path, pathlib.Path],
+    pathlib.Path,
+]:
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    home = tmp_path / "home"
+    config = tmp_path / "models.yml"
+    pi_path = home / ".pi/agent/models.json"
+    pi_settings_path = home / ".pi/agent/settings.json"
+    opencode_dir = home / ".config/opencode"
+    opencode_paths = (
+        opencode_dir / "config.json",
+        opencode_dir / "opencode.json",
+        opencode_dir / "opencode.jsonc",
+    )
+    state_path = home / ".local/state/opencode/model.json"
+    resolved_debug_state_dir = debug_state_dir or state_path.parent
+    config.write_text(config_text)
+    for path, text in (
+        (pi_path, pi_text),
+        (pi_settings_path, pi_settings_text),
+        (opencode_paths[0], opencode_config_json_text),
+        (opencode_paths[1], opencode_json_text),
+        (opencode_paths[2], opencode_jsonc_text),
+        (state_path, opencode_state_text),
+    ):
+        if text is not None and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "[ \"${!#}\" = 'http://127.0.0.1:18123/health' ] || exit 64\n"
+        "exit \"$HEALTH_EXIT\"\n"
+    )
+    curl.chmod(0o755)
+    mktemp = commands / "mktemp"
+    mktemp.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'mktemp %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "exec /usr/bin/mktemp \"$@\"\n"
+    )
+    mktemp.chmod(0o755)
+    opencode = commands / "opencode"
+    opencode.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  --version) printf '%s\\n' \"$OPENCODE_VERSION\" ;;\n"
+        "  'debug paths')\n"
+        "    printf 'home       %s\\n' \"$HOME\"\n"
+        "    printf 'state      %s\\n' \"$DEBUG_STATE_DIR\"\n"
+        "    ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    opencode.chmod(0o755)
+    move_counter = tmp_path / "move-counter"
+    move_counter.write_text("0\n")
+    move_counter.chmod(0o600)
+    mv = commands / "mv"
+    mv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'mv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "count=$(( $(cat \"$MOVE_COUNTER\") + 1 ))\n"
+        "printf '%s\\n' \"$count\" > \"$MOVE_COUNTER\"\n"
+        "if [ -n \"$FAIL_MOVE_NUMBER\" ] && [ \"$count\" -eq \"$FAIL_MOVE_NUMBER\" ]; then\n"
+        "  exit 70\n"
+        "fi\n"
+        "exec /usr/bin/mv \"$@\"\n"
+    )
+    mv.chmod(0o755)
+    if failing_command is not None:
+        command = commands / failing_command
+        command.write_text("#!/usr/bin/bash\nexit 70\n")
+        command.chmod(0o755)
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/setup-local-llm-agents.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "CALLS": str(calls),
+            "DEBUG_STATE_DIR": str(resolved_debug_state_dir),
+            "FAIL_MOVE_NUMBER": "" if fail_move_number is None else str(fail_move_number),
+            "HEALTH_EXIT": str(health_exit),
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "MOVE_COUNTER": str(move_counter),
+            "OPENCODE_VERSION": opencode_version,
+            "PI_CODING_AGENT_DIR": str(pi_path.parent),
+            "REAL_YQ": shutil.which("yq") or "yq",
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_STATE_HOME": str(home / ".local/state"),
+            "PATH": f"{commands}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls, pi_path, pi_settings_path, opencode_paths, state_path
+
+
+def test_setup_creates_missing_opencode_state_only_for_compatible_1_18_10(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _, _, _, state_path = run_setup_local_llm_agents(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(state_path.read_text()) == {
+        "recent": [],
+        "favorite": [
+            {"providerID": "local-llm-env", "modelID": "gemma4"},
+            {"providerID": "local-llm-env", "modelID": "ornith"},
+        ],
+        "variant": {},
+    }
+    assert "close Pi and OpenCode" in result.stdout + result.stderr
+    assert "restart Pi and OpenCode" in result.stdout
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("version", ["1.18.9", "1.19.0", "invalid"])
+def test_setup_rejects_missing_state_for_unsupported_opencode(
+    tmp_path: pathlib.Path, version: str
+) -> None:
+    result, calls, pi_path, _, opencode_paths, state_path = (
+        run_setup_local_llm_agents(tmp_path, opencode_version=version)
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert not opencode_paths[0].parent.exists()
+    assert not state_path.parent.exists()
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_rejects_debug_state_path_mismatch_before_staging(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, pi_path, _, opencode_paths, state_path = (
+        run_setup_local_llm_agents(
+            tmp_path, debug_state_dir=tmp_path / "wrong-state"
+        )
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert not opencode_paths[0].parent.exists()
+    assert not state_path.parent.exists()
+    assert "mv " not in calls.read_text()
+
+
+def test_setup_existing_state_does_not_require_version_or_path_compatibility(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _, _, _, state_path = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_state_text='{"recent":[],"favorite":[],"variant":{}}',
+        opencode_version="unsupported",
+        debug_state_dir=tmp_path / "wrong-state",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(state_path.read_text())["favorite"][:2] == [
+        {"providerID": "local-llm-env", "modelID": "gemma4"},
+        {"providerID": "local-llm-env", "modelID": "ornith"},
+    ]
+
+
+def test_setup_rejects_malformed_opencode_state_before_health(
+    tmp_path: pathlib.Path,
+) -> None:
+    malformed_state = '{"recent":[],"favorite":{},"variant":{}}\n'
+    result, calls, pi_path, _, opencode_paths, state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            opencode_state_text=malformed_state,
+        )
+    )
+
+    assert result.returncode != 0
+    assert "curl " not in calls.read_text()
+    assert "mv " not in calls.read_text()
+    assert state_path.read_text() == malformed_state
+    assert not pi_path.parent.exists()
+    assert not opencode_paths[0].parent.exists()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_stages_every_target_before_first_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    existing_provider = (
+        '{"provider":{"local-llm-env":{"models":{"old":{"name":"old"}}}}}\n'
+    )
+    result, calls, pi_path, settings_path, opencode_paths, state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            opencode_config_json_text=existing_provider,
+            opencode_json_text=existing_provider,
+            opencode_jsonc_text=existing_provider,
+            opencode_state_text='{"recent":[],"favorite":[],"variant":{}}',
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = calls.read_text().splitlines()
+    first_move = next(
+        index for index, line in enumerate(lines) if line.startswith("mv ")
+    )
+    targets = (pi_path, settings_path, *opencode_paths, state_path)
+    for target in targets:
+        pattern = f"{target.parent}/.{target.name}.XXXXXX"
+        assert any(pattern in line for line in lines[:first_move])
+
+
+def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    kwargs = {
+        "pi_text": '{"providers":{"other":{}}}',
+        "pi_settings_text": '{"theme":"dark"}',
+        "opencode_config_json_text": '{"provider":{"other":{}}}',
+        "opencode_state_text": '{"recent":[],"favorite":[],"variant":{}}',
+    }
+    failed, _, *_ = run_setup_local_llm_agents(
+        tmp_path, fail_move_number=2, **kwargs
+    )
+
+    assert failed.returncode != 0
+    assert "rerun make setup-local-llm-agents" in failed.stderr
+    assert "fixture-local-api-key" not in failed.stdout + failed.stderr
+
+    repaired, _, _, settings_path, _, state_path = run_setup_local_llm_agents(
+        tmp_path, **kwargs
+    )
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert json.loads(settings_path.read_text())["enabledModels"] == [
+        "local-llm-env/gemma4",
+        "local-llm-env/ornith",
+    ]
+    assert json.loads(state_path.read_text())["favorite"][:2] == [
+        {"providerID": "local-llm-env", "modelID": "gemma4"},
+        {"providerID": "local-llm-env", "modelID": "ornith"},
+    ]
+
+
+def test_setup_local_llm_agents_creates_private_provider_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    pi_path = tmp_path / "home/.pi/agent/models.json"
+    assert not pi_path.parent.exists()
+    result, calls, pi_path, settings_path, opencode_paths, state_path = (
+        run_setup_local_llm_agents(tmp_path)
+    )
+    config_json, opencode_json, opencode_jsonc = opencode_paths
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(pi_path.read_text())["providers"]["local-llm-env"] == {
+        "baseUrl": "http://127.0.0.1:18123/v1",
+        "api": "openai-completions",
+        "apiKey": "fixture-local-api-key",
+        "compat": {
+            "supportsDeveloperRole": False,
+            "supportsReasoningEffort": False,
+        },
+        "models": [
+            {"id": "gemma4", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "ornith", "contextWindow": 131072, "maxTokens": 8192},
+        ],
+    }
+    assert not config_json.exists()
+    assert not opencode_json.exists()
+    assert json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"] == {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "local-llm-env",
+        "options": {
+            "baseURL": "http://127.0.0.1:18123/v1",
+            "apiKey": "fixture-local-api-key",
+        },
+        "models": {
+            "gemma4": {
+                "name": "gemma4",
+                "limit": {"context": 131072, "output": 8192},
+            },
+            "ornith": {
+                "name": "ornith",
+                "limit": {"context": 131072, "output": 8192},
+            },
+        },
+    }
+    assert stat.S_IMODE(pi_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(opencode_jsonc.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+    calls_made = calls.read_text().splitlines()
+    health_index = next(
+        index for index, call in enumerate(calls_made) if call.startswith("curl ")
+    )
+    first_target_stage = next(
+        index
+        for index, call in enumerate(calls_made)
+        if call.startswith("mktemp ") and ".XXXXXX" in call
+    )
+    assert health_index < first_target_stage
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_secures_existing_client_directories_and_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    pi_dir = tmp_path / "home/.pi/agent"
+    opencode_dir = tmp_path / "home/.config/opencode"
+    pi_dir.mkdir(parents=True)
+    opencode_dir.mkdir(parents=True)
+    pi_dir.chmod(0o755)
+    opencode_dir.chmod(0o755)
+
+    result, _, pi_path, settings_path, opencode_paths, state_path = (
+        run_setup_local_llm_agents(tmp_path)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(pi_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(opencode_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    for path in (pi_path, settings_path, opencode_paths[2], state_path):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_setup_local_llm_agents_updates_every_global_file_that_defines_the_provider(
+    tmp_path: pathlib.Path,
+) -> None:
+    old_provider = '{"local-llm-env":{"models":{"old-model":{"name":"old"}}}}'
+    result, _, _, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_config_json_text=f'{{"configOnly":true,"provider":{old_provider}}}\n',
+        opencode_json_text=f'{{"model":"other/model","provider":{old_provider}}}\n',
+        opencode_jsonc_text=(
+            f'// retain this comment\n{{"agent":{{}},"provider":{old_provider}}}\n'
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    for path in opencode_paths:
+        text = path.read_text()
+        parsed = json.loads(re.sub(r"(?m)^\s*//[^\n]*", "", text))
+        provider = parsed["provider"]["local-llm-env"]
+        assert provider["models"] == {
+            "gemma4": {
+                "name": "gemma4",
+                "limit": {"context": 131072, "output": 8192},
+            },
+            "ornith": {
+                "name": "ornith",
+                "limit": {"context": 131072, "output": 8192},
+            },
+        }
+        assert "old-model" not in provider["models"]
+    assert json.loads(opencode_paths[0].read_text())["configOnly"] is True
+    assert json.loads(opencode_paths[1].read_text())["model"] == "other/model"
+    assert "// retain this comment" in opencode_paths[2].read_text()
+
+
+@pytest.mark.parametrize(
+    ("config_text", "json_text", "jsonc_text", "expected_name"),
+    [
+        ('{"configOnly":true}\n', None, None, "config.json"),
+        ('{"configOnly":true}\n', '{"jsonOnly":true}\n', None, "opencode.json"),
+        (
+            '{"configOnly":true}\n',
+            '{"jsonOnly":true}\n',
+            '// jsonc preferred\n{"jsoncOnly":true}\n',
+            "opencode.jsonc",
+        ),
+    ],
+)
+def test_setup_local_llm_agents_adds_provider_to_preferred_existing_global_file(
+    tmp_path: pathlib.Path,
+    config_text: str | None,
+    json_text: str | None,
+    jsonc_text: str | None,
+    expected_name: str,
+) -> None:
+    result, _, _, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_config_json_text=config_text,
+        opencode_json_text=json_text,
+        opencode_jsonc_text=jsonc_text,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for path, original in zip(
+        opencode_paths, (config_text, json_text, jsonc_text), strict=True
+    ):
+        if path.name == expected_name:
+            assert '"local-llm-env"' in path.read_text()
+        elif original is None:
+            assert not path.exists()
+        else:
+            assert path.read_text() == original
+
+
+def test_setup_local_llm_agents_rejects_concatenated_pi_json_without_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    original_pi = '{"providers":{}}\n{}\n'
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        pi_text=original_pi,
+    )
+
+    assert result.returncode != 0
+    assert pi_path.read_text() == original_pi
+    assert not opencode_paths[0].parent.exists()
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_rejects_non_object_pi_providers_before_creating_opencode_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    original_pi = '{"providers":[]}\n'
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        pi_text=original_pi,
+    )
+
+    assert result.returncode != 0
+    assert pi_path.read_text() == original_pi
+    assert not opencode_paths[0].parent.exists()
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_rejects_duplicate_opencode_provider_before_creating_pi_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    duplicate_provider = (
+        '{"provider":{"local-llm-env":{},"local-llm-env":{}}}\n'
+    )
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_jsonc_text=duplicate_provider,
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert opencode_paths[2].read_text() == duplicate_provider
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("invalid_whitespace", ["\v", "\N{NO-BREAK SPACE}"])
+def test_setup_local_llm_agents_rejects_non_jsonc_whitespace_before_creating_pi_directory(
+    tmp_path: pathlib.Path, invalid_whitespace: str
+) -> None:
+    invalid_source = f'{{"provider":{invalid_whitespace}{{"other":{{}}}}}}\n'
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_jsonc_text=invalid_source,
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert opencode_paths[2].read_bytes() == invalid_source.encode()
+    assert "mv " not in calls.read_text()
+
+
+@pytest.mark.parametrize("bad_global_index", [0, 1, 2])
+def test_setup_local_llm_agents_rejects_each_invalid_global_before_creating_pi_directory(
+    tmp_path: pathlib.Path, bad_global_index: int
+) -> None:
+    bad_text = '{"provider": }\n'
+    global_texts: list[str | None] = [None, None, None]
+    global_texts[bad_global_index] = bad_text
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_config_json_text=global_texts[0],
+        opencode_json_text=global_texts[1],
+        opencode_jsonc_text=global_texts[2],
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert opencode_paths[bad_global_index].read_text() == bad_text
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, pi_path, _, _, _ = run_setup_local_llm_agents(
+        tmp_path,
+        pi_text=(
+            '{"providers":{"other":{"baseUrl":"https://example.invalid/v1"},'
+            '"local-llm-env":{"models":[{"id":"old-model"}],"stale":true}},'
+            '"otherSetting":true}\n'
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    updated = json.loads(pi_path.read_text())
+    assert updated["otherSetting"] is True
+    assert updated["providers"]["other"] == {
+        "baseUrl": "https://example.invalid/v1"
+    }
+    assert updated["providers"]["local-llm-env"] == {
+        "baseUrl": "http://127.0.0.1:18123/v1",
+        "api": "openai-completions",
+        "apiKey": "fixture-local-api-key",
+        "compat": {
+            "supportsDeveloperRole": False,
+            "supportsReasoningEffort": False,
+        },
+        "models": [
+            {"id": "gemma4", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "ornith", "contextWindow": 131072, "maxTokens": 8192},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "settings_text",
+    [None, '{"enabledModels":[]}\n', '{"theme":"dark","enabledModels":["other/model"]}\n'],
+)
+def test_setup_local_llm_agents_sets_exact_pi_cycle(
+    tmp_path: pathlib.Path, settings_text: str | None
+) -> None:
+    result, _, _, settings_path, _, _ = run_setup_local_llm_agents(
+        tmp_path, pi_settings_text=settings_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    settings = json.loads(settings_path.read_text())
+    assert settings["enabledModels"] == [
+        "local-llm-env/gemma4",
+        "local-llm-env/ornith",
+    ]
+    if settings_text and "theme" in settings_text:
+        assert settings["theme"] == "dark"
+
+
+def test_setup_local_llm_agents_preserves_explicit_pi_defaults(
+    tmp_path: pathlib.Path,
+) -> None:
+    defaults = {
+        "defaultProvider": "other",
+        "defaultModel": "model",
+        "defaultThinkingLevel": "high",
+        "enabledModels": ["old/model"],
+    }
+    result, _, _, settings_path, _, _ = run_setup_local_llm_agents(
+        tmp_path, pi_settings_text=json.dumps(defaults)
+    )
+
+    assert result.returncode == 0, result.stderr
+    updated = json.loads(settings_path.read_text())
+    assert {key: updated[key] for key in defaults if key != "enabledModels"} == {
+        key: value for key, value in defaults.items() if key != "enabledModels"
+    }
+
+
+@pytest.mark.parametrize("settings_text", ["[]\n", "{}\n{}\n"])
+def test_setup_local_llm_agents_rejects_invalid_pi_settings_without_replacement(
+    tmp_path: pathlib.Path, settings_text: str
+) -> None:
+    original_pi = '{"providers":{"other":{}}}\n'
+    original_opencode = '{"provider":{"other":{}}}\n'
+    result, calls, pi_path, settings_path, opencode_paths, _ = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            pi_text=original_pi,
+            pi_settings_text=settings_text,
+            opencode_config_json_text=original_opencode,
+        )
+    )
+
+    assert result.returncode != 0
+    assert pi_path.read_text() == original_pi
+    assert settings_path.read_text() == settings_text
+    assert opencode_paths[0].read_text() == original_opencode
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "config_text",
+        [
+            VALID_AGENT_SETUP_CONFIG.replace("    ctx_size: 131072\n", "", 1),
+            VALID_AGENT_SETUP_CONFIG.replace("  - alias: ornith", "  - alias: gemma4"),
+        VALID_AGENT_SETUP_CONFIG.replace("    ctx_size: 131072", "    ctx_size: true", 1),
+        VALID_AGENT_SETUP_CONFIG.replace(
+            "    client_max_output_tokens: 8192",
+            "    client_max_output_tokens: 0",
+            1,
+        ),
+        VALID_AGENT_SETUP_CONFIG.replace("    ctx_size: 131072", "    ctx_size: 4096", 1),
+    ],
+)
+def test_setup_local_llm_agents_rejects_invalid_model_records_before_health(
+    tmp_path: pathlib.Path, config_text: str
+) -> None:
+    result, calls, pi_path, settings_path, opencode_paths, _ = (
+        run_setup_local_llm_agents(tmp_path, config_text=config_text)
+    )
+
+    assert result.returncode != 0
+    assert "curl " not in calls.read_text()
+    assert "mv " not in calls.read_text()
+    assert not pi_path.parent.exists()
+    assert not settings_path.exists()
+    assert not opencode_paths[0].parent.exists()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_migrates_missing_output_limit_before_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    config_text = VALID_AGENT_SETUP_CONFIG.replace(
+        "    client_max_output_tokens: 8192\n", "", 1
+    )
+
+    result, _, pi_path, _, _, _ = run_setup_local_llm_agents(
+        tmp_path, config_text=config_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    provider = json.loads(pi_path.read_text())["providers"]["local-llm-env"]
+    assert provider["models"][0]["maxTokens"] == 8192
+
+
+@pytest.mark.parametrize(
+    ("config_text", "health_exit", "pi_text"),
+    [
+        (
+            VALID_AGENT_SETUP_CONFIG.replace(
+                "api_key: fixture-local-api-key", "api_key: ''"
+            ),
+            0,
+            None,
+        ),
+        (VALID_AGENT_SETUP_CONFIG.replace("port: 18123", "port: 0"), 0, None),
+        (
+            VALID_AGENT_SETUP_CONFIG.replace("enabled: true", "enabled: false"),
+            0,
+            None,
+        ),
+        (VALID_AGENT_SETUP_CONFIG, 1, None),
+        (VALID_AGENT_SETUP_CONFIG, 0, '{"providers": }\n'),
+    ],
+)
+def test_setup_local_llm_agents_rejects_invalid_inputs_without_replacing_files(
+    tmp_path: pathlib.Path,
+    config_text: str,
+    health_exit: int,
+    pi_text: str | None,
+) -> None:
+    original_pi = pi_text or '{"providers":{"other":{}}}\n'
+    original_opencode = '{"provider":{"other":{}}}\n'
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        config_text=config_text,
+        pi_text=original_pi,
+        opencode_config_json_text=original_opencode,
+        health_exit=health_exit,
+    )
+
+    assert result.returncode != 0
+    assert pi_path.read_text() == original_pi
+    assert opencode_paths[0].read_text() == original_opencode
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("failing_command", ("mktemp", "chmod"))
+def test_setup_local_llm_agents_staging_failures_leave_existing_files_unchanged(
+    tmp_path: pathlib.Path, failing_command: str
+) -> None:
+    original_pi = '{"providers":{"other":{}}}\n'
+    original_opencode = '{"provider":{"other":{}}}\n'
+    result, calls, pi_path, settings_path, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path,
+        pi_text=original_pi,
+        opencode_config_json_text=original_opencode,
+        failing_command=failing_command,
+    )
+
+    assert result.returncode != 0
+    assert pi_path.read_text() == original_pi
+    assert not settings_path.exists()
+    assert opencode_paths[0].read_text() == original_opencode
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_does_not_create_client_directories_when_mkdir_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
+        tmp_path, failing_command="mkdir"
+    )
+
+    assert result.returncode != 0
+    assert not pi_path.parent.exists()
+    assert not opencode_paths[0].parent.exists()
+    assert "mv " not in calls.read_text()
+    assert "fixture-local-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_stages_each_replacement_with_its_target(
+    tmp_path: pathlib.Path,
+) -> None:
+    existing_provider = (
+        '{"provider":{"local-llm-env":{"models":{"old":{"name":"old"}}}}}\n'
+    )
+    result, calls, pi_path, settings_path, opencode_paths, state_path = run_setup_local_llm_agents(
+        tmp_path,
+        opencode_config_json_text=existing_provider,
+        opencode_json_text=existing_provider,
+        opencode_jsonc_text=existing_provider,
+    )
+
+    assert result.returncode == 0, result.stderr
+    moves = [
+        line.split()
+        for line in calls.read_text().splitlines()
+        if line.startswith("mv ")
+    ]
+    targets = (pi_path, settings_path, *opencode_paths, state_path)
+    assert len(moves) == len(targets)
+    for move, target in zip(moves, targets, strict=True):
+        assert pathlib.Path(move[-2]).parent == target.parent
+        assert pathlib.Path(move[-1]) == target
 
 
 def yq_value(config: pathlib.Path, expression: str) -> str:
@@ -1291,6 +2503,66 @@ def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
 
+def test_start_rejects_invalid_concurrency_before_key_or_service_output(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        api_key="",
+        config_mode=0o644,
+        parallel_slots=2,
+    )
+
+    assert result.returncode != 0
+    assert "runtime.parallel_slots must be 1" in result.stderr
+    assert yq_value(config, ".server.api_key") == ""
+    recorded = calls.read_text()
+    assert "yq -i .server.api_key" not in recorded
+    assert "systemctl --user start" not in recorded
+    assert f"bash {ROOT / 'setup/render-unit.sh'}" not in recorded
+    assert not (config.parent / "presets.ini").exists()
+
+
+def test_start_migrates_config_before_reading_runtime_or_generating_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", api_key=""
+    )
+
+    assert result.returncode == 0, result.stderr
+    recorded = calls.read_text().splitlines()
+    migration = next(index for index, call in enumerate(recorded) if "migrate-config" in call)
+    runtime_read = next(index for index, call in enumerate(recorded) if ".runtime.models_max" in call)
+    key_write = next(
+        index
+        for index, call in enumerate(recorded)
+        if call.startswith("yq -i .server.api_key")
+    )
+    assert migration < runtime_read
+    assert migration < key_write
+
+
+@pytest.mark.parametrize(
+    ("script", "api_key"),
+    [("setup/enable-boot.sh", ""), ("scripts/key-reset.sh", "existing-key")],
+)
+def test_key_mutating_entrypoints_reject_invalid_config_before_changing_key(
+    tmp_path: pathlib.Path, script: str, api_key: str
+) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path, script, api_key=api_key, parallel_slots=2
+    )
+
+    assert result.returncode != 0
+    assert "runtime.parallel_slots must be 1" in result.stderr
+    assert yq_value(config, ".server.api_key") == api_key
+    recorded = calls.read_text()
+    assert "yq -i .server.api_key" not in recorded
+    assert f"bash {ROOT / 'setup/render-unit.sh'}" not in recorded
+
+
 def test_key_writes_secure_config_before_persisting_a_secret(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1319,6 +2591,21 @@ def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key") == "existing-key"
+
+
+def test_start_stops_active_router_before_budgeting(tmp_path: pathlib.Path) -> None:
+    """A config change must unload the old router before measuring available VRAM."""
+    result, _, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", active=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    recorded = calls.read_text().splitlines()
+    active_check = recorded.index("systemctl --user is-active --quiet llm-server.service")
+    stop = recorded.index("systemctl --user stop llm-server.service")
+    budget = next(index for index, call in enumerate(recorded) if " budget " in call)
+    start = recorded.index("systemctl --user start llm-server.service")
+    assert active_check < stop < budget < start
 
 
 def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
@@ -1947,6 +3234,13 @@ fi
 jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
 """
 
+STDIN_CONSUMING_PI_STUB = VALID_PI_STUB.replace(
+    "#!/usr/bin/bash\n", "#!/usr/bin/bash\nIFS= read -r _ || true\n", 1
+)
+STDIN_CONSUMING_OPENCODE_STUB = VALID_OPENCODE_STUB.replace(
+    "#!/usr/bin/bash\n", "#!/usr/bin/bash\nIFS= read -r _ || true\n", 1
+)
+
 FENCED_JSON_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
@@ -2177,6 +3471,38 @@ def test_agent_check_fetches_snapshot_immediately_before_each_matrix_row(
     assert len(source_calls) == 4
     prompts = [line for line in calls.read_text().splitlines() if line.startswith("pi ")]
     assert all("Public snapshot for comparison" not in line for line in prompts)
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (
+        ("pi", STDIN_CONSUMING_PI_STUB),
+        ("opencode", STDIN_CONSUMING_OPENCODE_STUB),
+    ),
+)
+def test_agent_check_clients_cannot_consume_the_alias_loop_stdin(
+    tmp_path: pathlib.Path, client: str, stub: str
+) -> None:
+    """A child reading stdin must not silently remove later model aliases."""
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        model_aliases=("gemma4", "ornith"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert {
+        line.removeprefix(f"PASS client={client} ").removesuffix(
+            " reason=agent-returned-json"
+        )
+        for line in result.stdout.splitlines()
+        if line.startswith(f"PASS client={client} ")
+    } == {
+        "model=gemma4 check=weather",
+        "model=gemma4 check=fx",
+        "model=ornith check=weather",
+        "model=ornith check=fx",
+    }
 
 
 def test_agent_check_accepts_exactly_one_json_fence(tmp_path: pathlib.Path) -> None:
@@ -2636,6 +3962,28 @@ def test_agent_check_prompt_requires_literal_source_evidence(
         assert "The source_url field must reproduce the literal URL byte-for-byte" in prompt
         assert "Return source_timestamp as ISO-8601." in prompt
         assert "Return exactly one JSON object containing" in prompt
+    weather_prompt = next(
+        prompt for prompt in prompts if "https://api.open-meteo.com/v1/forecast?" in prompt
+    )
+    assert (
+        "The source_timestamp field must copy the source response's timestamp text "
+        "byte-for-byte." in weather_prompt
+    )
+    assert "Do not convert or normalize its timezone" in weather_prompt
+    assert "add an offset" in weather_prompt
+    assert "change its date" in weather_prompt
+    fx_prompt = next(
+        prompt for prompt in prompts if "https://open.er-api.com/v6/latest/USD" in prompt
+    )
+    assert (
+        "The source_timestamp field must convert the source response's exact "
+        "time_last_update_utc timestamp to ISO-8601" in fx_prompt
+    )
+    assert "preserving its UTC instant" in fx_prompt
+    assert "UTC timezone (Z or +00:00)" in fx_prompt
+    assert "source calendar date" in fx_prompt
+    assert "Do not convert it to local time or another timezone" in fx_prompt
+    assert "do not change its date" in fx_prompt
     assert any(
         "curl -fsS --max-time 20 -- 'https://api.open-meteo.com/v1/forecast?"
         in prompt

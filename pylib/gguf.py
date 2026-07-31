@@ -138,13 +138,9 @@ def validate_gguf(path: Path) -> tuple[bool, str]:
 
 
 def kv_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Extract the dimensions needed to size a KV cache.
-
-    head_count_kv is an int for models with uniform attention, or a list with
-    one entry per layer for models that vary it. Callers must handle both.
-    """
+    """Expand GGUF attention metadata into uniform per-layer geometry."""
     arch = metadata.get("general.architecture")
-    if not arch:
+    if not isinstance(arch, str) or not arch:
         raise GgufError("general.architecture missing from GGUF metadata")
 
     def need(suffix: str) -> Any:
@@ -153,34 +149,93 @@ def kv_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
             raise GgufError(f"required metadata key missing: {key}")
         return metadata[key]
 
-    def as_int(suffix: str) -> int:
+    def positive_int(suffix: str) -> int:
         value = need(suffix)
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise GgufError(f"{arch}.{suffix} must be an integer, got {value!r}")
-        return int(value)
-
-    head_count_kv = need("attention.head_count_kv")
-    if isinstance(head_count_kv, list):
-        if not head_count_kv or not all(
-            isinstance(v, int) and not isinstance(v, bool) and v > 0
-            for v in head_count_kv
-        ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise GgufError(
-                f"{arch}.attention.head_count_kv is a list but not all entries "
-                "are positive integers"
+                f"{arch}.{suffix} must be a positive integer, got {value!r}"
             )
-        head_count_kv = [int(v) for v in head_count_kv]
-    elif isinstance(head_count_kv, int) and not isinstance(head_count_kv, bool):
-        head_count_kv = int(head_count_kv)
-    else:
+        return value
+
+    block_count = positive_int("block_count")
+
+    def layer_values(suffix: str) -> list[int]:
+        value = need(suffix)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return [value] * block_count
+        if (
+            isinstance(value, list)
+            and len(value) == block_count
+            and all(
+                isinstance(item, int) and not isinstance(item, bool) and item > 0
+                for item in value
+            )
+        ):
+            return value
         raise GgufError(
-            f"{arch}.attention.head_count_kv has unsupported type "
-            f"{type(head_count_kv).__name__}; expected int or list of int"
+            f"{arch}.{suffix} must be a positive integer or a list of "
+            f"{block_count} positive integers"
         )
 
-    return {
-        "block_count": as_int("block_count"),
-        "head_count_kv": head_count_kv,
-        "key_length": as_int("attention.key_length"),
-        "value_length": as_int("attention.value_length"),
-    }
+    heads = layer_values("attention.head_count_kv")
+    full_keys = layer_values("attention.key_length")
+    full_values = layer_values("attention.value_length")
+    kinds = ["full"] * block_count
+    sliding_window = None
+    swa_keys = full_keys
+    swa_values = full_values
+
+    if arch in ("qwen35", "qwen35moe"):
+        recurrent_key = f"{arch}.attention.recurrent_layers"
+        if recurrent_key in metadata:
+            recurrent = metadata[recurrent_key]
+            if (
+                not isinstance(recurrent, list)
+                or len(recurrent) != block_count
+                or not all(isinstance(item, bool) for item in recurrent)
+            ):
+                raise GgufError(
+                    f"{recurrent_key} must contain {block_count} Boolean entries"
+                )
+            kinds = ["recurrent" if item else "full" for item in recurrent]
+        else:
+            interval_key = f"{arch}.full_attention_interval"
+            if interval_key not in metadata:
+                raise GgufError(
+                    f"required metadata missing: {recurrent_key} or {interval_key}"
+                )
+            interval = positive_int("full_attention_interval")
+            kinds = [
+                "full" if (index + 1) % interval == 0 else "recurrent"
+                for index in range(block_count)
+            ]
+
+    if arch == "gemma4":
+        pattern = need("attention.sliding_window_pattern")
+        if (
+            not isinstance(pattern, list)
+            or len(pattern) != block_count
+            or not all(isinstance(item, bool) for item in pattern)
+        ):
+            raise GgufError(
+                f"{arch}.attention.sliding_window_pattern must contain "
+                f"{block_count} Boolean entries"
+            )
+        kinds = ["swa" if item else "full" for item in pattern]
+        sliding_window = positive_int("attention.sliding_window")
+        swa_keys = layer_values("attention.key_length_swa")
+        swa_values = layer_values("attention.value_length_swa")
+
+    layers = []
+    for index, kind in enumerate(kinds):
+        layers.append(
+            {
+                "kind": kind,
+                "head_count_kv": heads[index],
+                "key_length": swa_keys[index] if kind == "swa" else full_keys[index],
+                "value_length": (
+                    swa_values[index] if kind == "swa" else full_values[index]
+                ),
+            }
+        )
+    return {"layers": layers, "sliding_window": sliding_window}

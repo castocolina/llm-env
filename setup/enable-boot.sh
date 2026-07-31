@@ -5,9 +5,10 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-require_cmd yq loginctl systemctl
+require_cmd uv jq yq loginctl systemctl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
+migrate_config_file || die "configuration migration failed"
 
 yq -i '.server.start_at_boot = true' "$CONFIG_PATH"
 ensure_api_key

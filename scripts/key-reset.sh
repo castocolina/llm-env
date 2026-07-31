@@ -5,9 +5,10 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-require_cmd yq systemctl
+require_cmd uv jq yq systemctl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
+migrate_config_file || die "configuration migration failed"
 
 reset_api_key
 log_info "API key reset"

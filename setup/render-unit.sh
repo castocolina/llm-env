@@ -8,6 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 require_cmd uv jq yq podman systemctl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
+migrate_config_file || die "configuration migration failed"
 
 backend="$(yq -r '.gpu.backend' "$CONFIG_PATH")"
 image="$(yq -r '.gpu.image' "$CONFIG_PATH")"

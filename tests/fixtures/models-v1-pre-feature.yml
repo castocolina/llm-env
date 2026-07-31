@@ -1,0 +1,52 @@
+version: 1
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_key: fixture-private-migration-key
+  mdns_name: llm
+  sleep_idle_seconds: 300
+  custom_server_field: preserved
+
+gpu:
+  pci_address: 0000:03:00.0
+  device_name: Test GPU
+  backend: vulkan
+  image: example.invalid/llama:latest
+  vram_total_mib: 16384
+  reserve_mode: auto
+  reserve_floor_mib: 1024
+
+runtime:
+  models_max: 1
+  flash_attn: true
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+
+models:
+  - alias: large
+    label: Large
+    parameters: 12B
+    quantization: Q4_K_M
+    enabled: true
+    file: large.gguf
+    url: https://example.invalid/large.gguf
+    size_bytes: 1000
+    vram_budget: 55%
+    ctx_size: 131072
+    n_gpu_layers: 99
+    custom_model_field: preserved
+  - alias: small
+    label: Small
+    parameters: 1B
+    quantization: Q4_K_M
+    enabled: false
+    file: small.gguf
+    url: https://example.invalid/small.gguf
+    size_bytes: 500
+    vram_budget: 10%
+    ctx_size: 4096
+    n_gpu_layers: 99
+
+custom_top_level:
+  retained: true

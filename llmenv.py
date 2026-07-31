@@ -13,7 +13,9 @@ Exit codes: 0 success, 1 handled error, 2 usage error.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import math
 import re
 import subprocess
 import sys
@@ -22,17 +24,18 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pylib.budget import BudgetError, compute_budget, kv_cache_mib
+from pylib.budget import BudgetError, compute_budget, kv_cache_components_mib
 from pylib.config import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
     enabled_models,
     load_config,
+    migrate_config,
+    require_valid_config,
     save_config,
     set_enabled_models,
     set_model_enabled,
     sync_models_max,
-    validate_config,
 )
 from pylib.detect import DetectError, detect
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
@@ -121,15 +124,15 @@ def _model_costs(cfg: dict[str, Any], models_dir: Path) -> list[dict[str, Any]]:
     costs = []
     for model in enabled_models(cfg):
         path = models_dir / model["file"]
-        header = read_gguf_header(path)
-        geometry = kv_geometry(header["metadata"])
+        geometry = kv_geometry(read_gguf_header(path)["metadata"])
         costs.append(
             {
                 "alias": model["alias"],
-                "weights_mib": path.stat().st_size // (1024 * 1024),
-                "kv_mib": kv_cache_mib(
+                "weights_mib": math.ceil(path.stat().st_size / (1024 * 1024)),
+                **kv_cache_components_mib(
                     geometry,
                     model["ctx_size"],
+                    runtime["ubatch_size"],
                     runtime["cache_type_k"],
                     runtime["cache_type_v"],
                 ),
@@ -139,7 +142,7 @@ def _model_costs(cfg: dict[str, Any], models_dir: Path) -> list[dict[str, Any]]:
 
 
 def cmd_budget(args: argparse.Namespace) -> int:
-    cfg = load_config(Path(args.config))
+    cfg = require_valid_config(load_config(Path(args.config)))
     facts = detect()
     pci = cfg["gpu"]["pci_address"]
     if not pci:
@@ -163,6 +166,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
         compositor_used_mib=compositor_used,
         reserve_floor_mib=cfg["gpu"]["reserve_floor_mib"],
         model_costs=_model_costs(cfg, Path(args.models_dir)),
+        models_max=runtime["models_max"],
         cache_type_k=runtime["cache_type_k"],
         cache_type_v=runtime["cache_type_v"],
     )
@@ -172,17 +176,16 @@ def cmd_budget(args: argparse.Namespace) -> int:
 
 
 def cmd_presets(args: argparse.Namespace) -> int:
-    cfg = load_config(Path(args.config))
+    cfg = require_valid_config(load_config(Path(args.config)))
     write_presets(cfg, args.models_dir, args.device, Path(args.output))
     return emit({"written": str(args.output), "models": cfg["runtime"]["models_max"]})
 
 
 def cmd_models(args: argparse.Namespace) -> int:
     path = Path(args.config)
-    cfg = load_config(path)
+    cfg = require_valid_config(load_config(path))
 
     if args.action == "list":
-        cfg = sync_models_max(cfg)
         return emit(
             {
                 "models_max": cfg["runtime"]["models_max"],
@@ -199,17 +202,19 @@ def cmd_models(args: argparse.Namespace) -> int:
 
     if args.action == "select":
         cfg = set_enabled_models(cfg, args.aliases)
+        require_valid_config(cfg)
         save_config(cfg, path)
         return emit({"models_max": cfg["runtime"]["models_max"]})
 
     alias = args.aliases[0]
     cfg = sync_models_max(set_model_enabled(cfg, alias, args.action == "enable"))
+    require_valid_config(cfg)
     save_config(cfg, path)
     return emit({"alias": alias, "models_max": cfg["runtime"]["models_max"]})
 
 
 def cmd_validate_gguf(args: argparse.Namespace) -> int:
-    cfg = load_config(Path(args.config))
+    cfg = require_valid_config(load_config(Path(args.config)))
     results, ok = [], True
     for model in enabled_models(cfg):
         valid, message = validate_gguf(Path(args.models_dir) / model["file"])
@@ -219,13 +224,20 @@ def cmd_validate_gguf(args: argparse.Namespace) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    cfg = load_config(Path(args.template))
-    errors = validate_config(cfg)
-    if errors:
-        return fail("; ".join(errors))
+    cfg = require_valid_config(load_config(Path(args.template)))
     cfg = sync_models_max(cfg)
     save_config(cfg, Path(args.config))
     return emit({"written": str(args.config)})
+
+
+def cmd_migrate_config(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    original = load_config(path, migrate=False)
+    cfg = require_valid_config(migrate_config(copy.deepcopy(original)))
+    written = cfg != original
+    if written:
+        save_config(cfg, path)
+    return emit({"written": written, "path": str(path)})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +285,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--config", default=argparse.SUPPRESS)
     init.add_argument("--template", required=True)
     init.set_defaults(func=cmd_init)
+
+    migrate = sub.add_parser("migrate-config")
+    migrate.add_argument("--config", default=argparse.SUPPRESS)
+    migrate.set_defaults(func=cmd_migrate_config)
 
     return parser
 

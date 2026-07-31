@@ -1,18 +1,21 @@
 """VRAM budget arithmetic.
 
-Every quantity here is measured or derived from GGUF metadata. The single
-tunable, SPIKE_HEADROOM_MIB, is a constant defined once and documented in the
-design spec.
+Geometry and model sizes are derived from GGUF metadata. Runtime and spike
+allowances are fixed constants defined here and documented in the design spec.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
+# Fixed allowance for each loaded model's runtime allocations.
+RUNTIME_OVERHEAD_MIB = 512
 # Fixed allowance for compositor, browser, and game VRAM spikes.
 SPIKE_HEADROOM_MIB = 1024
 
+MIB = 1024 * 1024
 MIB_PER_GB = 1024
 
 # Approximate bytes per element for KV cache storage types.
@@ -49,46 +52,52 @@ def parse_vram_budget(value: str, total_mib: int) -> int:
     return int(amount)
 
 
-def _total_kv_heads(geometry: dict[str, Any]) -> int:
-    """Total KV heads summed across all layers.
-
-    head_count_kv is an int when every layer is identical, or one entry per
-    layer when a model varies it (Gemma alternates local and global attention).
-    """
-    head_count_kv = geometry["head_count_kv"]
-    block_count = geometry["block_count"]
-
-    if isinstance(head_count_kv, list):
-        if len(head_count_kv) != block_count:
-            raise BudgetError(
-                f"head_count_kv has {len(head_count_kv)} entries but the model "
-                f"has {block_count} blocks"
-            )
-        return sum(head_count_kv)
-    return block_count * head_count_kv
+def pad256(value: int) -> int:
+    return ((value + 255) // 256) * 256
 
 
-def kv_cache_mib(
+def kv_cache_components_mib(
     geometry: dict[str, Any],
     ctx_size: int,
+    ubatch_size: int,
     cache_type_k: str,
     cache_type_v: str,
-) -> int:
+) -> dict[str, int]:
     for name in (cache_type_k, cache_type_v):
         if name not in BYTES_PER_ELEMENT:
             raise BudgetError(
                 f"unknown cache type {name!r}; known: {sorted(BYTES_PER_ELEMENT)}"
             )
 
-    total_kv_heads = _total_kv_heads(geometry)
-    elements_k = ctx_size * total_kv_heads * geometry["key_length"]
-    elements_v = ctx_size * total_kv_heads * geometry["value_length"]
+    sliding_window = geometry.get("sliding_window")
+    full_bytes = 0.0
+    swa_bytes = 0.0
+    for layer_geometry in geometry["layers"]:
+        kind = layer_geometry["kind"]
+        if kind == "recurrent":
+            continue
+        if kind == "full":
+            cells = ctx_size
+        elif kind == "swa" and isinstance(sliding_window, int):
+            cells = pad256(min(ctx_size, sliding_window + ubatch_size))
+        else:
+            raise BudgetError(f"invalid layer geometry: {layer_geometry!r}")
+        layer_bytes = cells * layer_geometry["head_count_kv"] * (
+            layer_geometry["key_length"] * BYTES_PER_ELEMENT[cache_type_k]
+            + layer_geometry["value_length"] * BYTES_PER_ELEMENT[cache_type_v]
+        )
+        if kind == "full":
+            full_bytes += layer_bytes
+        else:
+            swa_bytes += layer_bytes
 
-    total_bytes = (
-        elements_k * BYTES_PER_ELEMENT[cache_type_k]
-        + elements_v * BYTES_PER_ELEMENT[cache_type_v]
-    )
-    return int(total_bytes / (1024 * 1024))
+    full_mib = math.ceil(full_bytes / MIB)
+    swa_mib = math.ceil(swa_bytes / MIB)
+    return {
+        "full_kv_mib": full_mib,
+        "swa_kv_mib": swa_mib,
+        "kv_mib": full_mib + swa_mib,
+    }
 
 
 def compute_budget(
@@ -96,12 +105,28 @@ def compute_budget(
     compositor_used_mib: int,
     reserve_floor_mib: int,
     model_costs: list[dict[str, Any]],
+    models_max: int,
     cache_type_k: str = "f16",
     cache_type_v: str = "f16",
 ) -> dict[str, Any]:
+    if models_max < 1 or models_max > len(model_costs):
+        raise BudgetError("models_max must select at least one and no more than all models")
     reserve = max(compositor_used_mib, reserve_floor_mib)
     available = vram_total_mib - reserve - SPIKE_HEADROOM_MIB
-    required = sum(m["weights_mib"] + m["kv_mib"] for m in model_costs)
+    models = []
+    for cost in model_costs:
+        required = cost["weights_mib"] + cost["kv_mib"] + RUNTIME_OVERHEAD_MIB
+        models.append(
+            cost
+            | {
+                "runtime_overhead_mib": RUNTIME_OVERHEAD_MIB,
+                "required_mib": required,
+            }
+        )
+    resident_models = sorted(
+        models, key=lambda model: model["required_mib"], reverse=True
+    )[:models_max]
+    required = sum(model["required_mib"] for model in resident_models)
     shortfall = max(0, required - available)
     feasible = shortfall == 0
 
@@ -117,14 +142,16 @@ def compute_budget(
                 "(roughly halves KV cache size)"
             )
         remedies.append(
-            "reduce ctx_size for one or more models (KV cache scales linearly)"
+            "reduce ctx_size explicitly (KV cache scales with context)"
         )
-        remedies.append("enable runtime.flash_attn to reduce attention scratch memory")
-        if len(model_costs) > 1:
-            largest = max(model_costs, key=lambda m: m["weights_mib"] + m["kv_mib"])
+        remedies.append(
+            "enable runtime.flash_attn explicitly to reduce attention scratch memory"
+        )
+        if len(models) > models_max:
+            largest = resident_models[0]
             remedies.append(
-                f"disable a model, e.g. '{largest['alias']}' "
-                f"({largest['weights_mib'] + largest['kv_mib']} MiB)"
+                f"disable model '{largest['alias']}' or choose a smaller model "
+                f"({largest['required_mib']} MiB required)"
             )
         reclaimable = compositor_used_mib - reserve_floor_mib
         if reclaimable > 0:
@@ -138,11 +165,13 @@ def compute_budget(
         "vram_total_mib": vram_total_mib,
         "reserve_mib": reserve,
         "spike_headroom_mib": SPIKE_HEADROOM_MIB,
+        "runtime_overhead_mib_per_model": RUNTIME_OVERHEAD_MIB,
         "available_mib": available,
         "required_mib": required,
         "shortfall_mib": shortfall,
         "feasible": feasible,
-        "models": model_costs,
+        "models": models,
+        "resident_models": resident_models,
         "remedies": remedies,
         "cache_type_k": cache_type_k,
         "cache_type_v": cache_type_v,

@@ -97,14 +97,20 @@ def test_read_header_raises_on_truncated_file(tmp_path):
         read_gguf_header(truncated)
 
 
-def test_kv_geometry_extracts_dimensions(tmp_path):
+def test_kv_geometry_expands_uniform_full_attention(tmp_path):
     header = read_gguf_header(write_fake_gguf(tmp_path / "m.gguf"))
     geo = kv_geometry(header["metadata"])
     assert geo == {
-        "block_count": 40,
-        "head_count_kv": 8,
-        "key_length": 128,
-        "value_length": 128,
+        "layers": [
+            {
+                "kind": "full",
+                "head_count_kv": 8,
+                "key_length": 128,
+                "value_length": 128,
+            }
+            for _ in range(40)
+        ],
+        "sliding_window": None,
     }
 
 
@@ -194,9 +200,15 @@ def test_per_layer_head_count_kv_array_is_materialized(tmp_path):
     path.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, len(kvs)) + body)
 
     geo = kv_geometry(read_gguf_header(path)["metadata"])
-    assert geo["head_count_kv"] == [8] * 48
-    assert geo["block_count"] == 48
-    assert geo["key_length"] == 128
+    assert geo["layers"] == [
+        {
+            "kind": "full",
+            "head_count_kv": 8,
+            "key_length": 128,
+            "value_length": 128,
+        }
+        for _ in range(48)
+    ]
 
 
 def test_kv_geometry_rejects_non_integer_head_count(tmp_path):
@@ -244,4 +256,121 @@ def test_kv_geometry_rejects_summarized_array_head_count(tmp_path):
 
     with pytest.raises(GgufError) as excinfo:
         kv_geometry(metadata)
-    assert "unsupported type" in str(excinfo.value)
+    assert "list of 40 positive integers" in str(excinfo.value)
+
+
+def test_qwen35_uses_recurrent_layer_metadata():
+    metadata = {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 4,
+        "qwen35.attention.head_count_kv": 8,
+        "qwen35.attention.key_length": 128,
+        "qwen35.attention.value_length": 128,
+        "qwen35.attention.recurrent_layers": [True, True, True, False],
+    }
+    assert [layer["kind"] for layer in kv_geometry(metadata)["layers"]] == [
+        "recurrent",
+        "recurrent",
+        "recurrent",
+        "full",
+    ]
+
+
+def test_qwen35_falls_back_to_full_attention_interval():
+    metadata = {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 8,
+        "qwen35.attention.head_count_kv": 8,
+        "qwen35.attention.key_length": 128,
+        "qwen35.attention.value_length": 128,
+        "qwen35.full_attention_interval": 4,
+    }
+    assert [layer["kind"] for layer in kv_geometry(metadata)["layers"]] == [
+        "recurrent",
+        "recurrent",
+        "recurrent",
+        "full",
+        "recurrent",
+        "recurrent",
+        "recurrent",
+        "full",
+    ]
+
+
+def test_gemma4_uses_swa_pattern_window_and_dimensions():
+    metadata = {
+        "general.architecture": "gemma4",
+        "gemma4.block_count": 4,
+        "gemma4.attention.head_count_kv": [2, 4, 2, 4],
+        "gemma4.attention.key_length": 128,
+        "gemma4.attention.value_length": 128,
+        "gemma4.attention.sliding_window": 2048,
+        "gemma4.attention.sliding_window_pattern": [True, False, True, False],
+        "gemma4.attention.key_length_swa": 64,
+        "gemma4.attention.value_length_swa": 80,
+    }
+    geometry = kv_geometry(metadata)
+    assert geometry["sliding_window"] == 2048
+    assert geometry["layers"] == [
+        {"kind": "swa", "head_count_kv": 2, "key_length": 64, "value_length": 80},
+        {
+            "kind": "full",
+            "head_count_kv": 4,
+            "key_length": 128,
+            "value_length": 128,
+        },
+        {"kind": "swa", "head_count_kv": 2, "key_length": 64, "value_length": 80},
+        {
+            "kind": "full",
+            "head_count_kv": 4,
+            "key_length": 128,
+            "value_length": 128,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata, message",
+    [
+        (
+            {
+                "general.architecture": "qwen35",
+                "qwen35.block_count": 4,
+                "qwen35.attention.head_count_kv": 8,
+                "qwen35.attention.key_length": 128,
+                "qwen35.attention.value_length": 128,
+            },
+            "recurrent_layers or qwen35.full_attention_interval",
+        ),
+        (
+            {
+                "general.architecture": "qwen35",
+                "qwen35.block_count": 4,
+                "qwen35.attention.head_count_kv": 8,
+                "qwen35.attention.key_length": 128,
+                "qwen35.attention.value_length": 128,
+                "qwen35.attention.recurrent_layers": [True, False],
+            },
+            "4 Boolean entries",
+        ),
+        (
+            {
+                "general.architecture": "gemma4",
+                "gemma4.block_count": 2,
+                "gemma4.attention.head_count_kv": 4,
+                "gemma4.attention.key_length": 128,
+                "gemma4.attention.value_length": 128,
+                "gemma4.attention.sliding_window": 2048,
+                "gemma4.attention.sliding_window_pattern": [True, "false"],
+                "gemma4.attention.key_length_swa": 64,
+                "gemma4.attention.value_length_swa": 64,
+            },
+            "sliding_window_pattern",
+        ),
+    ],
+)
+def test_kv_geometry_rejects_incomplete_or_malformed_hybrid_metadata(
+    metadata, message
+):
+    with pytest.raises(GgufError, match=message):
+        kv_geometry(metadata)

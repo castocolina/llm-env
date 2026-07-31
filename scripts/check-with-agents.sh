@@ -196,7 +196,7 @@ run_agent() {
                     -p \
                     --mode json \
                     --model "llm-env/${alias}" \
-                    "$prompt"
+                    "$prompt" </dev/null
             ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
             pipeline_statuses=("${PIPESTATUS[@]}")
             status="${pipeline_statuses[0]}"
@@ -241,7 +241,7 @@ run_agent() {
                 export XDG_STATE_HOME="$workspace/opencode-state"
                 export OPENCODE_CONFIG="$config_file"
                 export OPENCODE_API_KEY="$api_key"
-                opencode run --format json --model "llm-env/${alias}" "$prompt"
+                opencode run --format json --model "llm-env/${alias}" "$prompt" </dev/null
             ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
             pipeline_statuses=("${PIPESTATUS[@]}")
             status="${pipeline_statuses[0]}"
@@ -374,6 +374,7 @@ for client in "${clients[@]}"; do
                     snapshot="$SNAPSHOT_RESULT"
                     source_url="$weather_url"
                     fields='source_url, source_timestamp, temperature_2m, and weather_code'
+                    timestamp_instruction="The source_timestamp field must copy the source response's timestamp text byte-for-byte. Do not convert or normalize its timezone, add an offset, or change its date. Return source_timestamp as ISO-8601."
                     agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched weather source'
                     ;;
                 fx)
@@ -385,10 +386,11 @@ for client in "${clients[@]}"; do
                     snapshot="$SNAPSHOT_RESULT"
                     source_url="$fx_url"
                     fields='source_url, source_timestamp, and usd_to_clp'
+                    timestamp_instruction="Return source_timestamp as ISO-8601. The source_timestamp field must convert the source response's exact time_last_update_utc timestamp to ISO-8601 while preserving its UTC instant, UTC timezone (Z or +00:00), and source calendar date. Do not convert it to local time or another timezone, and do not change its date."
                     agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
                     ;;
             esac
-            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. The source_url field must reproduce the literal URL byte-for-byte, including percent encoding. Return source_timestamp as ISO-8601. Return exactly one JSON object containing ${fields}."
+            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. The source_url field must reproduce the literal URL byte-for-byte, including percent encoding. ${timestamp_instruction} Return exactly one JSON object containing ${fields}."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"

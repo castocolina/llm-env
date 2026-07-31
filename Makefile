@@ -1,4 +1,4 @@
-.PHONY: help prerequisites setup start stop restart check-setup check-server check-with-agents benchmark \
+.PHONY: help prerequisites setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
         key-reset enable-boot disable-boot status logs validate test clean
 
 UNIT = llm-server
@@ -11,6 +11,9 @@ prerequisites:
 
 setup:
 	@bash setup/setup.sh
+
+setup-local-llm-agents:
+	@bash setup/setup-local-llm-agents.sh
 
 start:
 	@bash scripts/start.sh

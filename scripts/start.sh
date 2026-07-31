@@ -9,10 +9,16 @@ require_cmd uv jq yq systemctl curl
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 
+migrate_config_file || die "configuration migration failed"
 ensure_api_key
 
 models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
 [ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
+
+if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
+    log_step "Stopping the active router before measuring VRAM"
+    systemctl --user stop "${UNIT_NAME}.service"
+fi
 
 log_step "Checking the VRAM budget"
 if ! budget="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR")"; then

@@ -3,6 +3,7 @@ set -euo pipefail
 
 echo "make prerequisites Confirm and install host prerequisites"
 echo "make setup         Interactive configuration"
+echo "make setup-local-llm-agents Configure normal Pi and OpenCode local providers"
 echo "make start         Start the LLM server"
 echo "make stop          Stop the LLM server"
 echo "make restart       Restart the LLM server"

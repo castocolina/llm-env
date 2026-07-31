@@ -31,9 +31,13 @@ def render_presets(cfg: dict[str, Any], models_dir: str, device: str) -> str:
 
     parser["*"] = {
         "device": device,
-        "flash-attn": "on" if runtime.get("flash_attn") else "off",
-        "cache-type-k": str(runtime.get("cache_type_k", "f16")),
-        "cache-type-v": str(runtime.get("cache_type_v", "f16")),
+        "parallel": str(runtime["parallel_slots"]),
+        "ubatch-size": str(runtime["ubatch_size"]),
+        "flash-attn": "on" if runtime["flash_attn"] else "off",
+        "cache-type-k": str(runtime["cache_type_k"]),
+        "cache-type-v": str(runtime["cache_type_v"]),
+        "fit": "off",
+        "context-shift": "off",
     }
 
     for model in enabled_models(cfg):

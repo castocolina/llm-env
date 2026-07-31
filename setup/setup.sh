@@ -30,6 +30,7 @@ else
     llmenv --config "$CONFIG_PATH" init --template "${REPO_DIR}/models.yml.example" >/dev/null
     log_info "created ${CONFIG_PATH} from template"
 fi
+migrate_config_file || die "configuration migration failed"
 
 log_step "Step 2/7  Detecting GPUs"
 facts="$(llmenv detect)"

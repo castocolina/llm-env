@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ REQUIRED_MODEL_KEYS = (
     "size_bytes",
     "vram_budget",
     "ctx_size",
+    "client_max_output_tokens",
     "n_gpu_layers",
 )
 VALID_BACKENDS = ("vulkan", "cpu")
@@ -32,8 +35,26 @@ class ConfigError(Exception):
     """Raised when the configuration cannot be read or is structurally invalid."""
 
 
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Remove obsolete benchmark data from legacy generated configurations."""
+    """Apply additive defaults and remove obsolete generated benchmark data."""
+    runtime = cfg.get("runtime")
+    if isinstance(runtime, dict):
+        runtime.setdefault("parallel_slots", 1)
+        runtime.setdefault("ubatch_size", 512)
+
+    models = cfg.get("models")
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict) or "client_max_output_tokens" in model:
+                continue
+            ctx_size = model.get("ctx_size")
+            if _positive_int(ctx_size):
+                model["client_max_output_tokens"] = min(ctx_size, 8192)
+
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
         return cfg
@@ -43,7 +64,9 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+def load_config(
+    path: Path = DEFAULT_CONFIG_PATH, *, migrate: bool = True
+) -> dict[str, Any]:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError as exc:
@@ -54,21 +77,40 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in {path}: {exc}") from exc
+        problem = getattr(exc, "problem", None)
+        if not isinstance(problem, str) or not problem:
+            problem = "parser error"
+        mark = getattr(exc, "problem_mark", None)
+        line = mark.line + 1 if mark is not None else "unknown"
+        column = mark.column + 1 if mark is not None else "unknown"
+        raise ConfigError(
+            f"invalid YAML in {path}: {problem}; line {line}, column {column}"
+        ) from exc
 
     if not isinstance(data, dict):
         raise ConfigError(f"config root must be a mapping: {path}")
-    return migrate_config(data)
+    return migrate_config(data) if migrate else data
 
 
 def save_config(cfg: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
     cfg = migrate_config(cfg)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+    content = yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}."
     )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def validate_config(cfg: dict[str, Any]) -> list[str]:
@@ -83,6 +125,14 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if errors:
         return errors
 
+    for section in ("server", "gpu", "runtime"):
+        if not isinstance(cfg[section], dict):
+            errors.append(f"section {section} must be a mapping")
+    if not isinstance(cfg["models"], list):
+        errors.append("section models must be a list")
+    if errors:
+        return errors
+
     gpu = cfg["gpu"]
     if gpu.get("backend") not in VALID_BACKENDS:
         errors.append(f"gpu.backend must be one of {VALID_BACKENDS}")
@@ -91,52 +141,128 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if gpu.get("reserve_mode") not in ("auto", "fixed"):
         errors.append("gpu.reserve_mode must be 'auto' or 'fixed'")
 
+    runtime = cfg["runtime"]
+    for key in ("models_max", "parallel_slots", "ubatch_size"):
+        if not _positive_int(runtime.get(key)):
+            errors.append(f"runtime.{key} must be a positive integer")
+    if runtime.get("parallel_slots") != 1:
+        errors.append("runtime.parallel_slots must be 1")
+
     models = cfg["models"]
     if not isinstance(models, list) or not models:
         errors.append("models must be a non-empty list")
         return errors
 
     seen: set[str] = set()
-    for model in models:
-        alias = model.get("alias", "<unnamed>")
+    for index, model in enumerate(models):
+        if not isinstance(model, dict):
+            errors.append("each model must be a mapping")
+            continue
+        alias = model.get("alias")
+        valid_alias = isinstance(alias, str) and bool(alias.strip())
+        model_name = alias if valid_alias else f"at index {index}"
         for key in REQUIRED_MODEL_KEYS:
             if key not in model:
-                errors.append(f"model {alias} missing key: {key}")
-        if alias in seen:
+                errors.append(f"model {model_name} missing key: {key}")
+        if not valid_alias:
+            errors.append(f"model at index {index} alias must be a non-empty string")
+        elif alias in seen:
             errors.append(f"duplicate model alias: {alias}")
-        seen.add(alias)
+        else:
+            seen.add(alias)
+        if "enabled" in model and not isinstance(model["enabled"], bool):
+            errors.append(f"model {model_name} enabled must be a Boolean")
         budget = model.get("vram_budget")
         if budget is not None and not VRAM_BUDGET_RE.match(str(budget)):
             errors.append(
-                f"model {alias} vram_budget must look like '55%', '7.5GB', or '512MiB'"
+                f"model {model_name} vram_budget must look like '55%', '7.5GB', or '512MiB'"
             )
+
+        for key in ("ctx_size", "client_max_output_tokens"):
+            if not _positive_int(model.get(key)):
+                errors.append(f"model {model_name} {key} must be a positive integer")
+        if (
+            _positive_int(model.get("ctx_size"))
+            and _positive_int(model.get("client_max_output_tokens"))
+            and model["client_max_output_tokens"] > model["ctx_size"]
+        ):
+            errors.append(
+                f"model {model_name} client_max_output_tokens must not exceed ctx_size"
+            )
+
+    enabled_count = len(enabled_models(cfg))
+    if enabled_count == 0:
+        errors.append("at least one model must be enabled")
+    if _positive_int(runtime.get("models_max")) and runtime["models_max"] > enabled_count:
+        errors.append(
+            f"runtime.models_max must not exceed enabled model count ({enabled_count})"
+        )
 
     return errors
 
 
+def require_valid_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return cfg or raise one actionable error containing every validation issue."""
+    errors = validate_config(cfg)
+    if errors:
+        raise ConfigError("; ".join(errors))
+    return cfg
+
+
 def enabled_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    return [m for m in cfg.get("models", []) if m.get("enabled")]
+    return [
+        model
+        for model in cfg.get("models", [])
+        if isinstance(model, dict) and model.get("enabled") is True
+    ]
 
 
 def set_enabled_models(cfg: dict[str, Any], aliases: list[str]) -> dict[str, Any]:
-    requested = set(aliases)
+    requested: set[str] = set()
+    for alias in aliases:
+        if alias in requested:
+            raise ConfigError(f"duplicate model alias: {alias}")
+        requested.add(alias)
     known = {model["alias"] for model in cfg.get("models", [])}
     unknown = requested - known
     if unknown:
         raise ConfigError(f"unknown model alias: {min(unknown)}")
-    for model in cfg["models"]:
+    if not requested:
+        raise ConfigError("at least one model must remain enabled")
+
+    runtime = cfg.get("runtime")
+    configured = runtime.get("models_max", 1) if isinstance(runtime, dict) else 1
+    if not _positive_int(configured):
+        raise ConfigError("runtime.models_max must be a positive integer")
+
+    models_by_alias = {model["alias"]: model for model in cfg["models"]}
+    reordered = [models_by_alias[alias] for alias in aliases]
+    reordered.extend(model for model in cfg["models"] if model["alias"] not in requested)
+    for model in reordered:
         model["enabled"] = model["alias"] in requested
+    cfg["models"] = reordered
     return sync_models_max(cfg)
 
 
 def set_model_enabled(cfg: dict[str, Any], alias: str, enabled: bool) -> dict[str, Any]:
-    for model in cfg.get("models", []):
-        if model.get("alias") == alias:
-            model["enabled"] = enabled
-            return cfg
-    raise ConfigError(f"unknown model alias: {alias}")
+    model = next(
+        (item for item in cfg.get("models", []) if item.get("alias") == alias), None
+    )
+    if model is None:
+        raise ConfigError(f"unknown model alias: {alias}")
+    if not enabled and model.get("enabled") and len(enabled_models(cfg)) == 1:
+        raise ConfigError("cannot disable the final enabled model")
+    model["enabled"] = enabled
+    return cfg
 
 
 def sync_models_max(cfg: dict[str, Any]) -> dict[str, Any]:
-    cfg.setdefault("runtime", {})["models_max"] = len(enabled_models(cfg))
+    enabled_count = len(enabled_models(cfg))
+    if enabled_count == 0:
+        raise ConfigError("at least one model must remain enabled")
+    runtime = cfg.setdefault("runtime", {})
+    configured = runtime.get("models_max", 1)
+    if not _positive_int(configured):
+        raise ConfigError("runtime.models_max must be a positive integer")
+    runtime["models_max"] = min(configured, enabled_count)
     return cfg

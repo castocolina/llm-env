@@ -18,7 +18,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
-| `pylib/config.py` | Schema, enable/disable, `models_max` sync |
+| `pylib/config.py` | Schema, enable/disable, `models_max` validation and clamping |
 | `pylib/gguf.py` | GGUF header parsing, KV geometry |
 | `pylib/detect.py` | GPU and compositor detection from sysfs |
 | `pylib/budget.py` | VRAM arithmetic and remedies |
@@ -26,9 +26,14 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 
 ## Invariants
 
-- `runtime.models_max` always equals the count of enabled models.
+- `runtime.models_max` is a validated residency limit between 1 and the enabled
+  model count; model selection clamps it downward only when necessary.
+- `pylib/gguf.py` owns per-layer full/recurrent/SWA geometry; `pylib/budget.py`
+  owns Q5_1 byte arithmetic, the 512 MiB per-resident runtime allowance, and the
+  independent 1024 MiB spike reserve.
+- The target deployment uses one request slot. Automatic fitting, context
+  shifting, cache changes, and CPU offload remain disabled.
 - Vulkan device indices are never persisted; the PCI address is.
-- `spike_headroom` is 1024 MiB, defined only in `pylib/budget.py`.
 - An infeasible VRAM budget is reported, never silently corrected.
 - `presets.ini` must contain no `[DEFAULT]` section and no `version` key;
   `llama-server` treats every INI section as a model preset and would

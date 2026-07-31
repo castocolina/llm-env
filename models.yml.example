@@ -24,9 +24,11 @@ gpu:
 
 runtime:
   models_max: 1
+  parallel_slots: 1
+  ubatch_size: 512
   flash_attn: true
-  cache_type_k: q8_0
-  cache_type_v: q8_0
+  cache_type_k: q5_1
+  cache_type_v: q5_1
 
 models:
   - alias: gemma4
@@ -38,7 +40,8 @@ models:
     url: https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf
     size_bytes: 7660000000
     vram_budget: 55%
-    ctx_size: 8192
+    ctx_size: 131072
+    client_max_output_tokens: 8192
     n_gpu_layers: 99
 
   - alias: ornith
@@ -50,6 +53,6 @@ models:
     url: https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF/resolve/main/ornith-1.0-9b-Q4_K_M.gguf
     size_bytes: 5600000000
     vram_budget: 40%
-    ctx_size: 8192
+    ctx_size: 131072
+    client_max_output_tokens: 8192
     n_gpu_layers: 99
-

@@ -6,7 +6,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 RUNTIME=("uv:uv" "jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
-DEVELOPMENT=("git:git" "shellcheck:ShellCheck")
+DEVELOPMENT=("git:git" "shellcheck:ShellCheck" "node:nodejs")
 OPTIONAL_LAN=("firewall-cmd:firewalld" "avahi-publish:avahi")
 
 CHECK_ONLY=0
@@ -40,6 +40,7 @@ command_purpose() {
         ip) printf '%s\n' "network address inspection" ;;
         git) printf '%s\n' "source control for updates" ;;
         shellcheck) printf '%s\n' "shell script validation" ;;
+        node) printf '%s\n' "JSONC editor for OpenCode client configuration" ;;
         firewall-cmd) printf '%s\n' "firewall configuration for LAN access" ;;
         avahi-publish) printf '%s\n' "LAN service discovery" ;;
     esac

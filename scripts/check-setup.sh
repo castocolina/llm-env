@@ -112,6 +112,7 @@ done
 log_step "Configuration"
 record_command "configuration file" "test -f ${CONFIG_PATH}" "" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" test -f "$CONFIG_PATH" || true
+migrate_config_file || die "configuration migration failed"
 record_command "configuration validation" \
     "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} models list" "" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" \

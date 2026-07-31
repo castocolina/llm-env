@@ -50,11 +50,77 @@ curl http://llm.local:8000/v1/chat/completions \
   -d '{"model":"gemma4","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+## Coding clients
+
+After `make start`, configure normal Pi and OpenCode sessions once:
+
+```bash
+make setup-local-llm-agents
+```
+
+The command reads the private API key and enabled models from `models.yml`,
+checks that the local server is healthy, and creates or fully refreshes the
+`local-llm-env` provider in both clients' normal profiles. It preserves all
+other providers and settings, uses `http://127.0.0.1:<port>/v1`, and writes
+each updated file with mode `0600`. It never prints the key. Run it again after
+rotating the key, changing the port, or enabling or disabling a model.
+
+Clean setup and this command use each model's exact 131,072-token context and
+8,192-token output limits. Pi's global `enabledModels` becomes exactly the setup-selected
+local aliases in setup order, which defines its model cycle.
+OpenCode favorites start with the setup-selected local aliases in setup order;
+stale local favorites are removed, while unrelated favorites retain their
+order. The command leaves explicit client defaults unchanged.
+
+Close Pi and OpenCode before running the command. Restart both clients after the
+command succeeds. If a replacement fails partway, keep Pi and OpenCode closed,
+rerun `make setup-local-llm-agents`, and restart both clients only after it
+succeeds. The deployment uses one request slot with Q5_1 K/V caches,
+`fit = off`, and `context-shift = off`. Reserving all 8,192 output tokens leaves
+a nominal 122,880 tokens for prompt and history. It never silently reduces
+context or offloads model layers to the CPU.
+
+The measured llama.cpp build applies a strict admission rule: post-template
+prompt tokens must be less than `n_ctx`. With one 131,072-token slot, 131,071
+is admitted with `max_tokens: 1`; 131,072 and above are rejected. The clients
+still use a configured 131,072-token context and the nominal 122,880-token
+prompt/history allowance described above.
+
+OpenCode `1.18.10` stores model state at
+`${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json` with the shape
+`{recent: ModelRef[], favorite: ModelRef[], variant: object}`. The command
+updates `favorite` and preserves `recent` and `variant`.
+
+Separately, OpenCode's global provider configuration merges
+`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/config.json`, `opencode.json`, and
+`opencode.jsonc` in that order. The command validates every existing file
+before writing. It replaces `local-llm-env` in every file that defines the
+provider. If none defines it, the command adds it to the preferred existing
+file: `opencode.jsonc`, then `opencode.json`, then `config.json`. It creates
+`opencode.jsonc` only when none of those files exists.
+
+List the enabled aliases before choosing models:
+
+```bash
+yq -r '.models[] | select(.enabled) | .alias' ~/.config/llm-env/models.yml
+```
+
+Replace the placeholders below with enabled aliases:
+
+```bash
+pi --model local-llm-env/<alias>
+pi --models 'local-llm-env/<alias>,local-llm-env/<another-enabled-alias>'
+opencode --model local-llm-env/<alias>
+```
+
+`make check-with-agents` continues to use its own temporary isolated client
+configurations. It does not modify normal Pi or OpenCode profiles.
+
 ## Changing models
 
 ```bash
 uv run llmenv.py models list
-uv run llmenv.py models enable openhermes
+uv run llmenv.py models enable gemma4
 make restart
 ```
 
@@ -67,11 +133,15 @@ LLM_ENV_KEEP_CHECK_ARTIFACTS=1 make check-with-agents  # Pi/OpenCode live weathe
 make logs
 ```
 
-Every check prints its redacted command, input, stdout, stderr, parsed value,
-expectation, and verdict. `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the
-redacted private diagnostic artifacts; without it, the checks remove them
-after printing their contents.
+Checks print their command, validation facts, and verdict. They omit empty
+diagnostic blocks; non-empty stderr and parser errors remain visible and
+redacted. `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the redacted private
+diagnostic artifacts; without it, the checks remove them after printing their
+contents.
 
 `make check-server` uses the fixed local prompt `Reply with exactly: ready`.
-`make check-with-agents` is an opt-in live check: Pi and OpenCode independently fetch public weather and USD-to-CLP data.
-It compares their evidence with a fresh source snapshot.
+`make check-with-agents` is an opt-in live check: Pi and OpenCode independently
+fetch public weather and USD-to-CLP data. Its successful rows show the selected
+client/model, isolated configuration summary, redacted command, final response,
+validation facts, and a final passed/failed count. It compares their evidence
+with a fresh source snapshot.
