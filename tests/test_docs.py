@@ -32,8 +32,6 @@ RELOCATED_SCRIPT_REFERENCE = re.compile(
 CONTEXT_BOUNDARY_DOCS = (
     ROOT / "README.md",
     ROOT / "QUICK_START.md",
-    ROOT / "docs/superpowers/specs/2026-07-30-agent-context-favorites-design.md",
-    ROOT / "docs/superpowers/plans/2026-07-30-agent-context-favorites.md",
 )
 
 
