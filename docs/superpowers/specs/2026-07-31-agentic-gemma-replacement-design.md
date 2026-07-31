@@ -15,7 +15,7 @@ existing one-resident 131,072-token runtime contract.
 Use `gemma4-v2-Q4_K_M.gguf` from repository revision
 `190a31365a6b80a692349be34ccdac730cad4fe4`:
 
-- URL: `https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/main/gemma4-v2-Q4_K_M.gguf`
+- URL: `https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf`
 - Size: `7,381,381,664` bytes
 - LFS SHA-256: `0b9506cab36f7f818e34f9c0f5a3d6568d0b37100f3a3e1092e2eec3c4c96791`
 - Architecture: Gemma 4
@@ -60,14 +60,18 @@ margin. Do not add CPU offload or silently reduce context.
 ## Deployment
 
 1. Update the checked-in model record and its regression tests.
-2. Download the new GGUF while the current service remains available.
-3. Verify the exact byte size and LFS SHA-256.
-4. Validate the GGUF header and derive its actual KV geometry.
-5. Compute the 131,072-token Q5_1 budget with `models_max: 1`.
-6. Save a mode-0600 rollback copy of the active config in a private temporary
+2. Save a mode-0600 rollback copy of the active config in a private temporary
    directory. Never print its API key. Keep the old GGUF in place.
-7. Apply the new active record and run `make start`. The start path unloads the
-   old router before measuring VRAM and loading the replacement.
+3. Apply the new record to the active config, then run unattended `make setup`
+   to download and validate the new GGUF while the current service remains
+   available.
+4. Verify the exact byte size and LFS SHA-256.
+5. Stop the old service so its allocation does not affect offline VRAM
+   detection, then run `make check-setup` immediately after `make setup`.
+6. Confirm that GGUF validation, derived KV geometry, the 131,072-token Q5_1
+   budget, and disposable Vulkan inference all pass.
+7. Run `make start`. The start path loads the replacement from an unloaded VRAM
+   baseline.
 8. Refresh Pi and OpenCode with `make setup-local-llm-agents`.
 9. Delete the rollback config and old base Gemma GGUF only after every
    acceptance check passes.
@@ -79,6 +83,8 @@ acceptance check completes.
 ## Acceptance Criteria
 
 - `make validate` and `make test` pass.
+- Unattended `make setup` succeeds, followed by a passing `make check-setup`
+  while the router service is stopped.
 - The downloaded file matches the published byte size and SHA-256.
 - Offline GGUF validation and the VRAM budget pass without CPU offload,
   automatic fitting, cache changes, or context reduction.
