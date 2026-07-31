@@ -42,7 +42,8 @@ limit; the target configuration keeps one model resident and unloads it before
 loading another alias. This adds model-switch latency but avoids holding both
 models in VRAM.
 
-Clean setup gives Gemma 4 and Ornith one 131,072-token context and request slot
+Clean setup maps `gemma4` to yuxinlu1's Agentic Gemma 4 12B v2 Q4_K_M
+build. Gemma and Ornith each receive one 131,072-token context and request slot
 with Q5_1 K/V caches. Pi and OpenCode advertise up to 8,192 output tokens,
 so reserving the full output allowance leaves a nominal 122,880 tokens for the
 prompt and history. All tokens still share the same slot. Setup reports an

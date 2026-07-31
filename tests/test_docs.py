@@ -115,6 +115,15 @@ def test_docs_state_exact_runtime_token_limits() -> None:
     assert "nominal 122,880 tokens" in quick_start
 
 
+def test_docs_identify_agentic_gemma_default() -> None:
+    readme = _normalized_markdown(ROOT / "README.md").lower()
+    quick_start = _normalized_markdown(ROOT / "QUICK_START.md").lower()
+
+    for document in (readme, quick_start):
+        assert "agentic gemma 4 12b v2" in document
+        assert "`gemma4`" in document
+
+
 def test_docs_state_clean_setup_uses_128k_q5_1_defaults() -> None:
     readme = _normalized_markdown(ROOT / "README.md").lower()
     quick_start = _normalized_markdown(ROOT / "QUICK_START.md").lower()

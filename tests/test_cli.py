@@ -242,6 +242,36 @@ def test_default_config_uses_128k_q5_1_runtime(tmp_path):
     ]
 
 
+def test_default_config_uses_agentic_gemma_q4(tmp_path):
+    config = tmp_path / "models.yml"
+    result = run("init", "--config", str(config), "--template", "models.yml.example")
+
+    assert result.returncode == 0, result.stderr
+    parsed = yaml.safe_load(config.read_text())
+    gemma = next(model for model in parsed["models"] if model["alias"] == "gemma4")
+    assert {
+        "label": gemma["label"],
+        "file": gemma["file"],
+        "url": gemma["url"],
+        "size_bytes": gemma["size_bytes"],
+        "parameters": gemma["parameters"],
+        "quantization": gemma["quantization"],
+        "ctx_size": gemma["ctx_size"],
+        "client_max_output_tokens": gemma["client_max_output_tokens"],
+        "n_gpu_layers": gemma["n_gpu_layers"],
+    } == {
+        "label": "Gemma 4 12B Agentic v2",
+        "file": "gemma4-v2-Q4_K_M.gguf",
+        "url": "https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf",
+        "size_bytes": 7381381664,
+        "parameters": "12B",
+        "quantization": "Q4_K_M",
+        "ctx_size": 131072,
+        "client_max_output_tokens": 8192,
+        "n_gpu_layers": 99,
+    }
+
+
 def test_budget_reports_actionable_error_when_pci_address_unset(tmp_path):
     config = tmp_path / "models.yml"
     assert (

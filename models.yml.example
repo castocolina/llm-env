@@ -32,13 +32,13 @@ runtime:
 
 models:
   - alias: gemma4
-    label: Gemma 4 Instruct
+    label: Gemma 4 12B Agentic v2
     parameters: 12B
     quantization: Q4_K_M
     enabled: true
-    file: gemma-4-12B-it-Q4_K_M.gguf
-    url: https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf
-    size_bytes: 7660000000
+    file: gemma4-v2-Q4_K_M.gguf
+    url: https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf
+    size_bytes: 7381381664
     vram_budget: 55%
     ctx_size: 131072
     client_max_output_tokens: 8192
