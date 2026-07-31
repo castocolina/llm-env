@@ -168,7 +168,7 @@ make test
 git diff --check
 ```
 
-Expected: validation passes, all 386 tests pass, and `git diff --check` prints nothing.
+Expected: validation passes, all 388 tests pass, and `git diff --check` prints nothing.
 
 - [ ] **Step 8: Review and commit the repository change**
 
@@ -459,7 +459,7 @@ git status --short
 systemctl --user is-active llm-server.service
 ```
 
-Expected: validation passes, all 386 tests pass, diff check and Git status print nothing, and the service reports `active`.
+Expected: validation passes, all 388 tests pass, diff check and Git status print nothing, and the service reports `active`.
 
 - [ ] **Step 7: Delete the old model and rollback material**
 
