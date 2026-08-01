@@ -1243,7 +1243,14 @@ uv run llmenv.py models list --config "$CONFIG_PATH" >/dev/null
 safe_projection="$(yq -o=json '
   .models[]
   | select(.alias == "gemma4")
-  | {alias, file, ctx_size, client_max_output_tokens, n_gpu_layers, sampling}
+  | {
+      "alias": .alias,
+      "file": .file,
+      "ctx_size": .ctx_size,
+      "client_max_output_tokens": .client_max_output_tokens,
+      "n_gpu_layers": .n_gpu_layers,
+      "sampling": .sampling
+    }
 ' "$CONFIG_PATH" | jq -cS '.')"
 actual_fingerprint="$(sha256sum <<<"$safe_projection")"
 actual_fingerprint="${actual_fingerprint%% *}"
