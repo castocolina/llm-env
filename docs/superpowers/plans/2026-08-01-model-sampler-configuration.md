@@ -1266,7 +1266,7 @@ curl -fsS --max-time 10 "http://127.0.0.1:${port}/v1/models" |
       and ($gemma[0].status.args | index("/models/gemma4-v2-Q4_K_M.gguf")) != null
       and ($gemma[0].status.args | index("131072")) != null
       and ($gemma[0].status.args | index("q5_1")) != null
-      and ($gemma[0].status.preset | contains("temp = \($temperature)\n"))
+      and ($gemma[0].status.preset | contains("temperature = \($temperature)\n"))
       and ($gemma[0].status.preset | contains("top-p = 0.95\n"))
       and ($gemma[0].status.preset | contains("top-k = 64\n"))
       and ($gemma[0].status.preset | contains("repeat-penalty = 1.1\n"))
@@ -1987,7 +1987,7 @@ curl -fsS --max-time 10 "http://127.0.0.1:${port}/v1/models" |
     and ($gemma[0].status.args | index("/models/gemma4-v2-Q4_K_M.gguf")) != null
     and ($gemma[0].status.args | index("131072")) != null
     and ($gemma[0].status.args | index("q5_1")) != null
-    and ($gemma[0].status.preset | contains("temp = \($temperature)\n"))
+    and ($gemma[0].status.preset | contains("temperature = \($temperature)\n"))
     and ($gemma[0].status.preset | contains("top-p = 0.95\n"))
     and ($gemma[0].status.preset | contains("top-k = 64\n"))
     and ($gemma[0].status.preset | contains("repeat-penalty = 1.1\n"))
