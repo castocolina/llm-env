@@ -1,7 +1,10 @@
 import configparser
+import copy
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -126,6 +129,67 @@ def test_model_section_has_absolute_path_and_settings():
     assert section["model"] == "/models/gemma-4-12B-it-Q4_K_M.gguf"
     assert section["ctx-size"] == "131072"
     assert section["n-gpu-layers"] == "99"
+
+
+SAMPLER_KEYS = ("temp", "top-p", "top-k", "repeat-penalty")
+
+
+@pytest.mark.parametrize("temperature", [1.0, 0.0])
+def test_model_sampling_maps_to_llama_preset_keys(temperature):
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][0]["sampling"] = {
+        "temperature": temperature,
+        "top_p": 0.95,
+        "top_k": 64,
+        "repeat_penalty": 1.1,
+    }
+
+    parser = parse(render_presets(cfg, "/models", "Vulkan0"))
+
+    assert {key: parser["gemma4"][key] for key in SAMPLER_KEYS} == {
+        "temp": str(temperature),
+        "top-p": "0.95",
+        "top-k": "64",
+        "repeat-penalty": "1.1",
+    }
+    assert all(key not in parser["*"] for key in SAMPLER_KEYS)
+    assert all(key not in parser["ornith"] for key in SAMPLER_KEYS)
+
+
+def test_empty_sampling_mapping_emits_no_sampler_keys():
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][0]["sampling"] = {}
+
+    section = parse(render_presets(cfg, "/models", "Vulkan0"))["gemma4"]
+
+    assert all(key not in section for key in SAMPLER_KEYS)
+
+
+def test_zero_sampling_values_are_not_dropped():
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][0]["sampling"] = {
+        "temperature": 0,
+        "top_p": 0,
+        "top_k": 0,
+        "repeat_penalty": 1,
+    }
+
+    section = parse(render_presets(cfg, "/models", "Vulkan0"))["gemma4"]
+
+    assert {key: section[key] for key in SAMPLER_KEYS} == {
+        "temp": "0",
+        "top-p": "0",
+        "top-k": "0",
+        "repeat-penalty": "1",
+    }
+
+
+def test_disabled_model_sampling_emits_no_section():
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][0]["enabled"] = False
+    cfg["models"][0]["sampling"] = {"temperature": 1.0}
+
+    assert "gemma4" not in parse(render_presets(cfg, "/models", "Vulkan0"))
 
 
 def test_flash_attn_off_renders_off():
