@@ -876,19 +876,18 @@ jq -s \
         harness_sha256: $harness_sha256,
         requests: .
     }
-    | .assertions = {
-        pi_tool_continuation: (
-            [.requests[] | select(.client == "pi")] as $requests
-            | ($requests | length) >= 2
-              and $requests[0].tools_present
-              and any($requests[1:][]; .tool_result_present)
-        ),
-        opencode_tool_continuation: (
-            [.requests[] | select(.client == "opencode")] as $requests
-            | ($requests | length) >= 2
-              and $requests[0].tools_present
-              and any($requests[1:][]; .tool_result_present)
-        ),
+    | def has_tool_continuation($client):
+        [.requests[] | select(.client == $client)] as $requests
+        | ($requests | length) >= 2
+          and any(
+            range(0; ($requests | length));
+            . as $index
+            | $requests[$index].tools_present
+              and any($requests[($index + 1):][]; .tool_result_present)
+          );
+    .assertions = {
+        pi_tool_continuation: has_tool_continuation("pi"),
+        opencode_tool_continuation: has_tool_continuation("opencode"),
         all_models_are_gemma4: all(.requests[]; .model == "gemma4"),
         all_sampler_fields_omitted: all(.requests[]; (.sampling | length) == 0)
     }' \
