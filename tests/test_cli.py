@@ -335,6 +335,35 @@ def test_operational_commands_reject_invalid_concurrency_before_output_or_save(
     assert not output.exists()
 
 
+def test_presets_rejects_invalid_sampling_before_output(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed["models"][0]["sampling"] = {"temperature": -1}
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+    before = config.read_bytes()
+    output = tmp_path / "presets.ini"
+
+    result = run(
+        "presets",
+        "--models-dir",
+        "/models",
+        "--device",
+        "all",
+        "--output",
+        str(output),
+        "--config",
+        str(config),
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == (
+        "model a sampling.temperature must be a finite non-negative number"
+    )
+    assert "Traceback" not in result.stdout + result.stderr
+    assert config.read_bytes() == before
+    assert not output.exists()
+
+
 def test_migrate_config_writes_once_without_exposing_secrets(tmp_path: Path):
     fixture = REPO / "tests/fixtures/models-v1-pre-feature.yml"
     config = tmp_path / "models.yml"

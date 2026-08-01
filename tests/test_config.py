@@ -93,6 +93,131 @@ def test_valid_config_has_no_errors():
     assert validate_config(make_cfg()) == []
 
 
+@pytest.mark.parametrize(
+    "sampling",
+    [
+        {},
+        {"temperature": 0},
+        {"temperature": 1.0},
+        {"top_p": 0},
+        {"top_p": 0.95},
+        {"top_p": 1},
+        {"top_k": 0},
+        {"top_k": 64},
+        {"repeat_penalty": 1},
+        {"repeat_penalty": 1.1},
+        {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+            "repeat_penalty": 1.1,
+        },
+    ],
+)
+def test_config_accepts_optional_sampling_fields(sampling):
+    cfg = make_cfg()
+    cfg["models"][0]["sampling"] = sampling
+
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize(
+    ("sampling", "expected"),
+    [
+        (None, "model gemma4 sampling must be a mapping"),
+        ([], "model gemma4 sampling must be a mapping"),
+        ("default", "model gemma4 sampling must be a mapping"),
+        (1, "model gemma4 sampling must be a mapping"),
+        (True, "model gemma4 sampling must be a mapping"),
+        (
+            {"typical_p": 1.0},
+            "model gemma4 sampling.typical_p is not a supported field",
+        ),
+        (
+            {1: 1.0},
+            "model gemma4 sampling.1 is not a supported field",
+        ),
+        (
+            {"temperature": "1.0"},
+            "model gemma4 sampling.temperature must be a finite non-negative number",
+        ),
+        (
+            {"temperature": -0.1},
+            "model gemma4 sampling.temperature must be a finite non-negative number",
+        ),
+        (
+            {"temperature": True},
+            "model gemma4 sampling.temperature must be a finite non-negative number",
+        ),
+        (
+            {"temperature": float("inf")},
+            "model gemma4 sampling.temperature must be a finite non-negative number",
+        ),
+        (
+            {"top_p": -0.1},
+            "model gemma4 sampling.top_p must be a finite number between 0 and 1 inclusive",
+        ),
+        (
+            {"top_p": 1.1},
+            "model gemma4 sampling.top_p must be a finite number between 0 and 1 inclusive",
+        ),
+        (
+            {"top_p": float("nan")},
+            "model gemma4 sampling.top_p must be a finite number between 0 and 1 inclusive",
+        ),
+        (
+            {"top_p": None},
+            "model gemma4 sampling.top_p must be a finite number between 0 and 1 inclusive",
+        ),
+        (
+            {"top_p": False},
+            "model gemma4 sampling.top_p must be a finite number between 0 and 1 inclusive",
+        ),
+        (
+            {"top_k": -1},
+            "model gemma4 sampling.top_k must be a non-negative integer and not a Boolean",
+        ),
+        (
+            {"top_k": 1.0},
+            "model gemma4 sampling.top_k must be a non-negative integer and not a Boolean",
+        ),
+        (
+            {"top_k": False},
+            "model gemma4 sampling.top_k must be a non-negative integer and not a Boolean",
+        ),
+        (
+            {"top_k": "64"},
+            "model gemma4 sampling.top_k must be a non-negative integer and not a Boolean",
+        ),
+        (
+            {"repeat_penalty": 0},
+            "model gemma4 sampling.repeat_penalty must be a finite number greater than 0",
+        ),
+        (
+            {"repeat_penalty": -0.1},
+            "model gemma4 sampling.repeat_penalty must be a finite number greater than 0",
+        ),
+        (
+            {"repeat_penalty": False},
+            "model gemma4 sampling.repeat_penalty must be a finite number greater than 0",
+        ),
+        (
+            {"repeat_penalty": float("-inf")},
+            "model gemma4 sampling.repeat_penalty must be a finite number greater than 0",
+        ),
+        (
+            {"repeat_penalty": "1.1"},
+            "model gemma4 sampling.repeat_penalty must be a finite number greater than 0",
+        ),
+    ],
+)
+def test_config_rejects_invalid_sampling_with_actionable_error(sampling, expected):
+    cfg = make_cfg()
+    cfg["models"][0]["sampling"] = sampling
+
+    assert validate_config(cfg) == [expected]
+
+
 def test_vulkan_only_config_removes_legacy_rocm_benchmark():
     """Migration must discard obsolete ROCm measurements from existing configs."""
     cfg = make_cfg()
@@ -150,6 +275,7 @@ def test_pre_feature_config_migration_is_additive_and_idempotent():
     assert migrated["server"]["custom_server_field"] == "preserved"
     assert migrated["models"][0]["custom_model_field"] == "preserved"
     assert migrated["custom_top_level"] == {"retained": True}
+    assert all("sampling" not in model for model in migrated["models"])
     assert migrate_config(copy.deepcopy(migrated)) == migrated
     assert require_valid_config(migrated) is migrated
 
@@ -392,6 +518,21 @@ def test_save_then_load_roundtrip(tmp_path):
     path = tmp_path / "models.yml"
     save_config(make_cfg(), path)
     assert load_config(path) == make_cfg()
+
+
+def test_sampling_survives_save_load_roundtrip(tmp_path):
+    cfg = make_cfg()
+    cfg["models"][0]["sampling"] = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
+        "repeat_penalty": 1.1,
+    }
+    path = tmp_path / "models.yml"
+
+    save_config(cfg, path)
+
+    assert load_config(path) == cfg
 
 
 def test_load_missing_file_raises_configerror(tmp_path):

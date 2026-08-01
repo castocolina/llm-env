@@ -1078,6 +1078,7 @@ def run_lifecycle_script(
     active: bool = False,
     config_mode: int = 0o600,
     parallel_slots: int = 1,
+    sampling_temperature: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -1129,6 +1130,12 @@ def run_lifecycle_script(
         "    ctx_size: 8192\n"
         "    client_max_output_tokens: 8192\n"
         "    n_gpu_layers: 99\n"
+        + (
+            "    sampling:\n"
+            f"      temperature: {sampling_temperature}\n"
+            if sampling_temperature is not None
+            else ""
+        )
     )
     config.chmod(config_mode)
 
@@ -2516,6 +2523,30 @@ def test_start_rejects_invalid_concurrency_before_key_or_service_output(
 
     assert result.returncode != 0
     assert "runtime.parallel_slots must be 1" in result.stderr
+    assert yq_value(config, ".server.api_key") == ""
+    recorded = calls.read_text()
+    assert "yq -i .server.api_key" not in recorded
+    assert "systemctl --user start" not in recorded
+    assert f"bash {ROOT / 'setup/render-unit.sh'}" not in recorded
+    assert not (config.parent / "presets.ini").exists()
+
+
+def test_start_rejects_invalid_sampling_before_key_or_service_output(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        api_key="",
+        config_mode=0o644,
+        sampling_temperature="-1",
+    )
+
+    assert result.returncode != 0
+    assert (
+        "model test sampling.temperature must be a finite non-negative number"
+        in result.stderr
+    )
     assert yq_value(config, ".server.api_key") == ""
     recorded = calls.read_text()
     assert "yq -i .server.api_key" not in recorded

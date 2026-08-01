@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tempfile
@@ -29,6 +30,9 @@ REQUIRED_MODEL_KEYS = (
 )
 VALID_BACKENDS = ("vulkan", "cpu")
 VRAM_BUDGET_RE = re.compile(r"^\s*\d+(\.\d+)?\s*(%|GB|MiB)\s*$", re.IGNORECASE)
+SAMPLING_FIELDS = frozenset(
+    ("temperature", "top_p", "top_k", "repeat_penalty")
+)
 
 
 class ConfigError(Exception):
@@ -37,6 +41,12 @@ class ConfigError(Exception):
 
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, int) and not isinstance(value, bool)
+    ) or (isinstance(value, float) and math.isfinite(value))
 
 
 def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -172,6 +182,46 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             seen.add(alias)
         if "enabled" in model and not isinstance(model["enabled"], bool):
             errors.append(f"model {model_name} enabled must be a Boolean")
+        if "sampling" in model:
+            sampling = model["sampling"]
+            if not isinstance(sampling, dict):
+                errors.append(f"model {model_name} sampling must be a mapping")
+            else:
+                for field in sampling:
+                    if field not in SAMPLING_FIELDS:
+                        errors.append(
+                            f"model {model_name} sampling.{field} is not a supported field"
+                        )
+
+                if "temperature" in sampling and not (
+                    _finite_number(sampling["temperature"])
+                    and sampling["temperature"] >= 0
+                ):
+                    errors.append(
+                        f"model {model_name} sampling.temperature must be a finite non-negative number"
+                    )
+                if "top_p" in sampling and not (
+                    _finite_number(sampling["top_p"])
+                    and 0 <= sampling["top_p"] <= 1
+                ):
+                    errors.append(
+                        f"model {model_name} sampling.top_p must be a finite number between 0 and 1 inclusive"
+                    )
+                if "top_k" in sampling and not (
+                    isinstance(sampling["top_k"], int)
+                    and not isinstance(sampling["top_k"], bool)
+                    and sampling["top_k"] >= 0
+                ):
+                    errors.append(
+                        f"model {model_name} sampling.top_k must be a non-negative integer and not a Boolean"
+                    )
+                if "repeat_penalty" in sampling and not (
+                    _finite_number(sampling["repeat_penalty"])
+                    and sampling["repeat_penalty"] > 0
+                ):
+                    errors.append(
+                        f"model {model_name} sampling.repeat_penalty must be a finite number greater than 0"
+                    )
         budget = model.get("vram_budget")
         if budget is not None and not VRAM_BUDGET_RE.match(str(budget)):
             errors.append(
