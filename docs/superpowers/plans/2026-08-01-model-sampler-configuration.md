@@ -763,7 +763,7 @@ run_probe() {
     client="$1"
     port_file="$workspace/${client}.port"
     rm -f -- "$port_file"
-    node "$state_dir/proxy.mjs" \
+    "$node_binary" "$state_dir/proxy.mjs" \
         "http://127.0.0.1:${port}" \
         "$raw_summary" \
         "$port_file" \
@@ -858,6 +858,8 @@ run_probe() {
 for command in pi opencode node; do
     command -v "$command" >/dev/null || die "$command is required for sampler preflight"
 done
+node_binary="$(node -p 'process.execPath')"
+[ -x "$node_binary" ] || die "could not resolve the Node.js executable"
 
 run_probe pi
 run_probe opencode
