@@ -1213,12 +1213,13 @@ expected_baseline_hash="$(< "$state_dir/config-without-sampling.sha256")"
     exit 1
 }
 yq -e '
-  .models[]
-  | select(.alias == "gemma4")
-  | .label == "Gemma 4 12B Agentic v2"
-    and .file == "gemma4-v2-Q4_K_M.gguf"
-    and .url == "https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf"
-    and .size_bytes == 7381381664
+  [.models[]
+   | select(.alias == "gemma4"
+            and .label == "Gemma 4 12B Agentic v2"
+            and .file == "gemma4-v2-Q4_K_M.gguf"
+            and .url == "https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf"
+            and .size_bytes == 7381381664)]
+  | length == 1
 ' "$CONFIG_PATH" >/dev/null || { stage=agentic-prerequisite; exit 1; }
 
 stage=configuration
@@ -1656,15 +1657,15 @@ case "$selected" in
   *) printf '%s\n' 'invalid selected sampler profile' >&2; exit 1 ;;
 esac
 EXPECTED_TEMPERATURE="$expected_temperature" yq -e \
-  '.models[]
-   | select(.alias == "gemma4")
-   | .file == "gemma4-v2-Q4_K_M.gguf"
-     and .sampling == {
-       "temperature": (strenv(EXPECTED_TEMPERATURE) | tonumber),
-       "top_p": 0.95,
-       "top_k": 64,
-       "repeat_penalty": 1.1
-      }' \
+  '[.models[]
+    | select(.alias == "gemma4"
+             and .file == "gemma4-v2-Q4_K_M.gguf"
+             and (.sampling | length) == 4
+             and .sampling.temperature == (strenv(EXPECTED_TEMPERATURE) | tonumber)
+             and .sampling.top_p == 0.95
+             and .sampling.top_k == 64
+             and .sampling.repeat_penalty == 1.1)]
+   | length == 1' \
   "$CONFIG_PATH" >/dev/null
 test ! -e "$state_dir/pending-attempt.json"
 jq -e '
@@ -1957,14 +1958,14 @@ case "$selected" in
 esac
 for config in "$CONFIG_PATH" "$repo/models.yml.example"; do
   EXPECTED_TEMPERATURE="$expected_temperature" yq -e '
-    .models[]
-    | select(.alias == "gemma4")
-    | .sampling == {
-        "temperature": (strenv(EXPECTED_TEMPERATURE) | tonumber),
-        "top_p": 0.95,
-        "top_k": 64,
-        "repeat_penalty": 1.1
-      }
+    [.models[]
+     | select(.alias == "gemma4"
+              and (.sampling | length) == 4
+              and .sampling.temperature == (strenv(EXPECTED_TEMPERATURE) | tonumber)
+              and .sampling.top_p == 0.95
+              and .sampling.top_k == 64
+              and .sampling.repeat_penalty == 1.1)]
+    | length == 1
   ' "$config" >/dev/null
   yq -e '
     [.models[] | select(.alias == "ornith" and has("sampling"))]
