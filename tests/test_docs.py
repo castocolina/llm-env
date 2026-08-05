@@ -75,9 +75,10 @@ def test_quick_start_describes_check_diagnostics_without_layout_dependencies() -
     assert "they omit empty diagnostic blocks" in quick_start
     assert (
         "`llm_env_keep_check_artifacts=1` retains only the redacted private "
-        "diagnostic artifacts; without it, the checks remove them after printing their "
-        "contents."
+        "diagnostic artifacts; without it, the checks remove raw artifacts after "
+        "displaying bounded, redacted excerpts."
     ) in quick_start
+    assert "after printing their contents" not in quick_start
     assert "fixed local prompt `reply with exactly: ready`" in quick_start
     assert "opt-in live check" in quick_start
     assert "pi and opencode independently fetch public weather and usd-to-clp data" in quick_start

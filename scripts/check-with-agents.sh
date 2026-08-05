@@ -14,16 +14,19 @@ fi
 
 require_cmd curl jq yq date uv systemd-run systemctl wc head cat sed
 
-workspace="$(mktemp -d)" || die "could not create private workspace"
-chmod 700 "$workspace" || die "could not secure private workspace"
-diagnostic_dir="$(prepare_diagnostic_dir agents)"
+workspace=""
+diagnostic_dir=""
 
 cleanup() {
     local status=$? finalizer_status=0 workspace_status=0
     trap - EXIT
 
-    (finish_diagnostic_dir "$diagnostic_dir") || finalizer_status=$?
-    rm -rf "$workspace" || workspace_status=$?
+    if [ -n "$diagnostic_dir" ]; then
+        (finish_diagnostic_dir "$diagnostic_dir") || finalizer_status=$?
+    fi
+    if [ -n "$workspace" ]; then
+        rm -rf "$workspace" || workspace_status=$?
+    fi
     if [ "$status" -eq 0 ]; then
         if [ "$finalizer_status" -ne 0 ]; then
             status="$finalizer_status"
@@ -33,7 +36,16 @@ cleanup() {
     fi
     exit "$status"
 }
+
+if ! workspace="$(mktemp -d)"; then
+    die "could not create private workspace"
+fi
 trap cleanup EXIT
+chmod 700 "$workspace" || die "could not secure private workspace"
+if ! diagnostic_dir="$(prepare_diagnostic_dir agents)"; then
+    die "could not prepare diagnostic directory"
+fi
+[ -n "$diagnostic_dir" ] || die "diagnostic directory is empty"
 
 auth_conf="$(mktemp "$workspace/auth.XXXXXX")" || die "could not create curl authentication config"
 chmod 600 "$auth_conf" || die "could not secure curl authentication config"
@@ -654,8 +666,13 @@ for client in "${clients[@]}"; do
             agent_failed=0
             if run_agent "$client" "$alias" "$prompt" "$transcript_file" \
                 "$client_stderr_file" "$final_file" "$parser_error_file"; then
-                final_bytes="$(wc -c < "$final_file")"
-                if [ "$final_bytes" -gt "$final_response_limit_bytes" ]; then
+                if ! final_bytes="$(wc -c < "$final_file" 2>>"$parser_error_file")" \
+                    || ! [[ "$final_bytes" =~ ^(0|[1-9][0-9]*)$ ]]; then
+                    mark_agent_boundary_failure
+                    agent_failed=1
+                elif [ "${#final_bytes}" -gt "${#final_response_limit_bytes}" ] \
+                    || { [ "${#final_bytes}" -eq "${#final_response_limit_bytes}" ] \
+                        && [ "$final_bytes" -gt "$final_response_limit_bytes" ]; }; then
                     AGENT_FAILURE_STAGE="final response limit"
                     AGENT_FAILURE_REASON="final assistant text exceeded ${final_response_limit_bytes} bytes"
                     AGENT_RESULT_REASON="final-response-limit"

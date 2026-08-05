@@ -139,8 +139,8 @@ diagnostic blocks; non-empty stderr and parser errors remain visible and
 redacted. Displayed diagnostics are bounded, redacted excerpts. Explicitly
 retained private artifacts are redacted before retention.
 `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the redacted private
-diagnostic artifacts; without it, the checks remove them after printing their
-contents.
+diagnostic artifacts; without it, the checks remove raw artifacts after
+displaying bounded, redacted excerpts.
 
 `make check-server` uses the fixed local prompt `Reply with exactly: ready`.
 `make check-with-agents` is an opt-in live check: Pi and OpenCode independently

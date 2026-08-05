@@ -3234,9 +3234,11 @@ def run_agent_check(
     raw_bounded_results: bool = False,
     bounded_counter_mismatch: str = "",
     bounded_wc_override: str = "",
+    final_size_fault: str = "",
     config_after_startup: str = "",
     inherited_redaction_override: str | None = None,
     finalizer_failure: bool = False,
+    workspace_setup_fault: str = "",
     fail_pi_configuration: bool = False,
     oversized_source: str = "",
     oversized_final_client: str = "",
@@ -3256,7 +3258,16 @@ def run_agent_check(
     assert bounded_result_fault in {"", "mktemp", "chmod", "write", "read"}
     assert bounded_counter_mismatch in {"", "transcript", "stderr"}
     assert bounded_wc_override in {"", "transcript_bytes", "stderr_bytes"}
+    assert final_size_fault in {
+        "",
+        "failure",
+        "empty",
+        "malformed",
+        "negative",
+        "noncanonical",
+    }
     assert config_after_startup in {"", "remove", "rotate"}
+    assert workspace_setup_fault in {"", "chmod", "diagnostic"}
     assert oversized_source in {"", "models", "weather", "fx"}
     assert oversized_final_client in {"", "pi", "opencode"}
     assert source_at_limit in {"", "models"}
@@ -3438,6 +3449,10 @@ def run_agent_check(
         '    printf "%s\\n" "$workspace"\n'
         "    exit 0\n"
         "fi\n"
+        'if [ "$AGENT_CHECK_WORKSPACE_SETUP_FAULT" = diagnostic ] '
+        '&& [[ "${!#}" == "$TMPDIR"/llm-env-agents.XXXXXX ]]; then\n'
+        "    exit 74\n"
+        "fi\n"
         'exec /usr/bin/mktemp "$@"\n'
     )
     mktemp.chmod(mktemp.stat().st_mode | stat.S_IXUSR)
@@ -3450,6 +3465,10 @@ def run_agent_check(
             '    printf "%s" "$workspace" > "$AGENT_CHECK_WORKSPACE_RECORD" || exit $?\n'
             '    printf "%s\\n" "$workspace"\n'
             "    exit 0\n"
+            "fi\n"
+            'if [ "$AGENT_CHECK_WORKSPACE_SETUP_FAULT" = diagnostic ] '
+            '&& [[ "${!#}" == "$TMPDIR"/llm-env-agents.XXXXXX ]]; then\n'
+            "    exit 74\n"
             "fi\n"
             'if [[ "${!#}" == */bounded-result.XXXXXX ]]; then\n'
             "    printf '%s\\n' 'bounded result mktemp failed' >&2\n"
@@ -3475,6 +3494,15 @@ def run_agent_check(
     wc.write_text(
         "#!/usr/bin/bash\n"
         'input="$(/usr/bin/readlink "/proc/$$/fd/0")"\n'
+        'if [[ "$input" == */assistant-final.* ]]; then\n'
+        '    case "$AGENT_CHECK_FINAL_SIZE_FAULT" in\n'
+        "        failure) printf '%s\\n' 'injected final size measurement failure' >&2; exit 73 ;;\n"
+        "        empty) exit 0 ;;\n"
+        "        malformed) printf '%s\\n' not-a-count; exit 0 ;;\n"
+        "        negative) printf '%s\\n' -1; exit 0 ;;\n"
+        "        noncanonical) printf '%s\\n' 01; exit 0 ;;\n"
+        "    esac\n"
+        "fi\n"
         'if [ "$AGENT_CHECK_BOUNDED_WC_OVERRIDE" = transcript_bytes ] '
         '&& [[ "$input" == */client-transcript.* ]]; then\n'
         "    printf '%s\\n' 33554433\n"
@@ -3488,10 +3516,16 @@ def run_agent_check(
         'exec /usr/bin/wc "$@"\n'
     )
     wc.chmod(wc.stat().st_mode | stat.S_IXUSR)
-    if bounded_result_fault in {"chmod", "write"}:
+    if bounded_result_fault in {"chmod", "write"} or workspace_setup_fault == "chmod":
         chmod = commands / "chmod"
         chmod.write_text(
             "#!/usr/bin/bash\n"
+            'if [ "$AGENT_CHECK_WORKSPACE_SETUP_FAULT" = chmod ] '
+            '&& [ "$1" = 700 ] '
+            '&& [ "$2" = "$(< "$AGENT_CHECK_WORKSPACE_RECORD")" ]; then\n'
+            "    printf '%s\\n' 'injected workspace chmod failure' >&2\n"
+            "    exit 76\n"
+            "fi\n"
             'if [ "$1" = 600 ] && [[ "$2" == */bounded-result.* ]]; then\n'
             '    if [ "$AGENT_CHECK_BOUNDED_RESULT_FAULT" = chmod ]; then\n'
             "        printf '%s\\n' 'bounded result chmod failed' >&2\n"
@@ -3744,9 +3778,11 @@ def run_agent_check(
         "AGENT_CHECK_RAW_BOUNDED_RESULTS": "1" if raw_bounded_results else "0",
         "AGENT_CHECK_BOUNDED_COUNTER_MISMATCH": bounded_counter_mismatch,
         "AGENT_CHECK_BOUNDED_WC_OVERRIDE": bounded_wc_override,
+        "AGENT_CHECK_FINAL_SIZE_FAULT": final_size_fault,
         "AGENT_CHECK_CONFIG_AFTER_STARTUP": config_after_startup,
         "AGENT_CHECK_FINALIZER_FAILURE": "1" if finalizer_failure else "0",
         "AGENT_CHECK_WORKSPACE_RECORD": str(workspace_record),
+        "AGENT_CHECK_WORKSPACE_SETUP_FAULT": workspace_setup_fault,
         "AGENT_CHECK_EVIDENCE_PARSER_CALLS": str(evidence_parser_calls),
         "AGENT_CHECK_COMPARATOR_CALLS": str(comparator_calls),
         "AGENT_CHECK_COMPARATOR_FAILURE_MARKER": str(comparator_failure_marker),
@@ -4207,6 +4243,49 @@ def test_agent_check_input_bounds_accept_final_response_at_exact_limit(
     assert fixture_file.stat().st_size == 1_048_576
 
 
+@pytest.mark.parametrize(
+    ("fault", "measurement_diagnostic"),
+    (
+        ("failure", "injected final size measurement failure"),
+        ("empty", None),
+        ("malformed", None),
+        ("negative", None),
+        ("noncanonical", None),
+    ),
+)
+def test_agent_check_aborts_matrix_on_final_size_measurement_fault(
+    tmp_path: pathlib.Path,
+    fault: str,
+    measurement_diagnostic: str | None,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        final_size_fault=fault,
+        agent_parser_stderr="response parser warning",
+    )
+    combined = result.stdout + result.stderr
+    rows = agent_rows(result.stdout)
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert evidence_parser_invocations(calls) == []
+    assert len(rows) == 1
+    assert_common_agent_fields(rows[0], client="pi", exit_status="0")
+    assert "Agent parser stderr:\n  response parser warning" in rows[0]
+    if measurement_diagnostic is not None:
+        assert f"  {measurement_diagnostic}" in rows[0]
+    assert result.stderr.count("Verdict: FAIL stage=resource boundary") == 1
+    assert count_rows(result.stdout, "FAIL client=") == 1
+    assert "FAIL client=pi model=gemma4 check=weather reason=boundary-failure" in result.stdout
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "model=ornith" not in result.stdout
+    assert "client=opencode" not in result.stdout
+    assert "Results: 0 passed, 1 failed" in result.stdout
+    assert "integer expression expected" not in combined
+
+
 def test_agent_check_input_bounds_cap_every_harness_owned_source_curl(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4449,6 +4528,12 @@ def test_agent_check_integration_preflights_helpers_and_documents_diagnostics() 
         "explicitly retained private artifacts are redacted before retention."
         in quick_start
     )
+    assert (
+        "without it, the checks remove raw artifacts after displaying bounded, "
+        "redacted excerpts."
+        in quick_start
+    )
+    assert "after printing their contents" not in quick_start
 
 
 @pytest.mark.parametrize(
@@ -5445,6 +5530,34 @@ def test_agent_check_removes_workspace_when_diagnostic_finalization_fails(
     assert "could not traverse diagnostic artifacts" in result.stderr
     assert "Diagnostics retained:" not in result.stdout
     assert not workspace.exists()
+
+
+@pytest.mark.parametrize(
+    ("fault", "diagnostic"),
+    (
+        ("chmod", "could not secure private workspace"),
+        ("diagnostic", "could not prepare diagnostic directory"),
+    ),
+)
+def test_agent_check_removes_workspace_after_early_setup_failure(
+    tmp_path: pathlib.Path,
+    fault: str,
+    diagnostic: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        workspace_setup_fault=fault,
+    )
+    workspace = pathlib.Path(calls.with_name("workspace-path").read_text())
+
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
+    assert not workspace.exists()
+    assert calls.read_text() == ""
+    assert bounded_call_count(calls) == 0
+    assert "Agent:" not in result.stdout
+    assert "Diagnostics retained:" not in result.stdout
 
 
 def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Path) -> None:
