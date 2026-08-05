@@ -14,6 +14,7 @@ import time
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, Protocol
 
@@ -123,7 +124,7 @@ class SystemdScopeBackend:
             or limits.stream_limit_bytes > DEFAULT_STREAM_LIMIT_BYTES
         ):
             raise BoundaryError("run limits exceed production maxima")
-        runtime = f"{limits.runtime_seconds:g}s"
+        runtime = f"{Decimal(str(limits.runtime_seconds)).normalize():f}s"
         try:
             return subprocess.Popen(
                 [
@@ -324,11 +325,24 @@ def _drain_stream(
             events.put("boundary-failure")
 
 
+def _poll_process(
+    process: subprocess.Popen[bytes],
+) -> tuple[int | None, bool]:
+    try:
+        return process.poll(), False
+    except (OSError, subprocess.SubprocessError):
+        return None, True
+
+
 def _execution_finished(
     process: subprocess.Popen[bytes],
     threads: Sequence[threading.Thread],
-) -> bool:
-    return process.poll() is not None and not any(thread.is_alive() for thread in threads)
+) -> tuple[bool, bool]:
+    exit_status, poll_failed = _poll_process(process)
+    return (
+        exit_status is not None and not any(thread.is_alive() for thread in threads),
+        poll_failed,
+    )
 
 
 def _next_event(events: queue.Queue[Outcome]) -> Outcome | None:
@@ -350,7 +364,10 @@ def _cleanup_now(
     process: subprocess.Popen[bytes],
     threads: Sequence[threading.Thread],
 ) -> tuple[bool, bool]:
-    if not _execution_finished(process, threads):
+    execution_finished, poll_failed = _execution_finished(process, threads)
+    if poll_failed:
+        return False, True
+    if not execution_finished:
         return False, False
     if cgroup_path is None:
         return False, True
@@ -368,11 +385,17 @@ def _reap_local_launcher(
 ) -> bool:
     try:
         while time.monotonic() < deadline:
-            if _execution_finished(process, threads):
+            execution_finished, poll_failed = _execution_finished(process, threads)
+            if poll_failed:
+                return False
+            if execution_finished:
                 return True
             time.sleep(_POLL_SECONDS)
 
-        if process.poll() is None:
+        exit_status, poll_failed = _poll_process(process)
+        if poll_failed:
+            return False
+        if exit_status is None:
             process.terminate()
             try:
                 process.wait(timeout=grace_seconds)
@@ -384,7 +407,8 @@ def _reap_local_launcher(
                     return False
         for thread in threads:
             thread.join(timeout=_POLL_SECONDS * 10)
-        return _execution_finished(process, threads)
+        execution_finished, poll_failed = _execution_finished(process, threads)
+        return execution_finished and not poll_failed
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -452,7 +476,13 @@ def _stop_and_prove(
         except BoundaryError:
             boundary_failed = True
         term_deadline = time.monotonic() + limits.grace_seconds
-        while process.poll() is None and time.monotonic() < term_deadline:
+        while time.monotonic() < term_deadline:
+            exit_status, poll_failed = _poll_process(process)
+            if poll_failed:
+                boundary_failed = True
+                break
+            if exit_status is not None:
+                break
             time.sleep(_POLL_SECONDS)
         _reap_local_launcher(
             process,
@@ -501,9 +531,16 @@ def _make_result(
     stderr_state: _DrainState,
     cleanup_proved: bool,
 ) -> BoundedRunResult:
+    exit_status: int | None = None
+    poll_failed = False
+    if process is not None:
+        exit_status, poll_failed = _poll_process(process)
+    if poll_failed:
+        outcome = "boundary-failure"
+        cleanup_proved = False
     return BoundedRunResult(
         outcome=outcome,
-        exit_status=None if process is None else process.poll(),
+        exit_status=exit_status,
         transcript_bytes=transcript_state.stored_bytes,
         stderr_bytes=stderr_state.stored_bytes,
         cleanup_proved=cleanup_proved,
@@ -558,13 +595,44 @@ def run_bounded_agent(
                 False,
             )
 
+        cgroup_path: Path | None = None
+        pending_outcome: Outcome | None = None
+        boundary_failed = False
+        while cgroup_path is None:
+            remaining = runtime_deadline - time.monotonic()
+            if remaining <= 0:
+                pending_outcome = "timeout"
+                break
+            try:
+                cgroup_path = selected_backend.cgroup_path(
+                    unit_name,
+                    min(limits.grace_seconds, remaining),
+                )
+            except BoundaryError:
+                boundary_failed = True
+                break
+            if cgroup_path is None:
+                exit_status, poll_failed = _poll_process(process)
+                if poll_failed or exit_status is not None:
+                    boundary_failed = True
+                    break
+            time.sleep(min(_POLL_SECONDS, remaining))
+
         if process.stdout is None or process.stderr is None:
+            cleanup_proved, _ = _stop_and_prove(
+                selected_backend,
+                unit_name,
+                cgroup_path,
+                process,
+                (),
+                limits,
+            )
             return _make_result(
                 "boundary-failure",
                 process,
                 transcript_state,
                 stderr_state,
-                False,
+                cleanup_proved,
             )
 
         events: queue.Queue[Outcome] = queue.Queue()
@@ -594,32 +662,30 @@ def run_bounded_agent(
         )
         threads = (transcript_thread, stderr_thread)
 
-        cgroup_path: Path | None = None
-        pending_outcome: Outcome | None = None
-        boundary_failed = False
-        while cgroup_path is None:
-            remaining = runtime_deadline - time.monotonic()
-            if remaining <= 0:
-                pending_outcome = "timeout"
-                break
-            try:
-                cgroup_path = selected_backend.cgroup_path(
-                    unit_name,
-                    min(limits.grace_seconds, remaining),
-                )
-            except BoundaryError:
-                boundary_failed = True
-                break
-            if cgroup_path is None and process.poll() is not None:
-                boundary_failed = True
-                break
-            time.sleep(min(_POLL_SECONDS, remaining))
-
         # Do not drain client output until the cgroup path is saved. Kernel pipe
         # capacity back-pressures a fast writer without allowing a stream limit
         # to race ahead of the cleanup identity needed to stop it safely.
-        for thread in threads:
-            thread.start()
+        started_threads: list[threading.Thread] = []
+        try:
+            for thread in threads:
+                thread.start()
+                started_threads.append(thread)
+        except (OSError, RuntimeError):
+            cleanup_proved, _ = _stop_and_prove(
+                selected_backend,
+                unit_name,
+                cgroup_path,
+                process,
+                started_threads,
+                limits,
+            )
+            return _make_result(
+                "boundary-failure",
+                process,
+                transcript_state,
+                stderr_state,
+                cleanup_proved,
+            )
 
         if cgroup_path is None:
             cleanup_proved, stop_failed = _stop_and_prove(
@@ -647,7 +713,12 @@ def run_bounded_agent(
                 if time.monotonic() >= runtime_deadline:
                     pending_outcome = "timeout"
                     break
-                if _execution_finished(process, threads):
+                execution_finished, poll_failed = _execution_finished(process, threads)
+                if poll_failed:
+                    boundary_failed = True
+                    pending_outcome = "boundary-failure"
+                    break
+                if execution_finished:
                     if transcript_state.failed or stderr_state.failed:
                         boundary_failed = True
                         pending_outcome = "boundary-failure"

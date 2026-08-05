@@ -22,6 +22,29 @@ from pylib.agent_runner import (
 )
 
 
+class PollFaultProcess:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        fail_calls: frozenset[int],
+    ) -> None:
+        self._process = process
+        self._fail_calls = set(fail_calls)
+        self.poll_calls = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._process, name)
+
+    def poll(self) -> int | None:
+        self.poll_calls += 1
+        if self.poll_calls in self._fail_calls:
+            raise OSError("fixture poll failure")
+        return self._process.poll()
+
+    def arm_next_poll(self) -> None:
+        self._fail_calls.add(self.poll_calls + 1)
+
+
 class FakeBackend:
     def __init__(
         self,
@@ -33,6 +56,11 @@ class FakeBackend:
         synchronize_start: bool = False,
         signal_errors: set[signal.Signals] | None = None,
         wait_for_exit_before_cgroup: bool = False,
+        missing_pipes: frozenset[str] | None = None,
+        poll_error_calls: frozenset[int] | None = None,
+        cgroup_path_error: bool = False,
+        arm_poll_error_on_signal: bool = False,
+        arm_poll_error_on_cleanup_proof: bool = False,
     ) -> None:
         self.cleanup_error = cleanup_error
         self.cleanup_errors = cleanup_errors
@@ -41,8 +69,15 @@ class FakeBackend:
         self.synchronize_start = synchronize_start
         self.signal_errors = signal_errors or set()
         self.wait_for_exit_before_cgroup = wait_for_exit_before_cgroup
+        self.missing_pipes = missing_pipes or frozenset()
+        self.poll_error_calls = poll_error_calls or frozenset()
+        self.cgroup_path_error = cgroup_path_error
+        self.arm_poll_error_on_signal = arm_poll_error_on_signal
+        self.arm_poll_error_on_cleanup_proof = arm_poll_error_on_cleanup_proof
         self.start_calls = 0
-        self.process: subprocess.Popen[bytes] | None = None
+        self.cgroup_path_calls = 0
+        self.raw_process: subprocess.Popen[bytes] | None = None
+        self.process: subprocess.Popen[bytes] | PollFaultProcess | None = None
         self.unit_name: str | None = None
         self.signals: list[signal.Signals] = []
         self.signal_times: list[float] = []
@@ -55,28 +90,48 @@ class FakeBackend:
     ) -> subprocess.Popen[bytes]:
         self.start_calls += 1
         self.unit_name = unit_name
-        self.process = subprocess.Popen(
+        self.raw_process = subprocess.Popen(
             list(command),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=(
+                subprocess.DEVNULL
+                if "stdout" in self.missing_pipes
+                else subprocess.PIPE
+            ),
+            stderr=(
+                subprocess.DEVNULL
+                if "stderr" in self.missing_pipes
+                else subprocess.PIPE
+            ),
             bufsize=0,
         )
+        if (
+            self.poll_error_calls
+            or self.arm_poll_error_on_signal
+            or self.arm_poll_error_on_cleanup_proof
+        ):
+            self.process = PollFaultProcess(self.raw_process, self.poll_error_calls)
+        else:
+            self.process = self.raw_process
         if self.synchronize_start:
-            _, wait_status = os.waitpid(self.process.pid, os.WUNTRACED)
+            _, wait_status = os.waitpid(self.raw_process.pid, os.WUNTRACED)
             if not os.WIFSTOPPED(wait_status):
                 raise BoundaryError("fixture exited before signaling readiness")
-            self.process.send_signal(signal.SIGCONT)
+            self.raw_process.send_signal(signal.SIGCONT)
         return self.process
 
     def cgroup_path(self, unit_name: str, timeout_seconds: float) -> Path | None:
+        self.cgroup_path_calls += 1
         assert timeout_seconds > 0
         assert unit_name == self.unit_name
         assert self.process is not None
+        assert self.raw_process is not None
+        if self.cgroup_path_error:
+            raise BoundaryError("fixture cgroup path unavailable")
         if not self.cgroup_observable:
             return None
         if self.wait_for_exit_before_cgroup:
-            self.process.wait(timeout=timeout_seconds)
+            self.raw_process.wait(timeout=timeout_seconds)
         return Path("/fake-cgroup") / unit_name
 
     def signal_scope(
@@ -88,10 +143,14 @@ class FakeBackend:
         assert timeout_seconds > 0
         assert unit_name == self.unit_name
         assert self.process is not None
+        assert self.raw_process is not None
         self.signals.append(requested_signal)
         self.signal_times.append(time.monotonic())
-        if self.process.poll() is None:
-            self.process.send_signal(requested_signal)
+        if self.raw_process.poll() is None:
+            self.raw_process.send_signal(requested_signal)
+        if self.arm_poll_error_on_signal:
+            assert isinstance(self.process, PollFaultProcess)
+            self.process.arm_next_poll()
         if requested_signal in self.signal_errors:
             raise BoundaryError("fixture signal state unavailable")
 
@@ -102,8 +161,12 @@ class FakeBackend:
             raise BoundaryError("fixture cleanup state unavailable")
         if self.cgroup_empty_override is not None:
             return self.cgroup_empty_override
-        assert self.process is not None
-        return self.process.poll() is not None
+        assert self.raw_process is not None
+        scope_empty = self.raw_process.poll() is not None
+        if scope_empty and self.arm_poll_error_on_cleanup_proof:
+            assert isinstance(self.process, PollFaultProcess)
+            self.process.arm_next_poll()
+        return scope_empty
 
 
 def private_output(path: Path) -> None:
@@ -246,6 +309,172 @@ def test_bounded_run_rejects_over_max_limits_before_injected_backend(
         "cleanup_proved": False,
     }
     assert backend.start_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("cgroup_observable", "poll_error_calls"),
+    [
+        (False, frozenset({1})),
+        (True, frozenset({1})),
+    ],
+    ids=["cgroup-acquisition", "execution-monitor"],
+)
+def test_bounded_run_closes_poll_error_during_active_lifecycle(
+    tmp_path: Path,
+    cgroup_observable: bool,
+    poll_error_calls: frozenset[int],
+) -> None:
+    backend = FakeBackend(
+        cgroup_observable=cgroup_observable,
+        poll_error_calls=poll_error_calls,
+    )
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.outcome == "boundary-failure"
+        assert len(result.to_dict()) == 6
+        assert backend.raw_process is not None
+        assert backend.raw_process.poll() is not None
+    finally:
+        if backend.raw_process is not None and backend.raw_process.poll() is None:
+            backend.raw_process.kill()
+            backend.raw_process.wait(timeout=1.0)
+
+
+def test_bounded_run_closes_poll_error_during_no_cgroup_shutdown(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        cgroup_path_error=True,
+        arm_poll_error_on_signal=True,
+    )
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.outcome == "boundary-failure"
+        assert result.cleanup_proved is False
+        assert len(result.to_dict()) == 6
+        assert backend.raw_process is not None
+        assert backend.raw_process.poll() is not None
+    finally:
+        if backend.raw_process is not None and backend.raw_process.poll() is None:
+            backend.raw_process.kill()
+            backend.raw_process.wait(timeout=1.0)
+
+
+def test_bounded_run_closes_poll_error_during_result_collection(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        wait_for_exit_before_cgroup=True,
+        arm_poll_error_on_cleanup_proof=True,
+    )
+
+    result, _, _, _ = run_fixture(tmp_path, "", backend=backend)
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "boundary-failure",
+        "exit_status": None,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "missing_pipes",
+    [
+        frozenset({"stdout"}),
+        frozenset({"stderr"}),
+        frozenset({"stdout", "stderr"}),
+    ],
+)
+def test_bounded_run_cleans_scope_when_client_pipe_is_missing(
+    tmp_path: Path,
+    missing_pipes: frozenset[str],
+) -> None:
+    backend = FakeBackend(missing_pipes=missing_pipes)
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.outcome == "boundary-failure"
+        assert result.cleanup_proved is True
+        assert backend.cgroup_path_calls >= 1
+        assert backend.signals == [signal.SIGTERM]
+        assert backend.process is not None
+        assert backend.process.poll() is not None
+    finally:
+        if backend.process is not None and backend.process.poll() is None:
+            backend.process.kill()
+            backend.process.wait(timeout=1.0)
+
+
+@pytest.mark.parametrize("failing_start", [1, 2])
+def test_bounded_run_cleans_scope_when_drain_thread_start_fails(
+    tmp_path: Path,
+    monkeypatch,
+    failing_start: int,
+) -> None:
+    real_thread = agent_runner.threading.Thread
+    start_calls = 0
+
+    class ControlledThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._thread = real_thread(*args, **kwargs)
+
+        def start(self) -> None:
+            nonlocal start_calls
+            start_calls += 1
+            if start_calls == failing_start:
+                raise RuntimeError("fixture thread-start failure")
+            self._thread.start()
+
+        def is_alive(self) -> bool:
+            return self._thread.is_alive()
+
+        def join(self, timeout: float | None = None) -> None:
+            self._thread.join(timeout=timeout)
+
+    monkeypatch.setattr(agent_runner.threading, "Thread", ControlledThread)
+    backend = FakeBackend()
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.outcome == "boundary-failure"
+        assert result.cleanup_proved is True
+        assert backend.cgroup_path_calls >= 1
+        assert backend.signals == [signal.SIGTERM]
+        assert backend.process is not None
+        assert backend.process.poll() is not None
+    finally:
+        if backend.process is not None and backend.process.poll() is None:
+            backend.process.kill()
+            backend.process.wait(timeout=1.0)
 
 
 def test_bounded_run_times_out_and_proves_cleanup(tmp_path: Path) -> None:
@@ -576,6 +805,35 @@ def test_systemd_backend_constructs_exact_production_command(monkeypatch) -> Non
         "stderr": subprocess.PIPE,
         "bufsize": 0,
     }
+
+
+@pytest.mark.parametrize(
+    ("runtime_seconds", "expected_runtime"),
+    [
+        (0.00001, "0.00001s"),
+        (0.0000001, "0.0000001s"),
+    ],
+)
+def test_systemd_backend_formats_small_runtime_without_scientific_notation(
+    monkeypatch,
+    runtime_seconds: float,
+    expected_runtime: str,
+) -> None:
+    captured: list[str] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        captured.extend(command)
+        return object()
+
+    monkeypatch.setattr(agent_runner.subprocess, "Popen", fake_popen)
+
+    SystemdScopeBackend().start_scope(
+        "test.scope",
+        ["client"],
+        RunLimits(runtime_seconds=runtime_seconds),
+    )
+
+    assert f"--property=RuntimeMaxSec={expected_runtime}" in captured
 
 
 @pytest.mark.parametrize(
