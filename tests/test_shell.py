@@ -2304,6 +2304,7 @@ def run_log_file_excerpt(
     arguments: tuple[str, ...],
     *,
     api_key: str = "fixture-stream-secret",
+    completion_marker: pathlib.Path | None = None,
     fail_consumer: bool = False,
     fail_redaction: bool = False,
 ) -> subprocess.CompletedProcess[str]:
@@ -2317,6 +2318,13 @@ def run_log_file_excerpt(
         'source "$TEST_REPO_DIR/tools/lib.sh"\n'
         + (
             "redact_text() { printf '%s' \"$1\"; }\n"
+            "_redact_stream() { cat && printf '%s\\n' complete > "
+            '"$COMPLETION_MARKER"; }\n'
+            if completion_marker is not None
+            else ""
+        )
+        + (
+            "redact_text() { printf '%s' \"$1\"; }\n"
             "_redact_stream() { cat >/dev/null; return 17; }\n"
             if fail_redaction
             else ""
@@ -2324,14 +2332,20 @@ def run_log_file_excerpt(
         + ("head() { return 17; }\n" if fail_consumer else "")
         + 'log_file_excerpt "$@"\n'
     )
+    environment = os.environ | {
+        "LLM_ENV_CONFIG": str(config),
+        "TEST_REPO_DIR": str(ROOT),
+    }
+    if completion_marker is not None:
+        environment["COMPLETION_MARKER"] = str(completion_marker)
     return subprocess.run(
         ["/usr/bin/bash", str(helper), *arguments],
         cwd=ROOT,
-        env=os.environ
-        | {"LLM_ENV_CONFIG": str(config), "TEST_REPO_DIR": str(ROOT)},
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
+        timeout=10,
     )
 
 
@@ -2458,19 +2472,24 @@ def test_log_file_excerpt_normalizes_redaction_failure_to_status_one(
     assert result.returncode == 1
 
 
-def test_log_file_excerpt_normalizes_consumer_failure_to_status_one(
+def test_log_file_excerpt_failed_consumer_still_drains_complete_stream(
     tmp_path: pathlib.Path,
 ) -> None:
     source = tmp_path / "diagnostic.txt"
-    source.write_text("content")
+    with source.open("wb") as source_stream:
+        source_stream.truncate(2 * 1024 * 1024)
+    completion_marker = tmp_path / "excerpt-drained"
 
     result = run_log_file_excerpt(
         tmp_path,
         ("Diagnostic", str(source), "12"),
+        completion_marker=completion_marker,
         fail_consumer=True,
     )
 
     assert result.returncode == 1
+    assert completion_marker.is_file()
+    assert completion_marker.read_text() == "complete\n"
 
 
 def run_diagnostic_helper(
