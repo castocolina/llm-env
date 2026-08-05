@@ -29,12 +29,14 @@ class FakeBackend:
         cleanup_error: bool = False,
         cleanup_errors: int = 0,
         cgroup_empty_override: bool | None = None,
+        cgroup_observable: bool = True,
         synchronize_start: bool = False,
         signal_errors: set[signal.Signals] | None = None,
     ) -> None:
         self.cleanup_error = cleanup_error
         self.cleanup_errors = cleanup_errors
         self.cgroup_empty_override = cgroup_empty_override
+        self.cgroup_observable = cgroup_observable
         self.synchronize_start = synchronize_start
         self.signal_errors = signal_errors or set()
         self.process: subprocess.Popen[bytes] | None = None
@@ -67,6 +69,8 @@ class FakeBackend:
         assert timeout_seconds > 0
         assert unit_name == self.unit_name
         assert self.process is not None
+        if not self.cgroup_observable:
+            return None
         return Path("/fake-cgroup") / unit_name
 
     def signal_scope(
@@ -255,6 +259,98 @@ def test_bounded_run_waits_full_grace_after_cleanup_read_error(
     assert result.cleanup_proved is True
     assert backend.signals == [signal.SIGTERM, signal.SIGKILL]
     assert backend.signal_times[1] - backend.signal_times[0] >= grace_seconds
+
+
+def test_local_launcher_kill_waits_full_term_grace(monkeypatch) -> None:
+    grace_seconds = 0.25
+    clock = [10.0]
+    actions: list[tuple[str, float]] = []
+    wait_timeouts: list[float] = []
+
+    class HungLauncher:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.killed = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            actions.append(("term", clock[0]))
+
+        def wait(self, timeout: float) -> int:
+            wait_timeouts.append(timeout)
+            if not self.killed:
+                clock[0] += timeout
+                raise subprocess.TimeoutExpired(["systemd-run"], timeout)
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+        def kill(self) -> None:
+            actions.append(("kill", clock[0]))
+            self.killed = True
+
+    monkeypatch.setattr(agent_runner.time, "monotonic", lambda: clock[0])
+    process = HungLauncher()
+
+    reaped = agent_runner._reap_local_launcher(
+        process,
+        (),
+        clock[0],
+        grace_seconds,
+    )
+
+    assert reaped is True
+    assert wait_timeouts[0] == grace_seconds
+    assert actions == [
+        ("term", 10.0),
+        ("kill", 10.0 + grace_seconds),
+    ]
+
+
+def test_bounded_run_reaps_launcher_without_scope_kill_after_empty_cgroup(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        cgroup_empty_override=True,
+        synchronize_start=True,
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        sigterm_ignoring_code(),
+        grace_seconds=0.02,
+        backend=backend,
+    )
+
+    assert result.outcome == "timeout"
+    assert result.cleanup_proved is True
+    assert backend.signals == [signal.SIGTERM]
+    assert backend.process is not None
+    assert backend.process.poll() is not None
+
+
+def test_bounded_run_preserves_boundary_failure_without_saved_cgroup(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        cgroup_observable=False,
+        synchronize_start=True,
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        sigterm_ignoring_code(),
+        runtime_seconds=0.05,
+        grace_seconds=0.02,
+        backend=backend,
+    )
+
+    assert result.outcome == "boundary-failure"
+    assert result.cleanup_proved is False
+    assert backend.signals == [signal.SIGTERM]
+    assert backend.process is not None
+    assert backend.process.poll() is not None
 
 
 def test_bounded_run_does_not_signal_empty_scope_when_launcher_reap_fails(

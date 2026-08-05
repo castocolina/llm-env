@@ -364,6 +364,7 @@ def _reap_local_launcher(
     process: subprocess.Popen[bytes],
     threads: Sequence[threading.Thread],
     deadline: float,
+    grace_seconds: float,
 ) -> bool:
     while time.monotonic() < deadline:
         if _execution_finished(process, threads):
@@ -373,11 +374,11 @@ def _reap_local_launcher(
     if process.poll() is None:
         process.terminate()
         try:
-            process.wait(timeout=max(_POLL_SECONDS, deadline - time.monotonic()))
+            process.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
             process.kill()
             try:
-                process.wait(timeout=_POLL_SECONDS * 10)
+                process.wait(timeout=grace_seconds)
             except subprocess.TimeoutExpired:
                 return False
     for thread in threads:
@@ -391,6 +392,7 @@ def _wait_for_cleanup(
     process: subprocess.Popen[bytes],
     threads: Sequence[threading.Thread],
     deadline: float,
+    grace_seconds: float,
 ) -> tuple[bool, bool, bool]:
     if cgroup_path is None:
         return False, True, False
@@ -402,7 +404,12 @@ def _wait_for_cleanup(
             boundary_failed = True
         else:
             if scope_empty:
-                reaped = _reap_local_launcher(process, threads, deadline)
+                reaped = _reap_local_launcher(
+                    process,
+                    threads,
+                    deadline,
+                    grace_seconds,
+                )
                 return reaped, boundary_failed or not reaped, False
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -413,7 +420,12 @@ def _wait_for_cleanup(
     except BoundaryError:
         return False, True, False
     if scope_empty:
-        reaped = _reap_local_launcher(process, threads, deadline)
+        reaped = _reap_local_launcher(
+            process,
+            threads,
+            deadline,
+            grace_seconds,
+        )
         return reaped, boundary_failed or not reaped, False
     return False, boundary_failed, True
 
@@ -443,6 +455,7 @@ def _stop_and_prove(
             process,
             threads,
             time.monotonic() + limits.grace_seconds,
+            limits.grace_seconds,
         )
         return False, True
 
@@ -457,6 +470,7 @@ def _stop_and_prove(
         process,
         threads,
         term_deadline,
+        limits.grace_seconds,
     )
     boundary_failed = boundary_failed or proof_failed
     if cleanup_proved or not scope_populated:
@@ -472,6 +486,7 @@ def _stop_and_prove(
         process,
         threads,
         time.monotonic() + limits.grace_seconds,
+        limits.grace_seconds,
     )
     return cleanup_proved, boundary_failed or proof_failed or not cleanup_proved
 
