@@ -146,23 +146,28 @@ log_validation_facts() {
 }
 
 parse_bounded_result() {
-    local result="$1"
+    local result_file="$1"
 
-    # jq accepts leading-zero numbers and otherwise collapses duplicate object keys.
-    if ! printf '%s' "$result" | jq -Rse '
-        gsub("\"([^\"\\\\]|\\\\.)*\""; "\"\"")
-        | test("(^|[[:space:]\\[{: ,])-?0[0-9]")
-        | not
-    ' >/dev/null; then
+    # Validate emitted integer lexemes before jq converts them to binary floats.
+    if ! jq -Rse '
+        def exactly_one($pattern):
+            [scan($pattern)] | length == 1;
+
+        (contains("\u0000") | not)
+        and exactly_one("\"schema\"[[:space:]]*:[[:space:]]*1[[:space:]]*[,}]")
+        and exactly_one("\"exit_status\"[[:space:]]*:[[:space:]]*(?:null|0|-?[1-9][0-9]*)[[:space:]]*[,}]")
+        and exactly_one("\"transcript_bytes\"[[:space:]]*:[[:space:]]*(?:0|[1-9][0-9]*)[[:space:]]*[,}]")
+        and exactly_one("\"stderr_bytes\"[[:space:]]*:[[:space:]]*(?:0|[1-9][0-9]*)[[:space:]]*[,}]")
+    ' "$result_file" >/dev/null; then
         return 1
     fi
-    if ! printf '%s' "$result" | jq --stream -se '
+    if ! jq --stream -se '
         [.[] | select(length == 2)]
         | length == 6 and all(.[]; (.[0] | length) == 1)
-    ' >/dev/null; then
+    ' "$result_file" >/dev/null; then
         return 1
     fi
-    printf '%s' "$result" | jq -rse '
+    jq -rse '
         def integral_number:
             type == "number" and isfinite and (. == floor);
 
@@ -195,16 +200,23 @@ parse_bounded_result() {
            else (.exit_status | floor | tostring)
            end),
           (.cleanup_proved | tostring)
-    '
+    ' "$result_file"
+}
+
+mark_agent_boundary_failure() {
+    AGENT_FAILURE_STAGE="resource boundary"
+    AGENT_FAILURE_REASON="scope setup or cleanup could not be proved"
+    AGENT_RESULT_REASON="boundary-failure"
+    AGENT_ABORT_MATRIX=1
 }
 
 classify_bounded_result() {
-    local runner_status="$1" result="$2" parser_error_file="$3"
+    local runner_status="$1" result_file="$2" parser_error_file="$3"
     local parsed_result outcome exit_status cleanup_proved
     local -a result_fields
 
     if [ "$runner_status" -eq 0 ] \
-        && parsed_result="$(parse_bounded_result "$result" 2>>"$parser_error_file")"; then
+        && parsed_result="$(parse_bounded_result "$result_file" 2>>"$parser_error_file")"; then
         mapfile -t result_fields <<< "$parsed_result"
         outcome="${result_fields[0]}"
         exit_status="${result_fields[1]}"
@@ -248,10 +260,7 @@ classify_bounded_result() {
         fi
     fi
 
-    AGENT_FAILURE_STAGE="resource boundary"
-    AGENT_FAILURE_REASON="scope setup or cleanup could not be proved"
-    AGENT_RESULT_REASON="boundary-failure"
-    AGENT_ABORT_MATRIX=1
+    mark_agent_boundary_failure
     return 1
 }
 
@@ -264,7 +273,7 @@ run_agent() {
     local final_file="$6"
     local parser_error_file="$7"
     local client_base config_dir config_file config_key_command status quoted_prompt
-    local bounded_result
+    local bounded_result_file
     local -a client_command
 
     AGENT_FAILURE_STAGE="command exit"
@@ -310,21 +319,25 @@ run_agent() {
                 --model "llm-env/${alias}"
                 "$prompt"
             )
-            if bounded_result="$(
-                (
-                    cd "$workspace" || exit 1
-                    export PI_CODING_AGENT_DIR="$config_dir"
-                    uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
-                        --transcript "$transcript_file" \
-                        --stderr "$stderr_file" \
-                        -- "${client_command[@]}" </dev/null
-                ) 2>>"$parser_error_file"
-            )"; then
+            if ! bounded_result_file="$(
+                mktemp "$workspace/bounded-result.XXXXXX" 2>>"$parser_error_file"
+            )" || ! chmod 600 "$bounded_result_file" 2>>"$parser_error_file"; then
+                mark_agent_boundary_failure
+                return 1
+            fi
+            if (
+                cd "$workspace" || exit 1
+                export PI_CODING_AGENT_DIR="$config_dir"
+                uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                    --transcript "$transcript_file" \
+                    --stderr "$stderr_file" \
+                    -- "${client_command[@]}" </dev/null >"$bounded_result_file"
+            ) 2>>"$parser_error_file"; then
                 status=0
             else
                 status=$?
             fi
-            if ! classify_bounded_result "$status" "$bounded_result" "$parser_error_file"; then
+            if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
                 return 1
             fi
             if ! jq -rce '
@@ -355,26 +368,30 @@ run_agent() {
             client_command=(
                 opencode run --format json --model "llm-env/${alias}" "$prompt"
             )
-            if bounded_result="$(
-                (
-                    cd "$workspace" || exit 1
-                    export HOME="$workspace/opencode-home"
-                    export XDG_CONFIG_HOME="$workspace/opencode-config"
-                    export XDG_DATA_HOME="$workspace/opencode-data"
-                    export XDG_STATE_HOME="$workspace/opencode-state"
-                    export OPENCODE_CONFIG="$config_file"
-                    export OPENCODE_API_KEY="$api_key"
-                    uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
-                        --transcript "$transcript_file" \
-                        --stderr "$stderr_file" \
-                        -- "${client_command[@]}" </dev/null
-                ) 2>>"$parser_error_file"
-            )"; then
+            if ! bounded_result_file="$(
+                mktemp "$workspace/bounded-result.XXXXXX" 2>>"$parser_error_file"
+            )" || ! chmod 600 "$bounded_result_file" 2>>"$parser_error_file"; then
+                mark_agent_boundary_failure
+                return 1
+            fi
+            if (
+                cd "$workspace" || exit 1
+                export HOME="$workspace/opencode-home"
+                export XDG_CONFIG_HOME="$workspace/opencode-config"
+                export XDG_DATA_HOME="$workspace/opencode-data"
+                export XDG_STATE_HOME="$workspace/opencode-state"
+                export OPENCODE_CONFIG="$config_file"
+                export OPENCODE_API_KEY="$api_key"
+                uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                    --transcript "$transcript_file" \
+                    --stderr "$stderr_file" \
+                    -- "${client_command[@]}" </dev/null >"$bounded_result_file"
+            ) 2>>"$parser_error_file"; then
                 status=0
             else
                 status=$?
             fi
-            if ! classify_bounded_result "$status" "$bounded_result" "$parser_error_file"; then
+            if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
                 return 1
             fi
             if ! jq -rce '

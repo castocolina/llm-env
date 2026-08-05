@@ -3226,7 +3226,7 @@ def run_agent_check(
     agent_parser_stderr: str = "",
     fenced_parser_stderr: str = "",
     source_parser_stderr: str = "",
-    bounded_results: tuple[str, ...] = (),
+    bounded_results: tuple[str | bytes, ...] = (),
     bounded_exit_statuses: tuple[int, ...] = (),
     bounded_cli_stderr: str = "",
     fail_pi_configuration: bool = False,
@@ -3256,7 +3256,10 @@ def run_agent_check(
     bounded_results_dir = tmp_path / "bounded-results"
     bounded_results_dir.mkdir()
     for index, bounded_result in enumerate(bounded_results):
-        (bounded_results_dir / str(index)).write_text(bounded_result)
+        result_bytes = (
+            bounded_result.encode() if isinstance(bounded_result, str) else bounded_result
+        )
+        (bounded_results_dir / str(index)).write_bytes(result_bytes)
     bounded_statuses_dir = tmp_path / "bounded-statuses"
     bounded_statuses_dir.mkdir()
     for index, bounded_status in enumerate(bounded_exit_statuses):
@@ -4090,6 +4093,70 @@ del _MISSING_BOUNDED_RESULT_KEY["stderr_bytes"]
             id="non-json-leading-zero",
         ),
         pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"schema":1', '"schema":1e+0'),
+            id="schema-exponent",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"schema":1', '"schema":1.0'),
+            id="schema-decimal",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"exit_status":0', '"exit_status":1e-999'),
+            id="exit-positive-underflow",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace(
+                '"exit_status":0',
+                '"exit_status":9007199254740992.5',
+            ),
+            id="exit-rounded-fraction",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"exit_status":0', '"exit_status":1e+0'),
+            id="exit-exponent",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"exit_status":0', '"exit_status":1.0'),
+            id="exit-decimal",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace(
+                '"transcript_bytes":0',
+                '"transcript_bytes":-1e-999',
+            ),
+            id="transcript-negative-underflow",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace(
+                '"transcript_bytes":0',
+                '"transcript_bytes":0e+0',
+            ),
+            id="transcript-exponent",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace(
+                '"transcript_bytes":0',
+                '"transcript_bytes":0.0',
+            ),
+            id="transcript-decimal",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"stderr_bytes":0', '"stderr_bytes":0e+0'),
+            id="stderr-exponent",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"stderr_bytes":0', '"stderr_bytes":0.0'),
+            id="stderr-decimal",
+        ),
+        pytest.param(
+            b"\x00" + _VALID_BOUNDED_RESULT.encode(),
+            id="nul-before-object",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.encode() + b"\x00",
+            id="nul-after-object",
+        ),
+        pytest.param(
             _VALID_BOUNDED_RESULT.replace('"schema":1', '"schema":1,"schema":1'),
             id="duplicate-key",
         ),
@@ -4154,7 +4221,7 @@ del _MISSING_BOUNDED_RESULT_KEY["stderr_bytes"]
 )
 def test_agent_check_rejects_every_invalid_bounded_result(
     tmp_path: pathlib.Path,
-    bounded_result: str,
+    bounded_result: str | bytes,
 ) -> None:
     result, calls, _ = run_agent_check(
         tmp_path,
