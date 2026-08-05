@@ -3223,6 +3223,7 @@ def run_agent_check(
     keep_artifacts: bool = False,
     xtrace: bool = False,
     agent_client_stderr: str = "",
+    agent_client_stderr_file: pathlib.Path | None = None,
     agent_parser_stderr: str = "",
     fenced_parser_stderr: str = "",
     source_parser_stderr: str = "",
@@ -3275,9 +3276,11 @@ def run_agent_check(
 
     _mock_dirname(commands)
     for name, executable in {
+        "cat": "/usr/bin/cat",
         "chmod": "/usr/bin/chmod",
         "date": real_date,
         "find": "/usr/bin/find",
+        "head": "/usr/bin/head",
         "mkdir": "/usr/bin/mkdir",
         "mktemp": "/usr/bin/mktemp",
         "mv": "/usr/bin/mv",
@@ -3453,6 +3456,7 @@ def run_agent_check(
         or "{}",
         "AGENT_CHECK_FX_EVIDENCE_OVERRIDE": agent_fx_evidence_override or "{}",
         "AGENT_CHECK_CLIENT_STDERR": agent_client_stderr,
+        "AGENT_CHECK_CLIENT_STDERR_FILE": str(agent_client_stderr_file or ""),
         "AGENT_CHECK_PARSER_STDERR": agent_parser_stderr,
         "AGENT_CHECK_FENCED_PARSER_STDERR": fenced_parser_stderr,
         "AGENT_CHECK_SOURCE_PARSER_STDERR": source_parser_stderr,
@@ -3557,7 +3561,9 @@ def assert_common_agent_fields(
 
 VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
-if [ -n "${AGENT_CHECK_CLIENT_STDERR:-}" ]; then
+if [ -n "${AGENT_CHECK_CLIENT_STDERR_FILE:-}" ]; then
+    /usr/bin/cat "$AGENT_CHECK_CLIENT_STDERR_FILE" >&2
+elif [ -n "${AGENT_CHECK_CLIENT_STDERR:-}" ]; then
     printf '%s\n' "$AGENT_CHECK_CLIENT_STDERR" >&2
 fi
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
@@ -3733,6 +3739,7 @@ def test_agent_check_rejects_malformed_source_bodies(
 
     assert result.returncode != 0
     assert expected_error in result.stderr
+    assert "Source stdout:" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -3783,6 +3790,7 @@ def test_agent_check_rejects_unparseable_typed_fx_source_timestamp(
 
     assert result.returncode != 0
     assert "source fetch reason=fx source body is invalid" in result.stderr
+    assert "Source stdout:" in result.stdout
     assert "Source parser stderr:" in result.stdout
     assert "Source parser stderr:\n  (empty)" not in result.stdout
 
@@ -4601,6 +4609,59 @@ def test_agent_check_keeps_nonempty_success_diagnostics(
         assert "Final response:\n  {" in row
         assert "Validated:\n  source_url=https://" in row
         assert "Verdict: PASS" in row
+
+
+def test_agent_check_caps_file_backed_client_stderr_for_each_success_row(
+    tmp_path: pathlib.Path,
+) -> None:
+    sentinel = "client-stderr-cap-sentinel"
+    client_stderr = tmp_path / "large-client-stderr"
+    client_stderr.write_bytes(b"x" * 262_144 + sentinel.encode())
+
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_client_stderr_file=client_stderr,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 2
+    for row in rows:
+        assert row.count("Client stderr:") == 1
+        displayed_body = row.split("Client stderr:\n", 1)[1].split(
+            "Final response:\n", 1
+        )[0]
+        assert displayed_body.count("x") == 262_144, result.stderr
+
+
+def test_agent_check_routes_every_file_backed_display_through_excerpt_helper() -> None:
+    script = (SCRIPT_DIR / "check-with-agents.sh").read_text()
+    display_files = {
+        "Source stdout": "$stdout_file",
+        "Source stderr": "$stderr_file",
+        "Source parser stderr": "$parser_stderr_file",
+        "Client JSONL transcript": "$transcript_file",
+        "Client stderr": "$client_stderr_file",
+        "Agent parser stderr": "$parser_error_file",
+        "Final response": "$final_file",
+    }
+    call_pattern = re.compile(
+        r'^\s*(log_(?:block|nonempty_block|file_excerpt))\s+"([^"]+)"\s+(.+)$',
+        re.MULTILINE,
+    )
+    display_calls = [
+        call for call in call_pattern.findall(script) if call[1] in display_files
+    ]
+
+    assert {label for _, label, _ in display_calls} == set(display_files)
+    for function, label, arguments in display_calls:
+        assert function == "log_file_excerpt"
+        assert arguments == (
+            f'"{display_files[label]}" "$agent_diagnostic_excerpt_bytes"'
+        )
 
 
 @pytest.mark.parametrize(

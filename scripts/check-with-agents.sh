@@ -40,6 +40,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
 base="http://127.0.0.1:${port}"
 weather_url='https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago'
 fx_url='https://open.er-api.com/v6/latest/USD'
+agent_diagnostic_excerpt_bytes=262144
 
 fetch_models() {
     local config_file="$1"
@@ -86,17 +87,23 @@ snapshot_for() {
         status=$?
     fi
     if [ "$status" -ne 0 ]; then
-        log_block "Source stdout" "$(<"$stdout_file")"
-        log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+        log_file_excerpt "Source stdout" "$stdout_file" "$agent_diagnostic_excerpt_bytes"
+        if [ -s "$stderr_file" ]; then
+            log_file_excerpt "Source stderr" "$stderr_file" "$agent_diagnostic_excerpt_bytes"
+        fi
         log_block "Exit status" "$status"
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source exited ${status}"
         return 1
     fi
     if ! snapshot="$(jq -ce --arg url "$url" "$filter" "$stdout_file" 2>"$parser_stderr_file")"; then
-        log_block "Source stdout" "$(<"$stdout_file")"
-        log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+        log_file_excerpt "Source stdout" "$stdout_file" "$agent_diagnostic_excerpt_bytes"
+        if [ -s "$stderr_file" ]; then
+            log_file_excerpt "Source stderr" "$stderr_file" "$agent_diagnostic_excerpt_bytes"
+        fi
         log_block "Exit status" "$status"
-        log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
+        if [ -s "$parser_stderr_file" ]; then
+            log_file_excerpt "Source parser stderr" "$parser_stderr_file" "$agent_diagnostic_excerpt_bytes"
+        fi
         log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
         return 1
     fi
@@ -105,17 +112,25 @@ snapshot_for() {
             2>>"$parser_stderr_file")" \
             || ! snapshot="$(jq -ce --arg source_date "$source_date" '. + {source_date: $source_date}' \
                 <<<"$snapshot" 2>>"$parser_stderr_file")"; then
-            log_block "Source stdout" "$(<"$stdout_file")"
-            log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+            log_file_excerpt "Source stdout" "$stdout_file" "$agent_diagnostic_excerpt_bytes"
+            if [ -s "$stderr_file" ]; then
+                log_file_excerpt "Source stderr" "$stderr_file" "$agent_diagnostic_excerpt_bytes"
+            fi
             log_block "Exit status" "$status"
-            log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
+            if [ -s "$parser_stderr_file" ]; then
+                log_file_excerpt "Source parser stderr" "$parser_stderr_file" "$agent_diagnostic_excerpt_bytes"
+            fi
             log_error "Verdict: FAIL stage=source fetch reason=${check_name} source body is invalid"
             return 1
         fi
     fi
-    log_nonempty_block "Source stderr" "$(<"$stderr_file")"
+    if [ -s "$stderr_file" ]; then
+        log_file_excerpt "Source stderr" "$stderr_file" "$agent_diagnostic_excerpt_bytes"
+    fi
     log_block "Exit status" "$status"
-    log_nonempty_block "Source parser stderr" "$(<"$parser_stderr_file")"
+    if [ -s "$parser_stderr_file" ]; then
+        log_file_excerpt "Source parser stderr" "$parser_stderr_file" "$agent_diagnostic_excerpt_bytes"
+    fi
     log_block "Parsed result" "$snapshot"
     log_block "Expectation" "a current typed ${check_name} source object"
     log_info "Verdict: PASS"
@@ -563,10 +578,18 @@ for client in "${clients[@]}"; do
             log_block "Expectation" "$agent_expectation"
 
             if [ "$agent_failed" -ne 0 ]; then
-                log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
-                log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
-                log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-                log_nonempty_block "Final response" "$(<"$final_file")"
+                if [ -s "$transcript_file" ]; then
+                    log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+                if [ -s "$client_stderr_file" ]; then
+                    log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+                if [ -s "$parser_error_file" ]; then
+                    log_file_excerpt "Agent parser stderr" "$parser_error_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+                if [ -s "$final_file" ]; then
+                    log_file_excerpt "Final response" "$final_file" "$agent_diagnostic_excerpt_bytes"
+                fi
                 log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=${AGENT_FAILURE_REASON}"
                 printf 'FAIL client=%s model=%s check=%s reason=%s\n' \
                     "$client" "$alias" "$check_name" "$AGENT_RESULT_REASON"
@@ -579,9 +602,13 @@ for client in "${clients[@]}"; do
 
             differences="$(source_evidence_differences "$check_name" "$snapshot" "$evidence")"
             if [ -z "$differences" ]; then
-                log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
-                log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-                log_block "Final response" "$(<"$final_file")"
+                if [ -s "$client_stderr_file" ]; then
+                    log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+                if [ -s "$parser_error_file" ]; then
+                    log_file_excerpt "Agent parser stderr" "$parser_error_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+                log_file_excerpt "Final response" "$final_file" "$agent_diagnostic_excerpt_bytes"
                 log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
                 log_info "Verdict: PASS"
                 printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
@@ -589,10 +616,18 @@ for client in "${clients[@]}"; do
                 passes=$((passes + 1))
                 continue
             fi
-            log_nonempty_block "Client JSONL transcript" "$(<"$transcript_file")"
-            log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
-            log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
-            log_nonempty_block "Final response" "$(<"$final_file")"
+            if [ -s "$transcript_file" ]; then
+                log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+            fi
+            if [ -s "$client_stderr_file" ]; then
+                log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
+            fi
+            if [ -s "$parser_error_file" ]; then
+                log_file_excerpt "Agent parser stderr" "$parser_error_file" "$agent_diagnostic_excerpt_bytes"
+            fi
+            if [ -s "$final_file" ]; then
+                log_file_excerpt "Final response" "$final_file" "$agent_diagnostic_excerpt_bytes"
+            fi
             log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
             while IFS= read -r difference; do
                 [ -n "$difference" ] || continue
