@@ -212,6 +212,282 @@ def test_unknown_subcommand_is_usage_error():
     assert run("nonsense").returncode == 2
 
 
+def test_run_agent_bounded_forwards_lower_limits_and_remainder(
+    tmp_path: Path, monkeypatch, capsys
+):
+    import llmenv
+    from pylib.agent_runner import BoundedRunResult, RunLimits
+
+    transcript = tmp_path / "transcript.jsonl"
+    stderr = tmp_path / "agent.stderr"
+    captured = {}
+    runner_result = BoundedRunResult(
+        outcome="completed",
+        exit_status=0,
+        transcript_bytes=12,
+        stderr_bytes=3,
+        cleanup_proved=True,
+    )
+
+    def fake_run(command, transcript_path, stderr_path, *, limits):
+        captured.update(
+            command=command,
+            transcript_path=transcript_path,
+            stderr_path=stderr_path,
+            limits=limits,
+        )
+        return runner_result
+
+    monkeypatch.setattr(llmenv, "run_bounded_agent", fake_run, raising=False)
+
+    status = llmenv.main(
+        [
+            "run-agent-bounded",
+            "--transcript",
+            str(transcript),
+            "--stderr",
+            str(stderr),
+            "--runtime-seconds",
+            "1.25",
+            "--grace-seconds",
+            "0.5",
+            "--stream-limit-bytes",
+            "1024",
+            "--",
+            "agent-client",
+            "--model",
+            "local",
+        ]
+    )
+
+    streams = capsys.readouterr()
+    assert status == 0
+    assert streams.err == ""
+    assert captured == {
+        "command": ["agent-client", "--model", "local"],
+        "transcript_path": transcript,
+        "stderr_path": stderr,
+        "limits": RunLimits(
+            runtime_seconds=1.25,
+            grace_seconds=0.5,
+            stream_limit_bytes=1024,
+        ),
+    }
+
+
+def test_run_agent_bounded_emits_exact_json_and_succeeds_for_client_failure(
+    tmp_path: Path, monkeypatch, capsys
+):
+    import llmenv
+    from pylib.agent_runner import BoundedRunResult
+
+    runner_result = BoundedRunResult(
+        outcome="completed",
+        exit_status=7,
+        transcript_bytes=23,
+        stderr_bytes=11,
+        cleanup_proved=True,
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "run_bounded_agent",
+        lambda *args, **kwargs: runner_result,
+        raising=False,
+    )
+
+    status = llmenv.main(
+        [
+            "run-agent-bounded",
+            "--transcript",
+            str(tmp_path / "transcript.jsonl"),
+            "--stderr",
+            str(tmp_path / "agent.stderr"),
+            "--",
+            "agent-client",
+        ]
+    )
+
+    streams = capsys.readouterr()
+    assert status == 0
+    assert streams.out == json.dumps(runner_result.to_dict(), indent=2) + "\n"
+    assert streams.err == ""
+    assert set(json.loads(streams.out)) == {
+        "schema",
+        "outcome",
+        "exit_status",
+        "transcript_bytes",
+        "stderr_bytes",
+        "cleanup_proved",
+    }
+
+
+def test_run_agent_bounded_boundary_result_still_succeeds(
+    tmp_path: Path, monkeypatch, capsys
+):
+    import llmenv
+    from pylib.agent_runner import BoundedRunResult
+
+    runner_result = BoundedRunResult(
+        outcome="boundary-failure",
+        exit_status=None,
+        transcript_bytes=0,
+        stderr_bytes=0,
+        cleanup_proved=False,
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "run_bounded_agent",
+        lambda *args, **kwargs: runner_result,
+        raising=False,
+    )
+
+    status = llmenv.main(
+        [
+            "run-agent-bounded",
+            "--transcript",
+            str(tmp_path / "transcript.jsonl"),
+            "--stderr",
+            str(tmp_path / "agent.stderr"),
+            "agent-client",
+        ]
+    )
+
+    streams = capsys.readouterr()
+    assert status == 0
+    assert json.loads(streams.out) == runner_result.to_dict()
+    assert streams.err == ""
+
+
+@pytest.mark.parametrize("remainder", [(), ("--",)])
+def test_run_agent_bounded_rejects_missing_remainder_command(
+    tmp_path: Path, monkeypatch, capsys, remainder: tuple[str, ...]
+):
+    import llmenv
+
+    monkeypatch.setattr(
+        llmenv,
+        "run_bounded_agent",
+        lambda *args, **kwargs: pytest.fail("runner must not be called"),
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        llmenv.main(
+            [
+                "run-agent-bounded",
+                "--transcript",
+                str(tmp_path / "transcript.jsonl"),
+                "--stderr",
+                str(tmp_path / "agent.stderr"),
+                *remainder,
+            ]
+        )
+
+    streams = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert streams.out == ""
+    assert "a remainder command is required" in streams.err
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--runtime-seconds", "not-a-number"),
+        ("--runtime-seconds", "nan"),
+        ("--runtime-seconds", "inf"),
+        ("--runtime-seconds", "0"),
+        ("--runtime-seconds", "-1"),
+        ("--grace-seconds", "not-a-number"),
+        ("--grace-seconds", "nan"),
+        ("--grace-seconds", "inf"),
+        ("--grace-seconds", "0"),
+        ("--grace-seconds", "-1"),
+        ("--stream-limit-bytes", "not-an-integer"),
+        ("--stream-limit-bytes", "1.5"),
+        ("--stream-limit-bytes", "0"),
+        ("--stream-limit-bytes", "-1"),
+    ],
+)
+def test_run_agent_bounded_rejects_invalid_limits(
+    tmp_path: Path, monkeypatch, capsys, option: str, value: str
+):
+    import llmenv
+
+    monkeypatch.setattr(
+        llmenv,
+        "run_bounded_agent",
+        lambda *args, **kwargs: pytest.fail("runner must not be called"),
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        llmenv.main(
+            [
+                "run-agent-bounded",
+                "--transcript",
+                str(tmp_path / "transcript.jsonl"),
+                "--stderr",
+                str(tmp_path / "agent.stderr"),
+                option,
+                value,
+                "--",
+                "agent-client",
+            ]
+        )
+
+    streams = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert streams.out == ""
+    assert f"argument {option}" in streams.err
+
+
+def test_run_agent_bounded_forwards_production_defaults(
+    tmp_path: Path, monkeypatch, capsys
+):
+    import llmenv
+    from pylib.agent_runner import (
+        DEFAULT_GRACE_SECONDS,
+        DEFAULT_RUNTIME_SECONDS,
+        DEFAULT_STREAM_LIMIT_BYTES,
+        BoundedRunResult,
+        RunLimits,
+    )
+
+    captured = {}
+
+    def fake_run(command, transcript_path, stderr_path, *, limits):
+        captured["limits"] = limits
+        return BoundedRunResult(
+            outcome="completed",
+            exit_status=0,
+            transcript_bytes=0,
+            stderr_bytes=0,
+            cleanup_proved=True,
+        )
+
+    monkeypatch.setattr(llmenv, "run_bounded_agent", fake_run, raising=False)
+
+    status = llmenv.main(
+        [
+            "run-agent-bounded",
+            "--transcript",
+            str(tmp_path / "transcript.jsonl"),
+            "--stderr",
+            str(tmp_path / "agent.stderr"),
+            "--",
+            "agent-client",
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().err == ""
+    assert captured["limits"] == RunLimits(
+        runtime_seconds=DEFAULT_RUNTIME_SECONDS,
+        grace_seconds=DEFAULT_GRACE_SECONDS,
+        stream_limit_bytes=DEFAULT_STREAM_LIMIT_BYTES,
+    )
+
+
 def test_config_flag_works_before_the_subcommand(tmp_path):
     config = tmp_path / "models.yml"
     result = run("--config", str(config), "init", "--template", "models.yml.example")

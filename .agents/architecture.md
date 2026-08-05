@@ -18,6 +18,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
+| `pylib/agent_runner.py` | Bounded live-agent scopes, stream capture, and cleanup proof |
 | `pylib/config.py` | Schema, enable/disable, `models_max` validation and clamping |
 | `pylib/gguf.py` | GGUF header parsing, KV geometry |
 | `pylib/detect.py` | GPU and compositor detection from sysfs |
@@ -40,6 +41,9 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
   register a phantom model.
 - Host-side probes use `127.0.0.1`, never `localhost`.
 - A failed Vulkan benchmark configures CPU fallback and exits nonzero.
+- Live Pi and OpenCode checks enter a random systemd user scope through
+  `run-agent-bounded`; Bash consumes only the six-field result JSON and never
+  treats unproved cleanup as a model result.
 
 ## Platform
 

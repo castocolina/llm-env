@@ -24,6 +24,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from pylib.agent_runner import (
+    DEFAULT_GRACE_SECONDS,
+    DEFAULT_RUNTIME_SECONDS,
+    DEFAULT_STREAM_LIMIT_BYTES,
+    RunLimits,
+    run_bounded_agent,
+)
 from pylib.budget import BudgetError, compute_budget, kv_cache_components_mib
 from pylib.config import (
     DEFAULT_CONFIG_PATH,
@@ -54,6 +61,28 @@ def emit(payload: dict[str, Any], code: int = 0) -> int:
 
 def fail(message: str) -> int:
     return emit({"error": message}, 1)
+
+
+def finite_positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be a finite positive number"
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def cmd_detect(args: argparse.Namespace) -> int:
@@ -240,6 +269,26 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     return emit({"written": written, "path": str(path)})
 
 
+def cmd_run_agent_bounded(args: argparse.Namespace) -> int:
+    command = args.agent_command
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        args.command_parser.error("a remainder command is required")
+
+    result = run_bounded_agent(
+        command,
+        args.transcript,
+        args.stderr,
+        limits=RunLimits(
+            runtime_seconds=args.runtime_seconds,
+            grace_seconds=args.grace_seconds,
+            stream_limit_bytes=args.stream_limit_bytes,
+        ),
+    )
+    return emit(result.to_dict())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llmenv")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
@@ -289,6 +338,27 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = sub.add_parser("migrate-config")
     migrate.add_argument("--config", default=argparse.SUPPRESS)
     migrate.set_defaults(func=cmd_migrate_config)
+
+    run_agent = sub.add_parser("run-agent-bounded")
+    run_agent.add_argument("--transcript", type=Path, required=True)
+    run_agent.add_argument("--stderr", type=Path, required=True)
+    run_agent.add_argument(
+        "--runtime-seconds",
+        type=finite_positive_float,
+        default=DEFAULT_RUNTIME_SECONDS,
+    )
+    run_agent.add_argument(
+        "--grace-seconds",
+        type=finite_positive_float,
+        default=DEFAULT_GRACE_SECONDS,
+    )
+    run_agent.add_argument(
+        "--stream-limit-bytes",
+        type=positive_int,
+        default=DEFAULT_STREAM_LIMIT_BYTES,
+    )
+    run_agent.add_argument("agent_command", nargs=argparse.REMAINDER)
+    run_agent.set_defaults(func=cmd_run_agent_bounded, command_parser=run_agent)
 
     return parser
 
