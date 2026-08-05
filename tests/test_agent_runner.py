@@ -234,6 +234,20 @@ class CgroupEventsBackend(FakeBackend):
         return SystemdScopeBackend().cgroup_empty(cgroup_path)
 
 
+class ScopeRealizationBackend(FakeBackend):
+    def cgroup_path(self, unit_name: str, timeout_seconds: float) -> Path | None:
+        self.cgroup_path_calls += 1
+        assert timeout_seconds > 0
+        assert unit_name == self.unit_name
+        assert self.raw_process is not None
+        if self.wait_for_exit_before_cgroup:
+            self.raw_process.wait(timeout=timeout_seconds)
+        return SystemdScopeBackend(cgroup_root=Path("/fake-cgroup")).cgroup_path(
+            unit_name,
+            timeout_seconds,
+        )
+
+
 def private_output(path: Path) -> None:
     path.touch()
     path.chmod(0o600)
@@ -362,6 +376,27 @@ def observe_cleanup(
     return result, observed_paths, reap_calls, clock[0]
 
 
+def install_cgroup_query_outputs(
+    monkeypatch,
+    manager_outputs: Sequence[str],
+) -> list[str]:
+    queried_units: list[str] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        unit_name = command[3]
+        queried_units.append(unit_name)
+        output = manager_outputs[
+            min(len(queried_units) - 1, len(manager_outputs) - 1)
+        ].format(unit_name=unit_name)
+        return systemctl_result(output)
+
+    monkeypatch.setattr(agent_runner.subprocess, "run", fake_run)
+    return queried_units
+
+
 def test_bounded_run_completes_and_captures_both_streams(tmp_path: Path) -> None:
     result, transcript, client_stderr, backend = run_fixture(
         tmp_path,
@@ -447,6 +482,103 @@ def test_bounded_run_completes_when_saved_cgroup_outlives_fast_launcher(
     assert result.exit_status == exit_status
     assert result.cleanup_proved is True
     assert backend.signals == []
+
+
+def test_bounded_run_retries_loaded_scope_until_cgroup_path_is_realized(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = ScopeRealizationBackend()
+    queried_units = install_cgroup_query_outputs(
+        monkeypatch,
+        [
+            "LoadState=loaded\nControlGroup=\n",
+            "LoadState=loaded\nControlGroup=/{unit_name}\n",
+        ],
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "import time; time.sleep(0.05)",
+        backend=backend,
+    )
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "completed",
+        "exit_status": 0,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": True,
+    }
+    assert backend.cgroup_path_calls == 2
+    assert queried_units == [backend.unit_name, backend.unit_name]
+    assert backend.signals == []
+
+
+def test_bounded_run_fails_closed_when_launcher_exits_before_scope_realization(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = ScopeRealizationBackend(wait_for_exit_before_cgroup=True)
+    queried_units = install_cgroup_query_outputs(
+        monkeypatch,
+        ["LoadState=loaded\nControlGroup=\n"],
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "raise SystemExit(17)",
+        backend=backend,
+    )
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "boundary-failure",
+        "exit_status": 17,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": False,
+    }
+    assert backend.cgroup_path_calls == 1
+    assert queried_units == [backend.unit_name]
+    assert backend.signals == [signal.SIGTERM]
+
+
+def test_bounded_run_retries_persistent_loaded_scope_until_runtime_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = ScopeRealizationBackend()
+    queried_units = install_cgroup_query_outputs(
+        monkeypatch,
+        ["LoadState=loaded\nControlGroup=\n"],
+    )
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            runtime_seconds=0.1,
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.to_dict() == {
+            "schema": 1,
+            "outcome": "boundary-failure",
+            "exit_status": -signal.SIGTERM,
+            "transcript_bytes": 0,
+            "stderr_bytes": 0,
+            "cleanup_proved": False,
+        }
+        assert backend.cgroup_path_calls >= 2
+        assert queried_units == [backend.unit_name] * backend.cgroup_path_calls
+        assert backend.signals == [signal.SIGTERM]
+    finally:
+        if backend.process is not None and backend.process.poll() is None:
+            backend.process.kill()
+            backend.process.wait(timeout=1.0)
 
 
 @pytest.mark.parametrize(
@@ -1303,14 +1435,16 @@ def test_systemd_backend_queries_and_parses_loaded_scope_cgroup(
     }
 
 
-def test_systemd_backend_returns_none_only_for_confirmed_missing_scope(
+@pytest.mark.parametrize("load_state", ["not-found", "loaded"])
+def test_systemd_backend_returns_none_for_exact_unobservable_scope(
     monkeypatch,
+    load_state: str,
 ) -> None:
     monkeypatch.setattr(
         agent_runner.subprocess,
         "run",
         lambda *args, **kwargs: systemctl_result(
-            "LoadState=not-found\nControlGroup=\n"
+            f"LoadState={load_state}\nControlGroup=\n"
         ),
     )
 
@@ -1361,7 +1495,7 @@ def test_systemd_backend_wraps_cgroup_query_errors(
         "LoadState=loaded\nLoadState=loaded\nControlGroup=/user.slice/test.scope\n",
         "LoadState=loaded\nControlGroup=/user.slice/test.scope\nUnknown=value\n",
         "LoadState=masked\nControlGroup=/user.slice/test.scope\n",
-        "LoadState=loaded\nControlGroup=\n",
+        "LoadState=masked\nControlGroup=\n",
         "LoadState=loaded\nControlGroup=relative/path\n",
         "LoadState=loaded\nControlGroup=/user.slice/../escape.scope\n",
         "LoadState=loaded\nControlGroup=/\n",

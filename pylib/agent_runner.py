@@ -191,8 +191,10 @@ class SystemdScopeBackend:
             if relative_text:
                 raise BoundaryError("missing scope returned a cgroup path")
             return None
-        if load_state != "loaded" or not relative_text:
+        if load_state != "loaded":
             raise BoundaryError("transient scope has no usable cgroup path")
+        if not relative_text:
+            return None
 
         relative = PurePosixPath(relative_text)
         if (
