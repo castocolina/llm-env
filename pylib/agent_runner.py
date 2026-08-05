@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import queue
@@ -36,6 +37,10 @@ Outcome = Literal[
 
 class BoundaryError(RuntimeError):
     """The process boundary cannot be established or proved clean."""
+
+
+class _CgroupRemovalInProgress(BoundaryError):
+    """The saved cgroup path is being deactivated or removed."""
 
 
 @dataclass(frozen=True)
@@ -236,9 +241,19 @@ class SystemdScopeBackend:
             except FileNotFoundError:
                 return True
             except OSError as exc:
+                if exc.errno == errno.ENODEV:
+                    raise _CgroupRemovalInProgress(
+                        "saved cgroup path removal is in progress"
+                    ) from exc
                 raise BoundaryError("could not inspect saved cgroup path") from exc
             raise BoundaryError("cgroup.events is absent from the saved cgroup path")
-        except (OSError, UnicodeError) as exc:
+        except OSError as exc:
+            if exc.errno == errno.ENODEV:
+                raise _CgroupRemovalInProgress(
+                    "saved cgroup path removal is in progress"
+                ) from exc
+            raise BoundaryError("could not read cgroup.events") from exc
+        except UnicodeError as exc:
             raise BoundaryError("could not read cgroup.events") from exc
 
         fields: dict[str, str] = {}
@@ -385,6 +400,8 @@ def _cleanup_now(
         return False, True
     try:
         return backend.cgroup_empty(cgroup_path), False
+    except _CgroupRemovalInProgress:
+        return False, False
     except BoundaryError:
         return False, True
 
@@ -439,6 +456,8 @@ def _wait_for_cleanup(
     while time.monotonic() < deadline:
         try:
             scope_empty = backend.cgroup_empty(cgroup_path)
+        except _CgroupRemovalInProgress:
+            pass
         except BoundaryError:
             boundary_failed = True
         else:
@@ -456,6 +475,8 @@ def _wait_for_cleanup(
 
     try:
         scope_empty = backend.cgroup_empty(cgroup_path)
+    except _CgroupRemovalInProgress:
+        return False, True, False
     except BoundaryError:
         return False, True, False
     if scope_empty:

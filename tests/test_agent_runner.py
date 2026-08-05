@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
@@ -228,6 +229,11 @@ class FakeBackend:
         return scope_empty
 
 
+class CgroupEventsBackend(FakeBackend):
+    def cgroup_empty(self, cgroup_path: Path) -> bool:
+        return SystemdScopeBackend().cgroup_empty(cgroup_path)
+
+
 def private_output(path: Path) -> None:
     path.touch()
     path.chmod(0o600)
@@ -305,6 +311,55 @@ def install_thread_start_failure(monkeypatch, failing_start: int) -> None:
             self._thread.join(timeout=timeout)
 
     monkeypatch.setattr(agent_runner.threading, "Thread", ControlledThread)
+
+
+def install_cgroup_observations(
+    monkeypatch,
+    observations: Sequence[str | OSError],
+) -> list[Path]:
+    observed_paths: list[Path] = []
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        observed_paths.append(path)
+        observation = observations[min(len(observed_paths) - 1, len(observations) - 1)]
+        if isinstance(observation, OSError):
+            raise observation
+        return observation
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return observed_paths
+
+
+def observe_cleanup(
+    monkeypatch,
+    observations: Sequence[str | OSError],
+    *,
+    reaped: bool = True,
+) -> tuple[tuple[bool, bool, bool], list[Path], list[object], float]:
+    clock = [10.0]
+    reap_calls: list[object] = []
+    observed_paths = install_cgroup_observations(monkeypatch, observations)
+
+    def advance_clock(seconds: float) -> None:
+        clock[0] += seconds
+
+    def reap(*args: object) -> bool:
+        reap_calls.append(args)
+        return reaped
+
+    monkeypatch.setattr(agent_runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent_runner.time, "sleep", advance_clock)
+    monkeypatch.setattr(agent_runner, "_reap_local_launcher", reap)
+
+    result = agent_runner._wait_for_cleanup(
+        CgroupEventsBackend(),
+        Path("/fake-cgroup/test.scope"),
+        object(),
+        (),
+        10.02,
+        0.25,
+    )
+    return result, observed_paths, reap_calls, clock[0]
 
 
 def test_bounded_run_completes_and_captures_both_streams(tmp_path: Path) -> None:
@@ -763,6 +818,102 @@ def test_bounded_run_waits_full_grace_after_cleanup_read_error(
     assert result.cleanup_proved is True
     assert backend.signals == [signal.SIGTERM, signal.SIGKILL]
     assert backend.signal_times[1] - backend.signal_times[0] >= grace_seconds
+
+
+def test_bounded_run_recovers_from_one_cgroup_removal_observation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = CgroupEventsBackend()
+    observed_paths = install_cgroup_observations(
+        monkeypatch,
+        [
+            OSError(errno.ENODEV, "fixture cgroup removal in progress"),
+            "populated 0\nfrozen 0\n",
+        ],
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "import time; time.sleep(60)",
+        runtime_seconds=0.05,
+        grace_seconds=0.05,
+        backend=backend,
+    )
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "timeout",
+        "exit_status": -signal.SIGTERM,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": True,
+    }
+    assert len(observed_paths) == 2
+    assert backend.signals == [signal.SIGTERM]
+
+
+def test_cleanup_now_does_not_make_cgroup_removal_sticky(monkeypatch) -> None:
+    class CompletedProcess:
+        def poll(self) -> int:
+            return 0
+
+    install_cgroup_observations(
+        monkeypatch,
+        [OSError(errno.ENODEV, "fixture cgroup removal in progress")],
+    )
+
+    assert agent_runner._cleanup_now(
+        CgroupEventsBackend(),
+        Path("/fake-cgroup/test.scope"),
+        CompletedProcess(),
+        (),
+    ) == (False, False)
+
+
+def test_wait_for_cleanup_keeps_generic_error_sticky(monkeypatch) -> None:
+    result, observed_paths, reap_calls, _ = observe_cleanup(
+        monkeypatch,
+        [
+            OSError(errno.EIO, "fixture generic cgroup read failure"),
+            "populated 0\n",
+        ],
+    )
+
+    assert result == (True, True, False)
+    assert len(observed_paths) == 2
+    assert len(reap_calls) == 1
+
+
+def test_wait_for_cleanup_fails_closed_on_persistent_cgroup_removal(
+    monkeypatch,
+) -> None:
+    result, observed_paths, reap_calls, finished_at = observe_cleanup(
+        monkeypatch,
+        [OSError(errno.ENODEV, "fixture persistent cgroup removal")],
+    )
+
+    assert result == (False, True, False)
+    assert len(observed_paths) == 3
+    assert reap_calls == []
+    assert finished_at == pytest.approx(10.02)
+
+
+def test_wait_for_cleanup_requires_reap_after_cgroup_removal_resolves(
+    monkeypatch,
+) -> None:
+    result, observed_paths, reap_calls, _ = observe_cleanup(
+        monkeypatch,
+        [
+            OSError(errno.ENODEV, "fixture cgroup removal in progress"),
+            "populated 0\n",
+        ],
+        reaped=False,
+    )
+
+    assert result == (False, True, False)
+    assert len(observed_paths) == 2
+    assert len(reap_calls) == 1
 
 
 def test_local_launcher_kill_waits_full_term_grace(monkeypatch) -> None:
@@ -1251,6 +1402,48 @@ def test_systemd_backend_parses_cgroup_events_and_absence(tmp_path: Path) -> Non
 
     scope.rmdir()
     assert backend.cgroup_empty(scope) is True
+
+
+@pytest.mark.parametrize(
+    ("failure_location", "error_number", "is_removal_race"),
+    [
+        ("read", errno.ENODEV, True),
+        ("stat", errno.ENODEV, True),
+        ("read", errno.EIO, False),
+        ("stat", errno.EIO, False),
+    ],
+)
+def test_systemd_backend_maps_only_enodev_to_private_removal_race(
+    tmp_path: Path,
+    monkeypatch,
+    failure_location: str,
+    error_number: int,
+    is_removal_race: bool,
+) -> None:
+    backend = SystemdScopeBackend(cgroup_root=tmp_path)
+    scope = tmp_path / "scope"
+    failure = OSError(error_number, "fixture cgroup failure")
+
+    if failure_location == "read":
+        def fail_read(*args: object, **kwargs: object) -> str:
+            raise failure
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    else:
+        def missing_events(*args: object, **kwargs: object) -> str:
+            raise FileNotFoundError(errno.ENOENT, "fixture events absent")
+
+        def fail_stat(*args: object, **kwargs: object) -> os.stat_result:
+            raise failure
+
+        monkeypatch.setattr(Path, "read_text", missing_events)
+        monkeypatch.setattr(Path, "stat", fail_stat)
+
+    with pytest.raises(BoundaryError) as raised:
+        backend.cgroup_empty(scope)
+
+    assert (type(raised.value) is not BoundaryError) is is_removal_race
+    assert raised.value.__cause__ is failure
 
 
 @pytest.mark.parametrize(
