@@ -3229,6 +3229,7 @@ def run_agent_check(
     bounded_results: tuple[str | bytes, ...] = (),
     bounded_exit_statuses: tuple[int, ...] = (),
     bounded_cli_stderr: str = "",
+    bounded_result_fault: str = "",
     fail_pi_configuration: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
@@ -3238,6 +3239,7 @@ def run_agent_check(
     assert real_jq is not None
     assert real_yq is not None
     assert real_date is not None
+    assert bounded_result_fault in {"", "mktemp", "chmod", "write", "read"}
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -3288,6 +3290,36 @@ def run_agent_check(
         command = commands / name
         command.write_text(f"#!/usr/bin/bash\nexec {executable!s} \"$@\"\n")
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    if bounded_result_fault == "mktemp":
+        mktemp = commands / "mktemp"
+        mktemp.write_text(
+            "#!/usr/bin/bash\n"
+            'if [[ "${!#}" == */bounded-result.XXXXXX ]]; then\n'
+            "    printf '%s\\n' 'bounded result mktemp failed' >&2\n"
+            "    exit 71\n"
+            "fi\n"
+            'exec /usr/bin/mktemp "$@"\n'
+        )
+        mktemp.chmod(mktemp.stat().st_mode | stat.S_IXUSR)
+    if bounded_result_fault in {"chmod", "write"}:
+        chmod = commands / "chmod"
+        chmod.write_text(
+            "#!/usr/bin/bash\n"
+            'if [ "$1" = 600 ] && [[ "$2" == */bounded-result.* ]]; then\n'
+            '    if [ "$AGENT_CHECK_BOUNDED_RESULT_FAULT" = chmod ]; then\n'
+            "        printf '%s\\n' 'bounded result chmod failed' >&2\n"
+            "        exit 72\n"
+            "    fi\n"
+            '    /usr/bin/chmod "$@" || exit $?\n'
+            '    /usr/bin/rm -f -- "$2" || exit $?\n'
+            '    /usr/bin/mkdir -- "$2" || exit $?\n'
+            "    printf '%s\\n' 'bounded result write path replaced' >&2\n"
+            "    exit 0\n"
+            "fi\n"
+            'exec /usr/bin/chmod "$@"\n'
+        )
+        chmod.chmod(chmod.stat().st_mode | stat.S_IXUSR)
 
     jq = commands / "jq"
     jq.write_text(
@@ -3348,6 +3380,12 @@ def run_agent_check(
         "'{schema:1,outcome:\"completed\",exit_status:$exit_status,"
         "transcript_bytes:$transcript_bytes,stderr_bytes:$stderr_bytes,"
         "cleanup_proved:true}'\n"
+        "fi\n"
+        'if [ "$AGENT_CHECK_BOUNDED_RESULT_FAULT" = read ]; then\n'
+        '    bounded_output="$(/usr/bin/readlink "/proc/$$/fd/1")"\n'
+        '    /usr/bin/rm -f -- "$bounded_output" || exit $?\n'
+        '    /usr/bin/mkdir -- "$bounded_output" || exit $?\n'
+        "    printf '%s\\n' 'bounded result read path replaced' >&2\n"
         "fi\n"
         'if [ -n "$AGENT_CHECK_BOUNDED_CLI_STDERR" ]; then\n'
         '    printf "%s\\n" "$AGENT_CHECK_BOUNDED_CLI_STDERR" >&2\n'
@@ -3423,6 +3461,7 @@ def run_agent_check(
         "AGENT_CHECK_BOUNDED_RESULTS_DIR": str(bounded_results_dir),
         "AGENT_CHECK_BOUNDED_STATUSES_DIR": str(bounded_statuses_dir),
         "AGENT_CHECK_BOUNDED_CLI_STDERR": bounded_cli_stderr,
+        "AGENT_CHECK_BOUNDED_RESULT_FAULT": bounded_result_fault,
         "AGENT_CHECK_REPO_DIR": str(ROOT),
         "ARTIFACTS": str(artifacts),
         "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
@@ -4033,6 +4072,27 @@ def test_agent_check_accepts_a_negative_integral_completed_exit_status(
     assert "stage=resource boundary" not in result.stderr
 
 
+@pytest.mark.parametrize("exit_status", (9007199254740993, -9007199254740993))
+def test_agent_check_preserves_large_canonical_exit_status_text(
+    tmp_path: pathlib.Path,
+    exit_status: int,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(bounded_result_json(exit_status=exit_status),),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 2
+    assert f"Exit status:\n  {exit_status}" in agent_rows(result.stdout)[0]
+    assert "Verdict: FAIL stage=command exit" in result.stderr
+    assert "stage=resource boundary" not in result.stderr
+    assert "FAIL client=pi model=gemma4 check=weather reason=agent-failed" in result.stdout
+    assert "PASS client=pi model=gemma4 check=fx reason=agent-returned-json" in result.stdout
+    assert "Results: 1 passed, 1 failed" in result.stdout
+
+
 def test_agent_check_treats_completed_null_status_as_boundary_uncertainty(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4069,6 +4129,47 @@ def test_agent_check_treats_bounded_cli_failure_as_boundary_uncertainty(
     assert "Agent parser stderr:\n  bounded CLI setup failed" in result.stdout
     assert "Verdict: FAIL stage=resource boundary" in result.stderr
     assert "reason=boundary-failure" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("fault", "bounded_calls", "diagnostic"),
+    (
+        ("mktemp", 0, "bounded result mktemp failed"),
+        ("chmod", 0, "bounded result chmod failed"),
+        ("write", 0, "bounded result write path replaced"),
+        ("read", 1, "bounded result read path replaced"),
+    ),
+)
+def test_agent_check_aborts_on_bounded_result_file_fault(
+    tmp_path: pathlib.Path,
+    fault: str,
+    bounded_calls: int,
+    diagnostic: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_result_fault=fault,
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == bounded_calls
+    rows = agent_rows(result.stdout)
+    assert len(rows) == 1
+    assert_common_agent_fields(rows[0], client="pi", exit_status="NOT RUN")
+    assert f"Agent parser stderr:\n  {diagnostic}" in rows[0]
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "model=ornith" not in result.stdout
+    assert "client=opencode" not in result.stdout
+    assert (
+        "Verdict: FAIL stage=resource boundary client=pi model=gemma4 check=weather "
+        "reason=scope setup or cleanup could not be proved"
+    ) in result.stderr
+    assert (
+        "FAIL client=pi model=gemma4 check=weather reason=boundary-failure"
+    ) in result.stdout
+    assert "Results: 0 passed, 1 failed" in result.stdout
 
 
 _VALID_BOUNDED_RESULT = bounded_result_json()

@@ -167,7 +167,7 @@ parse_bounded_result() {
     ' "$result_file" >/dev/null; then
         return 1
     fi
-    jq -rse '
+    if ! jq -se '
         def integral_number:
             type == "number" and isfinite and (. == floor);
 
@@ -194,12 +194,18 @@ parse_bounded_result() {
         | select((.transcript_bytes | integral_number) and .transcript_bytes >= 0)
         | select((.stderr_bytes | integral_number) and .stderr_bytes >= 0)
         | select(.cleanup_proved | type == "boolean")
-        | .outcome,
-          (if .exit_status == null then "null"
-           elif .exit_status == 0 then "0"
-           else (.exit_status | floor | tostring)
-           end),
-          (.cleanup_proved | tostring)
+    ' "$result_file" >/dev/null; then
+        return 1
+    fi
+    jq -Rrse '
+        def exactly_one_value($pattern):
+            [scan($pattern)]
+            | select(length == 1 and (.[0] | length) == 1)
+            | .[0][0];
+
+        exactly_one_value("\"outcome\"[[:space:]]*:[[:space:]]*\"(completed|timeout|transcript-limit|stderr-limit|boundary-failure)\"[[:space:]]*[,}]"),
+        exactly_one_value("\"exit_status\"[[:space:]]*:[[:space:]]*(null|0|-?[1-9][0-9]*)[[:space:]]*[,}]"),
+        exactly_one_value("\"cleanup_proved\"[[:space:]]*:[[:space:]]*(true|false)[[:space:]]*[,}]")
     ' "$result_file"
 }
 
