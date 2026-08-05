@@ -12,7 +12,7 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 
-require_cmd curl jq yq date uv systemd-run systemctl
+require_cmd curl jq yq date uv systemd-run systemctl wc
 
 workspace="$(mktemp -d)" || die "could not create private workspace"
 chmod 700 "$workspace" || die "could not secure private workspace"
@@ -41,12 +41,15 @@ base="http://127.0.0.1:${port}"
 weather_url='https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago'
 fx_url='https://open.er-api.com/v6/latest/USD'
 agent_diagnostic_excerpt_bytes=262144
+source_response_limit_bytes=1048576
+final_response_limit_bytes=1048576
 
 fetch_models() {
     local config_file="$1"
     local server_base="$2"
 
-    curl -fsS --max-time 20 -K "$config_file" "${server_base}/v1/models" |
+    curl -fsS --max-time 20 --max-filesize "$source_response_limit_bytes" \
+        -K "$config_file" "${server_base}/v1/models" |
         jq -er '.data[]?.id'
 }
 
@@ -79,9 +82,10 @@ snapshot_for() {
     esac
 
     log_block "Source" "fetch check=${check_name}"
-    log_command "curl --fail --silent --show-error --max-time 20 ${url}"
+    log_command "curl --fail --silent --show-error --max-time 20 --max-filesize ${source_response_limit_bytes} ${url}"
     log_block "Input" "(none)"
-    if curl -fsS --max-time 20 "$url" >"$stdout_file" 2>"$stderr_file"; then
+    if curl -fsS --max-time 20 --max-filesize "$source_response_limit_bytes" \
+        "$url" >"$stdout_file" 2>"$stderr_file"; then
         status=0
     else
         status=$?
@@ -435,20 +439,19 @@ run_agent() {
 }
 
 parse_evidence() {
-    local assistant_text="$1" fenced fence_prefix='^[[:space:]]*```json'
+    local assistant_file="$1"
 
-    if [[ "$assistant_text" =~ $fence_prefix ]]; then
-        if ! fenced="$(printf '%s' "$assistant_text" | jq -Rrse \
-            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body')"; then
-            return 1
-        fi
-        [ -n "$fenced" ] || return 1
-        printf '%s' "$fenced" | jq -sce \
+    if jq -Rse 'test("^[[:space:]]*```json")' "$assistant_file" >/dev/null; then
+        jq -Rrse \
+            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body | select(length > 0)' \
+            "$assistant_file" |
+            jq -sce \
             'select(length == 1 and (.[0] | type == "object")) | .[0]'
         return
     fi
-    printf '%s' "$assistant_text" | jq -sce \
-        'select(length == 1 and (.[0] | type == "object")) | .[0]'
+    jq -sce \
+        'select(length == 1 and (.[0] | type == "object")) | .[0]' \
+        "$assistant_file"
 }
 
 source_evidence_differences() {
@@ -562,7 +565,13 @@ for client in "${clients[@]}"; do
             agent_failed=0
             if run_agent "$client" "$alias" "$prompt" "$transcript_file" \
                 "$client_stderr_file" "$final_file" "$parser_error_file"; then
-                if ! evidence="$(parse_evidence "$(<"$final_file")" 2>>"$parser_error_file")"; then
+                final_bytes="$(wc -c < "$final_file")"
+                if [ "$final_bytes" -gt "$final_response_limit_bytes" ]; then
+                    AGENT_FAILURE_STAGE="final response limit"
+                    AGENT_FAILURE_REASON="final assistant text exceeded ${final_response_limit_bytes} bytes"
+                    AGENT_RESULT_REASON="final-response-limit"
+                    agent_failed=1
+                elif ! evidence="$(parse_evidence "$final_file" 2>>"$parser_error_file")"; then
                     AGENT_FAILURE_STAGE="agent evidence parsing"
                     agent_failed=1
                 fi

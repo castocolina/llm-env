@@ -3232,6 +3232,10 @@ def run_agent_check(
     bounded_cli_stderr: str = "",
     bounded_result_fault: str = "",
     fail_pi_configuration: bool = False,
+    oversized_source: str = "",
+    oversized_final_client: str = "",
+    source_at_limit: str = "",
+    final_at_limit_client: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
@@ -3241,6 +3245,112 @@ def run_agent_check(
     assert real_yq is not None
     assert real_date is not None
     assert bounded_result_fault in {"", "mktemp", "chmod", "write", "read"}
+    assert oversized_source in {"", "models", "weather", "fx"}
+    assert oversized_final_client in {"", "pi", "opencode"}
+    assert source_at_limit in {"", "models"}
+    assert final_at_limit_client in {"", "pi", "opencode"}
+
+    source_response_limit_bytes = 1_048_576
+    aliases = model_aliases if model_aliases is not None else (model_alias,)
+
+    fixture_bodies = tmp_path / "fixture-bodies"
+    fixture_bodies.mkdir()
+    fixture_bodies.chmod(0o700)
+
+    def write_sized_json(
+        path: pathlib.Path,
+        prefix: bytes,
+        suffix: bytes,
+        size: int,
+        *,
+        sentinel: bytes,
+    ) -> None:
+        filler_bytes = size - len(prefix) - len(sentinel) - len(suffix)
+        assert filler_bytes >= 0
+        path.write_bytes(prefix + (b"x" * filler_bytes) + sentinel + suffix)
+        path.chmod(0o600)
+        assert path.stat().st_size == size
+
+    def write_left_padded_json(
+        path: pathlib.Path, body: dict[str, object], size: int
+    ) -> None:
+        encoded = json.dumps(body, separators=(",", ":")).encode()
+        assert len(encoded) <= size
+        path.write_bytes((b" " * (size - len(encoded))) + encoded)
+        path.chmod(0o600)
+        assert path.stat().st_size == size
+
+    response_prefix_file = fixture_bodies / "response-prefix"
+    response_prefix_file.write_text(agent_response_prefix)
+    response_prefix_file.chmod(0o600)
+
+    source_limit_file = fixture_bodies / "source-at-limit"
+    if source_at_limit == "models":
+        model_data = json.dumps(
+            [{"id": alias} for alias in aliases], separators=(",", ":")
+        ).encode()
+        write_sized_json(
+            source_limit_file,
+            b'{"data":' + model_data + b',"padding":"',
+            b'"}',
+            source_response_limit_bytes,
+            sentinel=b"source-at-limit-sentinel",
+        )
+
+    oversized_source_file = fixture_bodies / "oversized-source"
+    if oversized_source:
+        source_prefixes = {
+            "models": b'{"data":'
+            + json.dumps(
+                [{"id": alias} for alias in aliases], separators=(",", ":")
+            ).encode()
+            + b',"padding":"',
+            "weather": (
+                b'{"current":{"time":"2026-07-27T13:00:01",'
+                b'"temperature_2m":16.3,"weather_code":3},"padding":"'
+            ),
+            "fx": (
+                b'{"time_last_update_utc":"2026-07-27T00:00:02",'
+                b'"rates":{"CLP":946.527902},"padding":"'
+            ),
+        }
+        write_sized_json(
+            oversized_source_file,
+            source_prefixes[oversized_source],
+            b'"}',
+            source_response_limit_bytes + 1,
+            sentinel=b"oversized-source-sentinel",
+        )
+
+    weather_evidence = {
+        "source_url": (
+            "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&"
+            "longitude=-70.6693&current=temperature_2m,weather_code&"
+            "timezone=America%2FSantiago"
+        ),
+        "source_timestamp": "2026-07-27T13:00:01",
+        "temperature_2m": 16.3,
+        "weather_code": 3,
+    }
+    oversized_final_file = fixture_bodies / "oversized-final"
+    if oversized_final_client:
+        write_left_padded_json(
+            oversized_final_file,
+            weather_evidence | {"fixture": "oversized-final-sentinel"},
+            source_response_limit_bytes,
+        )
+        with oversized_final_file.open("ab") as stream:
+            stream.write(b" ")
+        assert oversized_final_file.stat().st_size == source_response_limit_bytes + 1
+
+    final_limit_file = fixture_bodies / "final-at-limit"
+    if final_at_limit_client:
+        # The extraction jq appends one newline, so this produces exactly 1 MiB.
+        write_left_padded_json(
+            final_limit_file,
+            weather_evidence | {"fixture": "final-at-limit-sentinel"},
+            source_response_limit_bytes - 1,
+        )
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -3256,6 +3366,8 @@ def run_agent_check(
     bounded_counter.write_text("0\n")
     bounded_calls = tmp_path / "bounded-calls"
     bounded_calls.touch()
+    evidence_parser_calls = tmp_path / "evidence-parser-calls"
+    evidence_parser_calls.touch()
     bounded_results_dir = tmp_path / "bounded-results"
     bounded_results_dir.mkdir()
     for index, bounded_result in enumerate(bounded_results):
@@ -3288,6 +3400,7 @@ def run_agent_check(
         "sed": "/usr/bin/sed",
         "systemctl": "/usr/bin/true",
         "systemd-run": "/usr/bin/true",
+        "wc": "/usr/bin/wc",
         "yq": real_yq,
     }.items():
         command = commands / name
@@ -3327,6 +3440,9 @@ def run_agent_check(
     jq = commands / "jq"
     jq.write_text(
         "#!/usr/bin/bash\n"
+        'if [[ "$*" == *\'select(length == 1 and (.[0] | type == "object"))\'* ]]; then\n'
+        '    printf "%s\\n" "$*" >> "$AGENT_CHECK_EVIDENCE_PARSER_CALLS"\n'
+        "fi\n"
         '"$REAL_JQ" "$@"\n'
         "status=$?\n"
         'if [ -n "$AGENT_CHECK_PARSER_STDERR" ] '
@@ -3405,33 +3521,71 @@ def run_agent_check(
     curl.write_text(
         "#!/usr/bin/bash\n"
         "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "max_filesize=\n"
+        "max_filesize_count=0\n"
+        "for ((index = 1; index <= $#; index++)); do\n"
+        "  if [ \"${!index}\" = --max-filesize ]; then\n"
+        "    max_filesize_count=$((max_filesize_count + 1))\n"
+        "    value_index=$((index + 1))\n"
+        "    max_filesize=\"${!value_index:-}\"\n"
+        "  fi\n"
+        "done\n"
         "url=\"${!#}\"\n"
+        "if [ \"$max_filesize_count\" -ne 1 ] || [ \"$max_filesize\" != 1048576 ]; then\n"
+        "  printf '%s\\n' 'harness curl omitted exact --max-filesize 1048576' >&2\n"
+        "  exit 98\n"
+        "fi\n"
+        "selected_file=\n"
         "case \"$url\" in\n"
-        "  */v1/models) printf '%s\\n' \"$AGENT_CHECK_MODELS\" ;;\n"
-        "  https://api.open-meteo.com/*)\n"
-        "    if [ -n \"$AGENT_CHECK_WEATHER_BODY\" ]; then\n"
-        "      printf '%s\\n' \"$AGENT_CHECK_WEATHER_BODY\"\n"
+        "  */v1/models)\n"
+        "    if [ \"$AGENT_CHECK_OVERSIZED_SOURCE\" = models ]; then\n"
+        "      selected_file=\"$AGENT_CHECK_OVERSIZED_SOURCE_FILE\"\n"
+        "    elif [ \"$AGENT_CHECK_SOURCE_AT_LIMIT\" = models ]; then\n"
+        "      selected_file=\"$AGENT_CHECK_SOURCE_LIMIT_FILE\"\n"
         "    else\n"
-        "      count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
-        "      count=$((count + 1))\n"
-        "      printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
+        "      printf '%s\\n' \"$AGENT_CHECK_MODELS\"\n"
+        "      exit 0\n"
+        "    fi\n"
+        "    ;;\n"
+        "  https://api.open-meteo.com/*)\n"
+        "    count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
+        "    count=$((count + 1))\n"
+        "    printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
+        "    if [ \"$AGENT_CHECK_OVERSIZED_SOURCE\" = weather ]; then\n"
+        "      selected_file=\"$AGENT_CHECK_OVERSIZED_SOURCE_FILE\"\n"
+        "    elif [ -n \"$AGENT_CHECK_WEATHER_BODY\" ]; then\n"
+        "      printf '%s\\n' \"$AGENT_CHECK_WEATHER_BODY\"\n"
+        "      exit 0\n"
+        "    else\n"
         "      printf -v seconds '%02d' \"$count\"\n"
         "      jq -cn --arg seconds \"$seconds\" '{current:{time:(\"2026-07-27T13:00:\" + $seconds),temperature_2m:16.3,weather_code:3}}'\n"
+        "      exit 0\n"
         "    fi\n"
         "    ;;\n"
         "  https://open.er-api.com/*)\n"
-        "    if [ -n \"$AGENT_CHECK_FX_BODY\" ]; then\n"
+        "    count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
+        "    count=$((count + 1))\n"
+        "    printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
+        "    if [ \"$AGENT_CHECK_OVERSIZED_SOURCE\" = fx ]; then\n"
+        "      selected_file=\"$AGENT_CHECK_OVERSIZED_SOURCE_FILE\"\n"
+        "    elif [ -n \"$AGENT_CHECK_FX_BODY\" ]; then\n"
         "      printf '%s\\n' \"$AGENT_CHECK_FX_BODY\"\n"
+        "      exit 0\n"
         "    else\n"
-        "      count=$(< \"$AGENT_CHECK_SOURCE_COUNTER\")\n"
-        "      count=$((count + 1))\n"
-        "      printf '%s\\n' \"$count\" > \"$AGENT_CHECK_SOURCE_COUNTER\"\n"
         "      printf -v seconds '%02d' \"$count\"\n"
         "      jq -cn --arg seconds \"$seconds\" '{time_last_update_utc:(\"2026-07-27T00:00:\" + $seconds),rates:{CLP:946.527902}}'\n"
+        "      exit 0\n"
         "    fi\n"
         "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
+        "selected_bytes=$(/usr/bin/wc -c < \"$selected_file\")\n"
+        "if [ -n \"$max_filesize\" ] && [ \"$selected_bytes\" -gt \"$max_filesize\" ]; then\n"
+        "  /usr/bin/head -c \"$max_filesize\" \"$selected_file\"\n"
+        "  printf '%s\\n' 'curl: (63) Authorization: Bearer test-key-not-a-secret maximum file size exceeded' >&2\n"
+        "  exit 63\n"
+        "fi\n"
+        "/usr/bin/cat \"$selected_file\"\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
 
@@ -3440,7 +3594,6 @@ def run_agent_check(
         command.write_text(body)
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
 
-    aliases = model_aliases if model_aliases is not None else (model_alias,)
     environment = os.environ | {
         "AGENT_CHECK_MODELS": json.dumps({"data": [{"id": alias} for alias in aliases]}),
         "AGENT_CHECK_WEATHER_BODY": weather_body
@@ -3449,7 +3602,7 @@ def run_agent_check(
         "AGENT_CHECK_FX_BODY": fx_body
         if fx_body is not None
         else "",
-        "AGENT_CHECK_RESPONSE_PREFIX": agent_response_prefix,
+        "AGENT_CHECK_RESPONSE_PREFIX_FILE": str(response_prefix_file),
         "AGENT_CHECK_RESPONSE_SUFFIX": agent_response_suffix,
         "AGENT_CHECK_SOURCE_TIMESTAMP": agent_source_timestamp or "",
         "AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE": agent_weather_evidence_override
@@ -3466,6 +3619,15 @@ def run_agent_check(
         "AGENT_CHECK_BOUNDED_STATUSES_DIR": str(bounded_statuses_dir),
         "AGENT_CHECK_BOUNDED_CLI_STDERR": bounded_cli_stderr,
         "AGENT_CHECK_BOUNDED_RESULT_FAULT": bounded_result_fault,
+        "AGENT_CHECK_EVIDENCE_PARSER_CALLS": str(evidence_parser_calls),
+        "AGENT_CHECK_OVERSIZED_SOURCE": oversized_source,
+        "AGENT_CHECK_OVERSIZED_SOURCE_FILE": str(oversized_source_file),
+        "AGENT_CHECK_SOURCE_AT_LIMIT": source_at_limit,
+        "AGENT_CHECK_SOURCE_LIMIT_FILE": str(source_limit_file),
+        "AGENT_CHECK_OVERSIZED_FINAL_CLIENT": oversized_final_client,
+        "AGENT_CHECK_OVERSIZED_FINAL_FILE": str(oversized_final_file),
+        "AGENT_CHECK_FINAL_AT_LIMIT_CLIENT": final_at_limit_client,
+        "AGENT_CHECK_FINAL_LIMIT_FILE": str(final_limit_file),
         "AGENT_CHECK_REPO_DIR": str(ROOT),
         "ARTIFACTS": str(artifacts),
         "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
@@ -3517,6 +3679,11 @@ def bounded_invocations(calls: pathlib.Path) -> list[str]:
     return calls.with_name("bounded-calls").read_text().splitlines()
 
 
+def evidence_parser_invocations(calls: pathlib.Path) -> list[str]:
+    """Return calls to the exact-one-object evidence validator."""
+    return calls.with_name("evidence-parser-calls").read_text().splitlines()
+
+
 def bounded_result_json(**overrides: object) -> str:
     """Build one exact bounded-runner result for fixture queues."""
     result: dict[str, object] = {
@@ -3561,6 +3728,7 @@ def assert_common_agent_fields(
 
 VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
+printf '%s' "${!#}" > "$ARTIFACTS/prompt-pi-${BASHPID}"
 if [ -n "${AGENT_CHECK_CLIENT_STDERR_FILE:-}" ]; then
     /usr/bin/cat "$AGENT_CHECK_CLIENT_STDERR_FILE" >&2
 elif [ -n "${AGENT_CHECK_CLIENT_STDERR:-}" ]; then
@@ -3569,25 +3737,42 @@ fi
 printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASHPID}.json"
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
+if [ "$AGENT_CHECK_OVERSIZED_FINAL_CLIENT" = pi ] && [[ "$*" == *weather* ]]; then
+    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:$response[:-1]}]}}'
+    exit
+fi
+if [ "$AGENT_CHECK_FINAL_AT_LIMIT_CLIENT" = pi ] && [[ "$*" == *weather* ]]; then
+    jq -cn --rawfile response "$AGENT_CHECK_FINAL_LIMIT_FILE" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:$response}]}}'
+    exit
+fi
 if [[ "$*" == *weather* ]]; then
     evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T13:00:" + $seconds) else $source_timestamp end),temperature_2m:16.3,weather_code:3} | . + $evidence_override')"
 else
     evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_FX_EVIDENCE_OVERRIDE" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T00:00:" + $seconds) else $source_timestamp end),usd_to_clp:946.527902} | . + $evidence_override')"
 fi
-jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}]}}'
+jq -cn --rawfile response_prefix "$AGENT_CHECK_RESPONSE_PREFIX_FILE" --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:($response_prefix + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}]}}'
 """
 
 VALID_OPENCODE_STUB = """#!/usr/bin/bash
 printf 'opencode %s xdg=%s\\n' "$*" "${XDG_CONFIG_HOME:-}" >> "$CALLS"
+printf '%s' "${!#}" > "$ARTIFACTS/prompt-opencode-${BASHPID}"
 printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc"
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
+if [ "$AGENT_CHECK_OVERSIZED_FINAL_CLIENT" = opencode ] && [[ "$*" == *weather* ]]; then
+    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"text",part:{type:"text",text:$response[:-1]}}'
+    exit
+fi
+if [ "$AGENT_CHECK_FINAL_AT_LIMIT_CLIENT" = opencode ] && [[ "$*" == *weather* ]]; then
+    jq -cn --rawfile response "$AGENT_CHECK_FINAL_LIMIT_FILE" '{type:"text",part:{type:"text",text:$response}}'
+    exit
+fi
 if [[ "$*" == *weather* ]]; then
     evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_WEATHER_EVIDENCE_OVERRIDE" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T13:00:" + $seconds) else $source_timestamp end),temperature_2m:16.3,weather_code:3} | . + $evidence_override')"
 else
     evidence="$(jq -cn --arg seconds "$seconds" --arg source_timestamp "$AGENT_CHECK_SOURCE_TIMESTAMP" --argjson evidence_override "$AGENT_CHECK_FX_EVIDENCE_OVERRIDE" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:(if $source_timestamp == "" then ("2026-07-27T00:00:" + $seconds) else $source_timestamp end),usd_to_clp:946.527902} | . + $evidence_override')"
 fi
-jq -cn --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:(env.AGENT_CHECK_RESPONSE_PREFIX + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
+jq -cn --rawfile response_prefix "$AGENT_CHECK_RESPONSE_PREFIX_FILE" --argjson evidence "$evidence" '{type:"text",part:{type:"text",text:($response_prefix + ($evidence | tojson) + env.AGENT_CHECK_RESPONSE_SUFFIX)}}'
 """
 
 STDIN_CONSUMING_PI_STUB = VALID_PI_STUB.replace(
@@ -3689,6 +3874,191 @@ def test_agent_check_rejects_arguments_without_echoing_them(
     assert "accepts no arguments" in result.stderr
     assert forbidden_argument not in result.stdout
     assert forbidden_argument not in result.stderr
+
+
+def test_agent_check_input_bounds_reject_oversized_model_discovery_before_matrix(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        oversized_source="models",
+    )
+    combined = result.stdout + result.stderr
+
+    oversized_file = calls.with_name("fixture-bodies") / "oversized-source"
+    assert stat.S_IMODE(oversized_file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(oversized_file.stat().st_mode) == 0o600
+    assert oversized_file.stat().st_size == 1_048_577
+    assert result.returncode != 0
+    assert "could not fetch model aliases" in result.stderr
+    assert bounded_call_count(calls) == 0
+    assert "Agent:" not in result.stdout
+    assert "pi " not in calls.read_text()
+    assert "https://api.open-meteo.com/" not in calls.read_text()
+    assert "https://open.er-api.com/" not in calls.read_text()
+    assert "oversized-source-sentinel" not in combined
+
+
+@pytest.mark.parametrize(
+    ("source", "failed_url", "continued_url"),
+    (
+        (
+            "weather",
+            "https://api.open-meteo.com/",
+            "https://open.er-api.com/v6/latest/USD",
+        ),
+        (
+            "fx",
+            "https://open.er-api.com/",
+            "https://api.open-meteo.com/v1/forecast?",
+        ),
+    ),
+)
+def test_agent_check_input_bounds_reject_oversized_public_source_without_client(
+    tmp_path: pathlib.Path,
+    source: str,
+    failed_url: str,
+    continued_url: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        oversized_source=source,
+    )
+    combined = result.stdout + result.stderr
+
+    oversized_file = calls.with_name("fixture-bodies") / "oversized-source"
+    assert stat.S_IMODE(oversized_file.stat().st_mode) == 0o600
+    assert oversized_file.stat().st_size == 1_048_577
+    assert result.returncode != 0
+    assert f"stage=source fetch reason={source} source exited 63" in result.stderr
+    assert "Source stdout:" in result.stdout
+    assert (
+        "Source stderr:\n  curl: (63) Authorization: Bearer <redacted> "
+        "maximum file size exceeded"
+    ) in result.stdout
+    assert "test-key-not-a-secret" not in combined
+    assert "oversized-source-sentinel" not in combined
+    assert len(combined.encode()) < 400_000
+    client_calls = [
+        line for line in calls.read_text().splitlines() if line.startswith("pi ")
+    ]
+    assert len(client_calls) == 1
+    assert failed_url not in client_calls[0]
+    assert continued_url in client_calls[0]
+    assert bounded_call_count(calls) == 1
+    assert "Results: 1 passed, 1 failed" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+def test_agent_check_input_bounds_gate_oversized_final_before_parser_and_continue(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        oversized_final_client=client,
+        keep_artifacts=True,
+    )
+    combined = result.stdout + result.stderr
+
+    oversized_file = calls.with_name("fixture-bodies") / "oversized-final"
+    assert stat.S_IMODE(oversized_file.stat().st_mode) == 0o600
+    assert oversized_file.stat().st_size == 1_048_577
+    assert result.returncode != 0
+    assert (
+        f"Verdict: FAIL stage=final response limit client={client} model=gemma4 "
+        "check=weather reason=final assistant text exceeded 1048576 bytes"
+    ) in result.stderr
+    assert (
+        f"FAIL client={client} model=gemma4 check=weather "
+        "reason=final-response-limit"
+    ) in result.stdout
+    assert "stage=agent evidence parsing" not in result.stderr
+    assert len(evidence_parser_invocations(calls)) == 1
+    assert bounded_call_count(calls) == 2
+    assert (
+        f"PASS client={client} model=gemma4 check=fx reason=agent-returned-json"
+    ) in result.stdout
+    assert "Results: 1 passed, 1 failed" in result.stdout
+    weather_row = next(row for row in agent_rows(result.stdout) if "check=weather" in row)
+    displayed_final = weather_row.split("Final response:\n  ", 1)[1].split(
+        f"\nFAIL client={client}", 1
+    )[0]
+    assert len(displayed_final.encode()) == 262_144
+    assert "oversized-final-sentinel" not in combined
+    assert len(combined.encode()) < 800_000
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    final_sizes = [path.stat().st_size for path in retained_dir.glob("assistant-final.*")]
+    assert 1_048_577 in final_sizes
+
+
+def test_agent_check_input_bounds_accept_source_response_at_exact_limit(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={},
+        source_at_limit="models",
+    )
+
+    source_file = calls.with_name("fixture-bodies") / "source-at-limit"
+    assert source_file.stat().st_size == 1_048_576
+    assert stat.S_IMODE(source_file.stat().st_mode) == 0o600
+    assert result.returncode != 0
+    assert "could not fetch model aliases" not in result.stderr
+    assert "fail no supported agent is installed" in result.stderr
+
+
+def test_agent_check_input_bounds_accept_final_response_at_exact_limit(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        final_at_limit_client="pi",
+        keep_artifacts=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_rows(result.stdout, "PASS client=pi") == 2
+    assert len(evidence_parser_invocations(calls)) == 2
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    final_sizes = [path.stat().st_size for path in retained_dir.glob("assistant-final.*")]
+    assert 1_048_576 in final_sizes
+
+
+def test_agent_check_input_bounds_cap_every_harness_owned_source_curl(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(tmp_path, clients={"pi": VALID_PI_STUB})
+
+    assert result.returncode == 0, result.stderr
+    curl_calls = [
+        line.removeprefix("curl ")
+        for line in calls.read_text().splitlines()
+        if line.startswith("curl ")
+    ]
+    assert len(curl_calls) == 3
+    for call in curl_calls:
+        assert call.split().count("--max-filesize") == 1
+        assert "--max-filesize 1048576" in call
+    assert result.stdout.count(
+        "Command: curl --fail --silent --show-error --max-time 20 "
+        "--max-filesize 1048576 https://"
+    ) == 2
 
 
 @pytest.mark.parametrize(
@@ -4797,12 +5167,13 @@ def test_agent_check_keeps_exact_source_url_and_numeric_evidence_checks(
 def test_agent_check_prompt_requires_literal_source_evidence(
     tmp_path: pathlib.Path, client: str, stub: str
 ) -> None:
-    result, calls, _ = run_agent_check(tmp_path, clients={client: stub})
+    result, calls, artifacts = run_agent_check(tmp_path, clients={client: stub})
 
     assert result.returncode == 0, result.stderr
     prompts = [line for line in calls.read_text().splitlines() if line.startswith(f"{client} ")]
     assert len(prompts) == 2
     for prompt in prompts:
+        assert "--max-filesize" not in prompt
         assert "You MUST use bash to execute this exact command verbatim" in prompt
         assert "as the only network request:" in prompt
         assert "The URL argument must be copied byte-for-byte" in prompt
@@ -4842,6 +5213,42 @@ def test_agent_check_prompt_requires_literal_source_evidence(
         "curl -fsS --max-time 20 -- 'https://open.er-api.com/v6/latest/USD'"
         in prompt
         for prompt in prompts
+    )
+    weather_url = (
+        "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&"
+        "longitude=-70.6693&current=temperature_2m,weather_code&"
+        "timezone=America%2FSantiago"
+    )
+    fx_url = "https://open.er-api.com/v6/latest/USD"
+    common_prefix = (
+        "You MUST use bash to execute this exact command verbatim as the only network "
+        "request: curl -fsS --max-time 20 -- '{url}'. The URL argument must be copied "
+        "byte-for-byte from the command. Do not substitute any source, endpoint, proxy, "
+        "mirror, or query. Return fields only from that command's response. The source_url "
+        "field must reproduce the literal URL byte-for-byte, including percent encoding. "
+    )
+    expected_weather_prompt = common_prefix.format(url=weather_url) + (
+        "The source_timestamp field must copy the source response's timestamp text "
+        "byte-for-byte. Do not convert or normalize its timezone, add an offset, or change "
+        "its date. Return source_timestamp as ISO-8601. Return exactly one JSON object "
+        "containing source_url, source_timestamp, temperature_2m, and weather_code."
+    )
+    expected_fx_prompt = common_prefix.format(url=fx_url) + (
+        "Return source_timestamp as ISO-8601. The source_timestamp field must convert the "
+        "source response's exact time_last_update_utc timestamp to ISO-8601 while preserving "
+        "its UTC instant, UTC timezone (Z or +00:00), and source calendar date. Do not "
+        "convert it to local time or another timezone, and do not change its date. Return "
+        "exactly one JSON object containing source_url, source_timestamp, and usd_to_clp."
+    )
+    recorded_prompt_bytes = {
+        path.read_bytes() for path in artifacts.glob(f"prompt-{client}-*")
+    }
+    assert recorded_prompt_bytes == {
+        expected_weather_prompt.encode(),
+        expected_fx_prompt.encode(),
+    }
+    assert all(
+        "--max-filesize" not in invocation for invocation in bounded_invocations(calls)
     )
 
 
