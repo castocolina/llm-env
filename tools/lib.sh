@@ -58,6 +58,41 @@ log_block() {
     fi
 }
 
+log_file_excerpt() {
+    if [ "$#" -ne 3 ]; then
+        return 64
+    fi
+
+    local label="$1" file="$2" max_bytes="$3" redacted_label
+    if [[ ! "$max_bytes" =~ ^[0-9]+$ ]]; then
+        return 64
+    fi
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+        return 66
+    fi
+    if ! redacted_label="$(redact_text "$label")"; then
+        return 1
+    fi
+
+    printf '%s:\n' "$redacted_label"
+    if [ ! -s "$file" ]; then
+        printf '  (empty)\n'
+        return 0
+    fi
+    if ! _redact_stream < "$file" |
+        {
+            excerpt_status=0
+            head -c "$max_bytes" || excerpt_status=$?
+            cat >/dev/null || excerpt_status=$?
+            exit "$excerpt_status"
+        } |
+        sed 's/^/  /'
+    then
+        return 1
+    fi
+    printf '\n'
+}
+
 log_nonempty_block() {
     if [ -n "$2" ]; then
         log_block "$1" "$2"

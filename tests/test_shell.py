@@ -2299,6 +2299,180 @@ def yq_value(config: pathlib.Path, expression: str) -> str:
     ).stdout.strip()
 
 
+def run_log_file_excerpt(
+    tmp_path: pathlib.Path,
+    arguments: tuple[str, ...],
+    *,
+    api_key: str = "fixture-stream-secret",
+    fail_consumer: bool = False,
+    fail_redaction: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke the streaming diagnostic helper with an isolated private config."""
+    config = tmp_path / "models.yml"
+    config.write_text(f"server:\n  api_key: {api_key}\n")
+    config.chmod(0o600)
+    helper = tmp_path / "log-file-excerpt.sh"
+    helper.write_text(
+        "#!/usr/bin/env bash\n"
+        'source "$TEST_REPO_DIR/tools/lib.sh"\n'
+        + (
+            "redact_text() { printf '%s' \"$1\"; }\n"
+            "_redact_stream() { cat >/dev/null; return 17; }\n"
+            if fail_redaction
+            else ""
+        )
+        + ("head() { return 17; }\n" if fail_consumer else "")
+        + 'log_file_excerpt "$@"\n'
+    )
+    return subprocess.run(
+        ["/usr/bin/bash", str(helper), *arguments],
+        cwd=ROOT,
+        env=os.environ
+        | {"LLM_ENV_CONFIG": str(config), "TEST_REPO_DIR": str(ROOT)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_log_file_excerpt_redacts_before_bounding_and_drains_large_input(
+    tmp_path: pathlib.Path,
+) -> None:
+    api_key = "fixture-stream-secret"
+    source = tmp_path / "client stderr.txt"
+    source.write_bytes(api_key.encode() + b"ab" + b"x" * (1024 * 1024))
+
+    result = run_log_file_excerpt(
+        tmp_path,
+        ("Client stderr", str(source), "12"),
+        api_key=api_key,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Client stderr:\n  <redacted>ab\n"
+    assert api_key not in result.stdout
+    assert api_key not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [(), ("Label", "file"), ("Label", "file", "1", "extra")],
+)
+def test_log_file_excerpt_requires_exactly_three_arguments(
+    tmp_path: pathlib.Path, arguments: tuple[str, ...]
+) -> None:
+    result = run_log_file_excerpt(tmp_path, arguments)
+
+    assert result.returncode == 64
+
+
+@pytest.mark.parametrize("max_bytes", ["", "-1", "+1", "1.0", " 1", "1x"])
+def test_log_file_excerpt_rejects_invalid_max_bytes(
+    tmp_path: pathlib.Path, max_bytes: str
+) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("content")
+
+    result = run_log_file_excerpt(
+        tmp_path, ("Diagnostic", str(source), max_bytes)
+    )
+
+    assert result.returncode == 64
+
+
+@pytest.mark.parametrize("source_kind", ["missing", "directory"])
+def test_log_file_excerpt_rejects_missing_or_nonregular_input(
+    tmp_path: pathlib.Path, source_kind: str
+) -> None:
+    source = tmp_path / "diagnostic"
+    if source_kind == "directory":
+        source.mkdir()
+
+    result = run_log_file_excerpt(tmp_path, ("Diagnostic", str(source), "12"))
+
+    assert result.returncode == 66
+
+
+def test_log_file_excerpt_rejects_an_unreadable_regular_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("content")
+    source.chmod(0)
+    if os.access(source, os.R_OK):
+        pytest.skip("effective user can read mode-000 files")
+
+    result = run_log_file_excerpt(tmp_path, ("Diagnostic", str(source), "12"))
+
+    assert result.returncode == 66
+
+
+def test_log_file_excerpt_marks_an_empty_file(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "empty.txt"
+    source.touch()
+
+    result = run_log_file_excerpt(tmp_path, ("Empty diagnostic", str(source), "12"))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Empty diagnostic:\n  (empty)\n"
+
+
+def test_log_file_excerpt_allows_a_zero_byte_excerpt(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("content")
+
+    result = run_log_file_excerpt(tmp_path, ("Zero excerpt", str(source), "0"))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Zero excerpt:\n\n"
+
+
+def test_log_file_excerpt_redacts_the_label_and_indents_each_emitted_line(
+    tmp_path: pathlib.Path,
+) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("first\nsecond")
+
+    result = run_log_file_excerpt(
+        tmp_path,
+        ("Label fixture-stream-secret", str(source), "8"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Label <redacted>:\n  first\n  se\n"
+    assert "fixture-stream-secret" not in result.stdout + result.stderr
+
+
+def test_log_file_excerpt_normalizes_redaction_failure_to_status_one(
+    tmp_path: pathlib.Path,
+) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("content")
+
+    result = run_log_file_excerpt(
+        tmp_path,
+        ("Diagnostic", str(source), "12"),
+        fail_redaction=True,
+    )
+
+    assert result.returncode == 1
+
+
+def test_log_file_excerpt_normalizes_consumer_failure_to_status_one(
+    tmp_path: pathlib.Path,
+) -> None:
+    source = tmp_path / "diagnostic.txt"
+    source.write_text("content")
+
+    result = run_log_file_excerpt(
+        tmp_path,
+        ("Diagnostic", str(source), "12"),
+        fail_consumer=True,
+    )
+
+    assert result.returncode == 1
+
+
 def run_diagnostic_helper(
     tmp_path: pathlib.Path,
     text: str,
