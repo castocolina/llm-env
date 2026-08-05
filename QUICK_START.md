@@ -136,7 +136,9 @@ make logs
 
 Checks print their command, validation facts, and verdict. They omit empty
 diagnostic blocks; non-empty stderr and parser errors remain visible and
-redacted. `LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the redacted private
+redacted. Displayed diagnostics are bounded, redacted excerpts. Explicitly
+retained private artifacts are redacted before retention.
+`LLM_ENV_KEEP_CHECK_ARTIFACTS=1` retains only the redacted private
 diagnostic artifacts; without it, the checks remove them after printing their
 contents.
 

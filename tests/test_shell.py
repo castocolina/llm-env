@@ -3236,6 +3236,9 @@ def run_agent_check(
     oversized_final_client: str = "",
     source_at_limit: str = "",
     final_at_limit_client: str = "",
+    comparator_failure_once: bool = False,
+    uv_cache_result: str | None = None,
+    offline_bootstrap_failure: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
@@ -3345,11 +3348,10 @@ def run_agent_check(
 
     final_limit_file = fixture_bodies / "final-at-limit"
     if final_at_limit_client:
-        # The extraction jq appends one newline, so this produces exactly 1 MiB.
         write_left_padded_json(
             final_limit_file,
             weather_evidence | {"fixture": "final-at-limit-sentinel"},
-            source_response_limit_bytes - 1,
+            source_response_limit_bytes,
         )
 
     commands = tmp_path / "bin"
@@ -3368,6 +3370,14 @@ def run_agent_check(
     bounded_calls.touch()
     evidence_parser_calls = tmp_path / "evidence-parser-calls"
     evidence_parser_calls.touch()
+    comparator_calls = tmp_path / "comparator-calls"
+    comparator_calls.touch()
+    comparator_failure_marker = tmp_path / "comparator-failed"
+    uv_calls = tmp_path / "uv-calls"
+    uv_calls.touch()
+    uv_cache = tmp_path / "uv-cache"
+    uv_cache.mkdir()
+    resolved_uv_cache = str(uv_cache) if uv_cache_result is None else uv_cache_result
     bounded_results_dir = tmp_path / "bounded-results"
     bounded_results_dir.mkdir()
     for index, bounded_result in enumerate(bounded_results):
@@ -3443,6 +3453,17 @@ def run_agent_check(
         'if [[ "$*" == *\'select(length == 1 and (.[0] | type == "object"))\'* ]]; then\n'
         '    printf "%s\\n" "$*" >> "$AGENT_CHECK_EVIDENCE_PARSER_CALLS"\n'
         "fi\n"
+        'if [[ "$*" == *\'field=source_timestamp expected_date\'* ]]; then\n'
+        '    printf jq >> "$AGENT_CHECK_COMPARATOR_CALLS"\n'
+        '    printf " %q" "$@" >> "$AGENT_CHECK_COMPARATOR_CALLS"\n'
+        '    printf "\\n" >> "$AGENT_CHECK_COMPARATOR_CALLS"\n'
+        '    if [ "$AGENT_CHECK_COMPARATOR_FAILURE_ONCE" = 1 ] '
+        '&& [ ! -e "$AGENT_CHECK_COMPARATOR_FAILURE_MARKER" ]; then\n'
+        '        printf x > "$AGENT_CHECK_COMPARATOR_FAILURE_MARKER"\n'
+        "        printf '%s\\n' 'injected evidence comparator failure' >&2\n"
+        "        exit 74\n"
+        "    fi\n"
+        "fi\n"
         '"$REAL_JQ" "$@"\n'
         "status=$?\n"
         'if [ -n "$AGENT_CHECK_PARSER_STDERR" ] '
@@ -3464,22 +3485,38 @@ def run_agent_check(
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
+        'printf "uv %s\\n" "$*" >> "$AGENT_CHECK_UV_CALLS"\n'
+        'if [ "$#" -eq 2 ] && [ "$1" = cache ] && [ "$2" = dir ]; then\n'
+        '    printf "%s\\n" "$AGENT_CHECK_UV_CACHE_RESULT"\n'
+        "    exit 0\n"
+        "fi\n"
         'count="$(< "$AGENT_CHECK_BOUNDED_COUNTER")"\n'
         'printf "%s\\n" "$((count + 1))" > "$AGENT_CHECK_BOUNDED_COUNTER"\n'
-        'printf "uv %s\\n" "$*" >> "$AGENT_CHECK_BOUNDED_CALLS"\n'
-        'if [ "$#" -lt 9 ] '
+        'printf "uv UV_CACHE_DIR=%s %s\\n" "${UV_CACHE_DIR:-}" "$*" '
+        '>> "$AGENT_CHECK_BOUNDED_CALLS"\n'
+        'if [ -z "${UV_CACHE_DIR:-}" ] '
+        '|| [ "$UV_CACHE_DIR" != "$AGENT_CHECK_UV_CACHE_RESULT" ]; then\n'
+        "    printf '%s\\n' 'bounded runner used an unstable uv cache' >&2\n"
+        "    exit 95\n"
+        "fi\n"
+        'if [ "$#" -lt 10 ] '
         '|| [ "$1" != run ] '
-        '|| [ "$2" != "$AGENT_CHECK_REPO_DIR/llmenv.py" ] '
-        '|| [ "$3" != run-agent-bounded ] '
-        '|| [ "$4" != --transcript ] '
-        '|| [ "$6" != --stderr ] '
-        '|| [ "$8" != -- ]; then\n'
+        '|| [ "$2" != --offline ] '
+        '|| [ "$3" != "$AGENT_CHECK_REPO_DIR/llmenv.py" ] '
+        '|| [ "$4" != run-agent-bounded ] '
+        '|| [ "$5" != --transcript ] '
+        '|| [ "$7" != --stderr ] '
+        '|| [ "$9" != -- ]; then\n'
         "    printf '%s\\n' 'invalid bounded CLI shape' >&2\n"
         "    exit 97\n"
         "fi\n"
-        'transcript_file="$5"\n'
-        'stderr_file="$7"\n'
-        "shift 8\n"
+        'transcript_file="$6"\n'
+        'stderr_file="$8"\n'
+        "shift 9\n"
+        'if [ "$AGENT_CHECK_OFFLINE_BOOTSTRAP_FAILURE" = 1 ]; then\n'
+        "    printf '%s\\n' 'offline cache bootstrap failed' >&2\n"
+        "    exit 75\n"
+        "fi\n"
         'if IFS= read -r _; then\n'
         "    printf '%s\\n' 'bounded runner inherited readable stdin' >&2\n"
         "    exit 96\n"
@@ -3620,6 +3657,14 @@ def run_agent_check(
         "AGENT_CHECK_BOUNDED_CLI_STDERR": bounded_cli_stderr,
         "AGENT_CHECK_BOUNDED_RESULT_FAULT": bounded_result_fault,
         "AGENT_CHECK_EVIDENCE_PARSER_CALLS": str(evidence_parser_calls),
+        "AGENT_CHECK_COMPARATOR_CALLS": str(comparator_calls),
+        "AGENT_CHECK_COMPARATOR_FAILURE_MARKER": str(comparator_failure_marker),
+        "AGENT_CHECK_COMPARATOR_FAILURE_ONCE": "1" if comparator_failure_once else "0",
+        "AGENT_CHECK_UV_CALLS": str(uv_calls),
+        "AGENT_CHECK_UV_CACHE_RESULT": resolved_uv_cache,
+        "AGENT_CHECK_OFFLINE_BOOTSTRAP_FAILURE": "1"
+        if offline_bootstrap_failure
+        else "0",
         "AGENT_CHECK_OVERSIZED_SOURCE": oversized_source,
         "AGENT_CHECK_OVERSIZED_SOURCE_FILE": str(oversized_source_file),
         "AGENT_CHECK_SOURCE_AT_LIMIT": source_at_limit,
@@ -3684,6 +3729,16 @@ def evidence_parser_invocations(calls: pathlib.Path) -> list[str]:
     return calls.with_name("evidence-parser-calls").read_text().splitlines()
 
 
+def comparator_invocations(calls: pathlib.Path) -> list[str]:
+    """Return calls to the source-evidence difference comparator."""
+    return calls.with_name("comparator-calls").read_text().splitlines()
+
+
+def uv_invocations(calls: pathlib.Path) -> list[str]:
+    """Return every fake uv invocation, including cache discovery."""
+    return calls.with_name("uv-calls").read_text().splitlines()
+
+
 def bounded_result_json(**overrides: object) -> str:
     """Build one exact bounded-runner result for fixture queues."""
     result: dict[str, object] = {
@@ -3738,7 +3793,7 @@ printf '%s\\n' "$(< "$PI_CODING_AGENT_DIR/models.json")" > "$ARTIFACTS/pi-${BASH
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
 if [ "$AGENT_CHECK_OVERSIZED_FINAL_CLIENT" = pi ] && [[ "$*" == *weather* ]]; then
-    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:$response[:-1]}]}}'
+    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:$response}]}}'
     exit
 fi
 if [ "$AGENT_CHECK_FINAL_AT_LIMIT_CLIENT" = pi ] && [[ "$*" == *weather* ]]; then
@@ -3760,7 +3815,7 @@ printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
 if [ "$AGENT_CHECK_OVERSIZED_FINAL_CLIENT" = opencode ] && [[ "$*" == *weather* ]]; then
-    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"text",part:{type:"text",text:$response[:-1]}}'
+    jq -cn --rawfile response "$AGENT_CHECK_OVERSIZED_FINAL_FILE" '{type:"text",part:{type:"text",text:$response}}'
     exit
 fi
 if [ "$AGENT_CHECK_FINAL_AT_LIMIT_CLIENT" = opencode ] && [[ "$*" == *weather* ]]; then
@@ -4038,6 +4093,8 @@ def test_agent_check_input_bounds_accept_final_response_at_exact_limit(
     retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
     final_sizes = [path.stat().st_size for path in retained_dir.glob("assistant-final.*")]
     assert 1_048_576 in final_sizes
+    fixture_file = calls.with_name("fixture-bodies") / "final-at-limit"
+    assert fixture_file.stat().st_size == 1_048_576
 
 
 def test_agent_check_input_bounds_cap_every_harness_owned_source_curl(
@@ -4059,6 +4116,229 @@ def test_agent_check_input_bounds_cap_every_harness_owned_source_curl(
         "Command: curl --fail --silent --show-error --max-time 20 "
         "--max-filesize 1048576 https://"
     ) == 2
+
+
+def test_agent_check_integration_fails_closed_when_comparator_errors(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        comparator_failure_once=True,
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 2
+    assert (
+        "Verdict: FAIL stage=source-evidence comparison client=pi model=gemma4 "
+        "check=weather reason=validated evidence comparison failed"
+    ) in result.stderr
+    assert (
+        "FAIL client=pi model=gemma4 check=weather "
+        "reason=evidence-comparison-failure"
+    ) in result.stdout
+    assert "PASS client=pi model=gemma4 check=weather" not in result.stdout
+    assert "PASS client=pi model=gemma4 check=fx reason=agent-returned-json" in result.stdout
+    weather_row = next(row for row in agent_rows(result.stdout) if "check=weather" in row)
+    assert "Agent parser stderr:\n  injected evidence comparator failure" in weather_row
+    assert "Results: 1 passed, 1 failed" in result.stdout
+
+
+def test_agent_check_integration_comparator_uses_only_private_json_files(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        keep_artifacts=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocations = comparator_invocations(calls)
+    assert len(invocations) == 2
+    for invocation in invocations:
+        assert "--slurpfile expected " in invocation
+        assert "--slurpfile received " in invocation
+        assert "source-snapshot." in invocation
+        assert "agent-evidence." in invocation
+        assert "--argjson expected" not in invocation
+        assert "--argjson received" not in invocation
+        assert '"source_url"' not in invocation
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    snapshot_files = list(retained_dir.glob("source-snapshot.*"))
+    evidence_files = list(retained_dir.glob("agent-evidence.*"))
+    assert len(snapshot_files) == 2
+    assert len(evidence_files) == 2
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o600
+        for path in snapshot_files + evidence_files
+    )
+
+
+@pytest.mark.parametrize(
+    ("weather_override", "fx_override", "field", "received"),
+    (
+        ('{"source_url":"https://example.invalid/received-weather"}', None, "source_url", "https://example.invalid/received-weather"),
+        (None, '{"source_url":"https://example.invalid/received-fx"}', "source_url", "https://example.invalid/received-fx"),
+        ('{"temperature_2m":-990001}', None, "temperature_2m", "-990001"),
+        ('{"weather_code":-990002}', None, "weather_code", "-990002"),
+        (None, '{"usd_to_clp":-990003}', "usd_to_clp", "-990003"),
+    ),
+)
+def test_agent_check_integration_redacts_every_required_received_value(
+    tmp_path: pathlib.Path,
+    weather_override: str | None,
+    fx_override: str | None,
+    field: str,
+    received: str,
+) -> None:
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        agent_weather_evidence_override=weather_override,
+        agent_fx_evidence_override=fx_override,
+    )
+
+    stdout_rows = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("FAIL client=pi") and f"field={field}" in line
+    ]
+    stderr_rows = [
+        line
+        for line in result.stderr.splitlines()
+        if "stage=source-evidence mismatch" in line and f"field={field}" in line
+    ]
+    assert result.returncode != 0
+    assert len(stdout_rows) == 1
+    assert len(stderr_rows) == 1
+    assert all('received="<redacted>"' in line for line in stdout_rows + stderr_rows)
+    assert all(received not in line for line in stdout_rows + stderr_rows)
+
+
+def test_agent_check_integration_never_emits_api_key_from_opencode_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    api_key = "model-controlled-required-field-api-key"
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={"opencode": VALID_OPENCODE_STUB},
+        api_key=api_key,
+        agent_weather_evidence_override=json.dumps({"source_url": api_key}),
+    )
+    combined = result.stdout + result.stderr
+    mismatch_rows = [
+        line
+        for line in combined.splitlines()
+        if "source-evidence mismatch" in line or line.startswith("FAIL client=opencode")
+    ]
+
+    assert result.returncode != 0
+    assert api_key not in combined
+    assert any("field=source_url" in line for line in mismatch_rows)
+    assert all('received="<redacted>"' in line for line in mismatch_rows)
+
+
+def test_agent_check_integration_extracts_exact_assistant_text_bytes(
+    tmp_path: pathlib.Path,
+) -> None:
+    script = (SCRIPT_DIR / "check-with-agents.sh").read_text()
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        final_at_limit_client="pi",
+        keep_artifacts=True,
+    )
+
+    assert script.count("jq -rjce '") == 2
+    assert "$response[:-1]" not in VALID_PI_STUB
+    assert "$response[:-1]" not in VALID_OPENCODE_STUB
+    fixture_file = calls.with_name("fixture-bodies") / "final-at-limit"
+    assert fixture_file.stat().st_size == 1_048_576
+    assert result.returncode == 0, result.stderr
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    assert 1_048_576 in [
+        path.stat().st_size for path in retained_dir.glob("assistant-final.*")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+def test_agent_check_integration_uses_one_stable_offline_uv_cache(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+) -> None:
+    result, calls, _ = run_agent_check(tmp_path, clients={client: stub})
+
+    assert result.returncode == 0, result.stderr
+    all_uv_calls = uv_invocations(calls)
+    assert all_uv_calls.count("uv cache dir") == 1
+    assert len(all_uv_calls) == 3
+    assert bounded_call_count(calls) == 2
+    assert len(bounded_invocations(calls)) == 2
+    expected_prefix = f"uv UV_CACHE_DIR={tmp_path / 'uv-cache'} run --offline {ROOT / 'llmenv.py'}"
+    assert all(call.startswith(expected_prefix) for call in bounded_invocations(calls))
+
+
+def test_agent_check_integration_rejects_an_empty_uv_cache_before_matrix(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        uv_cache_result="",
+    )
+
+    assert result.returncode != 0
+    assert "uv cache directory is empty" in result.stderr
+    assert bounded_call_count(calls) == 0
+    assert "Agent:" not in result.stdout
+    assert uv_invocations(calls) == ["uv cache dir"]
+
+
+def test_agent_check_integration_offline_bootstrap_failure_aborts_matrix(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        offline_bootstrap_failure=True,
+    )
+
+    assert result.returncode != 0
+    assert uv_invocations(calls)[0] == "uv cache dir"
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Agent parser stderr:\n  offline cache bootstrap failed" in result.stdout
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "client=opencode" not in result.stdout
+
+
+def test_agent_check_integration_preflights_helpers_and_documents_diagnostics() -> None:
+    script = (SCRIPT_DIR / "check-with-agents.sh").read_text()
+    prerequisite_line = next(
+        line for line in script.splitlines() if line.startswith("require_cmd ")
+    )
+    quick_start = " ".join((ROOT / "QUICK_START.md").read_text().split()).lower()
+
+    assert {"head", "cat", "sed"}.issubset(prerequisite_line.split())
+    assert "displayed diagnostics are bounded, redacted excerpts." in quick_start
+    assert (
+        "explicitly retained private artifacts are redacted before retention."
+        in quick_start
+    )
 
 
 @pytest.mark.parametrize(

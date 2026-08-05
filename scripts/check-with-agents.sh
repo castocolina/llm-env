@@ -12,7 +12,7 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 
-require_cmd curl jq yq date uv systemd-run systemctl wc
+require_cmd curl jq yq date uv systemd-run systemctl wc head cat sed
 
 workspace="$(mktemp -d)" || die "could not create private workspace"
 chmod 700 "$workspace" || die "could not secure private workspace"
@@ -156,11 +156,11 @@ ${credential}"
 }
 
 log_validation_facts() {
-    local check_name="$1" snapshot="$2"
+    local check_name="$1" snapshot_file="$2"
 
     case "$check_name" in
-        weather) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\ntemperature_2m=\(.temperature_2m)\nweather_code=\(.weather_code)"' <<<"$snapshot" ;;
-        fx) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\nusd_to_clp=\(.usd_to_clp)"' <<<"$snapshot" ;;
+        weather) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\ntemperature_2m=\(.temperature_2m)\nweather_code=\(.weather_code)"' "$snapshot_file" ;;
+        fx) jq -r '"source_url=\(.source_url)\nsource_date=\(.source_date)\nusd_to_clp=\(.usd_to_clp)"' "$snapshot_file" ;;
     esac
 }
 
@@ -353,7 +353,8 @@ run_agent() {
             if (
                 cd "$workspace" || exit 1
                 export PI_CODING_AGENT_DIR="$config_dir"
-                uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                UV_CACHE_DIR="$uv_cache_dir" uv run --offline \
+                    "${REPO_DIR}/llmenv.py" run-agent-bounded \
                     --transcript "$transcript_file" \
                     --stderr "$stderr_file" \
                     -- "${client_command[@]}" </dev/null >"$bounded_result_file"
@@ -365,7 +366,7 @@ run_agent() {
             if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
                 return 1
             fi
-            if ! jq -rce '
+            if ! jq -rjce '
                 [select(.type == "message_end" and .message.role == "assistant")
                  | [.message.content[]? | select(.type == "text") | .text] | join("")]
                 | last // empty
@@ -407,7 +408,8 @@ run_agent() {
                 export XDG_STATE_HOME="$workspace/opencode-state"
                 export OPENCODE_CONFIG="$config_file"
                 export OPENCODE_API_KEY="$api_key"
-                uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                UV_CACHE_DIR="$uv_cache_dir" uv run --offline \
+                    "${REPO_DIR}/llmenv.py" run-agent-bounded \
                     --transcript "$transcript_file" \
                     --stderr "$stderr_file" \
                     -- "${client_command[@]}" </dev/null >"$bounded_result_file"
@@ -419,7 +421,7 @@ run_agent() {
             if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
                 return 1
             fi
-            if ! jq -rce '
+            if ! jq -rjce '
                 reduce (select(.type == "text" and .part.type == "text") | .part) as $part
                 ({message_id: null, text: ""};
                  if .message_id == $part.messageID then .text += $part.text
@@ -456,8 +458,8 @@ parse_evidence() {
 
 source_evidence_differences() {
     local check_name="$1"
-    local snapshot="$2"
-    local evidence="$3"
+    local snapshot_file="$2"
+    local evidence_file="$3"
     local required_fields timestamp source_date source_timezone
     local timestamp_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])?$'
 
@@ -475,19 +477,37 @@ source_evidence_differences() {
             ;;
     esac
 
-    if ! timestamp="$(jq -er '.source_timestamp | strings' <<<"$evidence")" \
-        || ! [[ "$timestamp" =~ $timestamp_pattern ]]; then
+    if ! timestamp="$(jq -nr --slurpfile received "$evidence_file" '
+        if ($received | length) == 1 and ($received[0] | type) == "object" then
+            $received[0].source_timestamp | strings
+        else
+            error("validated evidence file must contain exactly one object")
+        end
+    ')"; then
+        return 1
+    fi
+    if [ -z "$timestamp" ] || ! [[ "$timestamp" =~ $timestamp_pattern ]]; then
         printf '%s\n' 'field=source_timestamp expected=ISO-8601 received="<redacted>"'
-        return
+        return 0
     fi
     # Calendar-day comparisons must use the timezone in which the source publishes data.
     if ! source_date="$(TZ="$source_timezone" date --date "$timestamp" +%F 2>/dev/null)"; then
         printf '%s\n' 'field=source_timestamp expected=ISO-8601 received="<redacted>"'
-        return
+        return 0
     fi
 
-    jq -nr --argjson expected "$snapshot" --argjson received "$evidence" \
-        --arg source_date "$source_date" --argjson fields "$required_fields" '
+    jq -nr --slurpfile expected "$snapshot_file" \
+        --slurpfile received "$evidence_file" --arg source_date "$source_date" \
+        --argjson fields "$required_fields" '
+        ($expected
+         | if length == 1 and (.[0] | type) == "object" then .[0]
+           else error("source snapshot file must contain exactly one object")
+           end) as $expected
+        | ($received
+           | if length == 1 and (.[0] | type) == "object" then .[0]
+             else error("validated evidence file must contain exactly one object")
+             end) as $received
+        |
         [
           (($expected.source_date // "<missing>") as $want_date
            | $source_date as $got_date
@@ -497,7 +517,7 @@ source_evidence_differences() {
            | ($expected[$field] // "<missing>") as $want
            | ($received[$field] // "<missing>") as $got
            | select($want != $got)
-           | "field=\($field) expected=\($want | tojson) received=\($got | tojson)")
+           | "field=\($field) expected=\($want | tojson) received=\"<redacted>\"")
         ]
         | .[]
     '
@@ -519,6 +539,11 @@ if [ "${#clients[@]}" -eq 0 ]; then
     printf '%s\n' 'fail no supported agent is installed' >&2
     exit 1
 fi
+
+if ! uv_cache_dir="$(uv cache dir)"; then
+    die "could not resolve uv cache directory"
+fi
+[ -n "$uv_cache_dir" ] || die "uv cache directory is empty"
 
 passes=0
 failures=0
@@ -555,13 +580,18 @@ for client in "${clients[@]}"; do
                     agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
                     ;;
             esac
+            snapshot_file="$(mktemp "${diagnostic_dir}/source-snapshot.XXXXXX")" || die "could not create source snapshot"
+            chmod 600 "$snapshot_file" || die "could not secure source snapshot"
+            printf '%s\n' "$snapshot" > "$snapshot_file" || die "could not write source snapshot"
             printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. The source_url field must reproduce the literal URL byte-for-byte, including percent encoding. ${timestamp_instruction} Return exactly one JSON object containing ${fields}."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"
             final_file="$(mktemp "${diagnostic_dir}/assistant-final.XXXXXX")" || die "could not create assistant final text"
+            evidence_file="$(mktemp "${diagnostic_dir}/agent-evidence.XXXXXX")" || die "could not create normalized agent evidence"
+            chmod 600 "$evidence_file" || die "could not secure normalized agent evidence"
             parser_error_file="$(mktemp "${diagnostic_dir}/agent-parser-stderr.XXXXXX")" || die "could not create agent parser stderr"
-            evidence=""
+            differences=""
             agent_failed=0
             if run_agent "$client" "$alias" "$prompt" "$transcript_file" \
                 "$client_stderr_file" "$final_file" "$parser_error_file"; then
@@ -571,11 +601,20 @@ for client in "${clients[@]}"; do
                     AGENT_FAILURE_REASON="final assistant text exceeded ${final_response_limit_bytes} bytes"
                     AGENT_RESULT_REASON="final-response-limit"
                     agent_failed=1
-                elif ! evidence="$(parse_evidence "$final_file" 2>>"$parser_error_file")"; then
+                elif ! parse_evidence "$final_file" > "$evidence_file" \
+                    2>>"$parser_error_file"; then
                     AGENT_FAILURE_STAGE="agent evidence parsing"
                     agent_failed=1
                 fi
             else
+                agent_failed=1
+            fi
+            if [ "$agent_failed" -eq 0 ] \
+                && ! differences="$(source_evidence_differences "$check_name" \
+                    "$snapshot_file" "$evidence_file" 2>>"$parser_error_file")"; then
+                AGENT_FAILURE_STAGE="source-evidence comparison"
+                AGENT_FAILURE_REASON="validated evidence comparison failed"
+                AGENT_RESULT_REASON="evidence-comparison-failure"
                 agent_failed=1
             fi
 
@@ -609,7 +648,6 @@ for client in "${clients[@]}"; do
                 continue
             fi
 
-            differences="$(source_evidence_differences "$check_name" "$snapshot" "$evidence")"
             if [ -z "$differences" ]; then
                 if [ -s "$client_stderr_file" ]; then
                     log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
@@ -618,7 +656,7 @@ for client in "${clients[@]}"; do
                     log_file_excerpt "Agent parser stderr" "$parser_error_file" "$agent_diagnostic_excerpt_bytes"
                 fi
                 log_file_excerpt "Final response" "$final_file" "$agent_diagnostic_excerpt_bytes"
-                log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
+                log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot_file")"
                 log_info "Verdict: PASS"
                 printf 'PASS client=%s model=%s check=%s reason=agent-returned-json\n' \
                     "$client" "$alias" "$check_name"
@@ -637,7 +675,7 @@ for client in "${clients[@]}"; do
             if [ -s "$final_file" ]; then
                 log_file_excerpt "Final response" "$final_file" "$agent_diagnostic_excerpt_bytes"
             fi
-            log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot")"
+            log_block "Validated" "$(log_validation_facts "$check_name" "$snapshot_file")"
             while IFS= read -r difference; do
                 [ -n "$difference" ] || continue
                 log_error "Verdict: FAIL stage=source-evidence mismatch client=${client} model=${alias} check=${check_name} ${difference}"
