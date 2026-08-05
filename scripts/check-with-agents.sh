@@ -19,9 +19,18 @@ chmod 700 "$workspace" || die "could not secure private workspace"
 diagnostic_dir="$(prepare_diagnostic_dir agents)"
 
 cleanup() {
-    local status=$?
-    finish_diagnostic_dir "$diagnostic_dir"
-    rm -rf "$workspace"
+    local status=$? finalizer_status=0 workspace_status=0
+    trap - EXIT
+
+    (finish_diagnostic_dir "$diagnostic_dir") || finalizer_status=$?
+    rm -rf "$workspace" || workspace_status=$?
+    if [ "$status" -eq 0 ]; then
+        if [ "$finalizer_status" -ne 0 ]; then
+            status="$finalizer_status"
+        elif [ "$workspace_status" -ne 0 ]; then
+            status="$workspace_status"
+        fi
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -33,6 +42,8 @@ port="$(yq -r '.server.port' "$CONFIG_PATH")"
 api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
 [ -n "$port" ] && [ "$port" != null ] || die "server port is not configured"
 [ -n "$api_key" ] && [ "$api_key" != null ] || die "server API key is not configured"
+unset _LLM_ENV_REDACTION_KEY_OVERRIDE
+_LLM_ENV_REDACTION_KEY_OVERRIDE="$api_key"
 printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
 
 # 127.0.0.1 rather than localhost: localhost resolves to ::1 first on this system
@@ -41,6 +52,7 @@ base="http://127.0.0.1:${port}"
 weather_url='https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago'
 fx_url='https://open.er-api.com/v6/latest/USD'
 agent_diagnostic_excerpt_bytes=262144
+agent_stream_limit_bytes=33554432
 source_response_limit_bytes=1048576
 final_response_limit_bytes=1048576
 
@@ -61,8 +73,14 @@ snapshot_for() {
         weather)
             url="$weather_url"
             # shellcheck disable=SC2016 # jq variables must remain literal until jq evaluates them.
-            filter='. as $source
-                | select(($source.current.time | strings | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")))
+            filter='def safe_timestamp:
+                    type == "string"
+                    and length > 0
+                    and length <= 64
+                    and all(explode[]; . >= 32 and . <= 126);
+                . as $source
+                | select($source.current.time | safe_timestamp)
+                | select($source.current.time | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))
                 | ($source.current.time[0:10]) as $source_date
                 | select(($source_date | strptime("%Y-%m-%d") | strftime("%Y-%m-%d")) == $source_date)
                 | select($source.current.temperature_2m | numbers)
@@ -76,7 +94,15 @@ snapshot_for() {
         fx)
             url="$fx_url"
             # shellcheck disable=SC2016 # jq variables must remain literal until jq evaluates them.
-            filter='. as $source | select(($source.time_last_update_utc | strings | length) > 0) | select($source.rates.CLP | numbers) | {source_url: $url, source_timestamp: $source.time_last_update_utc, usd_to_clp: $source.rates.CLP}'
+            filter='def safe_timestamp:
+                    type == "string"
+                    and length > 0
+                    and length <= 64
+                    and all(explode[]; . >= 32 and . <= 126);
+                . as $source
+                | select($source.time_last_update_utc | safe_timestamp)
+                | select($source.rates.CLP | numbers)
+                | {source_url: $url, source_timestamp: $source.time_last_update_utc, usd_to_clp: $source.rates.CLP}'
             ;;
         *) return 64 ;;
     esac
@@ -216,15 +242,24 @@ parse_bounded_result() {
     ' "$result_file" >/dev/null; then
         return 1
     fi
-    jq -Rrse '
+    jq -Rrse --arg stream_limit "$agent_stream_limit_bytes" '
         def exactly_one_value($pattern):
             [scan($pattern)]
             | select(length == 1 and (.[0] | length) == 1)
             | .[0][0];
 
-        exactly_one_value("\"outcome\"[[:space:]]*:[[:space:]]*\"(completed|timeout|transcript-limit|stderr-limit|boundary-failure)\"[[:space:]]*[,}]"),
-        exactly_one_value("\"exit_status\"[[:space:]]*:[[:space:]]*(null|0|-?[1-9][0-9]*)[[:space:]]*[,}]"),
-        exactly_one_value("\"cleanup_proved\"[[:space:]]*:[[:space:]]*(true|false)[[:space:]]*[,}]")
+        def at_most($limit):
+            length < ($limit | length)
+            or (length == ($limit | length) and . <= $limit);
+
+        exactly_one_value("\"outcome\"[[:space:]]*:[[:space:]]*\"(completed|timeout|transcript-limit|stderr-limit|boundary-failure)\"[[:space:]]*[,}]") as $outcome
+        | exactly_one_value("\"exit_status\"[[:space:]]*:[[:space:]]*(null|0|-?[1-9][0-9]*)[[:space:]]*[,}]") as $exit_status
+        | exactly_one_value("\"cleanup_proved\"[[:space:]]*:[[:space:]]*(true|false)[[:space:]]*[,}]") as $cleanup_proved
+        | exactly_one_value("\"transcript_bytes\"[[:space:]]*:[[:space:]]*(0|[1-9][0-9]*)[[:space:]]*[,}]") as $transcript_bytes
+        | exactly_one_value("\"stderr_bytes\"[[:space:]]*:[[:space:]]*(0|[1-9][0-9]*)[[:space:]]*[,}]") as $stderr_bytes
+        | select($transcript_bytes | at_most($stream_limit))
+        | select($stderr_bytes | at_most($stream_limit))
+        | $outcome, $exit_status, $cleanup_proved, $transcript_bytes, $stderr_bytes
     ' "$result_file"
 }
 
@@ -237,17 +272,31 @@ mark_agent_boundary_failure() {
 
 classify_bounded_result() {
     local runner_status="$1" result_file="$2" parser_error_file="$3"
+    local transcript_file="$4" stderr_file="$5"
     local parsed_result outcome exit_status cleanup_proved
+    local transcript_bytes stderr_bytes actual_transcript_bytes actual_stderr_bytes
     local -a result_fields
 
     if [ "$runner_status" -eq 0 ] \
-        && parsed_result="$(parse_bounded_result "$result_file" 2>>"$parser_error_file")"; then
+        && [ -f "$result_file" ] \
+        && [ -f "$transcript_file" ] \
+        && [ -f "$stderr_file" ] \
+        && parsed_result="$(parse_bounded_result "$result_file" 2>>"$parser_error_file")" \
+        && actual_transcript_bytes="$(wc -c < "$transcript_file" 2>>"$parser_error_file")" \
+        && actual_stderr_bytes="$(wc -c < "$stderr_file" 2>>"$parser_error_file")"; then
         mapfile -t result_fields <<< "$parsed_result"
         outcome="${result_fields[0]}"
         exit_status="${result_fields[1]}"
         cleanup_proved="${result_fields[2]}"
+        transcript_bytes="${result_fields[3]}"
+        stderr_bytes="${result_fields[4]}"
 
-        if [ "$outcome" != boundary-failure ] && [ "$cleanup_proved" = true ]; then
+        if [[ "$actual_transcript_bytes" =~ ^(0|[1-9][0-9]*)$ ]] \
+            && [[ "$actual_stderr_bytes" =~ ^(0|[1-9][0-9]*)$ ]] \
+            && [ "$transcript_bytes" = "$actual_transcript_bytes" ] \
+            && [ "$stderr_bytes" = "$actual_stderr_bytes" ] \
+            && [ "$outcome" != boundary-failure ] \
+            && [ "$cleanup_proved" = true ]; then
             if [ "$exit_status" = null ]; then
                 AGENT_EXIT_STATUS="NOT REPORTED"
             else
@@ -271,13 +320,13 @@ classify_bounded_result() {
                     ;;
                 transcript-limit)
                     AGENT_FAILURE_STAGE="transcript limit"
-                    AGENT_FAILURE_REASON="client transcript exceeded 33554432 bytes"
+                    AGENT_FAILURE_REASON="client transcript exceeded ${agent_stream_limit_bytes} bytes"
                     AGENT_RESULT_REASON="transcript-limit"
                     return 1
                     ;;
                 stderr-limit)
                     AGENT_FAILURE_STAGE="stderr limit"
-                    AGENT_FAILURE_REASON="client stderr exceeded 33554432 bytes"
+                    AGENT_FAILURE_REASON="client stderr exceeded ${agent_stream_limit_bytes} bytes"
                     AGENT_RESULT_REASON="stderr-limit"
                     return 1
                     ;;
@@ -363,7 +412,8 @@ run_agent() {
             else
                 status=$?
             fi
-            if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
+            if ! classify_bounded_result "$status" "$bounded_result_file" \
+                "$parser_error_file" "$transcript_file" "$stderr_file"; then
                 return 1
             fi
             if ! jq -rjce '
@@ -418,7 +468,8 @@ run_agent() {
             else
                 status=$?
             fi
-            if ! classify_bounded_result "$status" "$bounded_result_file" "$parser_error_file"; then
+            if ! classify_bounded_result "$status" "$bounded_result_file" \
+                "$parser_error_file" "$transcript_file" "$stderr_file"; then
                 return 1
             fi
             if ! jq -rjce '
@@ -477,16 +528,24 @@ source_evidence_differences() {
             ;;
     esac
 
-    if ! timestamp="$(jq -nr --slurpfile received "$evidence_file" '
+    if ! timestamp="$(jq -nr --arg timestamp_pattern "$timestamp_pattern" \
+        --slurpfile received "$evidence_file" '
+        def safe_timestamp:
+            type == "string"
+            and length > 0
+            and length <= 64
+            and all(explode[]; . >= 32 and . <= 126)
+            and test($timestamp_pattern);
+
         if ($received | length) == 1 and ($received[0] | type) == "object" then
-            $received[0].source_timestamp | strings
+            $received[0].source_timestamp | select(safe_timestamp)
         else
             error("validated evidence file must contain exactly one object")
         end
     ')"; then
         return 1
     fi
-    if [ -z "$timestamp" ] || ! [[ "$timestamp" =~ $timestamp_pattern ]]; then
+    if [ -z "$timestamp" ]; then
         printf '%s\n' 'field=source_timestamp expected=ISO-8601 received="<redacted>"'
         return 0
     fi

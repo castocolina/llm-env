@@ -3231,6 +3231,12 @@ def run_agent_check(
     bounded_exit_statuses: tuple[int, ...] = (),
     bounded_cli_stderr: str = "",
     bounded_result_fault: str = "",
+    raw_bounded_results: bool = False,
+    bounded_counter_mismatch: str = "",
+    bounded_wc_override: str = "",
+    config_after_startup: str = "",
+    inherited_redaction_override: str | None = None,
+    finalizer_failure: bool = False,
     fail_pi_configuration: bool = False,
     oversized_source: str = "",
     oversized_final_client: str = "",
@@ -3248,6 +3254,9 @@ def run_agent_check(
     assert real_yq is not None
     assert real_date is not None
     assert bounded_result_fault in {"", "mktemp", "chmod", "write", "read"}
+    assert bounded_counter_mismatch in {"", "transcript", "stderr"}
+    assert bounded_wc_override in {"", "transcript_bytes", "stderr_bytes"}
+    assert config_after_startup in {"", "remove", "rotate"}
     assert oversized_source in {"", "models", "weather", "fx"}
     assert oversized_final_client in {"", "pi", "opencode"}
     assert source_at_limit in {"", "models"}
@@ -3368,6 +3377,7 @@ def run_agent_check(
     bounded_counter.write_text("0\n")
     bounded_calls = tmp_path / "bounded-calls"
     bounded_calls.touch()
+    workspace_record = tmp_path / "workspace-path"
     evidence_parser_calls = tmp_path / "evidence-parser-calls"
     evidence_parser_calls.touch()
     comparator_calls = tmp_path / "comparator-calls"
@@ -3380,6 +3390,8 @@ def run_agent_check(
     resolved_uv_cache = str(uv_cache) if uv_cache_result is None else uv_cache_result
     bounded_results_dir = tmp_path / "bounded-results"
     bounded_results_dir.mkdir()
+    bounded_emitted_results_dir = tmp_path / "bounded-emitted-results"
+    bounded_emitted_results_dir.mkdir()
     for index, bounded_result in enumerate(bounded_results):
         result_bytes = (
             bounded_result.encode() if isinstance(bounded_result, str) else bounded_result
@@ -3417,10 +3429,28 @@ def run_agent_check(
         command.write_text(f"#!/usr/bin/bash\nexec {executable!s} \"$@\"\n")
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
 
+    mktemp = commands / "mktemp"
+    mktemp.write_text(
+        "#!/usr/bin/bash\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = -d ]; then\n'
+        '    workspace="$(/usr/bin/mktemp -d)" || exit $?\n'
+        '    printf "%s" "$workspace" > "$AGENT_CHECK_WORKSPACE_RECORD" || exit $?\n'
+        '    printf "%s\\n" "$workspace"\n'
+        "    exit 0\n"
+        "fi\n"
+        'exec /usr/bin/mktemp "$@"\n'
+    )
+    mktemp.chmod(mktemp.stat().st_mode | stat.S_IXUSR)
+
     if bounded_result_fault == "mktemp":
-        mktemp = commands / "mktemp"
         mktemp.write_text(
             "#!/usr/bin/bash\n"
+            'if [ "$#" -eq 1 ] && [ "$1" = -d ]; then\n'
+            '    workspace="$(/usr/bin/mktemp -d)" || exit $?\n'
+            '    printf "%s" "$workspace" > "$AGENT_CHECK_WORKSPACE_RECORD" || exit $?\n'
+            '    printf "%s\\n" "$workspace"\n'
+            "    exit 0\n"
+            "fi\n"
             'if [[ "${!#}" == */bounded-result.XXXXXX ]]; then\n'
             "    printf '%s\\n' 'bounded result mktemp failed' >&2\n"
             "    exit 71\n"
@@ -3428,6 +3458,36 @@ def run_agent_check(
             'exec /usr/bin/mktemp "$@"\n'
         )
         mktemp.chmod(mktemp.stat().st_mode | stat.S_IXUSR)
+
+    find = commands / "find"
+    find.write_text(
+        "#!/usr/bin/bash\n"
+        'if [ "$AGENT_CHECK_FINALIZER_FAILURE" = 1 ] '
+        '&& [[ "$1" == "$TMPDIR"/llm-env-agents.* ]]; then\n'
+        "    printf '%s\\n' 'injected diagnostic traversal failure' >&2\n"
+        "    exit 79\n"
+        "fi\n"
+        'exec /usr/bin/find "$@"\n'
+    )
+    find.chmod(find.stat().st_mode | stat.S_IXUSR)
+
+    wc = commands / "wc"
+    wc.write_text(
+        "#!/usr/bin/bash\n"
+        'input="$(/usr/bin/readlink "/proc/$$/fd/0")"\n'
+        'if [ "$AGENT_CHECK_BOUNDED_WC_OVERRIDE" = transcript_bytes ] '
+        '&& [[ "$input" == */client-transcript.* ]]; then\n'
+        "    printf '%s\\n' 33554433\n"
+        "    exit 0\n"
+        "fi\n"
+        'if [ "$AGENT_CHECK_BOUNDED_WC_OVERRIDE" = stderr_bytes ] '
+        '&& [[ "$input" == */client-stderr.* ]]; then\n'
+        "    printf '%s\\n' 33554433\n"
+        "    exit 0\n"
+        "fi\n"
+        'exec /usr/bin/wc "$@"\n'
+    )
+    wc.chmod(wc.stat().st_mode | stat.S_IXUSR)
     if bounded_result_fault in {"chmod", "write"}:
         chmod = commands / "chmod"
         chmod.write_text(
@@ -3521,22 +3581,44 @@ def run_agent_check(
         "    printf '%s\\n' 'bounded runner inherited readable stdin' >&2\n"
         "    exit 96\n"
         "fi\n"
+        'case "$AGENT_CHECK_CONFIG_AFTER_STARTUP" in\n'
+        '    remove) /usr/bin/rm -f -- "$LLM_ENV_CONFIG" || exit $? ;;\n'
+        '    rotate) printf "%s\\n" "server:" "  port: 8000" '
+        '"  api_key: rotated-fixture-key" > "$LLM_ENV_CONFIG" || exit $? ;;\n'
+        "esac\n"
         '"$@" </dev/null >"$transcript_file" 2>"$stderr_file"\n'
         "client_status=$?\n"
         'transcript_bytes="$(/usr/bin/wc -c <"$transcript_file")"\n'
         'stderr_bytes="$(/usr/bin/wc -c <"$stderr_file")"\n'
+        'reported_transcript_bytes="$transcript_bytes"\n'
+        'reported_stderr_bytes="$stderr_bytes"\n'
+        'case "$AGENT_CHECK_BOUNDED_COUNTER_MISMATCH" in\n'
+        '    transcript) reported_transcript_bytes="$((transcript_bytes + 1))" ;;\n'
+        '    stderr) reported_stderr_bytes="$((stderr_bytes + 1))" ;;\n'
+        "esac\n"
         'result_file="$AGENT_CHECK_BOUNDED_RESULTS_DIR/$count"\n'
+        'emitted_result_file="$AGENT_CHECK_BOUNDED_EMITTED_RESULTS_DIR/$count"\n'
         'if [ -f "$result_file" ]; then\n'
-        '    /usr/bin/cat "$result_file"\n'
+        '    if [ "$AGENT_CHECK_RAW_BOUNDED_RESULTS" = 1 ]; then\n'
+        '        /usr/bin/cp -- "$result_file" "$emitted_result_file" || exit $?\n'
+        "    else\n"
+        '        "$REAL_JQ" -c '
+        '--argjson transcript_bytes "$reported_transcript_bytes" '
+        '--argjson stderr_bytes "$reported_stderr_bytes" '
+        "'if .transcript_bytes == 0 then .transcript_bytes = $transcript_bytes else . end "
+        "| if .stderr_bytes == 0 then .stderr_bytes = $stderr_bytes else . end' "
+        '"$result_file" > "$emitted_result_file" || exit $?\n'
+        "    fi\n"
         "else\n"
         '    "$REAL_JQ" -cn '
         '--argjson exit_status "$client_status" '
-        '--argjson transcript_bytes "$transcript_bytes" '
-        '--argjson stderr_bytes "$stderr_bytes" '
+        '--argjson transcript_bytes "$reported_transcript_bytes" '
+        '--argjson stderr_bytes "$reported_stderr_bytes" '
         "'{schema:1,outcome:\"completed\",exit_status:$exit_status,"
         "transcript_bytes:$transcript_bytes,stderr_bytes:$stderr_bytes,"
-        "cleanup_proved:true}'\n"
+        "cleanup_proved:true}' > \"$emitted_result_file\" || exit $?\n"
         "fi\n"
+        '/usr/bin/cat "$emitted_result_file"\n'
         'if [ "$AGENT_CHECK_BOUNDED_RESULT_FAULT" = read ]; then\n'
         '    bounded_output="$(/usr/bin/readlink "/proc/$$/fd/1")"\n'
         '    /usr/bin/rm -f -- "$bounded_output" || exit $?\n'
@@ -3653,9 +3735,18 @@ def run_agent_check(
         "AGENT_CHECK_BOUNDED_COUNTER": str(bounded_counter),
         "AGENT_CHECK_BOUNDED_CALLS": str(bounded_calls),
         "AGENT_CHECK_BOUNDED_RESULTS_DIR": str(bounded_results_dir),
+        "AGENT_CHECK_BOUNDED_EMITTED_RESULTS_DIR": str(
+            bounded_emitted_results_dir
+        ),
         "AGENT_CHECK_BOUNDED_STATUSES_DIR": str(bounded_statuses_dir),
         "AGENT_CHECK_BOUNDED_CLI_STDERR": bounded_cli_stderr,
         "AGENT_CHECK_BOUNDED_RESULT_FAULT": bounded_result_fault,
+        "AGENT_CHECK_RAW_BOUNDED_RESULTS": "1" if raw_bounded_results else "0",
+        "AGENT_CHECK_BOUNDED_COUNTER_MISMATCH": bounded_counter_mismatch,
+        "AGENT_CHECK_BOUNDED_WC_OVERRIDE": bounded_wc_override,
+        "AGENT_CHECK_CONFIG_AFTER_STARTUP": config_after_startup,
+        "AGENT_CHECK_FINALIZER_FAILURE": "1" if finalizer_failure else "0",
+        "AGENT_CHECK_WORKSPACE_RECORD": str(workspace_record),
         "AGENT_CHECK_EVIDENCE_PARSER_CALLS": str(evidence_parser_calls),
         "AGENT_CHECK_COMPARATOR_CALLS": str(comparator_calls),
         "AGENT_CHECK_COMPARATOR_FAILURE_MARKER": str(comparator_failure_marker),
@@ -3686,6 +3777,8 @@ def run_agent_check(
     }
     if keep_artifacts:
         environment["LLM_ENV_KEEP_CHECK_ARTIFACTS"] = "1"
+    if inherited_redaction_override is not None:
+        environment["_LLM_ENV_REDACTION_KEY_OVERRIDE"] = inherited_redaction_override
     if fail_pi_configuration:
         command = commands / "mkdir"
         command.write_text(
@@ -3722,6 +3815,12 @@ def bounded_call_count(calls: pathlib.Path) -> int:
 def bounded_invocations(calls: pathlib.Path) -> list[str]:
     """Return the fake bounded runner's recorded argument vectors."""
     return calls.with_name("bounded-calls").read_text().splitlines()
+
+
+def bounded_emitted_results(calls: pathlib.Path) -> list[pathlib.Path]:
+    """Return fake bounded-runner results in invocation order."""
+    directory = calls.with_name("bounded-emitted-results")
+    return sorted(directory.iterdir(), key=lambda path: int(path.name))
 
 
 def evidence_parser_invocations(calls: pathlib.Path) -> list[str]:
@@ -3783,6 +3882,9 @@ def assert_common_agent_fields(
 
 VALID_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
+if [[ -v _LLM_ENV_REDACTION_KEY_OVERRIDE ]]; then
+    printf '%s' "$_LLM_ENV_REDACTION_KEY_OVERRIDE" > "$ARTIFACTS/redaction-override-pi-${BASHPID}"
+fi
 printf '%s' "${!#}" > "$ARTIFACTS/prompt-pi-${BASHPID}"
 if [ -n "${AGENT_CHECK_CLIENT_STDERR_FILE:-}" ]; then
     /usr/bin/cat "$AGENT_CHECK_CLIENT_STDERR_FILE" >&2
@@ -3810,8 +3912,16 @@ jq -cn --rawfile response_prefix "$AGENT_CHECK_RESPONSE_PREFIX_FILE" --argjson e
 
 VALID_OPENCODE_STUB = """#!/usr/bin/bash
 printf 'opencode %s xdg=%s\\n' "$*" "${XDG_CONFIG_HOME:-}" >> "$CALLS"
+if [[ -v _LLM_ENV_REDACTION_KEY_OVERRIDE ]]; then
+    printf '%s' "$_LLM_ENV_REDACTION_KEY_OVERRIDE" > "$ARTIFACTS/redaction-override-opencode-${BASHPID}"
+fi
 printf '%s' "${!#}" > "$ARTIFACTS/prompt-opencode-${BASHPID}"
 printf '%s\\n' "$(< "$OPENCODE_CONFIG")" > "$ARTIFACTS/opencode-${BASHPID}.jsonc"
+if [ -n "${AGENT_CHECK_CLIENT_STDERR_FILE:-}" ]; then
+    /usr/bin/cat "$AGENT_CHECK_CLIENT_STDERR_FILE" >&2
+elif [ -n "${AGENT_CHECK_CLIENT_STDERR:-}" ]; then
+    printf '%s\n' "$AGENT_CHECK_CLIENT_STDERR" >&2
+fi
 count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
 printf -v seconds '%02d' "$count"
 if [ "$AGENT_CHECK_OVERSIZED_FINAL_CLIENT" = opencode ] && [[ "$*" == *weather* ]]; then
@@ -4392,6 +4502,86 @@ def test_agent_check_rejects_malformed_source_bodies(
     assert "Source stdout:" in result.stdout
 
 
+@pytest.mark.parametrize("source", ("weather", "fx"))
+@pytest.mark.parametrize(
+    "unsafe_suffix",
+    (pytest.param("\x00", id="nul"), pytest.param("\n", id="newline"), pytest.param("\t", id="tab")),
+)
+def test_agent_check_rejects_unsafe_public_timestamp_before_client_launch(
+    tmp_path: pathlib.Path,
+    source: str,
+    unsafe_suffix: str,
+) -> None:
+    timestamps = {
+        "weather": "2026-07-27T13:00:01",
+        "fx": "Mon, 27 Jul 2026 00:02:31 +0000",
+    }
+    bodies = {
+        "weather": json.dumps(
+            {
+                "current": {
+                    "time": timestamps[source] + unsafe_suffix,
+                    "temperature_2m": 16.3,
+                    "weather_code": 3,
+                }
+            }
+        ),
+        "fx": json.dumps(
+            {
+                "time_last_update_utc": timestamps[source] + unsafe_suffix,
+                "rates": {"CLP": 946.527902},
+            }
+        ),
+    }
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        weather_body=bodies[source] if source == "weather" else None,
+        fx_body=bodies[source] if source == "fx" else None,
+    )
+
+    assert result.returncode != 0
+    assert f"source fetch reason={source} source body is invalid" in result.stderr
+    assert bounded_call_count(calls) == 1
+    client_calls = [
+        line for line in calls.read_text().splitlines() if line.startswith("pi ")
+    ]
+    assert len(client_calls) == 1
+    assert ("open-meteo" in client_calls[0]) is (source == "fx")
+    assert ("open.er-api.com" in client_calls[0]) is (source == "weather")
+
+
+@pytest.mark.parametrize("source", ("weather", "fx"))
+def test_agent_check_rejects_overlong_public_timestamp_before_client_launch(
+    tmp_path: pathlib.Path,
+    source: str,
+) -> None:
+    timestamp = "2026-07-27T13:00:01." + ("1" * 45)
+    assert len(timestamp) == 65
+    weather_body = json.dumps(
+        {
+            "current": {
+                "time": timestamp,
+                "temperature_2m": 16.3,
+                "weather_code": 3,
+            }
+        }
+    )
+    fx_body = json.dumps(
+        {"time_last_update_utc": timestamp, "rates": {"CLP": 946.527902}}
+    )
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        weather_body=weather_body if source == "weather" else None,
+        fx_body=fx_body if source == "fx" else None,
+    )
+
+    assert result.returncode != 0
+    assert f"source fetch reason={source} source body is invalid" in result.stderr
+    assert bounded_call_count(calls) == 1
+
+
 @pytest.mark.parametrize(
     "weather_body",
     (
@@ -4627,6 +4817,50 @@ def test_agent_check_classifies_proved_resource_outcomes_and_continues(
 
 
 @pytest.mark.parametrize(
+    ("outcome", "exit_status"),
+    (
+        ("completed", 0),
+        ("timeout", None),
+        ("transcript-limit", None),
+        ("stderr-limit", None),
+        ("boundary-failure", None),
+    ),
+)
+def test_agent_check_valid_bounded_fixtures_report_exact_capture_sizes(
+    tmp_path: pathlib.Path,
+    outcome: str,
+    exit_status: int | None,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(
+            bounded_result_json(outcome=outcome, exit_status=exit_status),
+        ),
+        agent_client_stderr="fixture counter stderr",
+        keep_artifacts=True,
+    )
+
+    emitted = json.loads(bounded_emitted_results(calls)[0].read_text())
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    transcript_sizes = [
+        path.stat().st_size for path in retained_dir.glob("client-transcript.*")
+    ]
+    stderr_sizes = [
+        path.stat().st_size for path in retained_dir.glob("client-stderr.*")
+    ]
+
+    assert emitted["outcome"] == outcome
+    assert emitted["transcript_bytes"] > 0
+    assert emitted["stderr_bytes"] > 0
+    assert emitted["transcript_bytes"] in transcript_sizes
+    assert emitted["stderr_bytes"] in stderr_sizes
+
+
+@pytest.mark.parametrize(
     ("case", "bounded_result"),
     (
         (
@@ -4830,6 +5064,49 @@ def test_agent_check_aborts_on_bounded_result_file_fault(
     assert "Results: 0 passed, 1 failed" in result.stdout
 
 
+@pytest.mark.parametrize("counter", ("transcript_bytes", "stderr_bytes"))
+def test_agent_check_aborts_when_runner_counter_exceeds_stream_limit(
+    tmp_path: pathlib.Path,
+    counter: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_results=(bounded_result_json(**{counter: 33_554_433}),),
+        bounded_wc_override=counter,
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "client=opencode" not in result.stdout
+
+
+@pytest.mark.parametrize("stream", ("transcript", "stderr"))
+def test_agent_check_aborts_when_runner_counter_mismatches_capture_size(
+    tmp_path: pathlib.Path,
+    stream: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_counter_mismatch=stream,
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "client=opencode" not in result.stdout
+
+
 _VALID_BOUNDED_RESULT = bounded_result_json()
 _MISSING_BOUNDED_RESULT_KEY = json.loads(_VALID_BOUNDED_RESULT)
 del _MISSING_BOUNDED_RESULT_KEY["stderr_bytes"]
@@ -4987,6 +5264,7 @@ def test_agent_check_rejects_every_invalid_bounded_result(
         clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
         model_aliases=("gemma4", "ornith"),
         bounded_results=(bounded_result,),
+        raw_bounded_results=True,
     )
 
     assert result.returncode != 0
@@ -4996,6 +5274,10 @@ def test_agent_check_rejects_every_invalid_bounded_result(
     assert "Verdict: FAIL stage=resource boundary" in result.stderr
     assert "reason=boundary-failure" in result.stdout
     assert "Results: 0 passed, 1 failed" in result.stdout
+    expected_result = (
+        bounded_result.encode() if isinstance(bounded_result, str) else bounded_result
+    )
+    assert bounded_emitted_results(calls)[0].read_bytes() == expected_result
 
 
 def test_agent_check_never_evaluates_runner_controlled_result_text(
@@ -5008,6 +5290,7 @@ def test_agent_check_never_evaluates_runner_controlled_result_text(
         bounded_results=(
             bounded_result_json(exit_status=f"$(touch {marker})"),
         ),
+        raw_bounded_results=True,
     )
 
     assert result.returncode != 0
@@ -5109,6 +5392,59 @@ def test_agent_check_retains_only_redacted_private_diagnostics(
     retained_text = "".join(path.read_text() for path in files)
     assert "retained-fixture-key" not in retained_text
     assert "Authorization: Bearer retained-fixture-key" not in retained_text
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+@pytest.mark.parametrize("config_after_startup", ("rotate", "remove"))
+def test_agent_check_pins_redaction_key_without_exporting_it_to_clients(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+    config_after_startup: str,
+) -> None:
+    api_key = "pinned-original-fixture-key"
+    result, _, artifacts = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        api_key=api_key,
+        agent_client_stderr=api_key,
+        keep_artifacts=True,
+        config_after_startup=config_after_startup,
+        inherited_redaction_override="inherited-exported-fixture-key",
+    )
+    combined = result.stdout + result.stderr
+    retained_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
+    )
+    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
+    retained_text = "".join(
+        path.read_text() for path in retained_dir.rglob("*") if path.is_file()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert api_key not in combined
+    assert api_key not in retained_text
+    assert not list(artifacts.glob("redaction-override-*"))
+
+
+def test_agent_check_removes_workspace_when_diagnostic_finalization_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        keep_artifacts=True,
+        finalizer_failure=True,
+    )
+    workspace = pathlib.Path(calls.with_name("workspace-path").read_text())
+
+    assert result.returncode != 0
+    assert "could not traverse diagnostic artifacts" in result.stderr
+    assert "Diagnostics retained:" not in result.stdout
+    assert not workspace.exists()
 
 
 def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Path) -> None:
@@ -5403,6 +5739,75 @@ def test_agent_check_redacts_agent_timestamps_from_mismatch_rows(
     assert count_rows(result.stdout, "FAIL client=pi") == failure_count
     assert timestamp not in mismatch_rows
     assert expected_diagnostic in mismatch_rows
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+@pytest.mark.parametrize(
+    "unsafe_suffix",
+    (pytest.param("\x00", id="nul"), pytest.param("\n", id="newline"), pytest.param("\t", id="tab")),
+)
+def test_agent_check_classifies_unsafe_evidence_timestamp_as_redacted_mismatch(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+    unsafe_suffix: str,
+) -> None:
+    override = json.dumps(
+        {"source_timestamp": "2026-07-27T13:00:01" + unsafe_suffix}
+    )
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_weather_evidence_override=override,
+        agent_fx_evidence_override=override,
+    )
+    mismatch_rows = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(f"FAIL client={client}")
+    ]
+
+    assert result.returncode != 0
+    assert count_rows(result.stdout, f"PASS client={client}") == 0
+    assert len(mismatch_rows) == 2
+    assert all("field=source_timestamp" in line for line in mismatch_rows)
+    assert all('received="<redacted>"' in line for line in mismatch_rows)
+    assert "stage=source-evidence comparison" not in result.stderr
+    assert "ignored null byte" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("client", "stub"),
+    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
+)
+def test_agent_check_rejects_overlong_evidence_timestamp(
+    tmp_path: pathlib.Path,
+    client: str,
+    stub: str,
+) -> None:
+    timestamp = "2026-07-27T13:00:01." + ("1" * 45)
+    assert len(timestamp) == 65
+    override = json.dumps({"source_timestamp": timestamp})
+    result, _, _ = run_agent_check(
+        tmp_path,
+        clients={client: stub},
+        agent_weather_evidence_override=override,
+        agent_fx_evidence_override=override,
+    )
+    mismatch_rows = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(f"FAIL client={client}")
+    ]
+
+    assert result.returncode != 0
+    assert count_rows(result.stdout, f"PASS client={client}") == 0
+    assert len(mismatch_rows) == 2
+    assert all("field=source_timestamp" in line for line in mismatch_rows)
+    assert all('received="<redacted>"' in line for line in mismatch_rows)
 
 
 @pytest.mark.parametrize(

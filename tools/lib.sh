@@ -23,7 +23,11 @@ log_error() { printf '%s fail%s %s\n' "$RED"  "$NC" "$*" >&2; }
 
 _redact_stream() {
     local key escaped
-    key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH" 2>/dev/null)"
+    if [ "${_LLM_ENV_REDACTION_KEY_OVERRIDE+x}" = x ]; then
+        key="${_LLM_ENV_REDACTION_KEY_OVERRIDE-}"
+    else
+        key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH" 2>/dev/null)"
+    fi
 
     sed -E 's/(Authorization:[[:space:]]*Bearer)[[:space:]]+[^[:space:]"'"'"']+/\1 <redacted>/g' |
         if [ -n "$key" ]; then
