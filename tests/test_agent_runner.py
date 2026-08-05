@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import BinaryIO, Self
 
 import pytest
 
@@ -45,6 +46,43 @@ class PollFaultProcess:
         self._fail_calls.add(self.poll_calls + 1)
 
 
+class CloseTrackingStream:
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        close_error: bool = False,
+        close_events: list[str] | None = None,
+        close_label: str = "stream",
+    ) -> None:
+        self._stream = stream
+        self._close_error = close_error
+        self._close_events = close_events
+        self._close_label = close_label
+        self.close_calls = 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+    @property
+    def closed(self) -> bool:
+        return self._stream.closed
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self._close_events is not None:
+            self._close_events.append(f"close-{self._close_label}")
+        self._stream.close()
+        if self._close_error:
+            raise OSError(f"fixture {self._close_label} close failure")
+
+
 class FakeBackend:
     def __init__(
         self,
@@ -61,6 +99,8 @@ class FakeBackend:
         cgroup_path_error: bool = False,
         arm_poll_error_on_signal: bool = False,
         arm_poll_error_on_cleanup_proof: bool = False,
+        track_pipes: bool = False,
+        pipe_close_errors: frozenset[str] | None = None,
     ) -> None:
         self.cleanup_error = cleanup_error
         self.cleanup_errors = cleanup_errors
@@ -74,6 +114,8 @@ class FakeBackend:
         self.cgroup_path_error = cgroup_path_error
         self.arm_poll_error_on_signal = arm_poll_error_on_signal
         self.arm_poll_error_on_cleanup_proof = arm_poll_error_on_cleanup_proof
+        self.track_pipes = track_pipes
+        self.pipe_close_errors = pipe_close_errors or frozenset()
         self.start_calls = 0
         self.cgroup_path_calls = 0
         self.raw_process: subprocess.Popen[bytes] | None = None
@@ -81,6 +123,8 @@ class FakeBackend:
         self.unit_name: str | None = None
         self.signals: list[signal.Signals] = []
         self.signal_times: list[float] = []
+        self.descriptor_events: list[str] = []
+        self.pipe_streams: dict[str, CloseTrackingStream] = {}
 
     def start_scope(
         self,
@@ -105,6 +149,19 @@ class FakeBackend:
             ),
             bufsize=0,
         )
+        if self.track_pipes or self.pipe_close_errors:
+            for stream_name in ("stdout", "stderr"):
+                stream = getattr(self.raw_process, stream_name)
+                if stream is None:
+                    continue
+                tracked_stream = CloseTrackingStream(
+                    stream,
+                    close_error=stream_name in self.pipe_close_errors,
+                    close_events=self.descriptor_events,
+                    close_label=stream_name,
+                )
+                setattr(self.raw_process, stream_name, tracked_stream)
+                self.pipe_streams[stream_name] = tracked_stream
         if (
             self.poll_error_calls
             or self.arm_poll_error_on_signal
@@ -163,6 +220,8 @@ class FakeBackend:
             return self.cgroup_empty_override
         assert self.raw_process is not None
         scope_empty = self.raw_process.poll() is not None
+        if scope_empty:
+            self.descriptor_events.append("cleanup-proved")
         if scope_empty and self.arm_poll_error_on_cleanup_proof:
             assert isinstance(self.process, PollFaultProcess)
             self.process.arm_next_poll()
@@ -224,6 +283,30 @@ def run_fixture(
     return result, transcript, client_stderr, selected_backend
 
 
+def install_thread_start_failure(monkeypatch, failing_start: int) -> None:
+    real_thread = agent_runner.threading.Thread
+    start_calls = 0
+
+    class ControlledThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._thread = real_thread(*args, **kwargs)
+
+        def start(self) -> None:
+            nonlocal start_calls
+            start_calls += 1
+            if start_calls == failing_start:
+                raise RuntimeError("fixture thread-start failure")
+            self._thread.start()
+
+        def is_alive(self) -> bool:
+            return self._thread.is_alive()
+
+        def join(self, timeout: float | None = None) -> None:
+            self._thread.join(timeout=timeout)
+
+    monkeypatch.setattr(agent_runner.threading, "Thread", ControlledThread)
+
+
 def test_bounded_run_completes_and_captures_both_streams(tmp_path: Path) -> None:
     result, transcript, client_stderr, backend = run_fixture(
         tmp_path,
@@ -254,6 +337,42 @@ def test_bounded_run_reports_nonzero_client_exit_as_completed(tmp_path: Path) ->
     assert result.cleanup_proved is True
     assert transcript.read_bytes() == b""
     assert client_stderr.read_bytes() == b""
+
+
+@pytest.mark.parametrize("failing_output", ["transcript", "client-stderr"])
+def test_bounded_run_returns_boundary_failure_when_private_output_close_fails(
+    tmp_path: Path,
+    monkeypatch,
+    failing_output: str,
+) -> None:
+    real_open = agent_runner._open_private_output
+    opened: dict[str, CloseTrackingStream] = {}
+
+    def open_with_close_failure(path: Path) -> CloseTrackingStream:
+        stream = CloseTrackingStream(
+            real_open(path),
+            close_error=path.name == failing_output,
+            close_label=path.name,
+        )
+        opened[path.name] = stream
+        return stream
+
+    monkeypatch.setattr(agent_runner, "_open_private_output", open_with_close_failure)
+
+    result, _, _, backend = run_fixture(tmp_path, "")
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "boundary-failure",
+        "exit_status": 0,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": True,
+    }
+    assert backend.start_calls == 1
+    assert opened.keys() == {"transcript", "client-stderr"}
+    assert all(stream.closed for stream in opened.values())
+    assert all(stream.close_calls == 1 for stream in opened.values())
 
 
 @pytest.mark.parametrize("exit_status", [0, 17])
@@ -406,7 +525,7 @@ def test_bounded_run_cleans_scope_when_client_pipe_is_missing(
     tmp_path: Path,
     missing_pipes: frozenset[str],
 ) -> None:
-    backend = FakeBackend(missing_pipes=missing_pipes)
+    backend = FakeBackend(missing_pipes=missing_pipes, track_pipes=True)
 
     try:
         result, _, _, _ = run_fixture(
@@ -416,12 +535,25 @@ def test_bounded_run_cleans_scope_when_client_pipe_is_missing(
             backend=backend,
         )
 
-        assert result.outcome == "boundary-failure"
-        assert result.cleanup_proved is True
+        assert result.to_dict() == {
+            "schema": 1,
+            "outcome": "boundary-failure",
+            "exit_status": -signal.SIGTERM,
+            "transcript_bytes": 0,
+            "stderr_bytes": 0,
+            "cleanup_proved": True,
+        }
         assert backend.cgroup_path_calls >= 1
         assert backend.signals == [signal.SIGTERM]
         assert backend.process is not None
         assert backend.process.poll() is not None
+        assert all(stream.closed for stream in backend.pipe_streams.values())
+        assert all(stream.close_calls == 1 for stream in backend.pipe_streams.values())
+        cleanup_index = backend.descriptor_events.index("cleanup-proved")
+        assert all(
+            backend.descriptor_events.index(f"close-{name}") > cleanup_index
+            for name in backend.pipe_streams
+        )
     finally:
         if backend.process is not None and backend.process.poll() is None:
             backend.process.kill()
@@ -434,28 +566,8 @@ def test_bounded_run_cleans_scope_when_drain_thread_start_fails(
     monkeypatch,
     failing_start: int,
 ) -> None:
-    real_thread = agent_runner.threading.Thread
-    start_calls = 0
-
-    class ControlledThread:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            self._thread = real_thread(*args, **kwargs)
-
-        def start(self) -> None:
-            nonlocal start_calls
-            start_calls += 1
-            if start_calls == failing_start:
-                raise RuntimeError("fixture thread-start failure")
-            self._thread.start()
-
-        def is_alive(self) -> bool:
-            return self._thread.is_alive()
-
-        def join(self, timeout: float | None = None) -> None:
-            self._thread.join(timeout=timeout)
-
-    monkeypatch.setattr(agent_runner.threading, "Thread", ControlledThread)
-    backend = FakeBackend()
+    install_thread_start_failure(monkeypatch, failing_start)
+    backend = FakeBackend(track_pipes=True)
 
     try:
         result, _, _, _ = run_fixture(
@@ -465,12 +577,114 @@ def test_bounded_run_cleans_scope_when_drain_thread_start_fails(
             backend=backend,
         )
 
-        assert result.outcome == "boundary-failure"
-        assert result.cleanup_proved is True
+        assert result.to_dict() == {
+            "schema": 1,
+            "outcome": "boundary-failure",
+            "exit_status": -signal.SIGTERM,
+            "transcript_bytes": 0,
+            "stderr_bytes": 0,
+            "cleanup_proved": True,
+        }
         assert backend.cgroup_path_calls >= 1
         assert backend.signals == [signal.SIGTERM]
         assert backend.process is not None
         assert backend.process.poll() is not None
+        assert all(stream.closed for stream in backend.pipe_streams.values())
+        assert all(stream.close_calls == 1 for stream in backend.pipe_streams.values())
+    finally:
+        if backend.process is not None and backend.process.poll() is None:
+            backend.process.kill()
+            backend.process.wait(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("missing_pipes", "unowned_pipe"),
+    [
+        (frozenset({"stdout"}), "stderr"),
+        (frozenset({"stderr"}), "stdout"),
+    ],
+)
+def test_bounded_run_closes_unowned_pipe_when_close_raises_on_missing_pipe(
+    tmp_path: Path,
+    missing_pipes: frozenset[str],
+    unowned_pipe: str,
+) -> None:
+    backend = FakeBackend(
+        missing_pipes=missing_pipes,
+        track_pipes=True,
+        pipe_close_errors=frozenset({unowned_pipe}),
+    )
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.to_dict() == {
+            "schema": 1,
+            "outcome": "boundary-failure",
+            "exit_status": -signal.SIGTERM,
+            "transcript_bytes": 0,
+            "stderr_bytes": 0,
+            "cleanup_proved": True,
+        }
+        stream = backend.pipe_streams[unowned_pipe]
+        assert stream.closed is True
+        assert stream.close_calls == 1
+        assert backend.descriptor_events.index(f"close-{unowned_pipe}") > (
+            backend.descriptor_events.index("cleanup-proved")
+        )
+    finally:
+        if backend.process is not None and backend.process.poll() is None:
+            backend.process.kill()
+            backend.process.wait(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("failing_start", "unowned_pipes"),
+    [
+        (1, frozenset({"stdout", "stderr"})),
+        (2, frozenset({"stderr"})),
+    ],
+)
+def test_bounded_run_closes_unowned_pipes_when_close_raises_after_thread_failure(
+    tmp_path: Path,
+    monkeypatch,
+    failing_start: int,
+    unowned_pipes: frozenset[str],
+) -> None:
+    install_thread_start_failure(monkeypatch, failing_start)
+    backend = FakeBackend(
+        track_pipes=True,
+        pipe_close_errors=unowned_pipes,
+    )
+
+    try:
+        result, _, _, _ = run_fixture(
+            tmp_path,
+            "import time; time.sleep(60)",
+            grace_seconds=0.02,
+            backend=backend,
+        )
+
+        assert result.to_dict() == {
+            "schema": 1,
+            "outcome": "boundary-failure",
+            "exit_status": -signal.SIGTERM,
+            "transcript_bytes": 0,
+            "stderr_bytes": 0,
+            "cleanup_proved": True,
+        }
+        assert all(stream.closed for stream in backend.pipe_streams.values())
+        assert all(stream.close_calls == 1 for stream in backend.pipe_streams.values())
+        cleanup_index = backend.descriptor_events.index("cleanup-proved")
+        assert all(
+            backend.descriptor_events.index(f"close-{name}") > cleanup_index
+            for name in unowned_pipes
+        )
     finally:
         if backend.process is not None and backend.process.poll() is None:
             backend.process.kill()

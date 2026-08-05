@@ -281,6 +281,18 @@ def _open_private_output(path: Path) -> BinaryIO:
         raise BoundaryError(f"could not wrap private output {path}") from exc
 
 
+def _close_streams(streams: Sequence[BinaryIO | None]) -> bool:
+    close_succeeded = True
+    for stream in streams:
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            close_succeeded = False
+    return close_succeeded
+
+
 def _drain_stream(
     source: BinaryIO,
     destination: BinaryIO,
@@ -547,6 +559,27 @@ def _make_result(
     )
 
 
+def _close_outputs_and_make_result(
+    stack: ExitStack,
+    outcome: Outcome,
+    process: subprocess.Popen[bytes] | None,
+    transcript_state: _DrainState,
+    stderr_state: _DrainState,
+    cleanup_proved: bool,
+    outputs: Sequence[BinaryIO | None],
+) -> BoundedRunResult:
+    stack.pop_all()
+    if not _close_streams(outputs):
+        outcome = "boundary-failure"
+    return _make_result(
+        outcome,
+        process,
+        transcript_state,
+        stderr_state,
+        cleanup_proved,
+    )
+
+
 def run_bounded_agent(
     command: Sequence[str],
     transcript_path: Path,
@@ -576,6 +609,9 @@ def run_bounded_agent(
     started_at = time.monotonic()
     runtime_deadline = started_at + limits.runtime_seconds
     process: subprocess.Popen[bytes] | None = None
+    transcript_output: BinaryIO | None = None
+    stderr_output: BinaryIO | None = None
+    cleanup_proved = False
 
     with ExitStack() as stack:
         try:
@@ -587,12 +623,14 @@ def run_bounded_agent(
             os.ftruncate(stderr_output.fileno(), 0)
             process = selected_backend.start_scope(unit_name, command, limits)
         except (BoundaryError, OSError):
-            return _make_result(
+            return _close_outputs_and_make_result(
+                stack,
                 "boundary-failure",
                 process,
                 transcript_state,
                 stderr_state,
                 False,
+                (transcript_output, stderr_output),
             )
 
         cgroup_path: Path | None = None
@@ -627,19 +665,23 @@ def run_bounded_agent(
                 (),
                 limits,
             )
-            return _make_result(
+            _close_streams((process.stdout, process.stderr))
+            return _close_outputs_and_make_result(
+                stack,
                 "boundary-failure",
                 process,
                 transcript_state,
                 stderr_state,
                 cleanup_proved,
+                (transcript_output, stderr_output),
             )
 
+        sources = (process.stdout, process.stderr)
         events: queue.Queue[Outcome] = queue.Queue()
         transcript_thread = threading.Thread(
             target=_drain_stream,
             args=(
-                process.stdout,
+                sources[0],
                 transcript_output,
                 limits.stream_limit_bytes,
                 "transcript-limit",
@@ -651,7 +693,7 @@ def run_bounded_agent(
         stderr_thread = threading.Thread(
             target=_drain_stream,
             args=(
-                process.stderr,
+                sources[1],
                 stderr_output,
                 limits.stream_limit_bytes,
                 "stderr-limit",
@@ -679,12 +721,15 @@ def run_bounded_agent(
                 started_threads,
                 limits,
             )
-            return _make_result(
+            _close_streams(sources[len(started_threads) :])
+            return _close_outputs_and_make_result(
+                stack,
                 "boundary-failure",
                 process,
                 transcript_state,
                 stderr_state,
                 cleanup_proved,
+                (transcript_output, stderr_output),
             )
 
         if cgroup_path is None:
@@ -696,12 +741,14 @@ def run_bounded_agent(
                 threads,
                 limits,
             )
-            return _make_result(
+            return _close_outputs_and_make_result(
+                stack,
                 "boundary-failure",
                 process,
                 transcript_state,
                 stderr_state,
                 cleanup_proved and not (boundary_failed or stop_failed),
+                (transcript_output, stderr_output),
             )
 
         if pending_outcome is None and not boundary_failed:
@@ -737,12 +784,14 @@ def run_bounded_agent(
                         pending_outcome = "boundary-failure"
                         break
                     if cleanup_proved:
-                        return _make_result(
+                        return _close_outputs_and_make_result(
+                            stack,
                             "completed",
                             process,
                             transcript_state,
                             stderr_state,
                             True,
+                            (transcript_output, stderr_output),
                         )
                 remaining = runtime_deadline - time.monotonic()
                 if remaining > 0:
@@ -768,10 +817,12 @@ def run_bounded_agent(
         else:
             assert pending_outcome is not None
             final_outcome = pending_outcome
-        return _make_result(
+        return _close_outputs_and_make_result(
+            stack,
             final_outcome,
             process,
             transcript_state,
             stderr_state,
             cleanup_proved,
+            (transcript_output, stderr_output),
         )
