@@ -22,7 +22,7 @@ log_warn()  { printf '%swarn%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
 log_error() { printf '%s fail%s %s\n' "$RED"  "$NC" "$*" >&2; }
 
 _redact_stream() {
-    local key escaped
+    local +x key escaped
     if [ "${_LLM_ENV_REDACTION_KEY_OVERRIDE+x}" = x ]; then
         key="${_LLM_ENV_REDACTION_KEY_OVERRIDE-}"
     else
@@ -32,7 +32,7 @@ _redact_stream() {
     sed -E 's/(Authorization:[[:space:]]*Bearer)[[:space:]]+[^[:space:]"'"'"']+/\1 <redacted>/g' |
         if [ -n "$key" ]; then
             escaped="$(printf '%s' "$key" | sed 's/[][\\.^$*\/]/\\&/g')"
-            sed "s/${escaped}/<redacted>/g"
+            sed -f /dev/fd/3 3<<<"s/${escaped}/<redacted>/g"
         else
             cat
         fi

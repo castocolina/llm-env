@@ -2630,6 +2630,74 @@ def test_diagnostic_helper_treats_api_keys_as_fixed_text(
     assert not artifact.exists()
 
 
+@pytest.mark.parametrize("use_pinned_key", [False, True], ids=("config", "pinned"))
+def test_redaction_keeps_api_keys_out_of_sed_process_metadata(
+    tmp_path: pathlib.Path,
+    use_pinned_key: bool,
+) -> None:
+    """The key-specific sed program must not expose its key through argv or env."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    configured_key = "configured-process-secret"
+    pinned_key = "pinned-process-secret"
+    expected_key = pinned_key if use_pinned_key else configured_key
+    config = tmp_path / "models.yml"
+    config.write_text(f"server:\n  api_key: {configured_key}\n")
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    sed_arguments = tmp_path / "sed-arguments"
+    sed_environment = tmp_path / "sed-environment"
+    sed = commands / "sed"
+    sed.write_text(
+        "#!/usr/bin/bash\n"
+        "printf '%s\\0' \"$@\" >> \"$SED_ARGUMENTS\"\n"
+        "export -p >> \"$SED_ENVIRONMENT\"\n"
+        "exec /usr/bin/sed \"$@\"\n"
+    )
+    sed.chmod(sed.stat().st_mode | stat.S_IXUSR)
+
+    helper = tmp_path / "redact-with-recording-sed.sh"
+    pinned_setup = (
+        f"unset _LLM_ENV_REDACTION_KEY_OVERRIDE\n"
+        f"_LLM_ENV_REDACTION_KEY_OVERRIDE='{pinned_key}'\n"
+        if use_pinned_key
+        else "unset _LLM_ENV_REDACTION_KEY_OVERRIDE\n"
+    )
+    helper.write_text(
+        "#!/usr/bin/env bash\n"
+        "source \"$TEST_REPO_DIR/tools/lib.sh\"\n"
+        f"{pinned_setup}"
+        f"printf '%s' 'before {expected_key} after' | _redact_stream\n"
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(helper)],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:{pathlib.Path(real_yq).parent}:/usr/bin:/bin",
+            "SED_ARGUMENTS": str(sed_arguments),
+            "SED_ENVIRONMENT": str(sed_environment),
+            "TEST_REPO_DIR": str(ROOT),
+            "escaped": "ambient-exported-escaped",
+            "key": "ambient-exported-key",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "before <redacted> after"
+    arguments = sed_arguments.read_bytes().split(b"\0")[:-1]
+    assert arguments
+    assert all(expected_key.encode() not in argument for argument in arguments)
+    assert expected_key not in sed_environment.read_text()
+    assert expected_key not in result.stdout + result.stderr
+
+
 def test_diagnostic_helper_keeps_only_private_redacted_artifacts(
     tmp_path: pathlib.Path,
 ) -> None:
