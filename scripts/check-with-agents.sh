@@ -12,7 +12,7 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 
-require_cmd curl jq yq date
+require_cmd curl jq yq date uv systemd-run systemctl
 
 workspace="$(mktemp -d)" || die "could not create private workspace"
 chmod 700 "$workspace" || die "could not secure private workspace"
@@ -145,6 +145,116 @@ log_validation_facts() {
     esac
 }
 
+parse_bounded_result() {
+    local result="$1"
+
+    # jq accepts leading-zero numbers and otherwise collapses duplicate object keys.
+    if ! printf '%s' "$result" | jq -Rse '
+        gsub("\"([^\"\\\\]|\\\\.)*\""; "\"\"")
+        | test("(^|[[:space:]\\[{: ,])-?0[0-9]")
+        | not
+    ' >/dev/null; then
+        return 1
+    fi
+    if ! printf '%s' "$result" | jq --stream -se '
+        [.[] | select(length == 2)]
+        | length == 6 and all(.[]; (.[0] | length) == 1)
+    ' >/dev/null; then
+        return 1
+    fi
+    printf '%s' "$result" | jq -rse '
+        def integral_number:
+            type == "number" and isfinite and (. == floor);
+
+        select(length == 1)
+        | .[0]
+        | select(type == "object")
+        | select(keys == [
+            "cleanup_proved",
+            "exit_status",
+            "outcome",
+            "schema",
+            "stderr_bytes",
+            "transcript_bytes"
+        ])
+        | select(.schema == 1)
+        | select(
+            .outcome == "completed"
+            or .outcome == "timeout"
+            or .outcome == "transcript-limit"
+            or .outcome == "stderr-limit"
+            or .outcome == "boundary-failure"
+        )
+        | select(.exit_status == null or (.exit_status | integral_number))
+        | select((.transcript_bytes | integral_number) and .transcript_bytes >= 0)
+        | select((.stderr_bytes | integral_number) and .stderr_bytes >= 0)
+        | select(.cleanup_proved | type == "boolean")
+        | .outcome,
+          (if .exit_status == null then "null"
+           elif .exit_status == 0 then "0"
+           else (.exit_status | floor | tostring)
+           end),
+          (.cleanup_proved | tostring)
+    '
+}
+
+classify_bounded_result() {
+    local runner_status="$1" result="$2" parser_error_file="$3"
+    local parsed_result outcome exit_status cleanup_proved
+    local -a result_fields
+
+    if [ "$runner_status" -eq 0 ] \
+        && parsed_result="$(parse_bounded_result "$result" 2>>"$parser_error_file")"; then
+        mapfile -t result_fields <<< "$parsed_result"
+        outcome="${result_fields[0]}"
+        exit_status="${result_fields[1]}"
+        cleanup_proved="${result_fields[2]}"
+
+        if [ "$outcome" != boundary-failure ] && [ "$cleanup_proved" = true ]; then
+            if [ "$exit_status" = null ]; then
+                AGENT_EXIT_STATUS="NOT REPORTED"
+            else
+                AGENT_EXIT_STATUS="$exit_status"
+            fi
+            case "$outcome" in
+                completed)
+                    if [ "$exit_status" = null ]; then
+                        :
+                    elif [ "$exit_status" = 0 ]; then
+                        return 0
+                    else
+                        return 1
+                    fi
+                    ;;
+                timeout)
+                    AGENT_FAILURE_STAGE="agent timeout"
+                    AGENT_FAILURE_REASON="bounded client runtime expired"
+                    AGENT_RESULT_REASON="timeout"
+                    return 1
+                    ;;
+                transcript-limit)
+                    AGENT_FAILURE_STAGE="transcript limit"
+                    AGENT_FAILURE_REASON="client transcript exceeded 33554432 bytes"
+                    AGENT_RESULT_REASON="transcript-limit"
+                    return 1
+                    ;;
+                stderr-limit)
+                    AGENT_FAILURE_STAGE="stderr limit"
+                    AGENT_FAILURE_REASON="client stderr exceeded 33554432 bytes"
+                    AGENT_RESULT_REASON="stderr-limit"
+                    return 1
+                    ;;
+            esac
+        fi
+    fi
+
+    AGENT_FAILURE_STAGE="resource boundary"
+    AGENT_FAILURE_REASON="scope setup or cleanup could not be proved"
+    AGENT_RESULT_REASON="boundary-failure"
+    AGENT_ABORT_MATRIX=1
+    return 1
+}
+
 run_agent() {
     local client="$1"
     local alias="$2"
@@ -154,9 +264,13 @@ run_agent() {
     local final_file="$6"
     local parser_error_file="$7"
     local client_base config_dir config_file config_key_command status quoted_prompt
-    local -a pipeline_statuses
+    local bounded_result
+    local -a client_command
 
     AGENT_FAILURE_STAGE="command exit"
+    AGENT_FAILURE_REASON="agent invocation failed"
+    AGENT_RESULT_REASON="agent-failed"
+    AGENT_ABORT_MATRIX=0
     AGENT_EXIT_STATUS="NOT RUN"
     AGENT_CLIENT_BASE="http://llm.local:${port}/v1"
     client_base="$AGENT_CLIENT_BASE"
@@ -183,36 +297,41 @@ run_agent() {
                     models: [{id: $alias}]
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            # The first pipe element is Pi; the second is tee.
-            (
-                cd "$workspace" || exit 1
-                PI_CODING_AGENT_DIR="$config_dir" pi \
-                    --no-session \
-                    --no-extensions \
-                    --no-skills \
-                    --no-prompt-templates \
-                    --no-context-files \
-                    --tools bash \
-                    -p \
-                    --mode json \
-                    --model "llm-env/${alias}" \
-                    "$prompt" </dev/null
-            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
-            pipeline_statuses=("${PIPESTATUS[@]}")
-            status="${pipeline_statuses[0]}"
-            AGENT_EXIT_STATUS="$status"
-            if [ "${pipeline_statuses[1]}" -ne 0 ]; then
-                AGENT_FAILURE_STAGE="transcript capture"
-                return 1
+            client_command=(
+                pi
+                --no-session
+                --no-extensions
+                --no-skills
+                --no-prompt-templates
+                --no-context-files
+                --tools bash
+                -p
+                --mode json
+                --model "llm-env/${alias}"
+                "$prompt"
+            )
+            if bounded_result="$(
+                (
+                    cd "$workspace" || exit 1
+                    export PI_CODING_AGENT_DIR="$config_dir"
+                    uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                        --transcript "$transcript_file" \
+                        --stderr "$stderr_file" \
+                        -- "${client_command[@]}" </dev/null
+                ) 2>>"$parser_error_file"
+            )"; then
+                status=0
+            else
+                status=$?
             fi
-            if [ "$status" -ne 0 ]; then
+            if ! classify_bounded_result "$status" "$bounded_result" "$parser_error_file"; then
                 return 1
             fi
             if ! jq -rce '
                 [select(.type == "message_end" and .message.role == "assistant")
                  | [.message.content[]? | select(.type == "text") | .text] | join("")]
                 | last // empty
-            ' "$transcript_file" >"$final_file" 2>"$parser_error_file"; then
+            ' "$transcript_file" >"$final_file" 2>>"$parser_error_file"; then
                 AGENT_FAILURE_STAGE="response parsing"
                 return 1
             fi
@@ -233,24 +352,29 @@ run_agent() {
                     models: {($alias): {name: $alias}}
                 }}}' > "$config_file" || return 1
             chmod 600 "$config_file" || return 1
-            (
-                cd "$workspace" || exit 1
-                export HOME="$workspace/opencode-home"
-                export XDG_CONFIG_HOME="$workspace/opencode-config"
-                export XDG_DATA_HOME="$workspace/opencode-data"
-                export XDG_STATE_HOME="$workspace/opencode-state"
-                export OPENCODE_CONFIG="$config_file"
-                export OPENCODE_API_KEY="$api_key"
-                opencode run --format json --model "llm-env/${alias}" "$prompt" </dev/null
-            ) 2>"$stderr_file" | tee "$transcript_file" >/dev/null
-            pipeline_statuses=("${PIPESTATUS[@]}")
-            status="${pipeline_statuses[0]}"
-            AGENT_EXIT_STATUS="$status"
-            if [ "${pipeline_statuses[1]}" -ne 0 ]; then
-                AGENT_FAILURE_STAGE="transcript capture"
-                return 1
+            client_command=(
+                opencode run --format json --model "llm-env/${alias}" "$prompt"
+            )
+            if bounded_result="$(
+                (
+                    cd "$workspace" || exit 1
+                    export HOME="$workspace/opencode-home"
+                    export XDG_CONFIG_HOME="$workspace/opencode-config"
+                    export XDG_DATA_HOME="$workspace/opencode-data"
+                    export XDG_STATE_HOME="$workspace/opencode-state"
+                    export OPENCODE_CONFIG="$config_file"
+                    export OPENCODE_API_KEY="$api_key"
+                    uv run "${REPO_DIR}/llmenv.py" run-agent-bounded \
+                        --transcript "$transcript_file" \
+                        --stderr "$stderr_file" \
+                        -- "${client_command[@]}" </dev/null
+                ) 2>>"$parser_error_file"
+            )"; then
+                status=0
+            else
+                status=$?
             fi
-            if [ "$status" -ne 0 ]; then
+            if ! classify_bounded_result "$status" "$bounded_result" "$parser_error_file"; then
                 return 1
             fi
             if ! jq -rce '
@@ -260,7 +384,7 @@ run_agent() {
                  else {message_id: $part.messageID, text: $part.text}
                  end)
                 | .text
-            ' "$transcript_file" >"$final_file" 2>"$parser_error_file"; then
+            ' "$transcript_file" >"$final_file" 2>>"$parser_error_file"; then
                 AGENT_FAILURE_STAGE="response parsing"
                 return 1
             fi
@@ -420,10 +544,13 @@ for client in "${clients[@]}"; do
                 log_nonempty_block "Client stderr" "$(<"$client_stderr_file")"
                 log_nonempty_block "Agent parser stderr" "$(<"$parser_error_file")"
                 log_nonempty_block "Final response" "$(<"$final_file")"
-                log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=agent invocation failed"
-                printf 'FAIL client=%s model=%s check=%s reason=agent-failed\n' \
-                    "$client" "$alias" "$check_name"
+                log_error "Verdict: FAIL stage=${AGENT_FAILURE_STAGE} client=${client} model=${alias} check=${check_name} reason=${AGENT_FAILURE_REASON}"
+                printf 'FAIL client=%s model=%s check=%s reason=%s\n' \
+                    "$client" "$alias" "$check_name" "$AGENT_RESULT_REASON"
                 failures=$((failures + 1))
+                if [ "$AGENT_ABORT_MATRIX" -ne 0 ]; then
+                    break 3
+                fi
                 continue
             fi
 

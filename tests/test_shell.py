@@ -3226,18 +3226,18 @@ def run_agent_check(
     agent_parser_stderr: str = "",
     fenced_parser_stderr: str = "",
     source_parser_stderr: str = "",
-    tee_exit: int = 0,
+    bounded_results: tuple[str, ...] = (),
+    bounded_exit_statuses: tuple[int, ...] = (),
+    bounded_cli_stderr: str = "",
     fail_pi_configuration: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the opt-in check with an isolated client path and fake APIs."""
     real_jq = shutil.which("jq")
     real_yq = shutil.which("yq")
     real_date = shutil.which("date")
-    real_tee = shutil.which("tee")
     assert real_jq is not None
     assert real_yq is not None
     assert real_date is not None
-    assert real_tee is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -3249,6 +3249,18 @@ def run_agent_check(
     diagnostic_tmpdir.mkdir()
     source_counter = tmp_path / "source-counter"
     source_counter.write_text("0\n")
+    bounded_counter = tmp_path / "bounded-counter"
+    bounded_counter.write_text("0\n")
+    bounded_calls = tmp_path / "bounded-calls"
+    bounded_calls.touch()
+    bounded_results_dir = tmp_path / "bounded-results"
+    bounded_results_dir.mkdir()
+    for index, bounded_result in enumerate(bounded_results):
+        (bounded_results_dir / str(index)).write_text(bounded_result)
+    bounded_statuses_dir = tmp_path / "bounded-statuses"
+    bounded_statuses_dir.mkdir()
+    for index, bounded_status in enumerate(bounded_exit_statuses):
+        (bounded_statuses_dir / str(index)).write_text(f"{bounded_status}\n")
     config = tmp_path / "models.yml"
     config.write_text(
         "server:\n"
@@ -3266,6 +3278,8 @@ def run_agent_check(
         "mv": "/usr/bin/mv",
         "rm": "/usr/bin/rm",
         "sed": "/usr/bin/sed",
+        "systemctl": "/usr/bin/true",
+        "systemd-run": "/usr/bin/true",
         "yq": real_yq,
     }.items():
         command = commands / name
@@ -3293,13 +3307,55 @@ def run_agent_check(
     )
     jq.chmod(jq.stat().st_mode | stat.S_IXUSR)
 
-    tee = commands / "tee"
-    tee.write_text(
+    uv = commands / "uv"
+    uv.write_text(
         "#!/usr/bin/bash\n"
-        '"$REAL_TEE" "$@"\n'
-        'exit "$AGENT_CHECK_TEE_EXIT"\n'
+        'count="$(< "$AGENT_CHECK_BOUNDED_COUNTER")"\n'
+        'printf "%s\\n" "$((count + 1))" > "$AGENT_CHECK_BOUNDED_COUNTER"\n'
+        'printf "uv %s\\n" "$*" >> "$AGENT_CHECK_BOUNDED_CALLS"\n'
+        'if [ "$#" -lt 9 ] '
+        '|| [ "$1" != run ] '
+        '|| [ "$2" != "$AGENT_CHECK_REPO_DIR/llmenv.py" ] '
+        '|| [ "$3" != run-agent-bounded ] '
+        '|| [ "$4" != --transcript ] '
+        '|| [ "$6" != --stderr ] '
+        '|| [ "$8" != -- ]; then\n'
+        "    printf '%s\\n' 'invalid bounded CLI shape' >&2\n"
+        "    exit 97\n"
+        "fi\n"
+        'transcript_file="$5"\n'
+        'stderr_file="$7"\n'
+        "shift 8\n"
+        'if IFS= read -r _; then\n'
+        "    printf '%s\\n' 'bounded runner inherited readable stdin' >&2\n"
+        "    exit 96\n"
+        "fi\n"
+        '"$@" </dev/null >"$transcript_file" 2>"$stderr_file"\n'
+        "client_status=$?\n"
+        'transcript_bytes="$(/usr/bin/wc -c <"$transcript_file")"\n'
+        'stderr_bytes="$(/usr/bin/wc -c <"$stderr_file")"\n'
+        'result_file="$AGENT_CHECK_BOUNDED_RESULTS_DIR/$count"\n'
+        'if [ -f "$result_file" ]; then\n'
+        '    /usr/bin/cat "$result_file"\n'
+        "else\n"
+        '    "$REAL_JQ" -cn '
+        '--argjson exit_status "$client_status" '
+        '--argjson transcript_bytes "$transcript_bytes" '
+        '--argjson stderr_bytes "$stderr_bytes" '
+        "'{schema:1,outcome:\"completed\",exit_status:$exit_status,"
+        "transcript_bytes:$transcript_bytes,stderr_bytes:$stderr_bytes,"
+        "cleanup_proved:true}'\n"
+        "fi\n"
+        'if [ -n "$AGENT_CHECK_BOUNDED_CLI_STDERR" ]; then\n'
+        '    printf "%s\\n" "$AGENT_CHECK_BOUNDED_CLI_STDERR" >&2\n'
+        "fi\n"
+        'status_file="$AGENT_CHECK_BOUNDED_STATUSES_DIR/$count"\n'
+        'if [ -f "$status_file" ]; then\n'
+        '    exit "$(<"$status_file")"\n'
+        "fi\n"
+        "exit 0\n"
     )
-    tee.chmod(tee.stat().st_mode | stat.S_IXUSR)
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     curl = commands / "curl"
     curl.write_text(
@@ -3359,7 +3415,12 @@ def run_agent_check(
         "AGENT_CHECK_PARSER_STDERR": agent_parser_stderr,
         "AGENT_CHECK_FENCED_PARSER_STDERR": fenced_parser_stderr,
         "AGENT_CHECK_SOURCE_PARSER_STDERR": source_parser_stderr,
-        "AGENT_CHECK_TEE_EXIT": str(tee_exit),
+        "AGENT_CHECK_BOUNDED_COUNTER": str(bounded_counter),
+        "AGENT_CHECK_BOUNDED_CALLS": str(bounded_calls),
+        "AGENT_CHECK_BOUNDED_RESULTS_DIR": str(bounded_results_dir),
+        "AGENT_CHECK_BOUNDED_STATUSES_DIR": str(bounded_statuses_dir),
+        "AGENT_CHECK_BOUNDED_CLI_STDERR": bounded_cli_stderr,
+        "AGENT_CHECK_REPO_DIR": str(ROOT),
         "ARTIFACTS": str(artifacts),
         "AGENT_CHECK_SOURCE_COUNTER": str(source_counter),
         "CALLS": str(calls),
@@ -3369,7 +3430,6 @@ def run_agent_check(
         "TMPDIR": str(diagnostic_tmpdir),
         "XDG_CONFIG_HOME": str(tmp_path / "host-xdg-config"),
         "REAL_JQ": real_jq,
-        "REAL_TEE": real_tee,
     }
     if keep_artifacts:
         environment["LLM_ENV_KEEP_CHECK_ARTIFACTS"] = "1"
@@ -3399,6 +3459,30 @@ def run_agent_check(
 def count_rows(output: str, prefix: str) -> int:
     """Count result rows with the requested client prefix."""
     return sum(line.startswith(prefix) for line in output.splitlines())
+
+
+def bounded_call_count(calls: pathlib.Path) -> int:
+    """Return the fake bounded runner's independent invocation count."""
+    return int(calls.with_name("bounded-counter").read_text())
+
+
+def bounded_invocations(calls: pathlib.Path) -> list[str]:
+    """Return the fake bounded runner's recorded argument vectors."""
+    return calls.with_name("bounded-calls").read_text().splitlines()
+
+
+def bounded_result_json(**overrides: object) -> str:
+    """Build one exact bounded-runner result for fixture queues."""
+    result: dict[str, object] = {
+        "schema": 1,
+        "outcome": "completed",
+        "exit_status": 0,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": True,
+    }
+    result.update(overrides)
+    return json.dumps(result, separators=(",", ":"))
 
 
 def agent_rows(output: str) -> list[str]:
@@ -3784,27 +3868,326 @@ def test_agent_check_prints_redacted_transcript_and_client_failure(
 
 
 @pytest.mark.parametrize(
-    ("client", "stub"), (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB))
+    ("outcome", "stage", "diagnostic_reason", "row_reason"),
+    (
+        (
+            "timeout",
+            "agent timeout",
+            "bounded client runtime expired",
+            "timeout",
+        ),
+        (
+            "transcript-limit",
+            "transcript limit",
+            "client transcript exceeded 33554432 bytes",
+            "transcript-limit",
+        ),
+        (
+            "stderr-limit",
+            "stderr limit",
+            "client stderr exceeded 33554432 bytes",
+            "stderr-limit",
+        ),
+    ),
 )
-def test_agent_check_reports_client_exit_when_transcript_capture_fails(
-    tmp_path: pathlib.Path, client: str, stub: str
+def test_agent_check_classifies_proved_resource_outcomes_and_continues(
+    tmp_path: pathlib.Path,
+    outcome: str,
+    stage: str,
+    diagnostic_reason: str,
+    row_reason: str,
 ) -> None:
-    result, _, _ = run_agent_check(
+    result, calls, _ = run_agent_check(
         tmp_path,
-        clients={client: stub},
-        tee_exit=41,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(
+            bounded_result_json(outcome=outcome, exit_status=None),
+        ),
+        agent_client_stderr="bounded client warning",
+        bounded_cli_stderr="bounded parser warning",
     )
 
     assert result.returncode != 0
     rows = agent_rows(result.stdout)
     assert len(rows) == 2
-    for row in rows:
-        assert_common_agent_fields(row, client=client, exit_status="0")
-        assert "Client JSONL transcript:\n  {\"type\":" in row
-        assert "Client stderr:" not in row
-        assert "Agent parser stderr:" not in row
-        assert "Final response:" not in row
-    assert "Verdict: FAIL stage=transcript capture" in result.stderr
+    failed_row = next(row for row in rows if "check=weather" in row)
+    assert_common_agent_fields(failed_row, client="pi", exit_status="NOT REPORTED")
+    assert "Client JSONL transcript:\n  {\"type\":" in failed_row
+    assert "Client stderr:\n  bounded client warning" in failed_row
+    assert "Agent parser stderr:\n  bounded parser warning" in failed_row
+    assert "Final response:" not in failed_row
+    assert (
+        f"Verdict: FAIL stage={stage} client=pi model=gemma4 check=weather "
+        f"reason={diagnostic_reason}"
+    ) in result.stderr
+    assert f"FAIL client=pi model=gemma4 check=weather reason={row_reason}" in result.stdout
+    assert "PASS client=pi model=gemma4 check=fx reason=agent-returned-json" in result.stdout
+    assert bounded_call_count(calls) == 2
+    assert "Results: 1 passed, 1 failed" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("case", "bounded_result"),
+    (
+        (
+            "explicit-boundary-failure",
+            bounded_result_json(
+                outcome="boundary-failure",
+                exit_status=None,
+            ),
+        ),
+        (
+            "completed-unproved-cleanup",
+            bounded_result_json(cleanup_proved=False),
+        ),
+        (
+            "timeout-unproved-cleanup",
+            bounded_result_json(
+                outcome="timeout",
+                exit_status=None,
+                cleanup_proved=False,
+            ),
+        ),
+        (
+            "transcript-limit-unproved-cleanup",
+            bounded_result_json(
+                outcome="transcript-limit",
+                exit_status=None,
+                cleanup_proved=False,
+            ),
+        ),
+        (
+            "stderr-limit-unproved-cleanup",
+            bounded_result_json(
+                outcome="stderr-limit",
+                exit_status=None,
+                cleanup_proved=False,
+            ),
+        ),
+    ),
+)
+def test_agent_check_aborts_the_complete_matrix_when_cleanup_is_uncertain(
+    tmp_path: pathlib.Path,
+    case: str,
+    bounded_result: str,
+) -> None:
+    del case
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_results=(bounded_result,),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Agent:\n  client=pi model=gemma4 check=weather" in result.stdout
+    assert "client=pi model=gemma4 check=fx" not in result.stdout
+    assert "model=ornith" not in result.stdout
+    assert "client=opencode" not in result.stdout
+    assert (
+        "Verdict: FAIL stage=resource boundary client=pi model=gemma4 check=weather "
+        "reason=scope setup or cleanup could not be proved"
+    ) in result.stderr
+    assert (
+        "FAIL client=pi model=gemma4 check=weather reason=boundary-failure"
+    ) in result.stdout
+    assert "Results: 0 passed, 1 failed" in result.stdout
+
+
+def test_agent_check_keeps_completed_nonzero_as_an_ordinary_client_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(bounded_result_json(exit_status=17),),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 2
+    assert "Verdict: FAIL stage=command exit" in result.stderr
+    assert "stage=resource boundary" not in result.stderr
+    assert "FAIL client=pi model=gemma4 check=weather reason=agent-failed" in result.stdout
+    assert "PASS client=pi model=gemma4 check=fx reason=agent-returned-json" in result.stdout
+    assert "Exit status:\n  17" in agent_rows(result.stdout)[0]
+
+
+def test_agent_check_accepts_a_negative_integral_completed_exit_status(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(bounded_result_json(exit_status=-15),),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 2
+    assert "Exit status:\n  -15" in agent_rows(result.stdout)[0]
+    assert "Verdict: FAIL stage=command exit" in result.stderr
+    assert "stage=resource boundary" not in result.stderr
+
+
+def test_agent_check_treats_completed_null_status_as_boundary_uncertainty(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_results=(bounded_result_json(exit_status=None),),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Exit status:\n  NOT REPORTED" in result.stdout
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+
+
+def test_agent_check_treats_bounded_cli_failure_as_boundary_uncertainty(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_exit_statuses=(73,),
+        bounded_cli_stderr="bounded CLI setup failed",
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Exit status:\n  NOT RUN" in result.stdout
+    assert "Agent parser stderr:\n  bounded CLI setup failed" in result.stdout
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+
+
+_VALID_BOUNDED_RESULT = bounded_result_json()
+_MISSING_BOUNDED_RESULT_KEY = json.loads(_VALID_BOUNDED_RESULT)
+del _MISSING_BOUNDED_RESULT_KEY["stderr_bytes"]
+
+
+@pytest.mark.parametrize(
+    "bounded_result",
+    (
+        pytest.param("", id="empty"),
+        pytest.param("{", id="malformed"),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"exit_status":0', '"exit_status":NaN'),
+            id="non-json-nan",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace(
+                '"transcript_bytes":0',
+                '"transcript_bytes":01',
+            ),
+            id="non-json-leading-zero",
+        ),
+        pytest.param(
+            _VALID_BOUNDED_RESULT.replace('"schema":1', '"schema":1,"schema":1'),
+            id="duplicate-key",
+        ),
+        pytest.param(
+            f"{_VALID_BOUNDED_RESULT}\n{_VALID_BOUNDED_RESULT}",
+            id="multiple-top-level-values",
+        ),
+        pytest.param("[]", id="top-level-array"),
+        pytest.param(bounded_result_json(extra=True), id="extra-key"),
+        pytest.param(
+            json.dumps(_MISSING_BOUNDED_RESULT_KEY),
+            id="missing-key",
+        ),
+        pytest.param(bounded_result_json(schema=2), id="wrong-schema"),
+        pytest.param(bounded_result_json(schema="1"), id="schema-string"),
+        pytest.param(bounded_result_json(outcome="unknown"), id="unknown-outcome"),
+        pytest.param(bounded_result_json(outcome=1), id="outcome-number"),
+        pytest.param(bounded_result_json(exit_status="0"), id="exit-string"),
+        pytest.param(bounded_result_json(exit_status=True), id="exit-boolean"),
+        pytest.param(bounded_result_json(exit_status=[]), id="exit-array"),
+        pytest.param(bounded_result_json(exit_status={}), id="exit-object"),
+        pytest.param(bounded_result_json(exit_status=1.5), id="exit-fraction"),
+        pytest.param(
+            bounded_result_json(transcript_bytes="0"),
+            id="transcript-string",
+        ),
+        pytest.param(
+            bounded_result_json(transcript_bytes=True),
+            id="transcript-boolean",
+        ),
+        pytest.param(
+            bounded_result_json(transcript_bytes=[]),
+            id="transcript-array",
+        ),
+        pytest.param(
+            bounded_result_json(transcript_bytes={}),
+            id="transcript-object",
+        ),
+        pytest.param(
+            bounded_result_json(transcript_bytes=1.5),
+            id="transcript-fraction",
+        ),
+        pytest.param(
+            bounded_result_json(transcript_bytes=-1),
+            id="transcript-negative",
+        ),
+        pytest.param(bounded_result_json(stderr_bytes="0"), id="stderr-string"),
+        pytest.param(bounded_result_json(stderr_bytes=True), id="stderr-boolean"),
+        pytest.param(bounded_result_json(stderr_bytes=[]), id="stderr-array"),
+        pytest.param(bounded_result_json(stderr_bytes={}), id="stderr-object"),
+        pytest.param(bounded_result_json(stderr_bytes=1.5), id="stderr-fraction"),
+        pytest.param(bounded_result_json(stderr_bytes=-1), id="stderr-negative"),
+        pytest.param(bounded_result_json(cleanup_proved=1), id="cleanup-number"),
+        pytest.param(
+            bounded_result_json(cleanup_proved="true"),
+            id="cleanup-string",
+        ),
+        pytest.param(bounded_result_json(cleanup_proved=None), id="cleanup-null"),
+        pytest.param(bounded_result_json(cleanup_proved=[]), id="cleanup-array"),
+        pytest.param(bounded_result_json(cleanup_proved={}), id="cleanup-object"),
+    ),
+)
+def test_agent_check_rejects_every_invalid_bounded_result(
+    tmp_path: pathlib.Path,
+    bounded_result: str,
+) -> None:
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB, "opencode": VALID_OPENCODE_STUB},
+        model_aliases=("gemma4", "ornith"),
+        bounded_results=(bounded_result,),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert len(agent_rows(result.stdout)) == 1
+    assert "Exit status:\n  NOT RUN" in result.stdout
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
+    assert "reason=boundary-failure" in result.stdout
+    assert "Results: 0 passed, 1 failed" in result.stdout
+
+
+def test_agent_check_never_evaluates_runner_controlled_result_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    marker = tmp_path / "runner-output-was-evaluated"
+    result, calls, _ = run_agent_check(
+        tmp_path,
+        clients={"pi": VALID_PI_STUB},
+        bounded_results=(
+            bounded_result_json(exit_status=f"$(touch {marker})"),
+        ),
+    )
+
+    assert result.returncode != 0
+    assert bounded_call_count(calls) == 1
+    assert not marker.exists()
+    assert "Verdict: FAIL stage=resource boundary" in result.stderr
 
 
 def test_agent_check_retains_final_response_parser_diagnostics(
@@ -3914,6 +4297,12 @@ def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Pat
 
     assert result.returncode == 0, result.stderr
     assert count_rows(result.stdout, "PASS client=pi") == 4
+    assert bounded_call_count(calls) == 4
+    assert len(bounded_invocations(calls)) == 4
+    assert all("run-agent-bounded" in call for call in bounded_invocations(calls))
+    assert all("--runtime-seconds" not in call for call in bounded_invocations(calls))
+    assert all("--grace-seconds" not in call for call in bounded_invocations(calls))
+    assert all("--stream-limit-bytes" not in call for call in bounded_invocations(calls))
     recorded = calls.read_text()
     assert "--no-session" in recorded
     assert "--no-extensions" in recorded
@@ -3946,6 +4335,12 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
 
     assert result.returncode == 0, result.stderr
     assert count_rows(result.stdout, "PASS client=opencode") == 4
+    assert bounded_call_count(calls) == 4
+    assert len(bounded_invocations(calls)) == 4
+    assert all("run-agent-bounded" in call for call in bounded_invocations(calls))
+    assert all("--runtime-seconds" not in call for call in bounded_invocations(calls))
+    assert all("--grace-seconds" not in call for call in bounded_invocations(calls))
+    assert all("--stream-limit-bytes" not in call for call in bounded_invocations(calls))
     recorded = calls.read_text()
     assert "run --format json --model llm-env/gemma4" in recorded
     assert f"xdg={tmp_path / 'host-xdg-config'}" not in recorded
@@ -4024,6 +4419,7 @@ def test_agent_check_keeps_nonempty_success_diagnostics(
         clients={"pi": VALID_PI_STUB},
         agent_client_stderr="client warning",
         agent_parser_stderr="parser warning",
+        bounded_cli_stderr="bounded runner warning",
     )
 
     assert result.returncode == 0, result.stderr
@@ -4033,7 +4429,7 @@ def test_agent_check_keeps_nonempty_success_diagnostics(
         assert_common_agent_fields(row, client="pi", exit_status="0")
         assert "Client JSONL transcript:" not in row
         assert "Client stderr:\n  client warning" in row
-        assert "Agent parser stderr:\n  parser warning" in row
+        assert "Agent parser stderr:\n  bounded runner warning\n  parser warning" in row
         assert "Final response:\n  {" in row
         assert "Validated:\n  source_url=https://" in row
         assert "Verdict: PASS" in row
