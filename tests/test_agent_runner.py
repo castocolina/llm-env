@@ -32,6 +32,7 @@ class FakeBackend:
         cgroup_observable: bool = True,
         synchronize_start: bool = False,
         signal_errors: set[signal.Signals] | None = None,
+        wait_for_exit_before_cgroup: bool = False,
     ) -> None:
         self.cleanup_error = cleanup_error
         self.cleanup_errors = cleanup_errors
@@ -39,6 +40,8 @@ class FakeBackend:
         self.cgroup_observable = cgroup_observable
         self.synchronize_start = synchronize_start
         self.signal_errors = signal_errors or set()
+        self.wait_for_exit_before_cgroup = wait_for_exit_before_cgroup
+        self.start_calls = 0
         self.process: subprocess.Popen[bytes] | None = None
         self.unit_name: str | None = None
         self.signals: list[signal.Signals] = []
@@ -50,6 +53,7 @@ class FakeBackend:
         command: Sequence[str],
         limits: RunLimits,
     ) -> subprocess.Popen[bytes]:
+        self.start_calls += 1
         self.unit_name = unit_name
         self.process = subprocess.Popen(
             list(command),
@@ -71,6 +75,8 @@ class FakeBackend:
         assert self.process is not None
         if not self.cgroup_observable:
             return None
+        if self.wait_for_exit_before_cgroup:
+            self.process.wait(timeout=timeout_seconds)
         return Path("/fake-cgroup") / unit_name
 
     def signal_scope(
@@ -185,6 +191,61 @@ def test_bounded_run_reports_nonzero_client_exit_as_completed(tmp_path: Path) ->
     assert result.cleanup_proved is True
     assert transcript.read_bytes() == b""
     assert client_stderr.read_bytes() == b""
+
+
+@pytest.mark.parametrize("exit_status", [0, 17])
+def test_bounded_run_completes_when_saved_cgroup_outlives_fast_launcher(
+    tmp_path: Path,
+    exit_status: int,
+) -> None:
+    backend = FakeBackend(wait_for_exit_before_cgroup=True)
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        f"raise SystemExit({exit_status})",
+        backend=backend,
+    )
+
+    assert result.outcome == "completed"
+    assert result.exit_status == exit_status
+    assert result.cleanup_proved is True
+    assert backend.signals == []
+
+
+@pytest.mark.parametrize(
+    ("runtime_seconds", "grace_seconds", "stream_limit_bytes"),
+    [
+        (300.000001, 10.0, 33_554_432),
+        (300.0, 10.000001, 33_554_432),
+        (300.0, 10.0, 33_554_433),
+    ],
+)
+def test_bounded_run_rejects_over_max_limits_before_injected_backend(
+    tmp_path: Path,
+    runtime_seconds: float,
+    grace_seconds: float,
+    stream_limit_bytes: int,
+) -> None:
+    backend = FakeBackend()
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "",
+        runtime_seconds=runtime_seconds,
+        grace_seconds=grace_seconds,
+        stream_limit_bytes=stream_limit_bytes,
+        backend=backend,
+    )
+
+    assert result.to_dict() == {
+        "schema": 1,
+        "outcome": "boundary-failure",
+        "exit_status": None,
+        "transcript_bytes": 0,
+        "stderr_bytes": 0,
+        "cleanup_proved": False,
+    }
+    assert backend.start_calls == 0
 
 
 def test_bounded_run_times_out_and_proves_cleanup(tmp_path: Path) -> None:
@@ -306,6 +367,63 @@ def test_local_launcher_kill_waits_full_term_grace(monkeypatch) -> None:
         ("term", 10.0),
         ("kill", 10.0 + grace_seconds),
     ]
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "launcher_error"),
+    [
+        ("poll", OSError("fixture poll failure")),
+        ("terminate", ProcessLookupError("fixture terminate failure")),
+        ("term-wait", subprocess.SubprocessError("fixture TERM wait failure")),
+        ("kill", PermissionError("fixture kill failure")),
+        ("kill-wait", subprocess.SubprocessError("fixture KILL wait failure")),
+    ],
+)
+def test_local_launcher_control_errors_return_false(
+    monkeypatch,
+    failure_stage: str,
+    launcher_error: BaseException,
+) -> None:
+    class FailingLauncher:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.killed = False
+
+        def poll(self) -> int | None:
+            if failure_stage == "poll":
+                raise launcher_error
+            return self.returncode
+
+        def terminate(self) -> None:
+            if failure_stage == "terminate":
+                raise launcher_error
+
+        def wait(self, timeout: float) -> int:
+            if self.killed:
+                if failure_stage == "kill-wait":
+                    raise launcher_error
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+            if failure_stage == "term-wait":
+                raise launcher_error
+            raise subprocess.TimeoutExpired(["systemd-run"], timeout)
+
+        def kill(self) -> None:
+            if failure_stage == "kill":
+                raise launcher_error
+            self.killed = True
+
+    monkeypatch.setattr(agent_runner.time, "monotonic", lambda: 10.0)
+
+    assert (
+        agent_runner._reap_local_launcher(
+            FailingLauncher(),
+            (),
+            10.0,
+            0.25,
+        )
+        is False
+    )
 
 
 def test_bounded_run_reaps_launcher_without_scope_kill_after_empty_cgroup(

@@ -366,24 +366,27 @@ def _reap_local_launcher(
     deadline: float,
     grace_seconds: float,
 ) -> bool:
-    while time.monotonic() < deadline:
-        if _execution_finished(process, threads):
-            return True
-        time.sleep(_POLL_SECONDS)
+    try:
+        while time.monotonic() < deadline:
+            if _execution_finished(process, threads):
+                return True
+            time.sleep(_POLL_SECONDS)
 
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        if process.poll() is None:
+            process.terminate()
             try:
                 process.wait(timeout=grace_seconds)
             except subprocess.TimeoutExpired:
-                return False
-    for thread in threads:
-        thread.join(timeout=_POLL_SECONDS * 10)
-    return _execution_finished(process, threads)
+                process.kill()
+                try:
+                    process.wait(timeout=grace_seconds)
+                except subprocess.TimeoutExpired:
+                    return False
+        for thread in threads:
+            thread.join(timeout=_POLL_SECONDS * 10)
+        return _execution_finished(process, threads)
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _wait_for_cleanup(
@@ -522,6 +525,14 @@ def run_bounded_agent(
         return _make_result(
             "boundary-failure", None, transcript_state, stderr_state, False
         )
+    if (
+        limits.runtime_seconds > DEFAULT_RUNTIME_SECONDS
+        or limits.grace_seconds > DEFAULT_GRACE_SECONDS
+        or limits.stream_limit_bytes > DEFAULT_STREAM_LIMIT_BYTES
+    ):
+        return _make_result(
+            "boundary-failure", None, transcript_state, stderr_state, False
+        )
 
     selected_backend = backend or SystemdScopeBackend()
     unit_name = f"llm-env-agent-{secrets.token_hex(16)}.scope"
@@ -599,7 +610,7 @@ def run_bounded_agent(
             except BoundaryError:
                 boundary_failed = True
                 break
-            if process.poll() is not None:
+            if cgroup_path is None and process.poll() is not None:
                 boundary_failed = True
                 break
             time.sleep(min(_POLL_SECONDS, remaining))
