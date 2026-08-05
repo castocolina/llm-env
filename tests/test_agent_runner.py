@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -21,11 +23,24 @@ from pylib.agent_runner import (
 
 
 class FakeBackend:
-    def __init__(self, *, cleanup_error: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        cleanup_error: bool = False,
+        cleanup_errors: int = 0,
+        cgroup_empty_override: bool | None = None,
+        synchronize_start: bool = False,
+        signal_errors: set[signal.Signals] | None = None,
+    ) -> None:
         self.cleanup_error = cleanup_error
+        self.cleanup_errors = cleanup_errors
+        self.cgroup_empty_override = cgroup_empty_override
+        self.synchronize_start = synchronize_start
+        self.signal_errors = signal_errors or set()
         self.process: subprocess.Popen[bytes] | None = None
         self.unit_name: str | None = None
         self.signals: list[signal.Signals] = []
+        self.signal_times: list[float] = []
 
     def start_scope(
         self,
@@ -41,11 +56,17 @@ class FakeBackend:
             stderr=subprocess.PIPE,
             bufsize=0,
         )
+        if self.synchronize_start:
+            _, wait_status = os.waitpid(self.process.pid, os.WUNTRACED)
+            if not os.WIFSTOPPED(wait_status):
+                raise BoundaryError("fixture exited before signaling readiness")
+            self.process.send_signal(signal.SIGCONT)
         return self.process
 
     def cgroup_path(self, unit_name: str, timeout_seconds: float) -> Path | None:
         assert timeout_seconds > 0
         assert unit_name == self.unit_name
+        assert self.process is not None
         return Path("/fake-cgroup") / unit_name
 
     def signal_scope(
@@ -58,13 +79,19 @@ class FakeBackend:
         assert unit_name == self.unit_name
         assert self.process is not None
         self.signals.append(requested_signal)
+        self.signal_times.append(time.monotonic())
         if self.process.poll() is None:
             self.process.send_signal(requested_signal)
+        if requested_signal in self.signal_errors:
+            raise BoundaryError("fixture signal state unavailable")
 
     def cgroup_empty(self, cgroup_path: Path) -> bool:
         assert cgroup_path == Path("/fake-cgroup") / self.unit_name
-        if self.cleanup_error:
+        if self.cleanup_error or self.cleanup_errors > 0:
+            self.cleanup_errors = max(0, self.cleanup_errors - 1)
             raise BoundaryError("fixture cleanup state unavailable")
+        if self.cgroup_empty_override is not None:
+            return self.cgroup_empty_override
         assert self.process is not None
         return self.process.poll() is not None
 
@@ -72,6 +99,28 @@ class FakeBackend:
 def private_output(path: Path) -> None:
     path.touch()
     path.chmod(0o600)
+
+
+def sigterm_ignoring_code() -> str:
+    return (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+        "os.kill(os.getpid(), signal.SIGSTOP)\n"
+        "time.sleep(60)\n"
+    )
+
+
+def systemctl_result(
+    stdout: str,
+    *,
+    returncode: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["systemctl"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr="",
+    )
 
 
 def run_fixture(
@@ -176,21 +225,88 @@ def test_bounded_run_caps_stderr_and_detects_the_next_byte(tmp_path: Path) -> No
 
 
 def test_bounded_run_escalates_from_term_to_kill(tmp_path: Path) -> None:
-    code = (
-        "import signal, sys, time\n"
-        "signal.signal(signal.SIGTERM, lambda *_: None)\n"
-        "sys.stdout.write('ready\\n')\n"
-        "sys.stdout.flush()\n"
-        "time.sleep(60)\n"
-    )
+    backend = FakeBackend(synchronize_start=True)
     result, _, _, backend = run_fixture(
         tmp_path,
-        code,
-        runtime_seconds=0.2,
+        sigterm_ignoring_code(),
         grace_seconds=0.05,
+        backend=backend,
     )
 
     assert result.outcome == "timeout"
+    assert result.cleanup_proved is True
+    assert backend.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_bounded_run_waits_full_grace_after_cleanup_read_error(
+    tmp_path: Path,
+) -> None:
+    grace_seconds = 0.05
+    backend = FakeBackend(cleanup_errors=1, synchronize_start=True)
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        sigterm_ignoring_code(),
+        grace_seconds=grace_seconds,
+        backend=backend,
+    )
+
+    assert result.outcome == "boundary-failure"
+    assert result.cleanup_proved is True
+    assert backend.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert backend.signal_times[1] - backend.signal_times[0] >= grace_seconds
+
+
+def test_bounded_run_does_not_signal_empty_scope_when_launcher_reap_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend = FakeBackend(cgroup_empty_override=True)
+    monkeypatch.setattr(agent_runner, "_reap_local_launcher", lambda *_: False)
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "import time; time.sleep(60)",
+        runtime_seconds=0.05,
+        grace_seconds=0.02,
+        backend=backend,
+    )
+
+    assert result.outcome == "boundary-failure"
+    assert result.cleanup_proved is False
+    assert backend.signals == [signal.SIGTERM]
+
+
+def test_bounded_run_preserves_term_signal_error_after_cleanup(tmp_path: Path) -> None:
+    backend = FakeBackend(signal_errors={signal.SIGTERM})
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        "import time; time.sleep(60)",
+        runtime_seconds=0.05,
+        grace_seconds=0.05,
+        backend=backend,
+    )
+
+    assert result.outcome == "boundary-failure"
+    assert result.cleanup_proved is True
+    assert backend.signals == [signal.SIGTERM]
+
+
+def test_bounded_run_preserves_kill_signal_error_after_cleanup(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        synchronize_start=True,
+        signal_errors={signal.SIGKILL},
+    )
+
+    result, _, _, _ = run_fixture(
+        tmp_path,
+        sigterm_ignoring_code(),
+        grace_seconds=0.05,
+        backend=backend,
+    )
+
+    assert result.outcome == "boundary-failure"
     assert result.cleanup_proved is True
     assert backend.signals == [signal.SIGTERM, signal.SIGKILL]
 
@@ -204,6 +320,7 @@ def test_bounded_run_turns_cleanup_uncertainty_into_boundary_failure(
     assert result.outcome == "boundary-failure"
     assert result.exit_status == 0
     assert result.cleanup_proved is False
+    assert backend.signals == [signal.SIGTERM]
 
 
 def test_systemd_backend_constructs_exact_production_command(monkeypatch) -> None:
@@ -245,6 +362,189 @@ def test_systemd_backend_constructs_exact_production_command(monkeypatch) -> Non
         "stderr": subprocess.PIPE,
         "bufsize": 0,
     }
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        RunLimits(runtime_seconds=300.000001),
+        RunLimits(grace_seconds=10.000001),
+        RunLimits(stream_limit_bytes=33_554_433),
+    ],
+)
+def test_systemd_backend_rejects_limits_above_production_maxima(
+    monkeypatch,
+    limits: RunLimits,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        calls.append(command)
+        return object()
+
+    monkeypatch.setattr(agent_runner.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(BoundaryError):
+        SystemdScopeBackend().start_scope("test.scope", ["client"], limits)
+
+    assert calls == []
+
+
+def test_systemd_backend_allows_limits_below_production_maxima(monkeypatch) -> None:
+    captured: list[str] = []
+    marker = object()
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        captured.extend(command)
+        return marker
+
+    monkeypatch.setattr(agent_runner.subprocess, "Popen", fake_popen)
+
+    process = SystemdScopeBackend().start_scope(
+        "test.scope",
+        ["client"],
+        RunLimits(
+            runtime_seconds=0.25,
+            grace_seconds=0.1,
+            stream_limit_bytes=1024,
+        ),
+    )
+
+    assert process is marker
+    assert "--property=RuntimeMaxSec=0.25s" in captured
+
+
+def test_systemd_backend_wraps_launch_oserror(monkeypatch) -> None:
+    launch_error = OSError("fixture launch failure")
+
+    def fake_popen(command: list[str], **kwargs: object) -> object:
+        raise launch_error
+
+    monkeypatch.setattr(agent_runner.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(BoundaryError) as raised:
+        SystemdScopeBackend().start_scope("test.scope", ["client"], RunLimits())
+
+    assert raised.value.__cause__ is launch_error
+
+
+def test_systemd_backend_queries_and_parses_loaded_scope_cgroup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return systemctl_result(
+            "ControlGroup=/user.slice/test.scope\nLoadState=loaded\n"
+        )
+
+    monkeypatch.setattr(agent_runner.subprocess, "run", fake_run)
+
+    cgroup_path = SystemdScopeBackend(cgroup_root=tmp_path).cgroup_path(
+        "test.scope",
+        1.25,
+    )
+
+    assert cgroup_path == tmp_path / "user.slice" / "test.scope"
+    assert captured["command"] == [
+        "systemctl",
+        "--user",
+        "show",
+        "test.scope",
+        "--property=LoadState",
+        "--property=ControlGroup",
+        "--all",
+    ]
+    assert captured["kwargs"] == {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+        "timeout": 1.25,
+    }
+
+
+def test_systemd_backend_returns_none_only_for_confirmed_missing_scope(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: systemctl_result(
+            "LoadState=not-found\nControlGroup=\n"
+        ),
+    )
+
+    assert SystemdScopeBackend().cgroup_path("test.scope", 1.0) is None
+
+
+def test_systemd_backend_rejects_nonzero_cgroup_query(monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: systemctl_result("", returncode=1),
+    )
+
+    with pytest.raises(BoundaryError):
+        SystemdScopeBackend().cgroup_path("test.scope", 1.0)
+
+
+@pytest.mark.parametrize(
+    "query_error",
+    [
+        OSError("fixture manager failure"),
+        subprocess.TimeoutExpired(["systemctl"], 1.0),
+        UnicodeError("fixture decoding failure"),
+    ],
+)
+def test_systemd_backend_wraps_cgroup_query_errors(
+    monkeypatch,
+    query_error: BaseException,
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise query_error
+
+    monkeypatch.setattr(agent_runner.subprocess, "run", fake_run)
+
+    with pytest.raises(BoundaryError) as raised:
+        SystemdScopeBackend().cgroup_path("test.scope", 1.0)
+
+    assert raised.value.__cause__ is query_error
+
+
+@pytest.mark.parametrize(
+    "manager_output",
+    [
+        "",
+        "LoadState=loaded\n",
+        "ControlGroup=/user.slice/test.scope\n",
+        "LoadState loaded\nControlGroup=/user.slice/test.scope\n",
+        "LoadState=loaded\nLoadState=loaded\nControlGroup=/user.slice/test.scope\n",
+        "LoadState=loaded\nControlGroup=/user.slice/test.scope\nUnknown=value\n",
+        "LoadState=masked\nControlGroup=/user.slice/test.scope\n",
+        "LoadState=loaded\nControlGroup=\n",
+        "LoadState=loaded\nControlGroup=relative/path\n",
+        "LoadState=loaded\nControlGroup=/user.slice/../escape.scope\n",
+        "LoadState=loaded\nControlGroup=/\n",
+        "LoadState=not-found\nControlGroup=/unexpected.scope\n",
+        "LoadState=not-found\n",
+        "LoadState=loaded\nControlGroup=/test.scope\nControlGroup=/test.scope\n",
+    ],
+)
+def test_systemd_backend_rejects_uncertain_cgroup_query_output(
+    monkeypatch,
+    manager_output: str,
+) -> None:
+    monkeypatch.setattr(
+        agent_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: systemctl_result(manager_output),
+    )
+
+    with pytest.raises(BoundaryError):
+        SystemdScopeBackend().cgroup_path("test.scope", 1.0)
 
 
 def test_systemd_backend_parses_cgroup_events_and_absence(tmp_path: Path) -> None:

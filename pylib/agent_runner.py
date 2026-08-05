@@ -117,26 +117,35 @@ class SystemdScopeBackend:
         command: Sequence[str],
         limits: RunLimits,
     ) -> subprocess.Popen[bytes]:
+        if (
+            limits.runtime_seconds > DEFAULT_RUNTIME_SECONDS
+            or limits.grace_seconds > DEFAULT_GRACE_SECONDS
+            or limits.stream_limit_bytes > DEFAULT_STREAM_LIMIT_BYTES
+        ):
+            raise BoundaryError("run limits exceed production maxima")
         runtime = f"{limits.runtime_seconds:g}s"
-        return subprocess.Popen(
-            [
-                "systemd-run",
-                "--user",
-                "--scope",
-                "--quiet",
-                f"--unit={unit_name}",
-                f"--property=RuntimeMaxSec={runtime}",
-                "--property=RuntimeRandomizedExtraSec=0",
-                "--property=KillMode=control-group",
-                "--property=OOMPolicy=kill",
-                "--",
-                *command,
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
+        try:
+            return subprocess.Popen(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "--quiet",
+                    f"--unit={unit_name}",
+                    f"--property=RuntimeMaxSec={runtime}",
+                    "--property=RuntimeRandomizedExtraSec=0",
+                    "--property=KillMode=control-group",
+                    "--property=OOMPolicy=kill",
+                    "--",
+                    *command,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise BoundaryError("could not launch transient scope") from exc
 
     def cgroup_path(self, unit_name: str, timeout_seconds: float) -> Path | None:
         try:
@@ -146,23 +155,47 @@ class SystemdScopeBackend:
                     "--user",
                     "show",
                     unit_name,
+                    "--property=LoadState",
                     "--property=ControlGroup",
-                    "--value",
+                    "--all",
                 ],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=timeout_seconds,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
             raise BoundaryError("could not query transient scope") from exc
         if result.returncode != 0:
+            raise BoundaryError("systemd rejected transient scope query")
+
+        fields: dict[str, str] = {}
+        expected_fields = {"LoadState", "ControlGroup"}
+        for line in result.stdout.splitlines():
+            name, separator, value = line.partition("=")
+            if not separator or name not in expected_fields or name in fields:
+                raise BoundaryError("malformed transient scope query")
+            fields[name] = value
+        if fields.keys() != expected_fields:
+            raise BoundaryError("incomplete transient scope query")
+
+        load_state = fields["LoadState"]
+        relative_text = fields["ControlGroup"]
+        if load_state == "not-found":
+            if relative_text:
+                raise BoundaryError("missing scope returned a cgroup path")
             return None
-        relative_text = result.stdout.strip()
-        if not relative_text or "\n" in relative_text:
-            return None
+        if load_state != "loaded" or not relative_text:
+            raise BoundaryError("transient scope has no usable cgroup path")
+
         relative = PurePosixPath(relative_text)
-        if not relative.is_absolute() or ".." in relative.parts:
+        if (
+            not relative.is_absolute()
+            or relative.root != "/"
+            or relative == PurePosixPath("/")
+            or relative.as_posix() != relative_text
+            or ".." in relative.parts
+        ):
             raise BoundaryError("systemd returned an invalid cgroup path")
         return self._cgroup_root.joinpath(*relative.parts[1:])
 
@@ -358,21 +391,31 @@ def _wait_for_cleanup(
     process: subprocess.Popen[bytes],
     threads: Sequence[threading.Thread],
     deadline: float,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
     if cgroup_path is None:
-        return False, True
-    while True:
+        return False, True, False
+    boundary_failed = False
+    while time.monotonic() < deadline:
         try:
             scope_empty = backend.cgroup_empty(cgroup_path)
         except BoundaryError:
-            return False, True
-        if scope_empty:
-            reaped = _reap_local_launcher(process, threads, deadline)
-            return reaped, not reaped
+            boundary_failed = True
+        else:
+            if scope_empty:
+                reaped = _reap_local_launcher(process, threads, deadline)
+                return reaped, boundary_failed or not reaped, False
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False, False
-        time.sleep(min(_POLL_SECONDS, remaining))
+        if remaining > 0:
+            time.sleep(min(_POLL_SECONDS, remaining))
+
+    try:
+        scope_empty = backend.cgroup_empty(cgroup_path)
+    except BoundaryError:
+        return False, True, False
+    if scope_empty:
+        reaped = _reap_local_launcher(process, threads, deadline)
+        return reaped, boundary_failed or not reaped, False
+    return False, boundary_failed, True
 
 
 def _stop_and_prove(
@@ -392,15 +435,10 @@ def _stop_and_prove(
         try:
             backend.signal_scope(unit_name, signal.SIGTERM, limits.grace_seconds)
         except BoundaryError:
-            pass
+            boundary_failed = True
         term_deadline = time.monotonic() + limits.grace_seconds
         while process.poll() is None and time.monotonic() < term_deadline:
             time.sleep(_POLL_SECONDS)
-        if process.poll() is None:
-            try:
-                backend.signal_scope(unit_name, signal.SIGKILL, limits.grace_seconds)
-            except BoundaryError:
-                pass
         _reap_local_launcher(
             process,
             threads,
@@ -408,27 +446,27 @@ def _stop_and_prove(
         )
         return False, True
 
-    term_requested_at = time.monotonic()
     try:
         backend.signal_scope(unit_name, signal.SIGTERM, limits.grace_seconds)
     except BoundaryError:
-        pass
-    cleanup_proved, proof_failed = _wait_for_cleanup(
+        boundary_failed = True
+    term_deadline = time.monotonic() + limits.grace_seconds
+    cleanup_proved, proof_failed, scope_populated = _wait_for_cleanup(
         backend,
         cgroup_path,
         process,
         threads,
-        term_requested_at + limits.grace_seconds,
+        term_deadline,
     )
     boundary_failed = boundary_failed or proof_failed
-    if cleanup_proved:
-        return True, boundary_failed
+    if cleanup_proved or not scope_populated:
+        return cleanup_proved, boundary_failed
 
     try:
         backend.signal_scope(unit_name, signal.SIGKILL, limits.grace_seconds)
     except BoundaryError:
-        pass
-    cleanup_proved, proof_failed = _wait_for_cleanup(
+        boundary_failed = True
+    cleanup_proved, proof_failed, _ = _wait_for_cleanup(
         backend,
         cgroup_path,
         process,
