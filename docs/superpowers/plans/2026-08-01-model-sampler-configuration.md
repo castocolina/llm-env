@@ -1508,12 +1508,16 @@ bash "$HOME/.local/state/llm-env/sampler-experiment/candidate.sh" \
 ```
 
 If the pending record has `stage: "client-drift"`, classify it
-`infra-invalid`, rerun the retained preflight atomically, and retry the same
-profile and run ID without advancing qualification:
+`infra-invalid`, ensure the llm-server is active (the preflight proxies client
+requests to the live server and its assertion gate otherwise fails on 502
+responses), rerun the retained preflight atomically, and retry the same profile
+and run ID without advancing qualification:
 
 ```bash
 state_dir="$HOME/.local/state/llm-env/sampler-experiment"
+repo=/var/home/bazzite/git/llm-env
 bash "$state_dir/classify.sh" infra-invalid
+make -C "$repo" start
 bash "$state_dir/preflight.sh"
 test -f "$state_dir/preflight-summary-path"
 ```
@@ -1526,22 +1530,119 @@ arguments, isolation, and prompt against the changed `run_agent()` code; rerun
 new preflight. This prevents stale hardcoded definitions from certifying a new
 harness.
 
-After that revised plan is approved, pin and test its definitions with:
+After that revised plan is approved, pin and test its definitions with the
+guarded block below. The guard asserts the on-disk harness hashes to the
+reviewed literal `8395890a42f57d00de3dab0f80d59b60f70725e0bb29e50498c03a23857dc54d`
+and exits nonzero on mismatch, so a second harness edit between approval and
+re-pinning cannot silently certify stale preflight definitions. Task 4 Step 1
+ends with `make stop`, so the block starts the llm-server on the agentic
+no-sampling config before running the preflight; the preflight proxies
+pi/opencode requests to the live server, and its assertion gate would otherwise
+fail on 502 responses:
 
 ```bash
-state_dir="$HOME/.local/state/llm-env/sampler-experiment"
+set -euo pipefail
 repo=/var/home/bazzite/git/llm-env
-definition_tmp="$(mktemp "$state_dir/.harness-definition.XXXXXX")"
+source "${repo}/tools/lib.sh"
+state_dir="$HOME/.local/state/llm-env/sampler-experiment"
 harness_sha256="$(sha256sum "${repo}/scripts/check-with-agents.sh")"
-printf '%s\n' "${harness_sha256%% *}" >"$definition_tmp"
+harness_sha256="${harness_sha256%% *}"
+[ "$harness_sha256" = "8395890a42f57d00de3dab0f80d59b60f70725e0bb29e50498c03a23857dc54d" ] || die \
+    "agent harness hash mismatch: got ${harness_sha256}, expected 8395890a42f57d00de3dab0f80d59b60f70725e0bb29e50498c03a23857dc54d; review the changed run_agent() and this plan before re-pinning the preflight definitions"
+definition_tmp="$(mktemp "$state_dir/.harness-definition.XXXXXX")"
+printf '%s\n' "$harness_sha256" >"$definition_tmp"
 chmod 600 "$definition_tmp"
 mv -- "$definition_tmp" "$state_dir/preflight-definition-harness-sha256"
 node --check "$state_dir/proxy.mjs"
 bash -n "$state_dir/preflight.sh"
 shellcheck -s bash -x -P /var/home/bazzite/git/llm-env \
   "$state_dir/preflight.sh"
+# Task 4 Step 1 ends with `make stop`; the preflight proxies client requests to
+# the live llm-server, so start the service on the agentic no-sampling config
+# before it. This run is the single authoritative preflight for the planned
+# resume sequence, which calls for exactly one preflight run; the only
+# exception is a stage=client-drift pending record, which reruns this same
+# retained preflight after `make -C "$repo" start` (Task 4 Step 4's client-drift
+# branch) and then retries the same profile and run ID.
+make -C "$repo" start
 bash "$state_dir/preflight.sh"
 ```
+
+### 2026-08-06 Harness-Drift Revision
+
+The agent harness changed after Task 4 was blocked. The bounded live-agent
+harness plan (`docs/superpowers/plans/2026-08-05-bounded-agent-harness.md`)
+replaced the direct client pipeline with bounded `systemd-run --user --scope`
+execution. Commits `a41db94` through `2dde0b8` on `main` were reviewed and
+approved; the harness now runs each client with a 300-second runtime limit, a
+10-second TERM-to-KILL grace, capped streams, and redacted bounded diagnostics.
+This is the per-client execution and memory bound the Task 4 Concern required
+before greedy could resume.
+
+Revalidation against the current `run_agent()` (`scripts/check-with-agents.sh`,
+SHA-256 `8395890a42f57d00de3dab0f80d59b60f70725e0bb29e50498c03a23857dc54d`):
+
+- Pi provider definitions, CLI flags, and `PI_CODING_AGENT_DIR` isolation are
+  unchanged.
+- OpenCode provider definitions, CLI flags, `HOME`/`XDG` isolation, and
+  `OPENCODE_API_KEY` are unchanged.
+- The weather/fx prompts, required evidence fields, and the `PASS client=`
+  result lines are unchanged.
+- Only the runtime wrapper changed (bounded scopes, redacted bounded
+  diagnostics, `--max-filesize` source fetches); the request projection the
+  preflight proves is unaffected.
+
+Approved resume procedure:
+
+1. If a `pending-attempt.json` exists when resuming, classify it `infra-invalid`
+   first; it reflects the blocked-run state, not a greedy model failure.
+2. Bring the private config back to the validated agentic baseline before any
+   candidate run by re-running Task 4 Step 1 in full (its rollback-viability
+   prechecks confirm the base GGUF and rollback material are still intact, then
+   it atomically activates `gemma4-v2-Q4_K_M.gguf` with no `sampling` and
+   re-records `config-without-sampling.sha256`). This is required, not
+   optional: when Task 4 was blocked the private config was reverted to the
+   base model `gemma-4-12B-it-Q4_K_M.gguf` (no `sampling`), while
+   `config-without-sampling.sha256` records the agentic baseline
+   (`fc51ab00917549690e05d57afaf1e6d0074f419aa27b38344234cab25ff83af5`), so
+   `candidate.sh` would otherwise exit at `stage=config-baseline` and its
+   agentic-prerequisite guard would fail, and the generic infra-invalid rerun
+   rule would loop forever. Preconditions: the active private config is the
+   validated agentic baseline (`config_baseline_hash` equals
+   `config-without-sampling.sha256`); if it is not, bring it to that state via
+   Task 4 Step 1 before running any candidate. The llm-server must also be
+   active on the current base config before re-running Task 4 Step 1, because
+   Step 1 ends with `make check-server`, an online check against the running
+   service; if the service is down, start it first (`make -C "$repo" start`).
+3. Recreate `proxy.mjs`, `preflight.sh`, `candidate.sh`, and `classify.sh`
+   exactly from this revised plan.
+4. Atomically replace `preflight-definition-harness-sha256` with the reviewed
+   harness hash using the guarded re-pinning block above. The block exits
+   nonzero if the on-disk harness does not hash to
+   `8395890a42f57d00de3dab0f80d59b60f70725e0bb29e50498c03a23857dc54d`, starts
+   the llm-server on the agentic no-sampling config (Task 4 Step 1 ends with
+   `make stop`), and runs the preflight once as its final command with the
+   service active. That final preflight is the single authoritative preflight
+   run for the planned resume sequence, which calls for exactly one preflight
+   run. The exactly-once rule does not extend to recovery: a
+   `stage=client-drift` pending record reruns this same retained preflight
+   after `make -C "$repo" start` (matching Task 4 Step 4's client-drift branch,
+   lines ~1510-1523) and then retries the same profile and run ID.
+5. Resume greedy screening with run ID `screening-1`. Do not run the preflight
+   again as part of the planned sequence; the guarded block in item 4 already
+   ran it exactly once with the service active. The sole exception is a
+   `stage=client-drift` pending record, which reruns the retained preflight
+   after `make -C "$repo" start` (Task 4 Step 4's client-drift branch, lines
+   ~1510-1523) and then retries the same profile and run ID without advancing
+   qualification. Preserve all seven existing ledger entries. A greedy
+   screening attempt that exhausts the new bounded runtime or stream cap is
+   infrastructure-invalid and is rerun with the same run ID.
+6. If a run exits at `stage=config-baseline` or `stage=agentic-prerequisite`
+   during resume, that is candidate-regression/infrastructure recovery from the
+   Task 4 block, not a greedy model-behavior failure. Classify the pending
+   attempt `infra-invalid`, re-run Task 4 Step 1 to re-establish the agentic
+   baseline, and rerun greedy `screening-1` with the same run ID. Never
+   classify it `model-failure`, and never let it reject the greedy candidate.
 
 For each run:
 
