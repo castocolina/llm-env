@@ -37,15 +37,12 @@ systemctl --user start "${UNIT_NAME}.service"
 log_step "Waiting for health"
 # Probe 127.0.0.1 explicitly: "localhost" resolves to ::1 first on this system while
 # podman publishes the port on 0.0.0.0 (IPv4), so a localhost probe would never connect.
-for _ in $(seq 1 60); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null; then
-        log_info "server is ready"
-        bash "${REPO_DIR}/setup/network.sh"
-        exit 0
-    fi
-    sleep 1
-done
+if wait_for_health "$port"; then
+    log_info "server is ready"
+    bash "${REPO_DIR}/setup/network.sh"
+    exit 0
+fi
 
-log_error "server did not become healthy within 60s"
+log_error "server did not become healthy within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s"
 echo "  Logs: journalctl --user -u ${UNIT_NAME}.service -n 50"
 exit 1
