@@ -3769,6 +3769,10 @@ def run_agent_check(
         '    printf "%s\\n" "$AGENT_CHECK_UV_CACHE_RESULT"\n'
         "    exit 0\n"
         "fi\n"
+        'if [ "$1" = run ] && [ "$2" = "$AGENT_CHECK_REPO_DIR/llmenv.py" ] '
+        '&& [ "$3" = classify-transcript ]; then\n'
+        '    exec "$REAL_UV" "$@"\n'
+        "fi\n"
         'count="$(< "$AGENT_CHECK_BOUNDED_COUNTER")"\n'
         'printf "%s\\n" "$((count + 1))" > "$AGENT_CHECK_BOUNDED_COUNTER"\n'
         'printf "uv UV_CACHE_DIR=%s %s\\n" "${UV_CACHE_DIR:-}" "$*" '
@@ -3995,6 +3999,7 @@ def run_agent_check(
         "TMPDIR": str(diagnostic_tmpdir),
         "XDG_CONFIG_HOME": str(tmp_path / "host-xdg-config"),
         "REAL_JQ": real_jq,
+        "REAL_UV": shutil.which("uv") or "uv",
     }
     if keep_artifacts:
         environment["LLM_ENV_KEEP_CHECK_ARTIFACTS"] = "1"
@@ -5072,7 +5077,7 @@ def test_agent_check_classifies_proved_resource_outcomes_and_continues(
     assert len(rows) == 2
     failed_row = next(row for row in rows if "check=weather" in row)
     assert_common_agent_fields(failed_row, client="pi", exit_status="NOT REPORTED")
-    assert "Client JSONL transcript:\n  {\"type\":" in failed_row
+    assert "Relevant transcript excerpt:\n  Final assistant text:\n  {" in failed_row
     assert "Client stderr:\n  bounded client warning" in failed_row
     assert "Agent parser stderr:\n  bounded parser warning" in failed_row
     assert "Final response:" not in failed_row
@@ -5580,7 +5585,7 @@ def test_agent_check_retains_final_response_parser_diagnostics(
     for row in rows:
         assert_common_agent_fields(row, client="pi", exit_status="0")
         assert "Final response:\n  not JSON" in row
-        assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in row
+        assert "Relevant transcript excerpt:\n  Final assistant text:\n  not JSON" in row
         assert "Agent parser stderr:\n  " in row
         assert "parse error:" in row
         assert "Client stderr:" not in row
@@ -5601,7 +5606,7 @@ def test_agent_check_renders_concise_source_evidence_mismatch(
     assert len(rows) == 2
     weather_row = next(row for row in rows if "check=weather" in row)
     assert_common_agent_fields(weather_row, client="pi", exit_status="0")
-    assert "Client JSONL transcript:\n  {\"type\":\"message_end\"" in weather_row
+    assert "Relevant transcript excerpt:\n  Final assistant text:\n  {" in weather_row
     assert "Final response:\n  {" in weather_row
     assert (
         "Validated:\n  source_url=https://api.open-meteo.com/v1/forecast?"
@@ -6534,3 +6539,39 @@ def test_make_restart_runs_stop_then_start_with_distinct_banners() -> None:
     assert result.returncode == 0, result.stderr
     assert "make --no-print-directory stop" in result.stdout
     assert "make --no-print-directory start" in result.stdout
+
+
+def test_check_with_agents_shows_classified_excerpt_not_raw_transcript_on_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    real_uv = shutil.which("uv")
+    assert real_yq is not None
+    assert real_uv is not None
+
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        '{"type": "message_start"}\n'
+        '{"type": "tool_error", "message": "boom-diagnostic-marker"}\n'
+    )
+
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -uo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        f"classified_json=\"$(llmenv classify-transcript --client pi --transcript {transcript})\"\n"
+        "excerpt=\"$(echo \"$classified_json\" | jq -r '.excerpt')\"\n"
+        "log_block \"Relevant transcript excerpt\" \"$excerpt\"\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "boom-diagnostic-marker" in result.stdout
+    assert "message_start" not in result.stdout

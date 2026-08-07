@@ -706,7 +706,13 @@ for client in "${clients[@]}"; do
 
             if [ "$agent_failed" -ne 0 ]; then
                 if [ -s "$transcript_file" ]; then
-                    log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                    classified_json="$(llmenv classify-transcript --client "$client" --transcript "$transcript_file" 2>/dev/null)" || classified_json=""
+                    excerpt="$(printf '%s' "$classified_json" | jq -r '.excerpt // empty' 2>/dev/null | head -c "$agent_diagnostic_excerpt_bytes")"
+                    if [ -n "$excerpt" ]; then
+                        log_block "Relevant transcript excerpt" "$excerpt"
+                    else
+                        log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                    fi
                 fi
                 if [ -s "$client_stderr_file" ]; then
                     log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
@@ -743,7 +749,13 @@ for client in "${clients[@]}"; do
                 continue
             fi
             if [ -s "$transcript_file" ]; then
-                log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                classified_json="$(llmenv classify-transcript --client "$client" --transcript "$transcript_file" 2>/dev/null)" || classified_json=""
+                excerpt="$(printf '%s' "$classified_json" | jq -r '.excerpt // empty' 2>/dev/null | head -c "$agent_diagnostic_excerpt_bytes")"
+                if [ -n "$excerpt" ]; then
+                    log_block "Relevant transcript excerpt" "$excerpt"
+                else
+                    log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                fi
             fi
             if [ -s "$client_stderr_file" ]; then
                 log_file_excerpt "Client stderr" "$client_stderr_file" "$agent_diagnostic_excerpt_bytes"
