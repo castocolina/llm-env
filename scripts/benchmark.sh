@@ -7,9 +7,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd uv jq yq podman awk
 
-VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
-CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
-
 bench_model="$(yq -r '[.models[] | select(.enabled)] | sort_by(.size_bytes) | .[0].file' "$CONFIG_PATH")"
 [ -n "$bench_model" ] && [ "$bench_model" != "null" ] || die "no enabled models to benchmark"
 
