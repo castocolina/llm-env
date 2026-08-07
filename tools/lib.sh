@@ -237,6 +237,13 @@ reset_api_key() {
     chmod 600 "$CONFIG_PATH"
 }
 
+# shellcheck disable=SC2034 # PORT/API_KEY/HOST are consumed by this function's callers.
+load_server_config() {
+    PORT="$(yq -r '.server.port' "$CONFIG_PATH")"
+    API_KEY="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+    HOST="$(yq -r '.server.host' "$CONFIG_PATH")"
+}
+
 wait_for_health() {
     local port="$1" attempt
     for (( attempt = 0; attempt < LLM_ENV_HEALTH_TIMEOUT_SECONDS; attempt++ )); do

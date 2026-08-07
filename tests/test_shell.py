@@ -6304,6 +6304,31 @@ def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.
     assert "${UNIT_NAME}" in logs_text
 
 
+def test_load_server_config_sets_port_api_key_and_host(tmp_path: pathlib.Path) -> None:
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "server:\n  host: 0.0.0.0\n  port: 9001\n  api_key: fixture-key\n"
+    )
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -euo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        "load_server_config\n"
+        "printf 'PORT=%s API_KEY=%s HOST=%s\\n' \"$PORT\" \"$API_KEY\" \"$HOST\"\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        env=os.environ | {"LLM_ENV_CONFIG": str(config)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PORT=9001 API_KEY=fixture-key HOST=0.0.0.0" in result.stdout
+
+
 def test_wait_for_health_succeeds_once_curl_reports_healthy(tmp_path: pathlib.Path) -> None:
     commands = tmp_path / "bin"
     commands.mkdir()
