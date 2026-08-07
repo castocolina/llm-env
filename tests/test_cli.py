@@ -817,3 +817,15 @@ def test_cmd_budget_passes_configured_models_max(tmp_path, monkeypatch):
 
     assert result == 0
     assert captured["models_max"] == 1
+
+
+def test_classify_transcript_emits_an_excerpt(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"error": "boom"}) + "\n")
+    result = run(
+        "classify-transcript",
+        "--client", "pi",
+        "--transcript", str(transcript),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "boom" in json.loads(result.stdout)["excerpt"]

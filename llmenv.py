@@ -47,6 +47,7 @@ from pylib.config import (
 from pylib.detect import DetectError, detect
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
 from pylib.presets import write_presets
+from pylib.transcript import classify_transcript
 
 DEVICE_LINE_RE = re.compile(
     r"^\s*(?P<id>\S+):\s*(?P<name>.*?)\s*\((?P<total_mib>\d+)\s*MiB.*\)$",
@@ -252,6 +253,11 @@ def cmd_validate_gguf(args: argparse.Namespace) -> int:
     return emit({"all_valid": ok, "results": results}, 0 if ok else 1)
 
 
+def cmd_classify_transcript(args: argparse.Namespace) -> int:
+    excerpt = classify_transcript(args.client, Path(args.transcript))
+    return emit({"excerpt": excerpt})
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.template)))
     cfg = sync_models_max(cfg)
@@ -329,6 +335,11 @@ def build_parser() -> argparse.ArgumentParser:
     gguf.add_argument("--config", default=argparse.SUPPRESS)
     gguf.add_argument("--models-dir", required=True)
     gguf.set_defaults(func=cmd_validate_gguf)
+
+    classify_transcript_parser = sub.add_parser("classify-transcript")
+    classify_transcript_parser.add_argument("--client", required=True, choices=["pi", "opencode"])
+    classify_transcript_parser.add_argument("--transcript", required=True)
+    classify_transcript_parser.set_defaults(func=cmd_classify_transcript)
 
     init = sub.add_parser("init")
     init.add_argument("--config", default=argparse.SUPPRESS)
