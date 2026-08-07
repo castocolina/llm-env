@@ -50,6 +50,24 @@ conventions), `podman compose` (new host prerequisite, provided by the
   breaks hand-substituted YAML) and achieves the same goal the spec cared
   about — a versioned, diffable, reviewable definition — since the Python
   source itself is that versioned definition.
+- Scope deviation, deliberate: the design spec's Goal/Scope frames this
+  change as covering **both** the llama.cpp router **and** a new OmniRoute
+  gateway service — a new `omniroute` compose service, `pylib/omniroute.py`
+  plus `llmenv.py omniroute provision`, an `omniroute:` config section,
+  fixed OmniRoute resource sizing (1 CPU / 1024 MiB), a `check-server`
+  OmniRoute section, and OmniRoute troubleshooting docs. This plan
+  implements only the router half — migrating the existing Quadlet unit to
+  a rendered compose file plus a thin systemd wrapper unit, and adding
+  `llm_server` resource-limit plumbing. **OmniRoute integration is
+  deferred to a follow-up plan**; none of Tasks 1–14 below add an
+  `omniroute` compose service, module, config section, or check-setup/
+  check-server step. One numeric consequence of this deferral:
+  `pylib/resources.py`'s `compute_resource_limits()` (Task 2) gives
+  `llm_server` the entire post-floor remainder (host total minus
+  `HOST_CPU_FLOOR`/`HOST_MEMORY_FLOOR_MIB` only) rather than also
+  subtracting OmniRoute's fixed allocation as the design spec's own
+  arithmetic does — that subtraction is out of scope here and will need
+  revisiting in the OmniRoute follow-up plan.
 
 ---
 
@@ -436,6 +454,14 @@ def test_migrate_config_preserves_existing_resources_values():
     assert migrated["resources"]["llm_server"] == {"cpus": 6, "memory_mib": 28672}
 
 
+def test_migrate_config_adds_default_resources_section_when_gpu_absent():
+    """The resources default must not be skipped by the gpu early-return branch."""
+    cfg = make_cfg()
+    del cfg["gpu"]
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"] == {"cpus": 0, "memory_mib": 0}
+
+
 def test_config_without_resources_key_has_no_errors():
     assert validate_config(make_cfg()) == []
 
@@ -480,10 +506,23 @@ does not reject the invalid-values cases (no matching error string).
 
 - [ ] **Step 3: Implement the schema changes**
 
-In `pylib/config.py`, extend `migrate_config()` (after the existing `gpu`
-block, before `return cfg`):
+In `pylib/config.py`, `migrate_config()` currently has an early return partway
+through — `gpu = cfg.get("gpu")` followed by `if not isinstance(gpu, dict):
+return cfg` (lines 68–70) — before its final `return cfg` (line 74). Insert
+the new resources-defaulting block **before that early-return check**, not
+after the `gpu` block, so it runs unconditionally even when `gpu` is
+absent/malformed:
 
 ```python
+    models = cfg.get("models")
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict) or "client_max_output_tokens" in model:
+                continue
+            ctx_size = model.get("ctx_size")
+            if _positive_int(ctx_size):
+                model["client_max_output_tokens"] = min(ctx_size, 8192)
+
     resources = cfg.setdefault("resources", {})
     if isinstance(resources, dict):
         llm_server_resources = resources.setdefault("llm_server", {})
@@ -491,8 +530,14 @@ block, before `return cfg`):
             llm_server_resources.setdefault("cpus", 0)
             llm_server_resources.setdefault("memory_mib", 0)
 
-    return cfg
+    gpu = cfg.get("gpu")
+    if not isinstance(gpu, dict):
+        return cfg
 ```
+
+That is, the new block goes immediately after the existing `models` loop and
+immediately before the existing `gpu = cfg.get("gpu")` line — the `gpu`
+block and final `return cfg` below it are otherwise unchanged.
 
 In `validate_config()`, after the `runtime` validation block and before the
 `models = cfg["models"]` line, add:
@@ -892,10 +937,11 @@ git commit -m "feat(cli): add llmenv render-compose subcommand"
 - [ ] **Step 1: Find every reference to `QUADLET_DIR`**
 
 Run: `grep -rn "QUADLET_DIR" --include='*.sh' --include='*.py' .`
-Expected output: `tools/lib.sh` (the definition) and `setup/render-unit.sh`
-(consumed in Task 9). If any other file appears, note it — Task 9 and
-Task 10 (`clean.sh`) are the only ones expected to need changes in this
-plan, and `setup/disable-boot.sh` (Task 11) needs a targeted fix.
+Expected output: 4 files — `tools/lib.sh` (the definition and export line),
+`setup/render-unit.sh` (consumed in Task 9), `setup/disable-boot.sh:14`
+(fixed in Task 11), and `scripts/clean.sh` (lines 20 and 33, fixed in
+Task 10). Task 9, Task 10, and Task 11 are the only ones expected to need
+changes in this plan for these references.
 
 - [ ] **Step 2: Replace the constant**
 
@@ -912,11 +958,22 @@ COMPOSE_FILE="${HOME}/.config/llm-env/docker-compose.yml"
 WRAPPER_UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}.service"
 ```
 
-Update the export line immediately below (currently
-`export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR`) to:
+Update the export line immediately below. The current line (added by a
+sibling CLI/Script Hygiene plan, already merged) is:
 
 ```bash
-export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME COMPOSE_FILE WRAPPER_UNIT_PATH
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+```
+
+Replace it with (swapping `QUADLET_DIR` for the two new names and keeping
+`VULKAN_IMAGE`/`CPU_IMAGE`/`LLM_ENV_HEALTH_TIMEOUT_SECONDS` exported exactly
+as before — they are consumed by `setup/setup.sh`, `scripts/benchmark.sh`,
+`scripts/clean.sh`, `tools/lib.sh`'s own `wait_for_health()`, and
+`render-unit.sh`'s mDNS heredoc; dropping them from `export` would make
+`shellcheck -s bash tools/lib.sh` flag them as unused, SC2034):
+
+```bash
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME COMPOSE_FILE WRAPPER_UNIT_PATH VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
 ```
 
 - [ ] **Step 3: Run shellcheck**
@@ -1018,10 +1075,25 @@ fail.
 
 - [ ] **Step 3: Update `setup/prerequisites.sh`**
 
-Add to the `RUNTIME` array:
+Add `podman-compose` to the `RUNTIME` array. The current array (line 8) is:
 
 ```bash
-RUNTIME=("uv:uv" "jq:jq" "yq:yq" "podman:podman" "podman-compose:podman-compose" "curl:curl" "ip:iproute")
+RUNTIME=("jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
+```
+
+Note it does **not** contain `uv:uv` — `uv` was deliberately pulled out of
+`RUNTIME`/`check_group` by an already-merged sibling fix and now has its own
+bespoke check-and-bootstrap block above `check_group` (the `uv_missing`
+variable, the `command -v uv` check at lines 79–84, and the dedicated
+official-installer prompt at lines 113–122). Do **not** add `uv:uv` back —
+doing so would revive a dead `command_purpose "uv")` case, print `uv`'s
+status twice (once from the dedicated block, once from `check_group`), and
+break the pre-existing tests `test_prerequisites_reports_missing_uv_without_rpm_ostree`
+and `test_prerequisites_installs_uv_via_official_installer_not_rpm_ostree`.
+Replace the array with:
+
+```bash
+RUNTIME=("jq:jq" "yq:yq" "podman:podman" "podman-compose:podman-compose" "curl:curl" "ip:iproute")
 ```
 
 Extend `command_is_usable()`:
@@ -1029,23 +1101,28 @@ Extend `command_is_usable()`:
 ```bash
 command_is_usable() {
     local command="$1"
+    if [ "$command" = "podman-compose" ]; then
+        podman compose version >/dev/null 2>&1 || return 1
+        return 0
+    fi
     command -v "$command" >/dev/null 2>&1 || return 1
     if [ "$command" = "yq" ]; then
         local version
         version="$(yq --version 2>/dev/null)"
         [[ "$version" == *"github.com/mikefarah/yq/"* && "$version" == *"version v4."* ]] || return 1
     fi
-    if [ "$command" = "podman-compose" ]; then
-        podman compose version >/dev/null 2>&1 || return 1
-    fi
 }
 ```
 
-Note this makes `command -v podman-compose` a prerequisite for even
-attempting the `podman compose version` check — that is intentional: a
-compose provider installed somewhere `podman compose` cannot discover would
-fail identically either way, and this keeps the message symmetric with the
-`yq` case (`command -v` gate first, functional check second).
+`podman-compose` names a *capability* ("`podman compose` resolves and
+works"), not a literal binary on `PATH` — unlike `yq`, there is no
+`podman-compose` executable this repo expects to exist. The generic
+`command -v "$command"` gate would look for a binary literally named
+`podman-compose`, which is neither installed nor required (the `podman compose`
+*subcommand* is what's being verified, provided by `podman` itself, whose own
+presence is already covered by the separate `podman:podman` entry in
+`RUNTIME`). So this case skips the `command -v` gate entirely and goes
+straight to the functional check.
 
 Extend `command_purpose()`:
 
@@ -1100,6 +1177,130 @@ return to the wrapper unit path instead:
     return result, home / ".config/systemd/user/llm-server.service"
 ```
 
+That same helper's config fixture (currently `tests/test_shell.py:830-843`)
+is missing `version: 1` and a `models:` section. Once `uv` is wired to
+forward to the real binary (below), `render-unit.sh`'s
+`migrate_config_file || die ...` (`render-unit.sh:11`) runs `llmenv
+migrate-config` for real, which calls `require_valid_config(migrate_config(...))`
+(`llmenv.py:268-273`) — `validate_config()` (`pylib/config.py:129-134`)
+requires `cfg.get("version") == 1` and a non-empty `"models"` list, neither
+of which this fixture has today, so the script would `die` before ever
+reaching the presets/compose-rendering steps this task tests.
+
+Adding `version`/`models` alone is not sufficient, though: this fixture's
+`gpu.backend: rocm` also fails real validation, independently of
+`version`/`models` — `VALID_BACKENDS` (`pylib/config.py:31`) is
+`("vulkan", "cpu")` only, and always has been; `rocm` is not a member.
+`migrate_config()` never rewrites `gpu.backend` (it only pops the obsolete
+`gpu.benchmark.rocm` key, `pylib/config.py:71-73`), so a config with a
+literal `backend: rocm` value is genuinely rejected by real validation no
+matter what else the fixture contains — confirmed by running
+`validate_config(migrate_config(cfg))` directly against this fixture's text
+plus a `version`/`models` block. This was already true in production before
+this plan; the fixture only ever "worked" in this test because the test's
+own `uv` stub was a no-op that skipped validation entirely. Since this
+fixture's actual regression target
+(`test_render_unit_never_adds_the_rocm_kernel_device`) only asserts that
+`/dev/kfd` never appears in the rendered output — a property that holds for
+any backend value, because neither `render-unit.sh` nor `pylib/compose.py`
+has a ROCm-specific device branch — switch `backend` to `vulkan` (a value
+`validate_config()` accepts) and add the missing `version`/`models` fields,
+mirroring the shape `run_lifecycle_script`'s fixture already uses
+(`tests/test_shell.py:1299-1334`).
+
+`version`/`models`/`backend` are not the whole gap, though: once this
+fixture reaches real validation and then real rendering, `runtime:` must
+also carry `flash_attn`, `cache_type_k`, and `cache_type_v`. Confirmed
+against the current `pylib/presets.py` (`render_presets()`, lines 38–44):
+it does direct dict access — `runtime["flash_attn"]`,
+`runtime["cache_type_k"]`, `runtime["cache_type_v"]` — with no `.get()` and
+no default, and neither `migrate_config()` nor `validate_config()`
+(`pylib/config.py`) defaults or requires these keys. So a `runtime:` block
+containing only `models_max`/`parallel_slots`/`ubatch_size` — which is all
+this fixture had — passes `require_valid_config(migrate_config(cfg))`
+cleanly but then raises `KeyError: 'flash_attn'` inside `render_presets()`,
+which `render-unit.sh`'s "Generating presets.ini" step (Task 9 Step 5) calls
+under `set -euo pipefail`. That crash would fail this test and both new
+tests in Step 3 below, all of which assert `result.returncode == 0`. Add
+the same three keys, in the same types (`flash_attn` a bool,
+`cache_type_k`/`cache_type_v` strings), that `run_lifecycle_script`'s
+already-working fixture uses (`tests/test_shell.py:1320-1322`). Change the
+fixture's `config.write_text(...)` call to:
+
+```python
+    config.write_text(
+        "version: 1\n"
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8000\n"
+        "  api_key: key\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "gpu:\n"
+        # validate_config() only accepts vulkan/cpu (pylib/config.py:31); this
+        # fixture predates ROCm removal but must still pass real validation
+        # now that `uv` forwards to the real binary below. The regression
+        # this test guards — /dev/kfd never appears in the rendered output —
+        # does not depend on which backend value is used.
+        "  backend: vulkan\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "  vram_total_mib: 8192\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
+        "models:\n"
+        "  - alias: test\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
+        "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
+    )
+```
+
+In that same helper, the current `uv` stub is a bare no-op (part of
+`for name in ("podman", "systemctl", "uv"): ... "#!/usr/bin/bash\nexit 0\n"`).
+The new `render-unit.sh` (Step 5 below) writes `$COMPOSE_FILE` by shelling
+out to `llmenv render-compose` via `tools/lib.sh`'s `llmenv() { uv run
+"${REPO_DIR}/llmenv.py" "$@"; }` — real Python execution. A no-op `uv` stub
+would make that call silently succeed without ever writing the compose
+file, so Step 3's new
+`test_render_unit_writes_a_compose_file_and_wrapper_unit` would fail no
+matter what `render-unit.sh` does. Pull `uv` out of that no-op loop and
+give it its own stub that forwards to the real binary, matching the
+`REAL_UV`-forwarding convention already used elsewhere in this file (e.g.
+`tests/test_shell.py:378`, `:1383`, `:3860`):
+
+```python
+    for name in ("podman", "systemctl"):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\nexec \"$REAL_UV\" \"$@\"\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+```
+
+(replaces the existing `for name in ("podman", "systemctl", "uv"): ...`
+loop) and add `"REAL_UV": real_uv,` to the `environment` dict a few lines
+below, alongside the existing `"REAL_YQ": real_yq,` entry.
+
 `test_render_unit_never_adds_the_rocm_kernel_device` needs no change beyond
 that — it already just asserts `"/dev/kfd" not in container.read_text()`
 against whatever path the helper returns, and the wrapper unit (which
@@ -1128,6 +1329,7 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "Requires=llm-server.service" in unit
     assert "After=llm-server.service" in unit
     assert "PartOf=llm-server.service" in unit
+    assert "Restart=on-failure" in unit
     assert "ExecStart=podman compose" in wrapper
     assert "ExecStartPre=" in unit
     assert "http://127.0.0.1:8000/health" in unit
@@ -1135,10 +1337,18 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "systemctl --user daemon-reload" in calls.read_text()
 ```
 
-Note: `Restart=on-failure` moved from the wrapper unit's `[Service]` (it now
-lives on the compose service's `restart: on-failure` key instead — see
-`pylib/compose.py`), so that assertion is intentionally dropped, not an
-oversight.
+Note: the pre-existing assertion this replaces (`tests/test_shell.py:3157`,
+`assert "Restart=on-failure" in unit`) checks `unit = mdns_unit.read_text()`
+— the **mDNS** unit, not the wrapper/container unit. The mDNS heredoc's own
+`Restart=on-failure`/`RestartSec=2` lines (current `setup/render-unit.sh:74-75`)
+are carried into the rewritten mDNS heredoc in Step 5 below unchanged, so
+this assertion is reinstated above (against `unit`, i.e. `mdns_unit`, not
+`wrapper`) rather than dropped — it is still true and still a real
+regression check. It is the container/wrapper unit's own `[Service]`
+`Restart=on-failure` (current `setup/render-unit.sh:117`) — a separate,
+unrelated occurrence — that genuinely moves to the compose file's
+`restart:` key (see `pylib/compose.py`); nothing in this test ever asserted
+on that one.
 
 - [ ] **Step 2: Run the updated tests against the *old* render-unit.sh to confirm they now fail for the right reason**
 
@@ -1214,7 +1424,7 @@ PartOf=${UNIT_NAME}.service
 
 [Service]
 Type=simple
-ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt 60 ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
+ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt ${LLM_ENV_HEALTH_TIMEOUT_SECONDS} ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
 ExecStart=${avahi_publish} -s ${mdns_name} _http._tcp ${port}
 Restart=on-failure
 RestartSec=2
@@ -1254,19 +1464,58 @@ chmod 600 "$WRAPPER_UNIT_PATH"
 systemctl --user daemon-reload
 ```
 
-Also remove the now-unused `device_lines="AddDevice=/dev/dri"` line from
-earlier in the file (the device passthrough is now hardcoded inside
-`pylib/compose.py`, not assembled in bash), and the `port` variable read
-used only by the removed Quadlet heredoc — keep the `port` read that the
-mDNS block above still needs (`port="$(yq -r '.server.port' "$CONFIG_PATH")"`
-must still run before the mDNS heredoc; if it was previously only computed
-inline for the removed Quadlet block, hoist it to run before the mDNS
-section).
+(The now-unused `device_lines="AddDevice=/dev/dri"` line, current
+`setup/render-unit.sh:52` — device passthrough is now hardcoded inside
+`pylib/compose.py`, not assembled in bash — falls inside the range this
+replacement already covers wholesale; it does not need a separate edit.)
+
+`host`, `api_key`, and `sleep_idle` become dead once the Quadlet heredoc is
+gone: `pylib/compose.py` reads `server.host`/`server.api_key`/
+`server.sleep_idle_seconds` straight out of the config dict passed to
+`render_compose()` (Task 5), not from bash variables, since
+`cmd_render_compose` (Task 6) loads the config itself
+(`require_valid_config(load_config(Path(args.config)))`). Left in place,
+`host="$HOST"` and `api_key="$API_KEY"` trip shellcheck's SC2034
+(unused variable), and `sleep_idle="$(yq -r '.server.sleep_idle_seconds' …)"`
+does a needless `yq` call for a value nothing reads. `port` stays — the
+mDNS block still needs it. Change the block at the top of the file
+(currently lines 16–24):
+
+```bash
+load_server_config
+# shellcheck disable=SC2153 # HOST/PORT/API_KEY are set by load_server_config() in ../tools/lib.sh.
+host="$HOST"
+# shellcheck disable=SC2153
+port="$PORT"
+# shellcheck disable=SC2153
+api_key="$API_KEY"
+sleep_idle="$(yq -r '.server.sleep_idle_seconds' "$CONFIG_PATH")"
+models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
+```
+
+to:
+
+```bash
+load_server_config
+# shellcheck disable=SC2153 # PORT is set by load_server_config() in ../tools/lib.sh.
+port="$PORT"
+models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
+```
+
+(`models_max` stays too — the `[ "$models_max" -gt 0 ] || die …` check right
+below still consumes it directly; `pylib/compose.py` reads its own copy of
+`runtime.models_max` from the config dict, same as `server.*`.)
 
 - [ ] **Step 6: Run the render-unit tests to verify they pass**
 
 Run: `uv run --with pytest pytest tests/test_shell.py -v -k "render_unit or enable_boot"`
-Expected: PASS, all of them, including the two updated pre-existing tests.
+Expected: PASS, all of them, including the two updated pre-existing tests
+AND the pre-existing, unmodified
+`test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout`
+(added by the sibling CLI/Script Hygiene plan) — the mDNS `ExecStartPre`
+line in Step 5's rewrite above interpolates
+`${LLM_ENV_HEALTH_TIMEOUT_SECONDS}`, not a hardcoded `60`, specifically so
+this test keeps passing unmodified.
 
 - [ ] **Step 7: Run shellcheck**
 
@@ -1290,10 +1539,14 @@ git commit -m "feat(render-unit): generate a compose file and systemd wrapper un
 
 **Interfaces:**
 - Consumes: `COMPOSE_FILE`/`WRAPPER_UNIT_PATH` (Task 7).
-- Produces: `make clean` runs `podman compose down` before removing files,
-  removes the wrapper unit and compose file instead of the Quadlet
-  `.container` file. Behavior for the confirmation prompt, image removal,
-  and `LLM_ENV_ASSUME_YES` is unchanged.
+- Produces: `make clean` runs `podman compose … down` before removing
+  files, removes the wrapper unit and compose file instead of the Quadlet
+  `.container` file. The existing `configured_image` selection logic is
+  preserved unchanged and merged into this flow: `gpu.image` is still read
+  via `yq` from `$CONFIG_PATH` **before** the config file is deleted: if set,
+  only that image is removed; otherwise `${VULKAN_IMAGE}`/`${CPU_IMAGE}` are
+  removed as the default pair. The confirmation prompt and
+  `LLM_ENV_ASSUME_YES` behavior are otherwise unchanged.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1351,21 +1604,37 @@ neither the `calls.read_text()` assertion nor the removal assertions hold
 
 - [ ] **Step 3: Update `scripts/clean.sh`**
 
-Replace the file's contents:
+The current file (unchanged by any earlier task in this plan) already reads
+`gpu.image` via `yq` before deleting `$CONFIG_PATH`, and removes either that
+configured image or the `${VULKAN_IMAGE}`/`${CPU_IMAGE}` default pair — this
+`configured_image` logic is preserved verbatim below, with the removed-file
+list and a `podman compose … down` step added ahead of it for the new
+compose/wrapper-unit layout. Replace the file's contents:
 
 ```bash
 #!/usr/bin/env bash
-# clean.sh — remove the compose stack, unit, and config. Keeps downloaded models.
+# clean.sh — remove the compose stack, unit, config, and images. Keeps downloaded models.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+configured_image=""
+if [ -f "$CONFIG_PATH" ]; then
+    configured_image="$(yq -r '.gpu.image // ""' "$CONFIG_PATH" 2>/dev/null || true)"
+fi
+if [ -n "$configured_image" ] && [ "$configured_image" != null ]; then
+    images_to_remove="$configured_image"
+else
+    configured_image=""
+    images_to_remove="${VULKAN_IMAGE} and ${CPU_IMAGE} (default; no configured gpu.image found)"
+fi
+
 echo "This removes:"
 echo "  compose stack  ${COMPOSE_FILE}"
 echo "  unit           ${WRAPPER_UNIT_PATH}"
 echo "  config         ${CONFIG_PATH}"
-echo "  images         ghcr.io/ggml-org/llama.cpp:server-vulkan and server"
+echo "  images         ${images_to_remove}"
 echo "Downloaded models in ${MODELS_DIR} are KEPT."
 if [ "${LLM_ENV_ASSUME_YES:-0}" = "1" ]; then
     confirm=yes
@@ -1382,15 +1651,31 @@ systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
 rm -f "$WRAPPER_UNIT_PATH"
 systemctl --user daemon-reload
 rm -f "$CONFIG_PATH" "$COMPOSE_FILE" "${HOME}/.config/llm-env/presets.ini"
-podman rmi -f ghcr.io/ggml-org/llama.cpp:server-vulkan \
-                ghcr.io/ggml-org/llama.cpp:server 2>/dev/null || true
+if [ -n "$configured_image" ]; then
+    podman rmi -f "$configured_image" 2>/dev/null || true
+else
+    podman rmi -f "$VULKAN_IMAGE" "$CPU_IMAGE" 2>/dev/null || true
+fi
 log_info "cleanup complete"
 ```
+
+Note the `configured_image` read still happens before `rm -f "$CONFIG_PATH"`
+— same ordering constraint as the pre-existing script, just now interleaved
+with the compose-down/wrapper-unit-removal steps rather than a Quadlet
+removal step.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run --with pytest pytest tests/test_shell.py -v -k "cleanup"`
-Expected: PASS, including the pre-existing `test_cleanup_preserves_the_host_rocm_image`.
+Expected: PASS, including the pre-existing
+`test_cleanup_preserves_the_host_rocm_image`,
+`test_cleanup_removes_the_configured_gpu_image_not_a_hardcoded_one`,
+`test_cleanup_falls_back_to_default_images_without_a_config`, and
+`test_cleanup_confirmation_prompt_reflects_the_configured_gpu_image` — none
+of these pre-existing tests create a `$COMPOSE_FILE`, so the new
+`podman compose … down` step is skipped for them (the `[ -f "$COMPOSE_FILE" ]`
+guard is false) and their assertions exercise the same `configured_image`
+branch as before, unaffected by the new compose/wrapper-unit lines.
 
 - [ ] **Step 5: Run shellcheck**
 
@@ -1610,7 +1895,10 @@ git commit -m "feat(check-setup): validate the rendered compose file"
   resources — see `pylib/resources.py`'s `ResourceError`), the step warns
   and leaves the existing `0`/`0` sentinel values in place rather than
   aborting setup, since `pylib/compose.py` already treats `0` as "no
-  explicit cap."
+  explicit cap." The new `resources_json` temp file's `EXIT` cleanup is
+  combined with the pre-existing `budget_json` `EXIT` trap from Step 7/7
+  into a single `trap` statement (bash `trap … EXIT` replaces rather than
+  accumulates), so both temp files are still removed on exit.
 
 - [ ] **Step 1: Extend the shared setup fixture and write the failing test**
 
@@ -1653,10 +1941,18 @@ fixture config built by `run_setup_with_numbered_selection` has no
 After "Step 7/7  Checking the VRAM budget" (the script's last existing
 step), add an eighth step:
 
+Bash `trap … EXIT` statements are not additive — a second one silently
+replaces the first, which would disable the existing `Step 7/7` block's
+`trap 'rm -f "$budget_json"' EXIT` (`setup/setup.sh:128`, unmodified by this
+task) and leak `$budget_json` on exit. Set a single trap here that cleans up
+both temp files instead of adding a second, competing one:
+
 ```bash
 log_step "Step 8/8  Computing resource limits"
 resources_json="$(mktemp)"
-trap 'rm -f "$resources_json"' EXIT
+# Replaces the Step 7/7 trap above with one that cleans up both temp
+# files — a second `trap … EXIT` overwrites rather than adds to the first.
+trap 'rm -f "$budget_json" "$resources_json"' EXIT
 if llmenv resources > "$resources_json"; then
     cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
     memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
@@ -1671,9 +1967,28 @@ else
 fi
 ```
 
-Update the earlier `"Step 7/7"` header text to `"Step 7/8"`, and the final
-summary line at the end of the script (`Setup complete. Next: make
-check-setup`) is unchanged.
+Adding an eighth step changes the total step count, so every existing
+`log_step "Step N/7  …"` header in the script must be renumbered to `N/8` —
+not just the last one — or the script would print `Step 1/7` … `Step 6/7`,
+then jump to `Step 7/8`, `Step 8/8`: an internally inconsistent progress
+sequence. Update all seven existing headers (confirmed against the current
+file at these exact lines):
+
+```
+setup/setup.sh:26   log_step "Step 1/7  Creating configuration"     -> "Step 1/8  Creating configuration"
+setup/setup.sh:35   log_step "Step 2/7  Detecting GPUs"              -> "Step 2/8  Detecting GPUs"
+setup/setup.sh:54   log_step "Step 3/7  Selecting models"            -> "Step 3/8  Selecting models"
+setup/setup.sh:77   log_step "Step 4/7  Downloading models"          -> "Step 4/8  Downloading models"
+setup/setup.sh:90   log_step "Step 5/7  Validating model files"      -> "Step 5/8  Validating model files"
+setup/setup.sh:95   log_step "Step 6/7  Preparing Vulkan"            -> "Step 6/8  Preparing Vulkan"
+setup/setup.sh:126  log_step "Step 7/7  Checking the VRAM budget"    -> "Step 7/8  Checking the VRAM budget"
+```
+
+Only the `N/7` -> `N/8` numerator/denominator changes; the rest of each
+header string (the descriptive text after the two spaces) stays exactly as
+it is today. The new eighth step added above already reads
+`"Step 8/8  Computing resource limits"`. The final summary line at the end
+of the script (`Setup complete. Next: make check-setup`) is unchanged.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1699,8 +2014,9 @@ git commit -m "feat(setup): compute and persist llm-server resource limits"
 
 **Files:**
 - Modify: `.agents/architecture.md`
-- Modify: `AGENTS.md` (only if it references the removed Quadlet path —
-  check first)
+- Modify: `AGENTS.md`
+- Modify: `README.md`
+- Modify: `QUICK_START.md`
 - Test: `tests/test_docs.py`
 
 **Interfaces:**
@@ -1708,12 +2024,18 @@ git commit -m "feat(setup): compute and persist llm-server resource limits"
   and what do I run to check it" for the new compose-based lifecycle,
   replacing any stale mention of the Quadlet `.container` path.
 
-- [ ] **Step 1: Check for stale references**
+- [ ] **Step 1: Confirm the stale references this task fixes**
 
-Run: `grep -rln "containers/systemd\|\.container\b\|Quadlet\|quadlet" AGENTS.md README.md QUICK_START.md .agents/architecture.md`
+Run: `grep -rn "containers/systemd\|\.container\b\|Quadlet\|quadlet" AGENTS.md README.md QUICK_START.md .agents/architecture.md`
 
-For every match, confirm whether it describes the now-removed Quadlet
-mechanism (needs updating) or something unrelated (leave alone).
+At the time this task is written, that matches exactly five lines, all
+describing the now-removed Quadlet mechanism (none are unrelated
+false-positives): `AGENTS.md:6`, `README.md:4`, `QUICK_START.md:24`,
+`.agents/architecture.md:16` (the `scripts/start.sh` row), and
+`.agents/architecture.md:50` (the `## Platform` paragraph). Steps 4 and 5
+below fix all five. If a rerun of this grep at implementation time turns up
+additional matches (e.g. from other work landing first), triage each one
+the same way before continuing.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1727,22 +2049,54 @@ def test_architecture_documents_the_compose_lifecycle_files() -> None:
     assert "~/.config/systemd/user/llm-server.service" in architecture
     assert "podman compose" in architecture
     assert "containers/systemd/llm-server.container" not in architecture
+    assert "quadlet" not in architecture
+
+
+def test_no_stale_quadlet_references_outside_architecture() -> None:
+    for relative_path in ("AGENTS.md", "README.md", "QUICK_START.md"):
+        text = (ROOT / relative_path).read_text().lower()
+        assert "quadlet" not in text, f"{relative_path} still mentions quadlet"
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 3: Run tests to verify they fail**
 
-Run: `uv run --with pytest pytest tests/test_docs.py -v -k test_architecture_documents_the_compose_lifecycle_files`
-Expected: FAIL — `.agents/architecture.md` does not yet mention these paths.
+Run: `uv run --with pytest pytest tests/test_docs.py -v -k "compose_lifecycle_files or stale_quadlet"`
+Expected: FAIL — `.agents/architecture.md`, `AGENTS.md`, `README.md`, and
+`QUICK_START.md` all still say "quadlet" (see Step 1's grep), and
+`.agents/architecture.md` does not yet mention the compose/wrapper-unit
+paths.
 
 - [ ] **Step 4: Update `.agents/architecture.md`**
 
-In the `## Files` table, update the `render-unit.sh` row from describing a
-Quadlet unit to describing the compose file and wrapper unit, and add a
-`pylib/compose.py` row:
+In the `## Files` table, the current `scripts/start.sh` row (line 16) reads:
+
+```markdown
+| `scripts/start.sh` | Budget check, device resolution, quadlet render, health gate |
+```
+
+Replace it, and add new `pylib/compose.py` and `pylib/resources.py` rows
+directly below it (the latter parallels the existing `pylib/budget.py` row
+— `pylib/resources.py` is a first-class new module from Task 2, wired into
+`llmenv.py` in Task 3 and `setup.sh` in Task 13):
 
 ```markdown
 | `scripts/start.sh` | Budget check, device resolution, compose+wrapper-unit render, health gate |
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
+| `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
+```
+
+In the `## Platform` section, the current paragraph (line 50) reads:
+
+```markdown
+Linux only. Bazzite/Fedora with podman and rootless quadlets. There is no
+macOS support and none is planned.
+```
+
+Replace it with:
+
+```markdown
+Linux only. Bazzite/Fedora with podman, running as a rootless compose
+stack. There is no macOS support and none is planned.
 ```
 
 Add a new `## Container Lifecycle` section (after `## Invariants`, before
@@ -1768,12 +2122,54 @@ To check state directly: `systemctl --user status llm-server.service`,
 `journalctl --user -u llm-server -f`.
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 5: Update `AGENTS.md`, `README.md`, and `QUICK_START.md`**
 
-Run: `uv run --with pytest pytest tests/test_docs.py -v -k test_architecture_documents_the_compose_lifecycle_files`
+In `AGENTS.md`, the current lines 5–6 read:
+
+```markdown
+Local llama.cpp router server on Bazzite, running as a rootless podman
+quadlet with GPU acceleration. Configuration lives in `models.yml`.
+```
+
+Replace with:
+
+```markdown
+Local llama.cpp router server on Bazzite, running as a rootless podman
+compose stack with GPU acceleration. Configuration lives in `models.yml`.
+```
+
+In `README.md`, the current lines 3–4 read:
+
+```markdown
+Local llama.cpp router server with GPU acceleration, running as a rootless
+podman quadlet on Bazzite.
+```
+
+Replace with:
+
+```markdown
+Local llama.cpp router server with GPU acceleration, running as a rootless
+podman compose stack on Bazzite.
+```
+
+In `QUICK_START.md`, the current line 24 reads:
+
+```
+make enable-boot     # enable lingering and render the quadlet [Install] section
+```
+
+Replace with:
+
+```
+make enable-boot     # enable lingering and render the wrapper unit's [Install] section
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `uv run --with pytest pytest tests/test_docs.py -v -k "compose_lifecycle_files or stale_quadlet"`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full test suite**
+- [ ] **Step 7: Run the full test suite**
 
 Run: `uv run --with pytest pytest tests/ -v`
 Run: `shellcheck -s bash ./tools/*.sh ./setup/*.sh ./scripts/*.sh`
@@ -1781,11 +2177,11 @@ Run: `uvx ruff check llmenv.py pylib tests`
 Expected: PASS — this is the plan's final full `make validate && make test`
 equivalent sweep.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add .agents/architecture.md tests/test_docs.py
-git commit -m "docs(architecture): document the compose lifecycle files"
+git add .agents/architecture.md AGENTS.md README.md QUICK_START.md tests/test_docs.py
+git commit -m "docs: document the compose lifecycle and drop stale quadlet references"
 ```
 
 ---
