@@ -873,6 +873,47 @@ def test_cleanup_confirmation_prompt_reflects_the_configured_gpu_image(
     assert "ghcr.io/ggml-org/llama.cpp:server-vulkan and server" not in result.stdout
 
 
+def test_cleanup_removes_the_compose_file_and_wrapper_unit(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("systemctl",):
+        _mock_command(commands, name)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    compose_file = home / ".config/llm-env/docker-compose.yml"
+    wrapper_unit = home / ".config/systemd/user/llm-server.service"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {llm-server: {}}\n")
+    wrapper_unit.parent.mkdir(parents=True)
+    wrapper_unit.write_text("[Unit]\n")
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"podman compose -f {compose_file} down" in calls.read_text()
+    assert not compose_file.exists()
+    assert not wrapper_unit.exists()
+
+
 def run_render_unit_with_legacy_rocm_config(
     tmp_path: pathlib.Path,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:

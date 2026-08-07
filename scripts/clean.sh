@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clean.sh — remove the unit, config, and images. Keeps downloaded models.
+# clean.sh — remove the compose stack, unit, config, and images. Keeps downloaded models.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -17,9 +17,10 @@ else
 fi
 
 echo "This removes:"
-echo "  unit    ${QUADLET_DIR}/${UNIT_NAME}.container"
-echo "  config  ${CONFIG_PATH}"
-echo "  images  ${images_to_remove}"
+echo "  compose stack  ${COMPOSE_FILE}"
+echo "  unit           ${WRAPPER_UNIT_PATH}"
+echo "  config         ${CONFIG_PATH}"
+echo "  images         ${images_to_remove}"
 echo "Downloaded models in ${MODELS_DIR} are KEPT."
 if [ "${LLM_ENV_ASSUME_YES:-0}" = "1" ]; then
     confirm=yes
@@ -28,11 +29,14 @@ else
 fi
 [ "$confirm" = "yes" ] || { echo "Aborted."; exit 1; }
 
+if [ -f "$COMPOSE_FILE" ]; then
+    podman compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+fi
 systemctl --user stop "${UNIT_NAME}.service" 2>/dev/null || true
 systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
-rm -f "${QUADLET_DIR}/${UNIT_NAME}.container"
+rm -f "$WRAPPER_UNIT_PATH"
 systemctl --user daemon-reload
-rm -f "$CONFIG_PATH" "${HOME}/.config/llm-env/presets.ini"
+rm -f "$CONFIG_PATH" "$COMPOSE_FILE" "${HOME}/.config/llm-env/presets.ini"
 if [ -n "$configured_image" ]; then
     podman rmi -f "$configured_image" 2>/dev/null || true
 else
