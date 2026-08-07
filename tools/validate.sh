@@ -3,5 +3,5 @@
 set -euo pipefail
 
 shellcheck -s bash ./tools/*.sh ./setup/*.sh ./scripts/*.sh
-uvx ruff check llmenv.py pylib tests
+uv run ruff check llmenv.py pylib tests
 echo "All checks passed."

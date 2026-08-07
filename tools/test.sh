@@ -2,4 +2,4 @@
 # test.sh — Python test suite.
 set -euo pipefail
 
-uv run --with pytest pytest tests/ -v
+uv run pytest tests/ -v
