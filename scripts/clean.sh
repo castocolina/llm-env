@@ -5,10 +5,21 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+configured_image=""
+if [ -f "$CONFIG_PATH" ]; then
+    configured_image="$(yq -r '.gpu.image // ""' "$CONFIG_PATH" 2>/dev/null || true)"
+fi
+if [ -n "$configured_image" ] && [ "$configured_image" != null ]; then
+    images_to_remove="$configured_image"
+else
+    configured_image=""
+    images_to_remove="${VULKAN_IMAGE} and ${CPU_IMAGE} (default; no configured gpu.image found)"
+fi
+
 echo "This removes:"
 echo "  unit    ${QUADLET_DIR}/${UNIT_NAME}.container"
 echo "  config  ${CONFIG_PATH}"
-echo "  images  ghcr.io/ggml-org/llama.cpp:server-vulkan and server"
+echo "  images  ${images_to_remove}"
 echo "Downloaded models in ${MODELS_DIR} are KEPT."
 if [ "${LLM_ENV_ASSUME_YES:-0}" = "1" ]; then
     confirm=yes
@@ -22,6 +33,9 @@ systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
 rm -f "${QUADLET_DIR}/${UNIT_NAME}.container"
 systemctl --user daemon-reload
 rm -f "$CONFIG_PATH" "${HOME}/.config/llm-env/presets.ini"
-podman rmi -f ghcr.io/ggml-org/llama.cpp:server-vulkan \
-                ghcr.io/ggml-org/llama.cpp:server 2>/dev/null || true
+if [ -n "$configured_image" ]; then
+    podman rmi -f "$configured_image" 2>/dev/null || true
+else
+    podman rmi -f "$VULKAN_IMAGE" "$CPU_IMAGE" 2>/dev/null || true
+fi
 log_info "cleanup complete"

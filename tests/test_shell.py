@@ -614,6 +614,122 @@ def test_cleanup_preserves_the_host_rocm_image(tmp_path: pathlib.Path) -> None:
     assert "rocm" not in (result.stdout + result.stderr + calls.read_text()).lower()
 
 
+def test_cleanup_removes_the_configured_gpu_image_not_a_hardcoded_one(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    calls = tmp_path / "calls"
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "gpu:\n  image: example.invalid/custom-build:pinned\n"
+    )
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "example.invalid/custom-build:pinned" in calls.read_text()
+
+
+def test_cleanup_falls_back_to_default_images_without_a_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    calls = tmp_path / "calls"
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(tmp_path / "home/.config/llm-env/models.yml"),  # absent
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ghcr.io/ggml-org/llama.cpp:server-vulkan" in calls.read_text()
+
+
+def test_cleanup_confirmation_prompt_reflects_the_configured_gpu_image(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    _mock_command(commands, "podman")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("gpu:\n  image: example.invalid/custom-build:pinned\n")
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "example.invalid/custom-build:pinned" in result.stdout
+    assert "ghcr.io/ggml-org/llama.cpp:server-vulkan and server" not in result.stdout
+
+
 def run_render_unit_with_legacy_rocm_config(
     tmp_path: pathlib.Path,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
