@@ -829,3 +829,15 @@ def test_classify_transcript_emits_an_excerpt(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "boom" in json.loads(result.stdout)["excerpt"]
+
+
+def test_resources_emits_host_and_llm_server_limits():
+    result = run("resources")
+    payload = json.loads(result.stdout)
+    if result.returncode == 0:
+        assert payload["host"]["cpu_count"] > 0
+        assert payload["llm_server"]["cpus"] >= 0
+        assert payload["llm_server"]["memory_mib"] >= 0
+    else:
+        assert result.returncode == 1
+        assert "error" in payload

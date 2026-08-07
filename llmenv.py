@@ -44,9 +44,10 @@ from pylib.config import (
     set_model_enabled,
     sync_models_max,
 )
-from pylib.detect import DetectError, detect
+from pylib.detect import DetectError, detect, host_resources
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
 from pylib.presets import write_presets
+from pylib.resources import ResourceError, compute_resource_limits
 from pylib.transcript import classify_transcript
 
 DEVICE_LINE_RE = re.compile(
@@ -205,6 +206,12 @@ def cmd_budget(args: argparse.Namespace) -> int:
     return emit(result, 0 if result["feasible"] else 1)
 
 
+def cmd_resources(args: argparse.Namespace) -> int:
+    host = host_resources()
+    limits = compute_resource_limits(host["cpu_count"], host["memory_total_mib"])
+    return emit({"host": host, **limits})
+
+
 def cmd_presets(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     write_presets(cfg, args.models_dir, args.device, Path(args.output))
@@ -318,6 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--models-dir", required=True)
     budget.set_defaults(func=cmd_budget)
 
+    sub.add_parser("resources").set_defaults(func=cmd_resources)
+
     presets = sub.add_parser("presets")
     presets.add_argument("--config", default=argparse.SUPPRESS)
     presets.add_argument("--models-dir", required=True)
@@ -384,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.func(args)
-    except (ConfigError, BudgetError, GgufError, DetectError) as exc:
+    except (ConfigError, BudgetError, GgufError, DetectError, ResourceError) as exc:
         return fail(str(exc))
     except OSError as exc:
         return fail(f"filesystem error: {exc}")
