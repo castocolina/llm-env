@@ -438,6 +438,8 @@ def run_setup_with_numbered_selection(
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
         "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":8192},{\"id\":\"Vulkan1\",\"name\":\"Fallback Radeon: \\\"safe\\\"\",\"total_mib\":32768}]}' ;;\n"
+        "  *' resources')\n"
+        "    printf '%s\\n' '{\"llm_server\": {\"cpus\": 6, \"memory_mib\": 28672}}' ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -546,6 +548,14 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
     }
     assert persisted["runtime"]["models_max"] == 1
     assert [model["enabled"] for model in persisted["models"]] == [True, True]
+
+
+def test_setup_writes_computed_resource_limits(tmp_path: pathlib.Path) -> None:
+    """Setup must persist llmenv resources output into resources.llm_server."""
+    _, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+
+    assert yq_value(config, ".resources.llm_server.cpus") == "6"
+    assert yq_value(config, ".resources.llm_server.memory_mib") == "28672"
 
 
 def test_setup_rejects_invalid_numbered_model_selection_before_download(

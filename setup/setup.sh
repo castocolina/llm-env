@@ -23,7 +23,7 @@ ask() {
 
 require_cmd uv jq yq podman curl
 
-log_step "Step 1/7  Creating configuration"
+log_step "Step 1/8  Creating configuration"
 if [ -f "$CONFIG_PATH" ]; then
     log_info "using existing config at ${CONFIG_PATH}"
 else
@@ -32,7 +32,7 @@ else
 fi
 migrate_config_file || die "configuration migration failed"
 
-log_step "Step 2/7  Detecting GPUs"
+log_step "Step 2/8  Detecting GPUs"
 facts="$(llmenv detect)"
 gpu_count="$(echo "$facts" | jq '.gpus | length')"
 [ "$gpu_count" -gt 0 ] || die "no VRAM-backed GPUs detected"
@@ -51,7 +51,7 @@ vram_used="$(echo "$gpu" | jq -r '.vram_used_mib')"
 vram_free="$((vram_total - vram_used))"
 log_info "selected ${pci} with ${vram_total} MiB total, ${vram_used} MiB used, ${vram_free} MiB free"
 
-log_step "Step 3/7  Selecting models"
+log_step "Step 3/8  Selecting models"
 if [ -f "$CONFIG_PATH" ]; then
     yq -i 'del(.models[] | select(.alias == "openhermes"))' "$CONFIG_PATH"
 fi
@@ -74,7 +74,7 @@ done
 llmenv --config "$CONFIG_PATH" models select "${aliases[@]}" >/dev/null
 log_info "selected ${aliases[*]}"
 
-log_step "Step 4/7  Downloading models"
+log_step "Step 4/8  Downloading models"
 mkdir -p "$MODELS_DIR"
 while IFS=$'\t' read -r file url; do
     [ -n "$file" ] || continue
@@ -87,12 +87,12 @@ while IFS=$'\t' read -r file url; do
       || die "download failed: ${url}"
 done < <(yq -r '.models[] | select(.enabled) | [.file, .url] | @tsv' "$CONFIG_PATH")
 
-log_step "Step 5/7  Validating model files"
+log_step "Step 5/8  Validating model files"
 llmenv --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" \
   | jq -r '.results[] | "  \(if .valid then "ok  " else "FAIL" end) \(.alias): \(.message)"' \
   || die "one or more model files are not valid GGUF"
 
-log_step "Step 6/7  Preparing Vulkan"
+log_step "Step 6/8  Preparing Vulkan"
 podman pull "$VULKAN_IMAGE" >/dev/null
 vulkan_listing="podman run --rm --device /dev/dri ${VULKAN_IMAGE} --list-devices"
 devices="$(llmenv list-devices --list-command "$vulkan_listing")"
@@ -123,7 +123,7 @@ PCI_ADDRESS="$pci" VRAM_TOTAL_MIB="$vram_total" DEVICE_NAME="$device_name" \
 chmod 600 "$CONFIG_PATH"
 log_info "prepared ${device_name} for ${pci}"
 
-log_step "Step 7/7  Checking the VRAM budget"
+log_step "Step 7/8  Checking the VRAM budget"
 budget_json="$(mktemp)"
 trap 'rm -f "$budget_json"' EXIT
 if llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" > "$budget_json"; then
@@ -132,6 +132,24 @@ else
     jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — SHORT BY \(.shortfall_mib) MiB"' "$budget_json"
     jq -r '.remedies[] | "    - \(.)"' "$budget_json"
     log_warn "models_max=$(jq -r .models_max "$budget_json") exceeds the VRAM budget"
+fi
+
+log_step "Step 8/8  Computing resource limits"
+resources_json="$(mktemp)"
+# Replaces the Step 7/7 trap above with one that cleans up both temp
+# files — a second `trap … EXIT` overwrites rather than adds to the first.
+trap 'rm -f "$budget_json" "$resources_json"' EXIT
+if llmenv resources > "$resources_json"; then
+    cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
+    memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
+    CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
+        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
+      ' "$CONFIG_PATH"
+    log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
+else
+    log_warn "$(jq -r '.error' "$resources_json")"
+    log_warn "leaving resources.llm_server uncapped (0 = no explicit limit)"
 fi
 
 echo
