@@ -841,3 +841,19 @@ def test_resources_emits_host_and_llm_server_limits():
     else:
         assert result.returncode == 1
         assert "error" in payload
+
+
+def test_render_compose_writes_a_compose_file(tmp_path):
+    config = write_test_config(tmp_path)
+    output = tmp_path / "docker-compose.yml"
+    result = run(
+        "--config", str(config),
+        "render-compose",
+        "--models-dir", "/models",
+        "--presets-path", "/presets.ini",
+        "--output", str(output),
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["written"] == str(output)
+    assert output.exists()
+    assert "llm-server" in output.read_text()

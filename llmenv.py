@@ -46,6 +46,7 @@ from pylib.config import (
 )
 from pylib.detect import DetectError, detect, host_resources
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
+from pylib.compose import write_compose
 from pylib.presets import write_presets
 from pylib.resources import ResourceError, compute_resource_limits
 from pylib.transcript import classify_transcript
@@ -218,6 +219,17 @@ def cmd_presets(args: argparse.Namespace) -> int:
     return emit({"written": str(args.output), "models": cfg["runtime"]["models_max"]})
 
 
+def cmd_render_compose(args: argparse.Namespace) -> int:
+    cfg = require_valid_config(load_config(Path(args.config)))
+    write_compose(
+        cfg,
+        models_dir=args.models_dir,
+        presets_path=args.presets_path,
+        path=Path(args.output),
+    )
+    return emit({"written": str(args.output)})
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     path = Path(args.config)
     cfg = require_valid_config(load_config(path))
@@ -333,6 +345,13 @@ def build_parser() -> argparse.ArgumentParser:
     presets.add_argument("--device", required=True)
     presets.add_argument("--output", required=True)
     presets.set_defaults(func=cmd_presets)
+
+    render_compose = sub.add_parser("render-compose")
+    render_compose.add_argument("--config", default=argparse.SUPPRESS)
+    render_compose.add_argument("--models-dir", required=True)
+    render_compose.add_argument("--presets-path", required=True)
+    render_compose.add_argument("--output", required=True)
+    render_compose.set_defaults(func=cmd_render_compose)
 
     models = sub.add_parser("models")
     models.add_argument("--config", default=argparse.SUPPRESS)
