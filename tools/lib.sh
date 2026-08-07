@@ -7,14 +7,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_PATH="${LLM_ENV_CONFIG:-${HOME}/.config/llm-env/models.yml}"
 MODELS_DIR="${LLM_ENV_MODELS_DIR:-${HOME}/llm-workspace/models}"
 UNIT_NAME="llm-server"
-QUADLET_DIR="${HOME}/.config/containers/systemd"
+COMPOSE_FILE="${HOME}/.config/llm-env/docker-compose.yml"
+WRAPPER_UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}.service"
 VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
 CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 LLM_ENV_HEALTH_TIMEOUT_SECONDS="${LLM_ENV_HEALTH_TIMEOUT_SECONDS:-60}"
 
 # Exported so scripts that source this file expose them to child processes, and so
 # the linter does not flag them as unused (SC2034) in this library.
-export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME COMPOSE_FILE WRAPPER_UNIT_PATH VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
 
 GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'
 RED=$'\033[0;31m'; NC=$'\033[0m'
