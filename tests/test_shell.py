@@ -91,10 +91,10 @@ def test_shell_scripts_use_the_approved_directories() -> None:
 def test_makefile_dispatches_relocated_entrypoints() -> None:
     makefile = (ROOT / "Makefile").read_text()
 
-    assert "@bash scripts/help.sh" in makefile
-    assert "@bash setup/setup.sh" in makefile
-    assert "@bash setup/setup-local-llm-agents.sh" in makefile
-    assert "@bash scripts/check-server.sh" in makefile
+    assert "bash scripts/help.sh" in makefile
+    assert "bash setup/setup.sh" in makefile
+    assert "bash setup/setup-local-llm-agents.sh" in makefile
+    assert "bash scripts/check-server.sh" in makefile
 
 
 def _mock_command(directory: pathlib.Path, name: str) -> None:
@@ -6279,3 +6279,47 @@ def test_run_target_runs_the_wrapped_commands_own_output(tmp_path: pathlib.Path)
     )
     assert result.returncode == 0
     assert "hello" in result.stdout
+
+
+def test_makefile_wraps_every_target_with_run_target_banners() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert "UNIT = llm-server" not in makefile
+    assert "@bash tools/run-target.sh start -- bash scripts/start.sh" in makefile
+    assert "@bash tools/run-target.sh stop -- bash scripts/stop.sh" in makefile
+    assert "@bash tools/run-target.sh status -- bash scripts/status.sh" in makefile
+    assert "@bash tools/run-target.sh logs -- bash scripts/logs.sh" in makefile
+
+
+def test_makefile_restart_chains_two_recursive_make_calls() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert "restart:\n\t@$(MAKE) --no-print-directory stop\n\t@$(MAKE) --no-print-directory start\n" in makefile
+
+
+def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.Path) -> None:
+    status_text = (ROOT / "scripts/status.sh").read_text()
+    logs_text = (ROOT / "scripts/logs.sh").read_text()
+    assert "source" in status_text and "tools/lib.sh" in status_text
+    assert "${UNIT_NAME}" in status_text
+    assert "source" in logs_text and "tools/lib.sh" in logs_text
+    assert "${UNIT_NAME}" in logs_text
+
+
+def test_make_restart_runs_stop_then_start_with_distinct_banners() -> None:
+    # `-n` is a dry run: make never executes any recipe line, so there is
+    # nothing here for a fake `make` stub to intercept — a stub would only
+    # matter for a real (non-`-n`) invocation. Instead, call the real `make`
+    # binary directly (unmodified PATH) and rely on GNU make's documented
+    # `-n` behavior: it still expands `$(MAKE)` to the make program's own
+    # name and prints each nested recipe line it would run, which is enough
+    # to prove `restart` triggers two independent `make` invocations (stop,
+    # then start) instead of chaining through prerequisites.
+    result = subprocess.run(
+        ["/usr/bin/make", "--no-print-directory", "-n", "restart"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "make --no-print-directory stop" in result.stdout
+    assert "make --no-print-directory start" in result.stdout

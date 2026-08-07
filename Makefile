@@ -1,62 +1,60 @@
 .PHONY: help prerequisites setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
         key-reset enable-boot disable-boot status logs validate test clean
 
-UNIT = llm-server
-
 help:
-	@bash scripts/help.sh
+	@bash tools/run-target.sh help -- bash scripts/help.sh
 
 prerequisites:
-	@bash setup/prerequisites.sh
+	@bash tools/run-target.sh prerequisites -- bash setup/prerequisites.sh
 
 setup:
-	@bash setup/setup.sh
+	@bash tools/run-target.sh setup -- bash setup/setup.sh
 
 setup-local-llm-agents:
-	@bash setup/setup-local-llm-agents.sh
+	@bash tools/run-target.sh setup-local-llm-agents -- bash setup/setup-local-llm-agents.sh
 
 start:
-	@bash scripts/start.sh
+	@bash tools/run-target.sh start -- bash scripts/start.sh
 
 stop:
-	@bash scripts/stop.sh
+	@bash tools/run-target.sh stop -- bash scripts/stop.sh
 
-restart: stop start
+restart:
+	@$(MAKE) --no-print-directory stop
+	@$(MAKE) --no-print-directory start
 
 check-setup:
-	@bash scripts/check-setup.sh
+	@bash tools/run-target.sh check-setup -- bash scripts/check-setup.sh
 
 check-server:
-	@bash scripts/check-server.sh
+	@bash tools/run-target.sh check-server -- bash scripts/check-server.sh
 
 check-with-agents:
-	@bash scripts/check-with-agents.sh
+	@bash tools/run-target.sh check-with-agents -- bash scripts/check-with-agents.sh
 
 benchmark:
-	@bash scripts/benchmark.sh
+	@bash tools/run-target.sh benchmark -- bash scripts/benchmark.sh
 
 key-reset:
-	@bash scripts/key-reset.sh
+	@bash tools/run-target.sh key-reset -- bash scripts/key-reset.sh
 
 enable-boot:
-	@bash setup/enable-boot.sh
+	@bash tools/run-target.sh enable-boot -- bash setup/enable-boot.sh
 
 disable-boot:
-	@bash setup/disable-boot.sh
+	@bash tools/run-target.sh disable-boot -- bash setup/disable-boot.sh
 
 status:
-	@systemctl --user status $(UNIT).service --no-pager || true
+	@bash tools/run-target.sh status -- bash scripts/status.sh
 
 logs:
-	@journalctl --user -u $(UNIT).service -f
+	@bash tools/run-target.sh logs -- bash scripts/logs.sh
 
 validate:
-	@shellcheck -s bash ./tools/*.sh ./setup/*.sh ./scripts/*.sh
-	@uvx ruff check llmenv.py pylib tests
-	@echo "All checks passed."
+	@bash tools/run-target.sh validate -- bash tools/validate.sh
 
 test:
-	@uv run --with pytest pytest tests/ -v
+	@bash tools/run-target.sh test -- bash tools/test.sh
 
 clean:
-	@bash scripts/clean.sh
+	@bash tools/run-target.sh clean -- bash scripts/clean.sh
