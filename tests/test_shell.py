@@ -6304,6 +6304,56 @@ def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.
     assert "${UNIT_NAME}" in logs_text
 
 
+def test_wait_for_health_succeeds_once_curl_reports_healthy(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    curl = commands / "curl"
+    curl.write_text("#!/usr/bin/bash\nexit 0\n")
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -euo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        "wait_for_health 8000\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        env=os.environ | {"PATH": f"{commands}:/usr/bin:/bin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_wait_for_health_times_out_when_curl_never_succeeds(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    curl = commands / "curl"
+    curl.write_text("#!/usr/bin/bash\nexit 1\n")
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -uo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        "wait_for_health 8000\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        env=os.environ | {"PATH": f"{commands}:/usr/bin:/bin", "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "2"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+
+
 def test_make_restart_runs_stop_then_start_with_distinct_banners() -> None:
     # `-n` is a dry run: make never executes any recipe line, so there is
     # nothing here for a fake `make` stub to intercept — a stub would only

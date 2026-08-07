@@ -236,3 +236,12 @@ reset_api_key() {
     API_KEY="$api_key" yq -i '.server.api_key = strenv(API_KEY)' "$CONFIG_PATH"
     chmod 600 "$CONFIG_PATH"
 }
+
+wait_for_health() {
+    local port="$1" attempt
+    for (( attempt = 0; attempt < LLM_ENV_HEALTH_TIMEOUT_SECONDS; attempt++ )); do
+        curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
