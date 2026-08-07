@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-RUNTIME=("uv:uv" "jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
+RUNTIME=("jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
 DEVELOPMENT=("git:git" "shellcheck:ShellCheck" "node:nodejs")
 OPTIONAL_LAN=("firewall-cmd:firewalld" "avahi-publish:avahi")
 
@@ -74,12 +74,21 @@ check_group() {
 }
 
 printf 'Checking Bazzite/Fedora prerequisites:\n'
+
+uv_missing=0
+if ! command -v uv >/dev/null 2>&1; then
+    uv_missing=1
+    printf '  missing    %-16s %-12s %s\n' uv "(astral.sh)" "Python tool runner and dependency manager"
+else
+    printf '  installed  %-16s %s\n' uv "Python tool runner and dependency manager"
+fi
+
 check_group runtime "${RUNTIME[@]}"
 check_group development "${DEVELOPMENT[@]}"
 check_group optional "${OPTIONAL_LAN[@]}"
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
-    if [ "${#missing_runtime[@]}" -eq 0 ]; then
+    if [ "${#missing_runtime[@]}" -eq 0 ] && [ "$uv_missing" -eq 0 ]; then
         exit 0
     fi
     exit 1
@@ -100,6 +109,17 @@ install_packages() {
     fi
     return 1
 }
+
+if [ "$uv_missing" -eq 1 ]; then
+    printf 'curl -LsSf https://astral.sh/uv/install.sh | sh\n'
+    read -rp "Install uv via its official installer? (yes/no) " reply
+    if [ "$reply" = "yes" ]; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        log_info "uv installed; ensure \$HOME/.local/bin is on PATH"
+    else
+        exit 1
+    fi
+fi
 
 if [ "${#missing_packages[@]}" -gt 0 ]; then
     if ! install_packages "Install these packages? (yes/no) " "${missing_packages[@]}"; then

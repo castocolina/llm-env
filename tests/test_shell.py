@@ -228,6 +228,92 @@ def test_prerequisites_installs_only_after_yes(tmp_path: pathlib.Path) -> None:
     assert "install yq" in calls.read_text()
 
 
+def test_prerequisites_reports_missing_uv_without_rpm_ostree(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("jq", "yq", "podman", "curl", "ip", "sudo"):
+        _mock_command(commands, name)
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"PATH": str(commands)}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh", "--check"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "missing    uv" in result.stdout
+
+
+def test_prerequisites_installs_uv_via_official_installer_not_rpm_ostree(
+    tmp_path: pathlib.Path,
+) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("jq", "podman", "curl", "ip", "git", "shellcheck"):
+        _mock_command(commands, name)
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    calls = tmp_path / "calls"
+    rpm_ostree = commands / "rpm-ostree"
+    rpm_ostree.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+    )
+    rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
+    sudo = commands / "sudo"
+    sudo.write_text("#!/usr/bin/bash\nexec \"$@\"\n")
+    sudo.chmod(sudo.stat().st_mode | stat.S_IXUSR)
+    uv_installer_log = tmp_path / "uv-install-invoked"
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        # Log invocation to $CALLS, not real stdout — real stdout here is
+        # what gets piped into `sh` by the script under test, so it must be
+        # valid (harmless) shell content, not a log line.
+        "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+        f"touch {uv_installer_log}\n"
+        "printf 'true\\n'\n"
+        "exit 0\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        # commands must come first so the mocked curl/rpm-ostree/etc. win,
+        # but /usr/bin:/bin must also be present — the real `sh` (the
+        # pipeline destination of `curl ... | sh`) and `touch` (used inside
+        # the curl stub above) are not mocked and must resolve to the real
+        # system binaries, the same convention run_lifecycle_script and
+        # run_cleanup_with_stubs already use elsewhere in this file.
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="yes\nyes\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert uv_installer_log.exists()
+    assert "install uv" not in calls.read_text()
+
+
 def test_setup_stops_for_missing_prerequisites_before_mutating_config(
     tmp_path: pathlib.Path,
 ) -> None:
