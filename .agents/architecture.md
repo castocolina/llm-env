@@ -13,7 +13,9 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `tools/lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
 | `setup/setup.sh` | Interactive configuration, downloads, network exposure |
 | `scripts/benchmark.sh` | Vulkan-only measurement with CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
-| `scripts/start.sh` | Budget check, device resolution, quadlet render, health gate |
+| `scripts/start.sh` | Budget check, device resolution, compose+wrapper-unit render, health gate |
+| `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
+| `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
@@ -24,6 +26,24 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/detect.py` | GPU and compositor detection from sysfs |
 | `pylib/budget.py` | VRAM arithmetic and remedies |
 | `pylib/presets.py` | `presets.ini` via configparser |
+
+## Container Lifecycle
+
+`setup/render-unit.sh` writes two generated files, both regenerated on
+every `make start`:
+
+- `~/.config/llm-env/docker-compose.yml` — the container definition
+  (`pylib/compose.py`). Not for hand editing.
+- `~/.config/systemd/user/llm-server.service` — a thin systemd wrapper unit
+  whose `ExecStart`/`ExecStop` run `podman compose … up -d`/`down`. This is
+  the unit `make start`/`stop`/`status`/`logs`/`enable-boot` all operate on
+  by name (`llm-server.service`); systemd supervises "is the compose stack
+  up," while each compose service's own `restart:` policy handles
+  crash-restart.
+
+To check state directly: `systemctl --user status llm-server.service`,
+`podman compose -f ~/.config/llm-env/docker-compose.yml ps`,
+`journalctl --user -u llm-server -f`.
 
 ## Invariants
 
@@ -47,5 +67,5 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 
 ## Platform
 
-Linux only. Bazzite/Fedora with podman and rootless quadlets. There is no
-macOS support and none is planned.
+Linux only. Bazzite/Fedora with podman, running as a rootless compose
+stack. There is no macOS support and none is planned.

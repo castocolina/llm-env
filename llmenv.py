@@ -32,6 +32,7 @@ from pylib.agent_runner import (
     run_bounded_agent,
 )
 from pylib.budget import BudgetError, compute_budget, kv_cache_components_mib
+from pylib.compose import write_compose
 from pylib.config import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
@@ -46,7 +47,6 @@ from pylib.config import (
 )
 from pylib.detect import DetectError, detect, host_resources
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
-from pylib.compose import write_compose
 from pylib.presets import write_presets
 from pylib.resources import ResourceError, compute_resource_limits
 from pylib.transcript import classify_transcript

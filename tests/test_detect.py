@@ -5,7 +5,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pylib.detect import DetectError, compositor_render_node, detect, host_resources, list_gpus
+from pylib.detect import (
+    DetectError,
+    compositor_render_node,
+    detect,
+    host_resources,
+    list_gpus,
+)
 
 MIB = 1024 * 1024
 

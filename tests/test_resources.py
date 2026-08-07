@@ -5,7 +5,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pylib.resources import HOST_CPU_FLOOR, HOST_MEMORY_FLOOR_MIB, ResourceError, compute_resource_limits
+from pylib.resources import (
+    HOST_CPU_FLOOR,
+    HOST_MEMORY_FLOOR_MIB,
+    ResourceError,
+    compute_resource_limits,
+)
 
 
 def test_llm_server_gets_remainder_after_host_floor():

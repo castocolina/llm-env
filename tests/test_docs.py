@@ -155,3 +155,19 @@ def test_architecture_describes_models_max_as_a_residency_limit() -> None:
     assert "enabled-model count" not in architecture
     assert "validated residency limit" in architecture
 
+
+
+def test_architecture_documents_the_compose_lifecycle_files() -> None:
+    architecture = (ROOT / ".agents/architecture.md").read_text().lower()
+
+    assert "~/.config/llm-env/docker-compose.yml" in architecture
+    assert "~/.config/systemd/user/llm-server.service" in architecture
+    assert "podman compose" in architecture
+    assert "containers/systemd/llm-server.container" not in architecture
+    assert "quadlet" not in architecture
+
+
+def test_no_stale_quadlet_references_outside_architecture() -> None:
+    for relative_path in ("AGENTS.md", "README.md", "QUICK_START.md"):
+        text = (ROOT / relative_path).read_text().lower()
+        assert "quadlet" not in text, f"{relative_path} still mentions quadlet"

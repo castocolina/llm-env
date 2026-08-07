@@ -1,7 +1,7 @@
 # llm-env
 
 Local llama.cpp router server with GPU acceleration, running as a rootless
-podman quadlet on Bazzite.
+podman compose stack on Bazzite.
 
 ## Quick start
 

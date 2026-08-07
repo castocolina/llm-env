@@ -3,7 +3,7 @@
 ## LLM Environment
 
 Local llama.cpp router server on Bazzite, running as a rootless podman
-quadlet with GPU acceleration. Configuration lives in `models.yml`.
+compose stack with GPU acceleration. Configuration lives in `models.yml`.
 
 ## Commands
 
