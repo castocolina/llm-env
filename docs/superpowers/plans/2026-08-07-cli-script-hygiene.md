@@ -97,14 +97,23 @@ CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 LLM_ENV_HEALTH_TIMEOUT_SECONDS="${LLM_ENV_HEALTH_TIMEOUT_SECONDS:-60}"
 ```
 
-Update the export line to include the new names:
+Update the export line to include the new names. As of this plan's writing,
+`tools/lib.sh`'s export line is:
 
 ```bash
-export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR
 ```
 
-(Keep whatever `QUADLET_DIR`/`COMPOSE_FILE`/`WRAPPER_UNIT_PATH` names are
-already on that line — this task only adds to it, never removes an
+Append the new names to the end, keeping every existing name in place:
+
+```bash
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME QUADLET_DIR VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+```
+
+(If the compose plan already ran first, this line may also carry
+`COMPOSE_FILE`/`WRAPPER_UNIT_PATH` instead of — or alongside —
+`QUADLET_DIR`; whatever names are already there, keep every one of them and
+only append the three new names shown above. This task never removes an
 unrelated entry.)
 
 - [ ] **Step 2: Run shellcheck**
@@ -154,7 +163,10 @@ def test_run_target_prints_start_banner_before_running_the_command(
         check=False,
     )
     assert result.returncode == 0
-    assert "demo" in result.stdout.splitlines()[0]
+    # The start-banner printf leads with a blank line (spacing between
+    # chained make targets), so stdout's line 0 is empty and the banner
+    # itself is line 1.
+    assert "demo" in result.stdout.splitlines()[1]
 
 
 def test_run_target_prints_ok_end_banner_on_success(tmp_path: pathlib.Path) -> None:
@@ -301,30 +313,25 @@ def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.
     assert "${UNIT_NAME}" in logs_text
 
 
-def test_make_restart_runs_stop_then_start_with_distinct_banners(
-    tmp_path: pathlib.Path,
-) -> None:
-    commands = tmp_path / "bin"
-    commands.mkdir()
-    calls = tmp_path / "calls"
-    make_stub = commands / "make"
-    make_stub.write_text(
-        "#!/usr/bin/bash\n"
-        "printf 'make %s\\n' \"$*\" >> \"$CALLS\"\n"
-    )
-    make_stub.chmod(make_stub.stat().st_mode | stat.S_IXUSR)
-
+def test_make_restart_runs_stop_then_start_with_distinct_banners() -> None:
+    # `-n` is a dry run: make never executes any recipe line, so there is
+    # nothing here for a fake `make` stub to intercept — a stub would only
+    # matter for a real (non-`-n`) invocation. Instead, call the real `make`
+    # binary directly (unmodified PATH) and rely on GNU make's documented
+    # `-n` behavior: it still expands `$(MAKE)` to the make program's own
+    # name and prints each nested recipe line it would run, which is enough
+    # to prove `restart` triggers two independent `make` invocations (stop,
+    # then start) instead of chaining through prerequisites.
     result = subprocess.run(
-        ["make", "--no-print-directory", "-n", "restart"],
+        ["/usr/bin/make", "--no-print-directory", "-n", "restart"],
         cwd=ROOT,
-        env=os.environ | {"CALLS": str(calls), "PATH": f"{commands}:/usr/bin:/bin"},
         text=True,
         capture_output=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "$(MAKE) --no-print-directory stop" in result.stdout
-    assert "$(MAKE) --no-print-directory start" in result.stdout
+    assert "make --no-print-directory stop" in result.stdout
+    assert "make --no-print-directory start" in result.stdout
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -767,10 +774,23 @@ git commit -m "feat(lib): add load_server_config helper"
 - Test: `tests/test_shell.py`
 
 **Interfaces:**
-- Consumes: `load_server_config()` (Task 6).
-- Produces: identical externally-observable behavior — this is a pure
-  refactor, verified by the existing test suites for each of these five
-  scripts continuing to pass, not by a new test.
+- Consumes: `load_server_config()` (Task 6); `LLM_ENV_HEALTH_TIMEOUT_SECONDS`
+  (Task 1, already exported by `tools/lib.sh`, which `render-unit.sh`
+  already sources).
+- Produces: identical externally-observable behavior at four of the five
+  call sites — verified by the existing test suites for those scripts
+  continuing to pass, not by a new test. `setup/render-unit.sh` is the
+  exception: alongside its `load_server_config()` adoption, this task also
+  makes the generated mDNS unit's `ExecStartPre` health-poll loop
+  interpolate `${LLM_ENV_HEALTH_TIMEOUT_SECONDS}` instead of an
+  independent hardcoded `60` literal, so the design's stated requirement
+  that the generated unit "at least reference the same timeout constant"
+  as `wait_for_health()` (Task 4) is actually met — this one sub-change
+  *is* a new, testable, externally-observable behavior (a custom
+  `LLM_ENV_HEALTH_TIMEOUT_SECONDS` value now shows up in the rendered
+  unit file), so it gets its own failing test in Step 2 below rather than
+  relying solely on the "existing tests still pass" baseline the other
+  four files use.
 
 - [ ] **Step 1: Confirm the existing tests for all five scripts pass first**
 
@@ -778,7 +798,76 @@ Run: `uv run --with pytest pytest tests/test_shell.py -v -k "check_server or che
 Expected: PASS against the current scripts — this is the before-state
 baseline for this refactor's test cycle.
 
-- [ ] **Step 2: `scripts/check-server.sh`**
+- [ ] **Step 2: Write the failing test for `render-unit.sh`'s health-timeout interpolation**
+
+`run_lifecycle_script()` (used by the existing `render_unit`/`enable_boot`
+tests) does not currently offer a way to override an environment variable
+for the script under test — add one, as an additional keyword-only
+parameter defaulting to `None` so every existing call site is unaffected.
+In `tests/test_shell.py`, change `run_lifecycle_script()`'s signature:
+
+```python
+def run_lifecycle_script(
+    tmp_path: pathlib.Path,
+    script: str,
+    *,
+    api_key: str = "existing-key",
+    active: bool = False,
+    config_mode: int = 0o600,
+    parallel_slots: int = 1,
+    sampling_temperature: str | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+```
+
+and change the `environment = os.environ | {...}` assignment near the end
+of the function so the overrides are applied last (so a caller-supplied
+value always wins over the function's own defaults):
+
+```python
+    environment = os.environ | {
+        "ACTIVE": "1" if active else "0",
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+        "REAL_UV": real_uv,
+    } | (env_overrides or {})
+```
+
+Then append the new test:
+
+```python
+def test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The generated mDNS unit's health poll must track the shared timeout,
+    not an independent hardcoded 60 — same requirement wait_for_health()
+    (Task 4) exists to satisfy for start.sh."""
+    result, config, _ = run_lifecycle_script(
+        tmp_path,
+        "setup/enable-boot.sh",
+        env_overrides={"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "77"},
+    )
+    mdns_unit = config.parent.parent / "systemd/user/llm-server-mdns.service"
+
+    assert result.returncode == 0, result.stderr
+    unit = mdns_unit.read_text()
+    assert "-lt 77" in unit
+    assert "-lt 60" not in unit
+```
+
+- [ ] **Step 3: Run the new test to verify it fails**
+
+Run: `uv run --with pytest pytest tests/test_shell.py -v -k test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout`
+Expected: FAIL — the current `render-unit.sh` heredoc always writes the
+literal `-lt 60`, so `"-lt 77" in unit` is false regardless of
+`LLM_ENV_HEALTH_TIMEOUT_SECONDS`.
+
+- [ ] **Step 4: `scripts/check-server.sh`**
 
 Replace:
 
@@ -799,7 +888,7 @@ api_key="$API_KEY"
 rest of the file, rather than renaming every subsequent reference, keeps
 this a minimal, reviewable diff.)
 
-- [ ] **Step 3: `scripts/check-with-agents.sh`**
+- [ ] **Step 5: `scripts/check-with-agents.sh`**
 
 Replace:
 
@@ -816,7 +905,7 @@ port="$PORT"
 api_key="$API_KEY"
 ```
 
-- [ ] **Step 4: `setup/network.sh`**
+- [ ] **Step 6: `setup/network.sh`**
 
 Replace:
 
@@ -836,7 +925,7 @@ mdns="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
 (`mdns_name` is not part of `load_server_config`'s three fields, so that
 read stays as-is.)
 
-- [ ] **Step 5: `setup/setup-local-llm-agents.sh`**
+- [ ] **Step 7: `setup/setup-local-llm-agents.sh`**
 
 Replace:
 
@@ -876,7 +965,7 @@ oversight, and folding it into the shared helper would either break this
 script's `null`-vs-empty handling or require `load_server_config()` itself
 to special-case a fallback every other caller does not need.)
 
-- [ ] **Step 6: `setup/render-unit.sh`**
+- [ ] **Step 8: `setup/render-unit.sh`**
 
 Replace:
 
@@ -899,25 +988,56 @@ api_key="$API_KEY"
 that same line block untouched — they are not part of
 `load_server_config`'s scope.)
 
-- [ ] **Step 7: Run the five scripts' test suites again to confirm no regression**
+Then, in the same file, replace the mDNS unit's `ExecStartPre` line:
+
+```bash
+ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt 60 ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
+```
+
+with:
+
+```bash
+ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt ${LLM_ENV_HEALTH_TIMEOUT_SECONDS} ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
+```
+
+(This line sits inside the unquoted `cat > "$mdns_unit" <<EOF` heredoc
+that already interpolates `${curl_path}`/`${port}`/`${mdns_name}` the same
+way — `${LLM_ENV_HEALTH_TIMEOUT_SECONDS}` expands exactly like those do,
+at heredoc-write time in this script's own shell, not at
+systemd-unit-run time. `LLM_ENV_HEALTH_TIMEOUT_SECONDS` is already
+exported by `tools/lib.sh`, Task 1, which this script sources at the top,
+so no new `source`/`require_cmd` line is needed. The single-quoted
+`'...'` around the whole `bash -c` argument, and the `\$\$` escaping of
+the loop counter `i`, are unchanged — those protect `$i`'s *runtime*
+expansion inside the generated unit's own `bash -c` invocation from this
+script's heredoc expansion; `${LLM_ENV_HEALTH_TIMEOUT_SECONDS}` is meant
+to expand now, at generation time, exactly like `${port}` already does on
+the same line, so it takes the same `${...}` form, not the `\$\$`-escaped
+form.)
+
+- [ ] **Step 9: Run the five scripts' test suites again to confirm no regression, and confirm the new render-unit test now passes**
 
 Run: `uv run --with pytest pytest tests/test_shell.py -v -k "check_server or check_with_agents or setup_local_llm_agents or render_unit or network"`
-Expected: PASS, unchanged from Step 1.
+Expected: PASS, unchanged from Step 1, plus
+`test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout`
+(added in Step 2) now PASSES too — it matches the `render_unit` filter
+above, so it is already included in this run; no separate command is
+needed.
 
-- [ ] **Step 8: Run shellcheck on all five files**
+- [ ] **Step 10: Run shellcheck on all five files**
 
 Run: `shellcheck -s bash scripts/check-server.sh scripts/check-with-agents.sh setup/network.sh setup/setup-local-llm-agents.sh setup/render-unit.sh`
 Expected: no new warnings.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add scripts/check-server.sh scripts/check-with-agents.sh setup/network.sh setup/render-unit.sh
-git commit -m "refactor: adopt load_server_config at its call sites"
+git add scripts/check-server.sh scripts/check-with-agents.sh setup/network.sh setup/render-unit.sh tests/test_shell.py
+git commit -m "refactor: adopt load_server_config at its call sites; render-unit mDNS health-poll tracks the shared timeout"
 ```
 
 (`setup/setup-local-llm-agents.sh` is intentionally excluded from this
-commit — see Step 5.)
+commit — see Step 7.)
 
 ---
 
@@ -1001,13 +1121,30 @@ git commit -m "refactor: adopt shared VULKAN_IMAGE/CPU_IMAGE constants"
   only when no config is present to read from — so a repointed
   `gpu.image` (a custom build, a pinned digest) actually gets cleaned up
   instead of leaving the real image orphaned while a stale hardcoded
-  literal gets removed instead.
+  literal gets removed instead. The pre-confirmation "This removes:"
+  disclosure the user sees *before* typing "yes" is updated to show that
+  same resolved image — not the old hardcoded
+  `ghcr.io/ggml-org/llama.cpp:server-vulkan and server` literal — since
+  the whole point of this task is that the actually-configured image may
+  differ from those defaults, and the prompt shown right before deletion
+  must not misstate what is about to be removed. Both the prompt and the
+  later `podman rmi` call read `gpu.image` exactly once, near the top of
+  the script, into a variable that both places share; the original code
+  read `.server.port`-style config fields immediately before use, but
+  `clean.sh` itself later runs `rm -f "$CONFIG_PATH"` — so a second,
+  later `yq` read of `gpu.image` (as opposed to reusing the one taken
+  before the prompt) would always find an already-deleted file and
+  silently fall back to the defaults, defeating this task's fix. Reading
+  once up front avoids that trap entirely.
 
 **Sequencing note:** if the sibling compose plan's Task 10 has already
 landed, `clean.sh`'s current body already reads `${COMPOSE_FILE}` and runs
-`podman compose … down` — apply this task's `podman rmi` change on top of
+`podman compose … down` — apply this task's `gpu.image` change on top of
 that version instead of the block quoted below (which reflects the
-Quadlet-era file, current as of this plan's writing).
+Quadlet-era file, current as of this plan's writing). Preserve the same
+principle regardless of which version you're modifying: resolve
+`gpu.image` once, before the confirmation prompt, and reuse that value
+for both the prompt text and the actual removal.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1088,23 +1225,80 @@ def test_cleanup_falls_back_to_default_images_without_a_config(
 
     assert result.returncode == 0, result.stderr
     assert "ghcr.io/ggml-org/llama.cpp:server-vulkan" in calls.read_text()
+
+
+def test_cleanup_confirmation_prompt_reflects_the_configured_gpu_image(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    _mock_command(commands, "podman")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("gpu:\n  image: example.invalid/custom-build:pinned\n")
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "example.invalid/custom-build:pinned" in result.stdout
+    assert "ghcr.io/ggml-org/llama.cpp:server-vulkan and server" not in result.stdout
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run --with pytest pytest tests/test_shell.py -v -k "cleanup_removes_the_configured_gpu_image or cleanup_falls_back_to_default"`
+Run: `uv run --with pytest pytest tests/test_shell.py -v -k "cleanup_removes_the_configured_gpu_image or cleanup_falls_back_to_default or cleanup_confirmation_prompt_reflects"`
 Expected: FAIL — the current `clean.sh` always removes the two hardcoded
 image literals unconditionally, so
 `"example.invalid/custom-build:pinned" in calls.read_text()` is false in
-the first test.
+the first test, and it always prints the hardcoded
+`"images  ghcr.io/ggml-org/llama.cpp:server-vulkan and server"` line
+regardless of `gpu.image`, so the third test's
+`"ghcr.io/ggml-org/llama.cpp:server-vulkan and server" not in result.stdout`
+assertion is false too.
 
 - [ ] **Step 3: Update `scripts/clean.sh`**
 
-Replace the final image-removal line:
+The current file (see Task 9's header for the exact text this plan was
+written against) reads no config at all before printing its "This
+removes:" disclosure, and unconditionally removes the two hardcoded image
+literals at the end. Both of those need to change together, and the
+`gpu.image` read needs to happen **before** the confirmation prompt (and
+therefore before `rm -f "$CONFIG_PATH"` runs later in the script) so the
+same resolved value can back both the prompt text and the actual
+removal — reading it a second time after the config file is already
+deleted would silently fall back to the defaults every time.
+
+Replace:
 
 ```bash
-podman rmi -f ghcr.io/ggml-org/llama.cpp:server-vulkan \
-                ghcr.io/ggml-org/llama.cpp:server 2>/dev/null || true
+echo "This removes:"
+echo "  unit    ${QUADLET_DIR}/${UNIT_NAME}.container"
+echo "  config  ${CONFIG_PATH}"
+echo "  images  ghcr.io/ggml-org/llama.cpp:server-vulkan and server"
+echo "Downloaded models in ${MODELS_DIR} are KEPT."
 ```
 
 with:
@@ -1115,15 +1309,49 @@ if [ -f "$CONFIG_PATH" ]; then
     configured_image="$(yq -r '.gpu.image // ""' "$CONFIG_PATH" 2>/dev/null || true)"
 fi
 if [ -n "$configured_image" ] && [ "$configured_image" != null ]; then
+    images_to_remove="$configured_image"
+else
+    configured_image=""
+    images_to_remove="${VULKAN_IMAGE} and ${CPU_IMAGE} (default; no configured gpu.image found)"
+fi
+
+echo "This removes:"
+echo "  unit    ${QUADLET_DIR}/${UNIT_NAME}.container"
+echo "  config  ${CONFIG_PATH}"
+echo "  images  ${images_to_remove}"
+echo "Downloaded models in ${MODELS_DIR} are KEPT."
+```
+
+(`configured_image` is deliberately reset to `""` in the fallback branch
+even though it may have held the literal string `null` — this keeps the
+later removal logic a single, simple `[ -n "$configured_image" ]` check
+rather than repeating the `!= null` comparison a second time.)
+
+Then replace the final image-removal line:
+
+```bash
+podman rmi -f ghcr.io/ggml-org/llama.cpp:server-vulkan \
+                ghcr.io/ggml-org/llama.cpp:server 2>/dev/null || true
+```
+
+with:
+
+```bash
+if [ -n "$configured_image" ]; then
     podman rmi -f "$configured_image" 2>/dev/null || true
 else
     podman rmi -f "$VULKAN_IMAGE" "$CPU_IMAGE" 2>/dev/null || true
 fi
 ```
 
+This reuses the `configured_image`/`images_to_remove` variables computed
+in the first replacement above — no second `yq` read of `$CONFIG_PATH`
+happens down here, which matters because by this point in the script
+`rm -f "$CONFIG_PATH"` has already run.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run --with pytest pytest tests/test_shell.py -v -k "cleanup_removes_the_configured_gpu_image or cleanup_falls_back_to_default"`
+Run: `uv run --with pytest pytest tests/test_shell.py -v -k "cleanup_removes_the_configured_gpu_image or cleanup_falls_back_to_default or cleanup_confirmation_prompt_reflects"`
 Expected: PASS.
 
 - [ ] **Step 5: Run the pre-existing cleanup test and shellcheck**
@@ -1136,7 +1364,7 @@ Expected: PASS; no new warnings.
 
 ```bash
 git add scripts/clean.sh tests/test_shell.py
-git commit -m "fix(clean): remove the configured gpu.image instead of a hardcoded one"
+git commit -m "fix(clean): remove and disclose the configured gpu.image instead of a hardcoded one"
 ```
 
 ---
@@ -1559,8 +1787,39 @@ them purely as a regression check after Step 3's edit.
 
 - [ ] **Step 3: Update `scripts/check-with-agents.sh`**
 
-There are two occurrences of the raw-transcript dump on the failure paths.
-The first, inside the `if [ "$agent_failed" -ne 0 ]` block:
+There are two occurrences of the raw-transcript dump on the failure paths,
+at different indentation depths — the two blocks below are not
+interchangeable; match each one to its own location, not to whichever
+looks similar.
+
+The first, inside the `if [ "$agent_failed" -ne 0 ]` block (16-space base
+indent — this is the deeper-nested of the two, since it sits inside that
+`if` in addition to the enclosing loop):
+
+```bash
+                if [ -s "$transcript_file" ]; then
+                    log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                fi
+```
+
+Replace with:
+
+```bash
+                if [ -s "$transcript_file" ]; then
+                    classified_json="$(llmenv classify-transcript --client "$client" --transcript "$transcript_file" 2>/dev/null)" || classified_json=""
+                    excerpt="$(printf '%s' "$classified_json" | jq -r '.excerpt // empty' 2>/dev/null)"
+                    if [ -n "$excerpt" ]; then
+                        log_block "Relevant transcript excerpt" "$excerpt"
+                    else
+                        log_file_excerpt "Client JSONL transcript" "$transcript_file" "$agent_diagnostic_excerpt_bytes"
+                    fi
+                fi
+```
+
+The second, inside the `differences` mismatch branch further down, after
+the `if [ -z "$differences" ]; then ... continue; fi` block's early return
+(12-space base indent — one level shallower, since it is not nested inside
+an extra `if`):
 
 ```bash
             if [ -s "$transcript_file" ]; then
@@ -1581,10 +1840,6 @@ Replace with:
                 fi
             fi
 ```
-
-The second, inside the `differences` mismatch branch further down (the
-block that also starts `if [ -s "$transcript_file" ]; then`), gets the
-identical replacement.
 
 (The `|| classified_json=""` fallback, and falling back to the original
 `log_file_excerpt` call when the classifier produces no usable excerpt,
@@ -1740,15 +1995,25 @@ def test_prerequisites_installs_uv_via_official_installer_not_rpm_ostree(
     curl = commands / "curl"
     curl.write_text(
         "#!/usr/bin/bash\n"
+        # Log invocation to $CALLS, not real stdout — real stdout here is
+        # what gets piped into `sh` by the script under test, so it must be
+        # valid (harmless) shell content, not a log line.
         "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
         f"touch {uv_installer_log}\n"
+        "printf 'true\\n'\n"
         "exit 0\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
 
     environment = os.environ | {
         "CALLS": str(calls),
-        "PATH": str(commands),
+        # commands must come first so the mocked curl/rpm-ostree/etc. win,
+        # but /usr/bin:/bin must also be present — the real `sh` (the
+        # pipeline destination of `curl ... | sh`) and `touch` (used inside
+        # the curl stub above) are not mocked and must resolve to the real
+        # system binaries, the same convention run_lifecycle_script and
+        # run_cleanup_with_stubs already use elsewhere in this file.
+        "PATH": f"{commands}:/usr/bin:/bin",
     }
     result = subprocess.run(
         ["/usr/bin/bash", "setup/prerequisites.sh"],
