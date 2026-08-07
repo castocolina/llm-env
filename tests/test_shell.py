@@ -885,6 +885,7 @@ def run_render_unit_with_legacy_rocm_config(
     home = tmp_path / "home"
     config = tmp_path / "models.yml"
     config.write_text(
+        "version: 1\n"
         "server:\n"
         "  host: 0.0.0.0\n"
         "  port: 8000\n"
@@ -892,17 +893,49 @@ def run_render_unit_with_legacy_rocm_config(
         "  sleep_idle_seconds: 300\n"
         "  start_at_boot: false\n"
         "gpu:\n"
-        "  backend: rocm\n"
+        # validate_config() only accepts vulkan/cpu (pylib/config.py:31); this
+        # fixture predates ROCm removal but must still pass real validation
+        # now that `uv` forwards to the real binary below. The regression
+        # this test guards — /dev/kfd never appears in the rendered output —
+        # does not depend on which backend value is used.
+        "  backend: vulkan\n"
         "  image: example.invalid/llama:latest\n"
         "  device_name: ''\n"
+        "  vram_total_mib: 8192\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
         "runtime:\n"
         "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
+        "models:\n"
+        "  - alias: test\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
+        "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
     )
 
-    for name in ("podman", "systemctl", "uv"):
+    for name in ("podman", "systemctl"):
         command = commands / name
         command.write_text("#!/usr/bin/bash\nexit 0\n")
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
+
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\nexec \"$REAL_UV\" \"$@\"\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
     yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
@@ -913,6 +946,7 @@ def run_render_unit_with_legacy_rocm_config(
         "LLM_ENV_CONFIG": str(config),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
+        "REAL_UV": real_uv,
     }
     result = subprocess.run(
         ["/usr/bin/bash", "setup/render-unit.sh"],
@@ -922,7 +956,7 @@ def run_render_unit_with_legacy_rocm_config(
         capture_output=True,
         check=False,
     )
-    return result, home / ".config/containers/systemd/llm-server.container"
+    return result, home / ".config/systemd/user/llm-server.service"
 
 
 def test_render_unit_never_adds_the_rocm_kernel_device(tmp_path: pathlib.Path) -> None:
@@ -931,6 +965,24 @@ def test_render_unit_never_adds_the_rocm_kernel_device(tmp_path: pathlib.Path) -
 
     assert result.returncode == 0, result.stderr
     assert "/dev/kfd" not in container.read_text()
+
+
+def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Path) -> None:
+    result, wrapper_unit = run_render_unit_with_legacy_rocm_config(tmp_path)
+    compose_file = wrapper_unit.parent.parent.parent / "llm-env/docker-compose.yml"
+
+    assert result.returncode == 0, result.stderr
+    assert compose_file.exists()
+    assert "llm-server" in compose_file.read_text()
+    assert "ExecStart=podman compose -f docker-compose.yml up -d" in wrapper_unit.read_text()
+    assert "ExecStop=podman compose -f docker-compose.yml down" in wrapper_unit.read_text()
+
+
+def test_render_unit_wrapper_unit_omits_install_section_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    _, wrapper_unit = run_render_unit_with_legacy_rocm_config(tmp_path)
+    assert "[Install]" not in wrapper_unit.read_text()
 
 
 def test_make_help_describes_a_vulkan_only_benchmark() -> None:
@@ -3201,17 +3253,17 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     """Boot setup must make mDNS discoverable as a reloaded user unit."""
     result, config, calls = run_lifecycle_script(tmp_path, "setup/enable-boot.sh")
     mdns_unit = config.parent.parent / "systemd/user/llm-server-mdns.service"
+    wrapper_unit = config.parent.parent / "systemd/user/llm-server.service"
 
     assert result.returncode == 0, result.stderr
     unit = mdns_unit.read_text()
-    container_unit = (
-        config.parent.parent / "containers/systemd/llm-server.container"
-    ).read_text()
-    assert "Wants=llm-server-mdns.service" in container_unit
+    wrapper = wrapper_unit.read_text()
+    assert "Wants=llm-server-mdns.service" in wrapper
     assert "Requires=llm-server.service" in unit
     assert "After=llm-server.service" in unit
     assert "PartOf=llm-server.service" in unit
     assert "Restart=on-failure" in unit
+    assert "ExecStart=podman compose" in wrapper
     assert "ExecStartPre=" in unit
     assert "http://127.0.0.1:8000/health" in unit
     assert "avahi-publish -s llm _http._tcp 8000" in unit
