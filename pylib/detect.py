@@ -136,6 +136,37 @@ def compositor_render_node(proc_root: Path = Path("/proc")) -> str | None:
     return None
 
 
+def host_resources(proc_root: Path = Path("/proc")) -> dict[str, int]:
+    """Return the host's total CPU count and total RAM, read from procfs directly."""
+    proc_root = Path(proc_root)
+    cpuinfo_path = proc_root / "cpuinfo"
+    try:
+        cpuinfo = cpuinfo_path.read_text()
+    except OSError as exc:
+        raise DetectError(f"cannot read {cpuinfo_path}: {exc}") from exc
+    cpu_count = sum(1 for line in cpuinfo.splitlines() if line.startswith("processor"))
+    if cpu_count == 0:
+        raise DetectError(f"no processor entries found in {cpuinfo_path}")
+
+    meminfo_path = proc_root / "meminfo"
+    try:
+        meminfo = meminfo_path.read_text()
+    except OSError as exc:
+        raise DetectError(f"cannot read {meminfo_path}: {exc}") from exc
+    memory_total_kib: int | None = None
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                raise DetectError(f"MemTotal line is malformed in {meminfo_path}: {line!r}")
+            memory_total_kib = int(parts[1])
+            break
+    if memory_total_kib is None:
+        raise DetectError(f"MemTotal not found in {meminfo_path}")
+
+    return {"cpu_count": cpu_count, "memory_total_mib": memory_total_kib // 1024}
+
+
 def detect(
     drm_root: Path = Path("/sys/class/drm"),
     proc_root: Path = Path("/proc"),

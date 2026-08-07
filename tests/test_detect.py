@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pylib.detect import DetectError, compositor_render_node, detect, list_gpus
+from pylib.detect import DetectError, compositor_render_node, detect, host_resources, list_gpus
 
 MIB = 1024 * 1024
 
@@ -117,3 +117,56 @@ def test_card_without_device_symlink_is_skipped(tmp_path):
     (drm / "card0" / "device").unlink()
     cards = [g["card"] for g in list_gpus(drm)]
     assert cards == ["card1"], "a card with no resolvable PCI device must be skipped"
+
+
+def build_proc_resources(root: Path, cpu_count: int, memory_total_kib: int) -> Path:
+    proc = root / "proc"
+    proc.mkdir(parents=True, exist_ok=True)
+    cpuinfo_lines = []
+    for index in range(cpu_count):
+        cpuinfo_lines.append(f"processor\t: {index}")
+        cpuinfo_lines.append("model name\t: Fixture CPU")
+        cpuinfo_lines.append("")
+    (proc / "cpuinfo").write_text("\n".join(cpuinfo_lines))
+    (proc / "meminfo").write_text(
+        f"MemTotal:       {memory_total_kib} kB\n"
+        "MemFree:         1000000 kB\n"
+    )
+    return proc
+
+
+def test_host_resources_reads_cpu_count_and_memory(tmp_path):
+    proc = build_proc_resources(tmp_path, cpu_count=8, memory_total_kib=32 * 1024 * 1024)
+    result = host_resources(proc)
+    assert result == {"cpu_count": 8, "memory_total_mib": 32 * 1024}
+
+
+def test_host_resources_missing_cpuinfo_raises(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("MemTotal:       1000 kB\n")
+    with pytest.raises(DetectError):
+        host_resources(proc)
+
+
+def test_host_resources_missing_meminfo_raises(tmp_path):
+    proc = build_proc_resources(tmp_path, cpu_count=4, memory_total_kib=1)
+    (proc / "meminfo").unlink()
+    with pytest.raises(DetectError):
+        host_resources(proc)
+
+
+def test_host_resources_corrupt_meminfo_raises(tmp_path):
+    proc = build_proc_resources(tmp_path, cpu_count=4, memory_total_kib=1)
+    (proc / "meminfo").write_text("MemTotal:       not-a-number kB\n")
+    with pytest.raises(DetectError):
+        host_resources(proc)
+
+
+def test_host_resources_no_processor_entries_raises(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "cpuinfo").write_text("")
+    (proc / "meminfo").write_text("MemTotal:       1000 kB\n")
+    with pytest.raises(DetectError):
+        host_resources(proc)
