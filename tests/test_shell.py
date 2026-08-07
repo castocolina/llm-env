@@ -314,6 +314,63 @@ def test_prerequisites_installs_uv_via_official_installer_not_rpm_ostree(
     assert "install uv" not in calls.read_text()
 
 
+def test_prerequisites_reports_missing_podman_compose_provider(tmp_path):
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("uv", "jq", "yq", "curl", "ip", "sudo"):
+        _mock_command(commands, name)
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nexit 1\n")  # "compose" subcommand fails: no provider
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"PATH": str(commands)}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh", "--check"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "podman-compose" in result.stdout
+
+
+def test_prerequisites_accepts_a_working_podman_compose_provider(tmp_path):
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("uv", "jq", "curl", "ip", "sudo"):
+        _mock_command(commands, name)
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  'compose version') exit 0 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"PATH": str(commands)}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh", "--check"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "installed  podman-compose" in result.stdout
+
+
 def test_setup_stops_for_missing_prerequisites_before_mutating_config(
     tmp_path: pathlib.Path,
 ) -> None:

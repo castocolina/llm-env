@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-RUNTIME=("jq:jq" "yq:yq" "podman:podman" "curl:curl" "ip:iproute")
+RUNTIME=("jq:jq" "yq:yq" "podman:podman" "podman-compose:podman-compose" "curl:curl" "ip:iproute")
 DEVELOPMENT=("git:git" "shellcheck:ShellCheck" "node:nodejs")
 OPTIONAL_LAN=("firewall-cmd:firewalld" "avahi-publish:avahi")
 
@@ -22,6 +22,10 @@ missing_optional=()
 
 command_is_usable() {
     local command="$1"
+    if [ "$command" = "podman-compose" ]; then
+        podman compose version >/dev/null 2>&1 || return 1
+        return 0
+    fi
     command -v "$command" >/dev/null 2>&1 || return 1
     if [ "$command" = "yq" ]; then
         local version
@@ -36,6 +40,7 @@ command_purpose() {
         jq) printf '%s\n' "JSON processor for script-to-Python communication" ;;
         yq) printf '%s\n' "Mike Farah yq v4 configuration processor" ;;
         podman) printf '%s\n' "container engine for llama.cpp" ;;
+        podman-compose) printf '%s\n' "compose provider for 'podman compose'" ;;
         curl) printf '%s\n' "HTTP client for downloads and health checks" ;;
         ip) printf '%s\n' "network address inspection" ;;
         git) printf '%s\n' "source control for updates" ;;
