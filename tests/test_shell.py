@@ -6661,3 +6661,30 @@ def test_check_with_agents_shows_classified_excerpt_not_raw_transcript_on_failur
     assert result.returncode == 0, result.stderr
     assert "boom-diagnostic-marker" in result.stdout
     assert "message_start" not in result.stdout
+
+
+def test_dev_setup_runs_uv_sync(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    calls = tmp_path / "calls"
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\nprintf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"CALLS": str(calls), "PATH": f"{commands}:/usr/bin:/bin"}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/dev-setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "uv sync" in calls.read_text()
+
+
+def test_makefile_dev_setup_chains_after_prerequisites() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert "dev-setup: prerequisites\n\t@bash tools/run-target.sh dev-setup -- bash setup/dev-setup.sh" in makefile

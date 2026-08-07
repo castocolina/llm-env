@@ -1,4 +1,4 @@
-.PHONY: help prerequisites setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
+.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
         key-reset enable-boot disable-boot status logs validate test clean
 
 help:
@@ -6,6 +6,9 @@ help:
 
 prerequisites:
 	@bash tools/run-target.sh prerequisites -- bash setup/prerequisites.sh
+
+dev-setup: prerequisites
+	@bash tools/run-target.sh dev-setup -- bash setup/dev-setup.sh
 
 setup:
 	@bash tools/run-target.sh setup -- bash setup/setup.sh
