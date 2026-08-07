@@ -50,8 +50,11 @@ fi
 auth_conf="$(mktemp "$workspace/auth.XXXXXX")" || die "could not create curl authentication config"
 chmod 600 "$auth_conf" || die "could not secure curl authentication config"
 
-port="$(yq -r '.server.port' "$CONFIG_PATH")"
-api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+load_server_config
+# shellcheck disable=SC2153 # PORT/API_KEY are set by load_server_config() in ../tools/lib.sh.
+port="$PORT"
+# shellcheck disable=SC2153
+api_key="$API_KEY"
 [ -n "$port" ] && [ "$port" != null ] || die "server port is not configured"
 [ -n "$api_key" ] && [ "$api_key" != null ] || die "server API key is not configured"
 unset _LLM_ENV_REDACTION_KEY_OVERRIDE

@@ -8,8 +8,11 @@ set +e
 
 require_cmd curl jq yq
 
-port="$(yq -r '.server.port' "$CONFIG_PATH")"
-api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+load_server_config
+# shellcheck disable=SC2153 # PORT/API_KEY are set by load_server_config() in ../tools/lib.sh.
+port="$PORT"
+# shellcheck disable=SC2153
+api_key="$API_KEY"
 
 auth_conf="$(mktemp)"
 chmod 600 "$auth_conf"

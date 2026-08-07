@@ -7,7 +7,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd ip jq yq
 
-port="$(yq -r '.server.port' "$CONFIG_PATH")"
+load_server_config
+# shellcheck disable=SC2153 # PORT is set by load_server_config() in ../tools/lib.sh.
+port="$PORT"
 mdns="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
 
 if command -v firewall-cmd >/dev/null 2>&1; then

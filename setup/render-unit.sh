@@ -13,9 +13,13 @@ migrate_config_file || die "configuration migration failed"
 backend="$(yq -r '.gpu.backend' "$CONFIG_PATH")"
 image="$(yq -r '.gpu.image' "$CONFIG_PATH")"
 device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH")"
-host="$(yq -r '.server.host' "$CONFIG_PATH")"
-port="$(yq -r '.server.port' "$CONFIG_PATH")"
-api_key="$(yq -r '.server.api_key' "$CONFIG_PATH")"
+load_server_config
+# shellcheck disable=SC2153 # HOST/PORT/API_KEY are set by load_server_config() in ../tools/lib.sh.
+host="$HOST"
+# shellcheck disable=SC2153
+port="$PORT"
+# shellcheck disable=SC2153
+api_key="$API_KEY"
 sleep_idle="$(yq -r '.server.sleep_idle_seconds' "$CONFIG_PATH")"
 models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
 
@@ -65,7 +69,7 @@ PartOf=${UNIT_NAME}.service
 
 [Service]
 Type=simple
-ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt 60 ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
+ExecStartPre=/usr/bin/bash -c 'i=0; while [ \$\$i -lt ${LLM_ENV_HEALTH_TIMEOUT_SECONDS} ]; do ${curl_path} -fsS -o /dev/null http://127.0.0.1:${port}/health && exit 0; i=\$\$((i + 1)); sleep 1; done; exit 1'
 ExecStart=${avahi_publish} -s ${mdns_name} _http._tcp ${port}
 Restart=on-failure
 RestartSec=2

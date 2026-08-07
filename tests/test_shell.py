@@ -1079,6 +1079,7 @@ def run_lifecycle_script(
     config_mode: int = 0o600,
     parallel_slots: int = 1,
     sampling_temperature: str | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -1208,7 +1209,7 @@ def run_lifecycle_script(
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
-    }
+    } | (env_overrides or {})
     result = subprocess.run(
         ["/usr/bin/bash", script],
         cwd=ROOT,
@@ -6302,6 +6303,25 @@ def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.
     assert "${UNIT_NAME}" in status_text
     assert "source" in logs_text and "tools/lib.sh" in logs_text
     assert "${UNIT_NAME}" in logs_text
+
+
+def test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The generated mDNS unit's health poll must track the shared timeout,
+    not an independent hardcoded 60 — same requirement wait_for_health()
+    (Task 4) exists to satisfy for start.sh."""
+    result, config, _ = run_lifecycle_script(
+        tmp_path,
+        "setup/enable-boot.sh",
+        env_overrides={"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "77"},
+    )
+    mdns_unit = config.parent.parent / "systemd/user/llm-server-mdns.service"
+
+    assert result.returncode == 0, result.stderr
+    unit = mdns_unit.read_text()
+    assert "-lt 77" in unit
+    assert "-lt 60" not in unit
 
 
 def test_load_server_config_sets_port_api_key_and_host(tmp_path: pathlib.Path) -> None:
