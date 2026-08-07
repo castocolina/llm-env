@@ -914,6 +914,50 @@ def test_cleanup_removes_the_compose_file_and_wrapper_unit(tmp_path: pathlib.Pat
     assert not wrapper_unit.exists()
 
 
+def test_disable_boot_removes_install_section_from_the_wrapper_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("version: 1\nserver:\n  start_at_boot: true\n")
+
+    wrapper_unit = home / ".config/systemd/user/llm-server.service"
+    wrapper_unit.parent.mkdir(parents=True)
+    wrapper_unit.write_text(
+        "[Unit]\nDescription=x\n\n[Service]\nExecStart=x\n\n[Install]\nWantedBy=default.target\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/disable-boot.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[Install]" not in wrapper_unit.read_text()
+    assert yq_value(config, ".server.start_at_boot") == "false"
+
+
 def run_render_unit_with_legacy_rocm_config(
     tmp_path: pathlib.Path,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:

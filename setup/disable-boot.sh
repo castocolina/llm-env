@@ -11,7 +11,7 @@ require_cmd yq systemctl
 
 yq -i '.server.start_at_boot = false' "$CONFIG_PATH"
 
-unit="${QUADLET_DIR}/${UNIT_NAME}.container"
+unit="$WRAPPER_UNIT_PATH"
 if [ -f "$unit" ]; then
     # Drop the [Install] section so the generator stops wanting it at boot.
     sed -i '/^\[Install\]$/,$d' "$unit"
