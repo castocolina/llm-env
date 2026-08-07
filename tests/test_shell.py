@@ -6222,3 +6222,60 @@ def test_agent_check_dispatches_an_alias_that_cannot_form_an_output_path(
     assert f"FAIL client=pi model={model_alias} check=weather reason=agent-failed" in result.stdout
     assert f"FAIL client=pi model={model_alias} check=fx reason=agent-failed" in result.stdout
     assert "agent invocation failed" in result.stderr
+
+
+def test_run_target_prints_start_banner_before_running_the_command(
+    tmp_path: pathlib.Path,
+) -> None:
+    result = subprocess.run(
+        ["/usr/bin/bash", "tools/run-target.sh", "demo", "--", "true"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    # The start-banner printf leads with a blank line (spacing between
+    # chained make targets), so stdout's line 0 is empty and the banner
+    # itself is line 1.
+    assert "demo" in result.stdout.splitlines()[1]
+
+
+def test_run_target_prints_ok_end_banner_on_success(tmp_path: pathlib.Path) -> None:
+    result = subprocess.run(
+        ["/usr/bin/bash", "tools/run-target.sh", "demo", "--", "true"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "demo" in result.stdout
+    assert "ok" in result.stdout
+
+
+def test_run_target_prints_failed_end_banner_and_propagates_exit_status(
+    tmp_path: pathlib.Path,
+) -> None:
+    result = subprocess.run(
+        ["/usr/bin/bash", "tools/run-target.sh", "demo", "--", "bash", "-c", "exit 7"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 7
+    assert "failed" in result.stdout
+    assert "exit 7" in result.stdout
+
+
+def test_run_target_runs_the_wrapped_commands_own_output(tmp_path: pathlib.Path) -> None:
+    result = subprocess.run(
+        ["/usr/bin/bash", "tools/run-target.sh", "demo", "--", "echo", "hello"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "hello" in result.stdout
