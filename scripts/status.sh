@@ -6,3 +6,4 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 systemctl --user status "${UNIT_NAME}.service" --no-pager || true
+podman compose -f "$COMPOSE_FILE" ps || true

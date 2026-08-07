@@ -5,4 +5,4 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-journalctl --user -u "${UNIT_NAME}.service" -f
+podman compose -f "$COMPOSE_FILE" logs -f

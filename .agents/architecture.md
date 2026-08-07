@@ -41,9 +41,15 @@ every `make start`:
   up," while each compose service's own `restart:` policy handles
   crash-restart.
 
-To check state directly: `systemctl --user status llm-server.service`,
-`podman compose -f ~/.config/llm-env/docker-compose.yml ps`,
-`journalctl --user -u llm-server -f`.
+The wrapper unit is `Type=oneshot`/`RemainAfterExit=yes`, so its own
+`journalctl -u llm-server.service` only carries the oneshot invocation's
+start/stop lines, not container output, and `systemctl status` only
+reflects whether `compose up -d` last succeeded, not live container health.
+`scripts/logs.sh` and `scripts/status.sh` use `podman compose logs`/`ps`
+against the compose file for real container output and health — use those
+directly for the same view: `podman compose -f
+~/.config/llm-env/docker-compose.yml logs -f`, `podman compose -f
+~/.config/llm-env/docker-compose.yml ps`.
 
 ## Invariants
 

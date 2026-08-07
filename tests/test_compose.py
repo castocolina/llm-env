@@ -63,9 +63,9 @@ def test_service_sets_router_environment():
     _, document = compose_dict()
     env = document["services"]["llm-server"]["environment"]
     assert env["LLAMA_ARG_MODELS_PRESET"] == "/etc/llama/presets.ini"
-    assert env["LLAMA_ARG_MODELS_MAX"] == 1
+    assert env["LLAMA_ARG_MODELS_MAX"] == "1"
     assert env["LLAMA_ARG_HOST"] == "0.0.0.0"
-    assert env["LLAMA_ARG_PORT"] == 8000
+    assert env["LLAMA_ARG_PORT"] == "8000"
     assert env["LLAMA_API_KEY"] == "test-api-key"
 
 

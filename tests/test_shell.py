@@ -6715,13 +6715,14 @@ def test_makefile_restart_chains_two_recursive_make_calls() -> None:
     assert "restart:\n\t@$(MAKE) --no-print-directory stop\n\t@$(MAKE) --no-print-directory start\n" in makefile
 
 
-def test_status_and_logs_scripts_reference_unit_name_from_lib(tmp_path: pathlib.Path) -> None:
+def test_status_and_logs_scripts_reference_unit_name_and_compose_file_from_lib(tmp_path: pathlib.Path) -> None:
     status_text = (ROOT / "scripts/status.sh").read_text()
     logs_text = (ROOT / "scripts/logs.sh").read_text()
     assert "source" in status_text and "tools/lib.sh" in status_text
     assert "${UNIT_NAME}" in status_text
+    assert "$COMPOSE_FILE" in status_text
     assert "source" in logs_text and "tools/lib.sh" in logs_text
-    assert "${UNIT_NAME}" in logs_text
+    assert "$COMPOSE_FILE" in logs_text
 
 
 def test_render_unit_mdns_execstartpre_uses_the_configured_health_timeout(

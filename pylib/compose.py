@@ -37,9 +37,9 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
         "ports": [f"{server['port']}:{server['port']}"],
         "environment": {
             "LLAMA_ARG_MODELS_PRESET": "/etc/llama/presets.ini",
-            "LLAMA_ARG_MODELS_MAX": runtime["models_max"],
+            "LLAMA_ARG_MODELS_MAX": str(runtime["models_max"]),
             "LLAMA_ARG_HOST": server["host"],
-            "LLAMA_ARG_PORT": server["port"],
+            "LLAMA_ARG_PORT": str(server["port"]),
             "LLAMA_API_KEY": server["api_key"],
         },
         "command": ["--sleep-idle-seconds", str(server["sleep_idle_seconds"])],

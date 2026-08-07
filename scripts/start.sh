@@ -44,5 +44,5 @@ if wait_for_health "$port"; then
 fi
 
 log_error "server did not become healthy within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s"
-echo "  Logs: journalctl --user -u ${UNIT_NAME}.service -n 50"
+echo "  Logs: podman compose -f ${COMPOSE_FILE} logs"
 exit 1
