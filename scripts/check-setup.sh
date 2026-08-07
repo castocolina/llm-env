@@ -154,6 +154,12 @@ log_step "Container image"
 record_command "container image" "podman image exists ${image}" "" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" podman image exists "$image" || true
 
+log_step "Compose file"
+record_command "compose file syntax" \
+    "podman compose -f ${COMPOSE_FILE} config" "" \
+    "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+    podman compose -f "$COMPOSE_FILE" config || true
+
 log_step "Model files"
 record_command "GGUF validation" \
     "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} validate-gguf --models-dir ${MODELS_DIR}" "" \

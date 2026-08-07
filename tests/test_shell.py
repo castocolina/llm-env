@@ -1438,6 +1438,14 @@ def test_check_setup_reports_a_normalized_inference_mismatch(tmp_path: pathlib.P
     ) in result.stderr
 
 
+def test_check_setup_validates_the_rendered_compose_file(tmp_path: pathlib.Path) -> None:
+    result, calls, _ = run_check_setup_with_stubs(tmp_path)
+    compose_file = tmp_path / "home/.config/llm-env/docker-compose.yml"
+
+    assert "Compose file" in result.stdout
+    assert f"podman compose -f {compose_file} config" in calls.read_text()
+
+
 @pytest.mark.parametrize(
     ("budget_exit", "resolve_exit", "reason"),
     [
