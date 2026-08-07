@@ -65,6 +65,13 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             if _positive_int(ctx_size):
                 model["client_max_output_tokens"] = min(ctx_size, 8192)
 
+    resources = cfg.setdefault("resources", {})
+    if isinstance(resources, dict):
+        llm_server_resources = resources.setdefault("llm_server", {})
+        if isinstance(llm_server_resources, dict):
+            llm_server_resources.setdefault("cpus", 0)
+            llm_server_resources.setdefault("memory_mib", 0)
+
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
         return cfg
@@ -157,6 +164,29 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(f"runtime.{key} must be a positive integer")
     if runtime.get("parallel_slots") != 1:
         errors.append("runtime.parallel_slots must be 1")
+
+    if "resources" in cfg:
+        resources = cfg["resources"]
+        if not isinstance(resources, dict):
+            errors.append("section resources must be a mapping")
+        else:
+            llm_server_resources = resources.get("llm_server", {})
+            if not isinstance(llm_server_resources, dict):
+                errors.append("resources.llm_server must be a mapping")
+            else:
+                cpus = llm_server_resources.get("cpus", 0)
+                if isinstance(cpus, bool) or not (
+                    isinstance(cpus, (int, float)) and cpus >= 0
+                ):
+                    errors.append(
+                        "resources.llm_server.cpus must be a non-negative number"
+                    )
+                memory_mib = llm_server_resources.get("memory_mib", 0)
+                if not (memory_mib == 0 or _positive_int(memory_mib)):
+                    errors.append(
+                        "resources.llm_server.memory_mib must be zero or a "
+                        "positive integer"
+                    )
 
     models = cfg["models"]
     if not isinstance(models, list) or not models:

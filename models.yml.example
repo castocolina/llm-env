@@ -30,6 +30,11 @@ runtime:
   cache_type_k: q5_1
   cache_type_v: q5_1
 
+resources:
+  llm_server:
+    cpus: 0
+    memory_mib: 0
+
 models:
   - alias: gemma4
     label: Gemma 4 12B Agentic v2

@@ -54,6 +54,9 @@ def make_cfg(**overrides):
             "cache_type_k": "q8_0",
             "cache_type_v": "q8_0",
         },
+        "resources": {
+            "llm_server": {"cpus": 0, "memory_mib": 0},
+        },
         "models": [
             {
                 "alias": "gemma4",
@@ -538,3 +541,59 @@ def test_sampling_survives_save_load_roundtrip(tmp_path):
 def test_load_missing_file_raises_configerror(tmp_path):
     with pytest.raises(ConfigError):
         load_config(tmp_path / "absent.yml")
+
+
+def test_migrate_config_adds_default_resources_section():
+    cfg = make_cfg()
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"] == {"cpus": 0, "memory_mib": 0}
+
+
+def test_migrate_config_preserves_existing_resources_values():
+    cfg = make_cfg(resources={"llm_server": {"cpus": 6, "memory_mib": 28672}})
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"] == {"cpus": 6, "memory_mib": 28672}
+
+
+def test_migrate_config_adds_default_resources_section_when_gpu_absent():
+    """The resources default must not be skipped by the gpu early-return branch."""
+    cfg = make_cfg()
+    del cfg["gpu"]
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"] == {"cpus": 0, "memory_mib": 0}
+
+
+def test_config_without_resources_key_has_no_errors():
+    assert validate_config(make_cfg()) == []
+
+
+def test_config_accepts_valid_resources_section():
+    cfg = make_cfg(resources={"llm_server": {"cpus": 6, "memory_mib": 28672}})
+    assert validate_config(cfg) == []
+
+
+def test_config_accepts_zero_sentinel_resources():
+    cfg = make_cfg(resources={"llm_server": {"cpus": 0, "memory_mib": 0}})
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize(
+    "llm_server",
+    [
+        {"cpus": -1, "memory_mib": 0},
+        {"cpus": "six", "memory_mib": 0},
+        {"cpus": True, "memory_mib": 0},
+        {"cpus": 0, "memory_mib": -1},
+        {"cpus": 0, "memory_mib": "lots"},
+    ],
+)
+def test_config_rejects_invalid_resources_values(llm_server):
+    cfg = make_cfg(resources={"llm_server": llm_server})
+    errors = validate_config(cfg)
+    assert any("resources.llm_server" in error for error in errors)
+
+
+def test_config_rejects_non_mapping_resources_section():
+    cfg = make_cfg(resources=[])
+    errors = validate_config(cfg)
+    assert any(error == "section resources must be a mapping" for error in errors)
