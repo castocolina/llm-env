@@ -1631,6 +1631,7 @@ def run_lifecycle_script(
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
     } | (env_overrides or {})
     result = subprocess.run(
         ["/usr/bin/bash", script],

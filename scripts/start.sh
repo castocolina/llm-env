@@ -46,9 +46,18 @@ if wait_for_health "$port"; then
     omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
     if wait_for_tcp_port "$omniroute_port"; then
         log_info "OmniRoute is ready"
-        if llmenv --config "$CONFIG_PATH" omniroute provision >/dev/null; then
+        provisioned=0
+        for attempt in 1 2 3; do
+            if response="$(llmenv --config "$CONFIG_PATH" omniroute provision)"; then
+                provisioned=1
+                break
+            fi
+            [ "$attempt" -eq 3 ] || sleep 2
+        done
+        if [ "$provisioned" -eq 1 ]; then
             log_info "OmniRoute connection configured"
         else
+            jq -r '.error // "provisioning failed"' <<<"$response" >&2
             log_warn "OmniRoute provisioning failed; configure it manually via the dashboard"
         fi
     else

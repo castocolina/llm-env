@@ -68,7 +68,7 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
     omniroute_service: dict[str, Any] = {
         "image": omniroute_cfg.get("image", "docker.io/diegosouzapw/omniroute:latest"),
         "container_name": "omniroute",
-        "ports": [f"{omniroute_port}:{omniroute_port}"],
+        "ports": [f"127.0.0.1:{omniroute_port}:{omniroute_port}"],
         "volumes": ["omniroute-data:/app/data"],
         "environment": {
             "PORT": str(omniroute_port),
@@ -112,3 +112,4 @@ def write_compose(
         render_compose(cfg, models_dir=models_dir, presets_path=presets_path),
         encoding="utf-8",
     )
+    path.chmod(0o600)

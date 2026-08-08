@@ -1,3 +1,4 @@
+import stat
 import sys
 from pathlib import Path
 
@@ -114,7 +115,7 @@ def test_omniroute_service_uses_configured_image_and_port():
     _, document = compose_dict()
     omniroute = document["services"]["omniroute"]
     assert omniroute["image"] == "docker.io/diegosouzapw/omniroute:latest"
-    assert omniroute["ports"] == ["20128:20128"]
+    assert omniroute["ports"] == ["127.0.0.1:20128:20128"]
 
 
 def test_omniroute_service_mounts_a_named_data_volume():
@@ -172,3 +173,9 @@ def test_write_compose_creates_parent_directories(tmp_path):
     write_compose(CFG, models_dir="/models", presets_path="/presets.ini", path=target)
     assert target.exists()
     assert "llm-server" in yaml.safe_load(target.read_text())["services"]
+
+
+def test_write_compose_sets_restrictive_file_mode(tmp_path):
+    target = tmp_path / "docker-compose.yml"
+    write_compose(CFG, models_dir="/models", presets_path="/presets.ini", path=target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
