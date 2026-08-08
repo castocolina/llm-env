@@ -3412,6 +3412,9 @@ def run_check_server(
         "server:\n"
         "  port: 8000\n"
         "  api_key: fixture-secret\n"
+        "omniroute:\n"
+        "  port: 20128\n"
+        "  cli_token: omniroute-cli-token\n"
         "models:\n"
         "  - alias: gemma4\n"
         "    enabled: true\n"
@@ -3442,6 +3445,19 @@ def run_check_server(
         "case \"$url\" in\n"
         "  */health) write_response '{\"status\":\"ok\"}'; printf '200' ;;\n"
         "  */v1/models) write_response \"$MODEL_LIST_BODY\"; printf '200' ;;\n"
+        "  http://127.0.0.1:20128/api/providers)\n"
+        "    write_response '{\"providers\":[{\"name\":\"llm-env-local\",\"isActive\":true}]}'\n"
+        "    printf '200'\n"
+        "    ;;\n"
+        "  http://127.0.0.1:20128/v1/chat/completions)\n"
+        "    case \"$data\" in\n"
+        "      *gemma4*|*ornith*)\n"
+        "        write_response '{\"choices\":[{\"message\":{\"content\":\"ready\"}}]}'\n"
+        "        printf '200'\n"
+        "        ;;\n"
+        "      *) write_response '{\"error\":\"unknown model\"}'; printf '400' ;;\n"
+        "    esac\n"
+        "    ;;\n"
         "  */v1/chat/completions)\n"
         "    if [ -n \"$auth_conf\" ] && [[ \"$(<\"$auth_conf\")\" == *definitely-not-the-key* ]]; then\n"
         "      write_response '{\"error\":\"unauthorized\"}'; printf '401'; exit 0\n"
@@ -3494,6 +3510,7 @@ def run_check_server(
         "        printf '%b\\n' \"$content\"\n"
         "        ;;\n"
         "      '.choices?[0]?.message?.reasoning_content? // empty') exit 0 ;;\n"
+        "      *'isActive'*) printf '%s\\n' true ;;\n"
         "      *) exit 64 ;;\n"
         "    esac\n"
         "    ;;\n"
@@ -3508,6 +3525,8 @@ def run_check_server(
         "case \"$2\" in\n"
         "  '.server.port') printf '%s\\n' 8000 ;;\n"
         "  '.server.api_key') printf '%s\\n' fixture-secret ;;\n"
+        "  '.omniroute.port') printf '%s\\n' 20128 ;;\n"
+        "  '.omniroute.cli_token') printf '%s\\n' omniroute-cli-token ;;\n"
         "  '[.models[] | select(.enabled) | .alias] | sort | join(\",\")')\n"
         "    printf '%s\\n' 'gemma4,ornith'\n"
         "    ;;\n"
@@ -3570,7 +3589,7 @@ def test_check_server_requires_normalized_ready_for_every_enabled_model(
     assert result.returncode != 0
     assert "gemma4: returned ready" in result.stdout
     assert "ornith: expected ready" in result.stderr
-    assert calls.read_text().count("/v1/chat/completions") == 3
+    assert calls.read_text().count("/v1/chat/completions") == 5
 
 
 def test_check_server_accepts_normalized_ready_for_every_enabled_model(
@@ -3605,7 +3624,7 @@ def test_check_server_prints_redacted_request_response_and_curl_template(
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
     assert "fixture-secret" not in combined
-    assert combined.count("Request payload:") == 2
+    assert combined.count("Request payload:") == 3
     assert 'Request payload:\n  {"model":"x"' not in combined
     assert 'Request payload:\n  {"model":"gemma4"' not in combined
     assert 'Request payload:\n  {"model":"ornith"' not in combined
