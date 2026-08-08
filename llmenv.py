@@ -47,6 +47,7 @@ from pylib.config import (
 )
 from pylib.detect import DetectError, detect, host_resources
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
+from pylib.omniroute import OmniRouteError, provision
 from pylib.presets import write_presets
 from pylib.resources import ResourceError, compute_resource_limits
 from pylib.transcript import classify_transcript
@@ -213,6 +214,21 @@ def cmd_resources(args: argparse.Namespace) -> int:
     return emit({"host": host, **limits})
 
 
+def cmd_omniroute(args: argparse.Namespace) -> int:
+    cfg = require_valid_config(load_config(Path(args.config)))
+    omniroute_cfg = cfg.get("omniroute") or {}
+    cli_token = omniroute_cfg.get("cli_token")
+    port = omniroute_cfg.get("port")
+    if not cli_token or not port:
+        return fail(
+            "omniroute.cli_token and omniroute.port must be set; run 'make start' "
+            "after 'make setup' to generate them"
+        )
+    base_url = f"http://127.0.0.1:{port}"
+    result = provision(base_url, cli_token, cfg["server"]["port"], cfg["server"]["api_key"])
+    return emit(result)
+
+
 def cmd_presets(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     write_presets(cfg, args.models_dir, args.device, Path(args.output))
@@ -339,6 +355,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("resources").set_defaults(func=cmd_resources)
 
+    omniroute_parser = sub.add_parser("omniroute")
+    omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
+    omniroute_parser.add_argument("action", choices=["provision"])
+    omniroute_parser.set_defaults(func=cmd_omniroute)
+
     presets = sub.add_parser("presets")
     presets.add_argument("--config", default=argparse.SUPPRESS)
     presets.add_argument("--models-dir", required=True)
@@ -412,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.func(args)
-    except (ConfigError, BudgetError, GgufError, DetectError, ResourceError) as exc:
+    except (ConfigError, BudgetError, GgufError, DetectError, ResourceError, OmniRouteError) as exc:
         return fail(str(exc))
     except OSError as exc:
         return fail(f"filesystem error: {exc}")

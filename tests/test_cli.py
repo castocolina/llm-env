@@ -1,8 +1,11 @@
+import http.server
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -841,6 +844,81 @@ def test_resources_emits_host_and_llm_server_limits():
     else:
         assert result.returncode == 1
         assert "error" in payload
+
+
+class _RecordingProviderHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple]] = []
+
+    def _reply(self, payload, status=200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, self.headers.get("x-omniroute-cli-token")))
+        self._reply([])
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("POST", self.path, body))
+        self._reply({"id": "created-id"})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def _write_omniroute_test_config(tmp_path: Path, *, omniroute_port: int, cli_token: str) -> Path:
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "server: {host: 0.0.0.0, port: 8000, api_key: routerkey, mdns_name: llm,"
+        " sleep_idle_seconds: 300}\n"
+        "gpu: {pci_address: '0000:03:00.0', device_name: d, backend: vulkan,"
+        " image: i, vram_total_mib: 16304, reserve_mode: auto, reserve_floor_mib: 1024}\n"
+        "runtime: {models_max: 1, parallel_slots: 1, ubatch_size: 512,"
+        " flash_attn: true, cache_type_k: q8_0, cache_type_v: q8_0}\n"
+        f"omniroute: {{image: i, port: {omniroute_port}, cli_token: {cli_token},"
+        " initial_password: p}\n"
+        "models:\n"
+        "  - {alias: a, label: A, parameters: 1B, quantization: Q4_K_M, enabled: true,"
+        " file: a.gguf, url: u, size_bytes: 1, vram_budget: 10%, ctx_size: 4096,"
+        " client_max_output_tokens: 4096, n_gpu_layers: 99}\n"
+    )
+    return config
+
+
+def test_omniroute_provision_creates_a_connection_via_the_admin_api(tmp_path):
+    _RecordingProviderHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingProviderHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], cli_token="secret-token"
+        )
+        result = run("--config", str(config), "omniroute", "provision")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"action": "created", "id": "created-id"}
+        assert _RecordingProviderHandler.received[0] == ("GET", "/api/providers", "secret-token")
+        method, path, body = _RecordingProviderHandler.received[1]
+        assert method == "POST"
+        assert path == "/api/providers"
+        assert body["url"] == "http://llm-server:8000/v1"
+        assert body["apiKey"] == "routerkey"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_provision_fails_cleanly_without_a_cli_token(tmp_path):
+    config = _write_omniroute_test_config(tmp_path, omniroute_port=20128, cli_token='""')
+    result = run("--config", str(config), "omniroute", "provision")
+    assert result.returncode == 1
+    assert "cli_token" in json.loads(result.stdout)["error"]
 
 
 def test_render_compose_writes_a_compose_file(tmp_path):
