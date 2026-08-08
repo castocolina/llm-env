@@ -11,6 +11,7 @@ require_cmd uv jq yq systemctl curl
 
 migrate_config_file || die "configuration migration failed"
 ensure_api_key
+ensure_omniroute_secrets
 
 models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
 [ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
@@ -40,6 +41,19 @@ log_step "Waiting for health"
 if wait_for_health "$port"; then
     log_info "server is ready"
     bash "${REPO_DIR}/setup/network.sh"
+
+    log_step "Waiting for OmniRoute"
+    omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
+    if wait_for_tcp_port "$omniroute_port"; then
+        log_info "OmniRoute is ready"
+        if llmenv --config "$CONFIG_PATH" omniroute provision >/dev/null; then
+            log_info "OmniRoute connection configured"
+        else
+            log_warn "OmniRoute provisioning failed; configure it manually via the dashboard"
+        fi
+    else
+        log_warn "OmniRoute did not become reachable within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s; configure it manually"
+    fi
     exit 0
 fi
 

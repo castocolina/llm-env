@@ -3308,6 +3308,18 @@ def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
     assert yq_value(config, ".server.api_key") == "existing-key"
 
 
+def test_start_warns_when_omniroute_is_unreachable_but_still_succeeds(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _config, _calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        env_overrides={"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OmniRoute did not become reachable" in result.stdout + result.stderr
+
+
 def test_start_stops_active_router_before_budgeting(tmp_path: pathlib.Path) -> None:
     """A config change must unload the old router before measuring available VRAM."""
     result, _, calls = run_lifecycle_script(
@@ -6775,6 +6787,62 @@ def test_load_server_config_sets_port_api_key_and_host(tmp_path: pathlib.Path) -
     )
     assert result.returncode == 0, result.stderr
     assert "PORT=9001 API_KEY=fixture-key HOST=0.0.0.0" in result.stdout
+
+
+def test_ensure_omniroute_secrets_generates_missing_cli_token_and_password(
+    tmp_path: pathlib.Path,
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "llm-env"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "omniroute: {image: i, port: 20128, cli_token: '', initial_password: ''}\n"
+    )
+    script = tmp_path / "run.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        "ensure_omniroute_secrets\n"
+    )
+    script.chmod(0o755)
+    env = {**os.environ, "HOME": str(home), "LLM_ENV_CONFIG": str(config)}
+    result = subprocess.run(
+        ["bash", str(script)], cwd=ROOT, text=True, capture_output=True, env=env, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    cfg = yaml.safe_load(config.read_text())
+    assert cfg["omniroute"]["cli_token"]
+    assert cfg["omniroute"]["initial_password"]
+    assert cfg["omniroute"]["cli_token"] != cfg["omniroute"]["initial_password"]
+
+
+def test_ensure_omniroute_secrets_preserves_existing_values(tmp_path: pathlib.Path) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "llm-env"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "omniroute: {image: i, port: 20128, cli_token: existing-token,"
+        " initial_password: existing-password}\n"
+    )
+    script = tmp_path / "run.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+        "ensure_omniroute_secrets\n"
+    )
+    script.chmod(0o755)
+    env = {**os.environ, "HOME": str(home), "LLM_ENV_CONFIG": str(config)}
+    result = subprocess.run(
+        ["bash", str(script)], cwd=ROOT, text=True, capture_output=True, env=env, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    cfg = yaml.safe_load(config.read_text())
+    assert cfg["omniroute"]["cli_token"] == "existing-token"
+    assert cfg["omniroute"]["initial_password"] == "existing-password"
 
 
 def test_wait_for_health_succeeds_once_curl_reports_healthy(tmp_path: pathlib.Path) -> None:

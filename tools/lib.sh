@@ -230,6 +230,37 @@ ensure_api_key() {
     chmod 600 "$CONFIG_PATH"
 }
 
+ensure_omniroute_secrets() {
+    local cli_token initial_password
+    cli_token="$(yq -r '.omniroute.cli_token' "$CONFIG_PATH")"
+    if [ -z "$cli_token" ] || [ "$cli_token" = "null" ]; then
+        cli_token="$(new_api_key)"
+        chmod 600 "$CONFIG_PATH"
+        CLI_TOKEN="$cli_token" yq -i '.omniroute.cli_token = strenv(CLI_TOKEN)' "$CONFIG_PATH"
+        log_info "generated an OmniRoute CLI token"
+    fi
+    initial_password="$(yq -r '.omniroute.initial_password' "$CONFIG_PATH")"
+    if [ -z "$initial_password" ] || [ "$initial_password" = "null" ]; then
+        initial_password="$(new_api_key)"
+        chmod 600 "$CONFIG_PATH"
+        INITIAL_PASSWORD="$initial_password" yq -i '.omniroute.initial_password = strenv(INITIAL_PASSWORD)' "$CONFIG_PATH"
+        log_info "generated an OmniRoute dashboard password"
+    fi
+    chmod 600 "$CONFIG_PATH"
+}
+
+wait_for_tcp_port() {
+    local port="$1" attempt
+    for (( attempt = 0; attempt < LLM_ENV_HEALTH_TIMEOUT_SECONDS; attempt++ )); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            exec 3<&- 3>&-
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 reset_api_key() {
     local api_key
     api_key="$(new_api_key)"
