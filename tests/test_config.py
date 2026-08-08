@@ -12,6 +12,7 @@ from pylib.config import (
     ConfigError,
     enabled_models,
     load_config,
+    migrate_config,
     save_config,
     set_enabled_models,
     set_model_enabled,
@@ -56,6 +57,13 @@ def make_cfg(**overrides):
         },
         "resources": {
             "llm_server": {"cpus": 0, "memory_mib": 0},
+            "omniroute": {"cpus": 1, "memory_mib": 1024},
+        },
+        "omniroute": {
+            "image": "docker.io/diegosouzapw/omniroute:latest",
+            "port": 20128,
+            "cli_token": "test-cli-token",
+            "initial_password": "test-password",
         },
         "models": [
             {
@@ -597,3 +605,97 @@ def test_config_rejects_non_mapping_resources_section():
     cfg = make_cfg(resources=[])
     errors = validate_config(cfg)
     assert any(error == "section resources must be a mapping" for error in errors)
+
+
+def test_migrate_config_adds_default_omniroute_section():
+    cfg = make_cfg()
+    del cfg["omniroute"]
+    migrated = migrate_config(cfg)
+    assert migrated["omniroute"] == {
+        "image": "docker.io/diegosouzapw/omniroute:latest",
+        "port": 20128,
+        "cli_token": "",
+        "initial_password": "",
+    }
+
+
+def test_migrate_config_preserves_existing_omniroute_values():
+    cfg = make_cfg(
+        omniroute={
+            "image": "docker.io/diegosouzapw/omniroute:latest",
+            "port": 21000,
+            "cli_token": "existing-token",
+            "initial_password": "existing-password",
+        }
+    )
+    migrated = migrate_config(cfg)
+    assert migrated["omniroute"]["port"] == 21000
+    assert migrated["omniroute"]["cli_token"] == "existing-token"
+
+
+def test_migrate_config_adds_default_resources_omniroute_section():
+    cfg = make_cfg()
+    del cfg["resources"]["omniroute"]
+    migrated = migrate_config(cfg)
+    assert migrated["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
+
+
+def test_config_accepts_valid_omniroute_section():
+    cfg = make_cfg()
+    assert validate_config(cfg) == []
+
+
+def test_config_without_omniroute_key_has_no_errors():
+    cfg = make_cfg()
+    del cfg["omniroute"]
+    assert validate_config(cfg) == []
+
+
+def test_config_rejects_non_mapping_omniroute_section():
+    cfg = make_cfg(omniroute=[])
+    errors = validate_config(cfg)
+    assert any(error == "section omniroute must be a mapping" for error in errors)
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        ("image", "", "omniroute.image must be a non-empty string"),
+        ("image", 5, "omniroute.image must be a non-empty string"),
+        ("port", 0, "omniroute.port must be a positive integer"),
+        ("port", "20128", "omniroute.port must be a positive integer"),
+        ("cli_token", 5, "omniroute.cli_token must be a string"),
+        ("initial_password", 5, "omniroute.initial_password must be a string"),
+    ],
+)
+def test_config_rejects_invalid_omniroute_values(field, value, expected_error):
+    omniroute = {
+        "image": "docker.io/diegosouzapw/omniroute:latest",
+        "port": 20128,
+        "cli_token": "",
+        "initial_password": "",
+    }
+    omniroute[field] = value
+    cfg = make_cfg(omniroute=omniroute)
+    errors = validate_config(cfg)
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    "omniroute_resources",
+    [
+        {"cpus": -1, "memory_mib": 1024},
+        {"cpus": True, "memory_mib": 1024},
+        {"cpus": 1, "memory_mib": -1},
+        {"cpus": 1, "memory_mib": 0.5},
+    ],
+)
+def test_config_rejects_invalid_resources_omniroute_values(omniroute_resources):
+    cfg = make_cfg(
+        resources={
+            "llm_server": {"cpus": 0, "memory_mib": 0},
+            "omniroute": omniroute_resources,
+        }
+    )
+    errors = validate_config(cfg)
+    assert any("resources.omniroute" in error for error in errors)

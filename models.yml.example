@@ -34,6 +34,15 @@ resources:
   llm_server:
     cpus: 0
     memory_mib: 0
+  omniroute:
+    cpus: 1
+    memory_mib: 1024
+
+omniroute:
+  image: docker.io/diegosouzapw/omniroute:latest
+  port: 20128
+  cli_token: ""
+  initial_password: ""
 
 models:
   - alias: gemma4

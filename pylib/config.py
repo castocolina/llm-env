@@ -34,6 +34,9 @@ SAMPLING_FIELDS = frozenset(
     ("temperature", "top_p", "top_k", "repeat_penalty")
 )
 
+DEFAULT_OMNIROUTE_IMAGE = "docker.io/diegosouzapw/omniroute:latest"
+DEFAULT_OMNIROUTE_PORT = 20128
+
 
 class ConfigError(Exception):
     """Raised when the configuration cannot be read or is structurally invalid."""
@@ -71,6 +74,17 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         if isinstance(llm_server_resources, dict):
             llm_server_resources.setdefault("cpus", 0)
             llm_server_resources.setdefault("memory_mib", 0)
+        omniroute_resources = resources.setdefault("omniroute", {})
+        if isinstance(omniroute_resources, dict):
+            omniroute_resources.setdefault("cpus", 1)
+            omniroute_resources.setdefault("memory_mib", 1024)
+
+    omniroute = cfg.setdefault("omniroute", {})
+    if isinstance(omniroute, dict):
+        omniroute.setdefault("image", DEFAULT_OMNIROUTE_IMAGE)
+        omniroute.setdefault("port", DEFAULT_OMNIROUTE_PORT)
+        omniroute.setdefault("cli_token", "")
+        omniroute.setdefault("initial_password", "")
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -187,6 +201,37 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         "resources.llm_server.memory_mib must be zero or a "
                         "positive integer"
                     )
+            omniroute_resources = resources.get("omniroute", {})
+            if not isinstance(omniroute_resources, dict):
+                errors.append("resources.omniroute must be a mapping")
+            else:
+                o_cpus = omniroute_resources.get("cpus", 0)
+                if isinstance(o_cpus, bool) or not (
+                    isinstance(o_cpus, (int, float)) and o_cpus >= 0
+                ):
+                    errors.append(
+                        "resources.omniroute.cpus must be a non-negative number"
+                    )
+                o_memory_mib = omniroute_resources.get("memory_mib", 0)
+                if not (o_memory_mib == 0 or _positive_int(o_memory_mib)):
+                    errors.append(
+                        "resources.omniroute.memory_mib must be zero or a "
+                        "positive integer"
+                    )
+
+    if "omniroute" in cfg:
+        omniroute = cfg["omniroute"]
+        if not isinstance(omniroute, dict):
+            errors.append("section omniroute must be a mapping")
+        else:
+            image = omniroute.get("image")
+            if not (isinstance(image, str) and image.strip()):
+                errors.append("omniroute.image must be a non-empty string")
+            if not _positive_int(omniroute.get("port")):
+                errors.append("omniroute.port must be a positive integer")
+            for key in ("cli_token", "initial_password"):
+                if not isinstance(omniroute.get(key, ""), str):
+                    errors.append(f"omniroute.{key} must be a string")
 
     models = cfg["models"]
     if not isinstance(models, list) or not models:
