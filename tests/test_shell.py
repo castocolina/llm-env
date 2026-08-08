@@ -11,6 +11,7 @@ import stat
 import subprocess
 
 import pytest
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "scripts"
@@ -439,7 +440,7 @@ def run_setup_with_numbered_selection(
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
         "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":8192},{\"id\":\"Vulkan1\",\"name\":\"Fallback Radeon: \\\"safe\\\"\",\"total_mib\":32768}]}' ;;\n"
         "  *' resources')\n"
-        "    printf '%s\\n' '{\"llm_server\": {\"cpus\": 6, \"memory_mib\": 28672}}' ;;\n"
+        "    printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}' ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -554,8 +555,15 @@ def test_setup_writes_computed_resource_limits(tmp_path: pathlib.Path) -> None:
     """Setup must persist llmenv resources output into resources.llm_server."""
     _, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
 
-    assert yq_value(config, ".resources.llm_server.cpus") == "6"
-    assert yq_value(config, ".resources.llm_server.memory_mib") == "28672"
+    assert yq_value(config, ".resources.llm_server.cpus") == "5"
+    assert yq_value(config, ".resources.llm_server.memory_mib") == "27648"
+
+
+def test_setup_writes_computed_omniroute_resource_limits(tmp_path: pathlib.Path) -> None:
+    result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    cfg = yaml.safe_load(config.read_text())
+    assert cfg["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
 
 
 def test_setup_rejects_invalid_numbered_model_selection_before_download(

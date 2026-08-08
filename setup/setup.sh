@@ -142,14 +142,21 @@ trap 'rm -f "$budget_json" "$resources_json"' EXIT
 if llmenv resources > "$resources_json"; then
     cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
     memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
-    CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
+    omniroute_cpus="$(jq -r '.omniroute.cpus' "$resources_json")"
+    omniroute_memory_mib="$(jq -r '.omniroute.memory_mib' "$resources_json")"
+    CPUS="$cpus" MEMORY_MIB="$memory_mib" \
+      OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
+      yq -i '
         .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
-        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
+        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber) |
+        .resources.omniroute.cpus = (strenv(OMNIROUTE_CPUS) | tonumber) |
+        .resources.omniroute.memory_mib = (strenv(OMNIROUTE_MEMORY_MIB) | tonumber)
       ' "$CONFIG_PATH"
     log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
+    log_info "reserved ${omniroute_cpus} CPUs, ${omniroute_memory_mib} MiB RAM for omniroute"
 else
     log_warn "$(jq -r '.error' "$resources_json")"
-    log_warn "leaving resources.llm_server uncapped (0 = no explicit limit)"
+    log_warn "leaving resources.llm_server/omniroute uncapped (0 = no explicit limit)"
 fi
 
 echo
