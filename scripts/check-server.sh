@@ -20,12 +20,18 @@ printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
 bad_conf="$(mktemp)"
 chmod 600 "$bad_conf"
 printf 'header = "Authorization: Bearer definitely-not-the-key"\n' > "$bad_conf"
+omniroute_conf="$(mktemp)"
+chmod 600 "$omniroute_conf"
+omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
+omniroute_cli_token="$(yq -r '.omniroute.cli_token' "$CONFIG_PATH")"
+printf 'header = "x-omniroute-cli-token: %s"\n' "$omniroute_cli_token" > "$omniroute_conf"
+omniroute_base="http://127.0.0.1:${omniroute_port}"
 diagnostic_dir="$(prepare_diagnostic_dir server)"
 
 cleanup() {
     local status=$?
     finish_diagnostic_dir "$diagnostic_dir"
-    rm -f "$auth_conf" "$bad_conf"
+    rm -f "$auth_conf" "$bad_conf" "$omniroute_conf"
     exit "$status"
 }
 trap cleanup EXIT
@@ -198,6 +204,83 @@ while read -r alias; do
     fi
 
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
+done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
+
+log_step "OmniRoute providers"
+request_record "omniroute provider listing" \
+    "curl --silent --show-error --max-time 10 -H 'x-omniroute-cli-token: <redacted>' ${omniroute_base}/api/providers" \
+    "" "HTTP status: 200" -- \
+    curl --silent --show-error --max-time 10 -K "$omniroute_conf" "${omniroute_base}/api/providers"
+log_block "Expectation" "$REQUEST_EXPECTATION"
+if request_failed 200 "omniroute provider listing"; then
+    :
+else
+    connection_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
+    is_active="$(jq -r '
+        (if type == "array" then . else (.providers // .data // []) end)
+        | map(select(.name == "llm-env-local"))[0].isActive // false
+      ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
+    log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
+    if [ "$is_active" = "true" ]; then
+        ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
+    else
+        bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
+    fi
+fi
+
+log_step "OmniRoute completions"
+while read -r alias; do
+    [ -n "$alias" ] || continue
+    body="$(jq -n --arg m "llm-env-local/${alias}" \
+        '{model: $m,
+          messages: [{role: "user", content: "Reply with exactly: ready"}],
+          max_tokens: 256, stream: false}')"
+
+    identity="omniroute completion model=${alias}"
+    expectation="normalized assistant content: ready"
+    request_record "$identity" \
+        "curl --silent --show-error --max-time 120 -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
+        "$body" "$expectation" -- \
+        curl --silent --show-error --max-time 120 \
+        -H "Content-Type: application/json" \
+        --data-raw "$body" "${omniroute_base}/v1/chat/completions"
+
+    content=""
+    normalized=""
+    failure_stage=""
+    failure_detail=""
+    omniroute_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
+    if [ "$REQUEST_CURL_STATUS" -ne 0 ]; then
+        failure_stage="curl failure"
+        failure_detail="exit=${REQUEST_CURL_STATUS}"
+    elif [[ ! "$REQUEST_HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+        failure_stage="HTTP response"
+        failure_detail="status=${REQUEST_HTTP_STATUS}"
+    elif ! jq . "$REQUEST_BODY_FILE" >/dev/null 2>"$omniroute_parse_stderr"; then
+        failure_stage="invalid JSON"
+    else
+        content="$(jq -r '.choices?[0]?.message?.content? // empty' \
+            < "$REQUEST_BODY_FILE" 2>>"$omniroute_parse_stderr")"
+        normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
+            sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
+        if [ -z "$content" ]; then
+            failure_stage="missing assistant content"
+        elif [ "$normalized" != ready ]; then
+            failure_stage="normalized-value mismatch"
+            failure_detail="${alias}: expected ready, got $(printf '%.80s' "$content")"
+        fi
+    fi
+
+    log_block "Assistant content" "$content"
+    log_block "Normalized content" "$normalized"
+    log_nonempty_block "Response parsing stderr" "$(<"$omniroute_parse_stderr")"
+    log_block "Expectation" "$REQUEST_EXPECTATION"
+    if [ -n "$failure_stage" ]; then
+        bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
+        continue
+    fi
+
+    ok "Verdict: PASS identity=${identity} ${alias}: returned ready via OmniRoute"
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 
 echo
