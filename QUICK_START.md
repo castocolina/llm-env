@@ -25,6 +25,13 @@ make enable-boot     # enable lingering and render the wrapper unit's [Install] 
 make disable-boot
 ```
 
+## OmniRoute dashboard
+
+`make start` auto-provisions OmniRoute's connection to the local router.
+The dashboard itself is at `http://127.0.0.1:20128` (or your configured
+`omniroute.port`); the login password is `omniroute.initial_password` in
+`~/.config/llm-env/models.yml`.
+
 ## Using it
 
 The config file (`~/.config/llm-env/models.yml`) is mode 600 because it

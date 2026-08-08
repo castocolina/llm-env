@@ -25,6 +25,8 @@ make check-server
   makes it start with the machine.
 - Exposes an OpenAI-compatible API on the LAN with an API key and an
   mDNS `.local` name.
+- Runs an OmniRoute gateway alongside the router and auto-configures its
+  connection to the local model on every start — no manual dashboard setup.
 
 ## Configuration
 

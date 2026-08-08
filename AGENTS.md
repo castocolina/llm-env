@@ -3,7 +3,9 @@
 ## LLM Environment
 
 Local llama.cpp router server on Bazzite, running as a rootless podman
-compose stack with GPU acceleration. Configuration lives in `models.yml`.
+compose stack with GPU acceleration, fronted by an OmniRoute gateway that
+`make start` auto-configures against the local router. Configuration lives
+in `models.yml`.
 
 ## Commands
 

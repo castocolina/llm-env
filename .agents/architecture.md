@@ -16,6 +16,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/start.sh` | Budget check, device resolution, compose+wrapper-unit render, health gate |
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
 | `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
+| `pylib/omniroute.py` | Idempotent OmniRoute provider-connection provisioning via its admin API |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
@@ -51,6 +52,18 @@ directly for the same view: `podman compose -f
 ~/.config/llm-env/docker-compose.yml logs -f`, `podman compose -f
 ~/.config/llm-env/docker-compose.yml ps`.
 
+The compose file also runs `omniroute`, network-joined to `llm-server` and
+gated on its `service_healthy` condition. `scripts/start.sh` calls `llmenv
+omniroute provision` once both containers are reachable, which idempotently
+creates or updates a provider connection named `llm-env-local` pointing at
+`http://llm-server:<port>/v1` with the router's real API key — see
+`pylib/omniroute.py`. To inspect what is actually configured in OmniRoute:
+
+```bash
+curl -H "x-omniroute-cli-token: $(yq -r '.omniroute.cli_token' ~/.config/llm-env/models.yml)" \
+  http://127.0.0.1:20128/api/providers
+```
+
 ## Invariants
 
 - `runtime.models_max` is a validated residency limit between 1 and the enabled
@@ -70,6 +83,8 @@ directly for the same view: `podman compose -f
 - Live Pi and OpenCode checks enter a random systemd user scope through
   `run-agent-bounded`; Bash consumes only the six-field result JSON and never
   treats unproved cleanup as a model result.
+- The `llm-env-local` OmniRoute provider connection is owned by this tool —
+  never renamed or deleted by hand, or `make start` will create a duplicate.
 
 ## Platform
 
