@@ -21,6 +21,8 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
     gpu = cfg["gpu"]
     runtime = cfg["runtime"]
     llm_server_resources = cfg.get("resources", {}).get("llm_server", {})
+    omniroute_cfg = cfg.get("omniroute", {})
+    omniroute_resources = cfg.get("resources", {}).get("omniroute", {})
 
     service: dict[str, Any] = {
         "image": gpu["image"],
@@ -62,7 +64,40 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
     if memory_mib:
         service["mem_limit"] = f"{memory_mib}m"
 
-    document = {"services": {"llm-server": service}}
+    omniroute_port = omniroute_cfg.get("port", 20128)
+    omniroute_service: dict[str, Any] = {
+        "image": omniroute_cfg.get("image", "docker.io/diegosouzapw/omniroute:latest"),
+        "container_name": "omniroute",
+        "ports": [f"{omniroute_port}:{omniroute_port}"],
+        "volumes": ["omniroute-data:/app/data"],
+        "environment": {
+            "PORT": str(omniroute_port),
+            "OMNIROUTE_CLI_TOKEN": omniroute_cfg.get("cli_token", ""),
+            "OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS": "true",
+            "INITIAL_PASSWORD": omniroute_cfg.get("initial_password", ""),
+        },
+        "healthcheck": {
+            "test": ["CMD", "node", "healthcheck.mjs"],
+            "interval": "30s",
+            "timeout": "5s",
+            "retries": 3,
+            "start_period": "15s",
+        },
+        "stop_grace_period": "40s",
+        "depends_on": {"llm-server": {"condition": "service_healthy"}},
+        "restart": "unless-stopped",
+    }
+    omniroute_cpus = omniroute_resources.get("cpus")
+    if omniroute_cpus:
+        omniroute_service["cpus"] = omniroute_cpus
+    omniroute_memory_mib = omniroute_resources.get("memory_mib")
+    if omniroute_memory_mib:
+        omniroute_service["mem_limit"] = f"{omniroute_memory_mib}m"
+
+    document = {
+        "services": {"llm-server": service, "omniroute": omniroute_service},
+        "volumes": {"omniroute-data": {}},
+    }
     return HEADER_COMMENT + yaml.safe_dump(
         document, sort_keys=False, default_flow_style=False
     )

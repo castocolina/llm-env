@@ -23,6 +23,13 @@ CFG = {
     },
     "resources": {
         "llm_server": {"cpus": 0, "memory_mib": 0},
+        "omniroute": {"cpus": 0, "memory_mib": 0},
+    },
+    "omniroute": {
+        "image": "docker.io/diegosouzapw/omniroute:latest",
+        "port": 20128,
+        "cli_token": "test-cli-token",
+        "initial_password": "test-password",
     },
 }
 
@@ -101,6 +108,63 @@ def test_nonzero_resource_limits_are_applied():
 def test_sleep_idle_seconds_becomes_a_command_flag():
     _, document = compose_dict()
     assert document["services"]["llm-server"]["command"] == ["--sleep-idle-seconds", "300"]
+
+
+def test_omniroute_service_uses_configured_image_and_port():
+    _, document = compose_dict()
+    omniroute = document["services"]["omniroute"]
+    assert omniroute["image"] == "docker.io/diegosouzapw/omniroute:latest"
+    assert omniroute["ports"] == ["20128:20128"]
+
+
+def test_omniroute_service_mounts_a_named_data_volume():
+    _, document = compose_dict()
+    assert document["services"]["omniroute"]["volumes"] == ["omniroute-data:/app/data"]
+    assert document["volumes"] == {"omniroute-data": {}}
+
+
+def test_omniroute_service_sets_its_environment():
+    _, document = compose_dict()
+    env = document["services"]["omniroute"]["environment"]
+    assert env["PORT"] == "20128"
+    assert env["OMNIROUTE_CLI_TOKEN"] == "test-cli-token"
+    assert env["OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS"] == "true"
+    assert env["INITIAL_PASSWORD"] == "test-password"
+
+
+def test_omniroute_service_healthcheck_runs_the_bundled_script():
+    _, document = compose_dict()
+    healthcheck = document["services"]["omniroute"]["healthcheck"]
+    assert healthcheck["test"] == ["CMD", "node", "healthcheck.mjs"]
+
+
+def test_omniroute_service_depends_on_a_healthy_llm_server():
+    _, document = compose_dict()
+    assert document["services"]["omniroute"]["depends_on"] == {
+        "llm-server": {"condition": "service_healthy"}
+    }
+
+
+def test_omniroute_service_stop_grace_period_and_restart_policy():
+    _, document = compose_dict()
+    omniroute = document["services"]["omniroute"]
+    assert omniroute["stop_grace_period"] == "40s"
+    assert omniroute["restart"] == "unless-stopped"
+
+
+def test_omniroute_zero_resource_limits_are_omitted():
+    _, document = compose_dict()
+    omniroute = document["services"]["omniroute"]
+    assert "cpus" not in omniroute
+    assert "mem_limit" not in omniroute
+
+
+def test_omniroute_nonzero_resource_limits_are_applied():
+    cfg = {**CFG, "resources": {**CFG["resources"], "omniroute": {"cpus": 1, "memory_mib": 1024}}}
+    _, document = compose_dict(cfg)
+    omniroute = document["services"]["omniroute"]
+    assert omniroute["cpus"] == 1
+    assert omniroute["mem_limit"] == "1024m"
 
 
 def test_write_compose_creates_parent_directories(tmp_path):
