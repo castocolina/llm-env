@@ -60,6 +60,7 @@ request_record() {
     http_status="$("$@" -o "$body_file" -w '%{http_code}' 2>"$stderr_file")"
     curl_status=$?
 
+    open_diagnostic_capture "$diagnostic_dir"
     log_block "Identity" "$identity"
     log_command "$display_command"
     if [[ "$display_command" != *"--data-raw"* ]]; then
@@ -78,10 +79,12 @@ request_record() {
 request_failed() {
     local expected_status="$1" identity="$2"
     if [ "$REQUEST_CURL_STATUS" -ne 0 ]; then
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=curl failure identity=${identity} exit=${REQUEST_CURL_STATUS}"
         return 0
     fi
     if [ "$REQUEST_HTTP_STATUS" != "$expected_status" ]; then
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=HTTP response identity=${identity} status=${REQUEST_HTTP_STATUS} expected=${expected_status}"
         return 0
     fi
@@ -97,6 +100,7 @@ log_block "Expectation" "$REQUEST_EXPECTATION"
 if request_failed 200 "server health"; then
     :
 else
+    close_diagnostic_capture 0
     ok "Verdict: PASS identity=server health /health responds"
 fi
 if [ "$FAIL" -ne 0 ]; then
@@ -118,6 +122,7 @@ log_block "Expectation" "$REQUEST_EXPECTATION"
 if request_failed 401 "server invalid-key probe"; then
     :
 else
+    close_diagnostic_capture 0
     ok "Verdict: PASS identity=server invalid-key probe rejects invalid API key (401)"
 fi
 
@@ -137,10 +142,13 @@ else
     model_parse_status=$?
     log_nonempty_block "Response parsing stderr" "$(<"$model_parse_stderr")"
     if [ "$model_parse_status" -ne 0 ]; then
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=response parsing identity=server model listing"
     elif [ "$listed" = "$expected" ]; then
+        close_diagnostic_capture 0
         ok "Verdict: PASS identity=server model listing /v1/models lists exactly: ${expected}"
     else
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=model-list mismatch listed='${listed}' expected='${expected}'"
     fi
 fi
@@ -194,10 +202,12 @@ while read -r alias; do
     log_nonempty_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
     log_block "Expectation" "$REQUEST_EXPECTATION"
     if [ -n "$failure_stage" ]; then
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
         continue
     fi
 
+    close_diagnostic_capture 0
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 
@@ -214,6 +224,7 @@ if request_failed 200 "omniroute dashboard login"; then
     log_step "OmniRoute providers"
     bad "Verdict: FAIL stage=skipped reason=omniroute dashboard login failed"
 else
+    close_diagnostic_capture 0
     ok "Verdict: PASS identity=omniroute dashboard login session established"
 
     log_step "OmniRoute providers"
@@ -232,8 +243,10 @@ else
           ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
         log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
         if [ "$is_active" = "true" ]; then
+            close_diagnostic_capture 0
             ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
         else
+            close_diagnostic_capture 1
             bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
         fi
     fi
@@ -293,10 +306,12 @@ while read -r alias; do
     log_nonempty_block "Response parsing stderr" "$(<"$omniroute_parse_stderr")"
     log_block "Expectation" "$REQUEST_EXPECTATION"
     if [ -n "$failure_stage" ]; then
+        close_diagnostic_capture 1
         bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
         continue
     fi
 
+    close_diagnostic_capture 0
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready via OmniRoute"
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 

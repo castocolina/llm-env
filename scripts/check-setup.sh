@@ -26,6 +26,7 @@ record_command() {
     stderr_file="$(mktemp "${diagnostic_dir}/stderr.XXXXXX")" || die "could not create diagnostic stderr"
     record_stdout_file="$stdout_file"
 
+    open_diagnostic_capture "$diagnostic_dir"
     log_identity "$identity"
     log_command "$command_text"
     log_block "Input" "$input"
@@ -50,17 +51,20 @@ record_command() {
     log_block "Expectation" "$expectation"
 
     if [ "$status" -ne 0 ]; then
+        close_diagnostic_capture 1
         log_error "Verdict: FAIL stage=command exit reason=${identity%% *} exited ${status}"
         FAIL=$((FAIL + 1))
         return 1
     fi
     if [ -n "$expected_result" ] && [ "$normalized" != "$expected_result" ]; then
+        close_diagnostic_capture 1
         log_error "Verdict: FAIL stage=parsed result reason=normalized assistant content mismatch expected=${expected_result}"
         FAIL=$((FAIL + 1))
         return 1
     fi
 
-    log_info "Verdict: PASS"
+    close_diagnostic_capture 0
+    log_info "Verdict: PASS identity=${identity}"
     PASS=$((PASS + 1))
 }
 

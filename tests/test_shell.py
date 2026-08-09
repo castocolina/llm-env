@@ -1324,6 +1324,7 @@ def run_check_setup_with_stubs(
     budget_exit: int = 0,
     resolve_exit: int = 0,
     render_node: str | None = "renderD128",
+    verbose: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
@@ -1429,7 +1430,7 @@ def run_check_setup_with_stubs(
         "BUDGET_EXIT": str(budget_exit),
         "RESOLVE_EXIT": str(resolve_exit),
         "DETECTED_GPU": detected_gpu,
-    }
+    } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-setup.sh"],
         cwd=ROOT,
@@ -1490,8 +1491,10 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
 def test_check_setup_prints_complete_static_and_inference_records(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Offline validation must expose complete evidence for every checked command."""
-    result, _, _ = run_check_setup_with_stubs(tmp_path)
+    """Offline validation must expose complete evidence for every checked command
+    when LLM_ENV_CHECK_VERBOSE=1 is set; a default run only prints a concise
+    verdict per PASS -- see test_check_setup_prints_concise_pass_rows_by_default."""
+    result, _, _ = run_check_setup_with_stubs(tmp_path, verbose=True)
 
     assert result.returncode == 0, result.stderr
     assert "Identity: tooling command uv" in result.stdout
@@ -1509,6 +1512,25 @@ def test_check_setup_prints_complete_static_and_inference_records(
     assert "Inference stderr:" not in result.stdout
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
+
+
+def test_check_setup_prints_concise_pass_rows_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A default (non-verbose) run must not dump the Identity/Command/stdout/
+    Exit status/Expectation block for a PASS -- only the one-line verdict."""
+    result, _, _ = run_check_setup_with_stubs(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Identity:" not in result.stdout
+    assert "Command:" not in result.stdout
+    assert "Command stdout:" not in result.stdout
+    assert "Inference stdout:" not in result.stdout
+    assert "Parsed result:" not in result.stdout
+    assert "Expectation:" not in result.stdout
+    assert "Verdict: PASS identity=tooling command uv" in result.stdout
+    assert "Verdict: PASS identity=inference " in result.stdout
+    assert "Results: " in result.stdout
 
 
 def test_check_setup_skips_unresolved_gpu_render_node_without_parsed_result(
@@ -1535,6 +1557,7 @@ def test_check_setup_accepts_ready_after_visible_reasoning(tmp_path: pathlib.Pat
     result, _, _ = run_check_setup_with_stubs(
         tmp_path,
         inference_stdout="[Start thinking]\nThe user requires one word.\nready\n",
+        verbose=True,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1550,6 +1573,7 @@ def test_check_setup_ignores_llama_exit_footer_after_ready(
     result, calls, _ = run_check_setup_with_stubs(
         tmp_path,
         inference_stdout="[Start thinking]\nreasoning\nready\n\nExiting...\n",
+        verbose=True,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1619,8 +1643,8 @@ def test_check_setup_skips_each_enabled_inference_after_prerequisite_failure(
     assert result.returncode != 0
     assert result.stdout.count("Identity: inference ") == 2
     assert result.stderr.count(f"Verdict: SKIP reason={reason}") == 2
-    assert "Identity: tooling command uv" in result.stdout
-    assert "Identity: GGUF validation" in result.stdout
+    assert "Verdict: PASS identity=tooling command uv" in result.stdout
+    assert "Verdict: PASS identity=GGUF validation" in result.stdout
     assert "Results:" in result.stdout
 
 
@@ -3449,6 +3473,7 @@ def run_check_server(
     completion_responses: dict[str, str] | None = None,
     completion_statuses: dict[str, int] | None = None,
     model_list_body: str = '{"data":[{"id":"gemma4"},{"id":"ornith"}]}',
+    verbose: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
     commands = tmp_path / "bin"
@@ -3631,7 +3656,7 @@ def run_check_server(
         "ORNITH_RESPONSE": ornith_response,
         "ORNITH_STATUS": str(completion_statuses.get("ornith", 200)),
         "PATH": f"{commands}:/usr/bin:/bin",
-    }
+    } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-server.sh"],
         cwd=ROOT,
@@ -3674,8 +3699,12 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
 def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Successful API checks must show complete, directly-runnable diagnostic records."""
-    result, _ = run_check_server(tmp_path, {"gemma4": "ready", "ornith": "ready"})
+    """Successful API checks must show complete, directly-runnable diagnostic
+    records when LLM_ENV_CHECK_VERBOSE=1 is set -- a default run only prints a
+    concise verdict per PASS, see test_check_server_prints_concise_pass_rows_by_default."""
+    result, _ = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}, verbose=True
+    )
     combined = result.stdout + result.stderr
 
     assert result.returncode == 0, result.stderr
@@ -3693,6 +3722,25 @@ def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template
     assert 'Request payload:\n  {"model":"x"' not in combined
     assert 'Request payload:\n  {"model":"gemma4"' not in combined
     assert 'Request payload:\n  {"model":"ornith"' not in combined
+
+
+def test_check_server_prints_concise_pass_rows_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A default (non-verbose) run must not dump the Identity/Command/HTTP
+    response/Expectation block for a PASS -- only the one-line verdict."""
+    result, _ = run_check_server(tmp_path, {"gemma4": "ready", "ornith": "ready"})
+
+    assert result.returncode == 0, result.stderr
+    assert "Identity:" not in result.stdout
+    assert "Command:" not in result.stdout
+    assert "HTTP response:" not in result.stdout
+    assert "Assistant content:" not in result.stdout
+    assert "Expectation:" not in result.stdout
+    assert "Verdict: PASS identity=server health" in result.stdout
+    assert "Verdict: PASS identity=server completion model=gemma4" in result.stdout
+    assert "Verdict: PASS identity=omniroute completion model=ornith" in result.stdout
+    assert "Results: " in result.stdout
 
 
 def test_check_server_reports_a_completion_failure_without_hiding_other_models(

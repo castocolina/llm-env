@@ -101,6 +101,28 @@ log_nonempty_block() {
     fi
 }
 
+# check-setup.sh/check-server.sh call these around each per-check diagnostic
+# block (Identity/Command/Input/stdout/Exit status/Expectation) so a PASS
+# only prints one concise verdict line -- the full block still exists and
+# prints on FAIL, or always with LLM_ENV_CHECK_VERBOSE=1, since that detail
+# is exactly what's needed to debug a failure.
+open_diagnostic_capture() {
+    local directory="$1"
+    _diagnostic_capture_file="$(mktemp "${directory}/detail.XXXXXX")" \
+        || die "could not create diagnostic detail buffer"
+    exec 9>&1
+    exec 1>"$_diagnostic_capture_file"
+}
+
+close_diagnostic_capture() {
+    local show="$1"
+    exec 1>&9 9>&-
+    if [ "$show" = 1 ] || [ "${LLM_ENV_CHECK_VERBOSE:-0}" = 1 ]; then
+        cat "$_diagnostic_capture_file"
+    fi
+    rm -f "$_diagnostic_capture_file"
+}
+
 _discard_diagnostic_dir() {
     local directory="$1"
     chmod -R u+rwx -- "$directory" >/dev/null 2>&1 || true
