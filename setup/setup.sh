@@ -132,7 +132,7 @@ resources_json="$(mktemp)"
 # Replaces the Step 7/7 trap above with one that cleans up both temp
 # files — a second `trap … EXIT` overwrites rather than adds to the first.
 trap 'rm -f "$budget_json" "$resources_json"' EXIT
-if llmenv resources > "$resources_json"; then
+if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
     cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
     memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
     omniroute_cpus="$(jq -r '.omniroute.cpus' "$resources_json")"

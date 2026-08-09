@@ -209,8 +209,15 @@ def cmd_budget(args: argparse.Namespace) -> int:
 
 
 def cmd_resources(args: argparse.Namespace) -> int:
+    cfg = require_valid_config(load_config(Path(args.config)))
     host = host_resources()
-    limits = compute_resource_limits(host["cpu_count"], host["memory_total_mib"])
+    llm_server_resources = cfg["resources"]["llm_server"]
+    limits = compute_resource_limits(
+        host["cpu_count"],
+        host["memory_total_mib"],
+        llm_server_resources["memory_ceiling_pct"],
+        llm_server_resources["memory_ceiling_floor_mib"],
+    )
     return emit({"host": host, **limits})
 
 
@@ -353,7 +360,9 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--models-dir", required=True)
     budget.set_defaults(func=cmd_budget)
 
-    sub.add_parser("resources").set_defaults(func=cmd_resources)
+    resources_parser = sub.add_parser("resources")
+    resources_parser.add_argument("--config", default=argparse.SUPPRESS)
+    resources_parser.set_defaults(func=cmd_resources)
 
     omniroute_parser = sub.add_parser("omniroute")
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)

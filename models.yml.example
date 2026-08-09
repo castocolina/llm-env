@@ -34,6 +34,8 @@ resources:
   llm_server:
     cpus: 0
     memory_mib: 0
+    memory_ceiling_pct: 46
+    memory_ceiling_floor_mib: 10240
   omniroute:
     cpus: 1
     memory_mib: 1024

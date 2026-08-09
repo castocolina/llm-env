@@ -74,6 +74,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         if isinstance(llm_server_resources, dict):
             llm_server_resources.setdefault("cpus", 0)
             llm_server_resources.setdefault("memory_mib", 0)
+            llm_server_resources.setdefault("memory_ceiling_pct", 46)
+            llm_server_resources.setdefault("memory_ceiling_floor_mib", 10240)
         omniroute_resources = resources.setdefault("omniroute", {})
         if isinstance(omniroute_resources, dict):
             omniroute_resources.setdefault("cpus", 1)
@@ -199,6 +201,25 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                     errors.append(
                         "resources.llm_server.memory_mib must be zero or a "
                         "positive integer"
+                    )
+                memory_ceiling_pct = llm_server_resources.get("memory_ceiling_pct", 46)
+                if isinstance(memory_ceiling_pct, bool) or not (
+                    _finite_number(memory_ceiling_pct)
+                    and 0 < memory_ceiling_pct <= 100
+                ):
+                    errors.append(
+                        "resources.llm_server.memory_ceiling_pct must be a "
+                        "finite number greater than 0 and at most 100"
+                    )
+                memory_ceiling_floor_mib = llm_server_resources.get(
+                    "memory_ceiling_floor_mib", 10240
+                )
+                if isinstance(memory_ceiling_floor_mib, bool) or not _positive_int(
+                    memory_ceiling_floor_mib
+                ):
+                    errors.append(
+                        "resources.llm_server.memory_ceiling_floor_mib must be "
+                        "a positive integer"
                     )
             omniroute_resources = resources.get("omniroute", {})
             if not isinstance(omniroute_resources, dict):

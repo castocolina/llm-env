@@ -56,7 +56,12 @@ def make_cfg(**overrides):
             "cache_type_v": "q8_0",
         },
         "resources": {
-            "llm_server": {"cpus": 0, "memory_mib": 0},
+            "llm_server": {
+                "cpus": 0,
+                "memory_mib": 0,
+                "memory_ceiling_pct": 46,
+                "memory_ceiling_floor_mib": 10240,
+            },
             "omniroute": {"cpus": 1, "memory_mib": 1024},
         },
         "omniroute": {
@@ -553,13 +558,94 @@ def test_load_missing_file_raises_configerror(tmp_path):
 def test_migrate_config_adds_default_resources_section():
     cfg = make_cfg()
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"] == {"cpus": 0, "memory_mib": 0}
+    assert migrated["resources"]["llm_server"] == {
+        "cpus": 0,
+        "memory_mib": 0,
+        "memory_ceiling_pct": 46,
+        "memory_ceiling_floor_mib": 10240,
+    }
 
 
 def test_migrate_config_preserves_existing_resources_values():
     cfg = make_cfg(resources={"llm_server": {"cpus": 6, "memory_mib": 28672}})
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"] == {"cpus": 6, "memory_mib": 28672}
+    assert migrated["resources"]["llm_server"] == {
+        "cpus": 6,
+        "memory_mib": 28672,
+        "memory_ceiling_pct": 46,
+        "memory_ceiling_floor_mib": 10240,
+    }
+
+
+def test_migrate_config_adds_default_memory_ceiling_pct():
+    cfg = make_cfg()
+    cfg["resources"]["llm_server"].pop("memory_ceiling_pct", None)
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"]["memory_ceiling_pct"] == 46
+
+
+def test_migrate_config_preserves_existing_memory_ceiling_pct():
+    cfg = make_cfg(
+        resources={
+            "llm_server": {
+                "cpus": 6,
+                "memory_mib": 28672,
+                "memory_ceiling_pct": 30,
+                "memory_ceiling_floor_mib": 10240,
+            }
+        }
+    )
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"]["memory_ceiling_pct"] == 30
+
+
+@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
+def test_validate_config_rejects_invalid_memory_ceiling_pct(value):
+    cfg = make_cfg(
+        resources={"llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_pct": value}}
+    )
+    errors = validate_config(cfg)
+    assert any("memory_ceiling_pct" in error for error in errors)
+
+
+def test_validate_config_accepts_boundary_memory_ceiling_pct():
+    cfg = make_cfg(
+        resources={"llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_pct": 100}}
+    )
+    assert validate_config(cfg) == []
+
+
+def test_migrate_config_adds_default_memory_ceiling_floor_mib():
+    cfg = make_cfg()
+    cfg["resources"]["llm_server"].pop("memory_ceiling_floor_mib", None)
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"]["memory_ceiling_floor_mib"] == 10240
+
+
+def test_migrate_config_preserves_existing_memory_ceiling_floor_mib():
+    cfg = make_cfg(
+        resources={
+            "llm_server": {
+                "cpus": 6,
+                "memory_mib": 28672,
+                "memory_ceiling_pct": 46,
+                "memory_ceiling_floor_mib": 2048,
+            }
+        }
+    )
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["resources"]["llm_server"]["memory_ceiling_floor_mib"] == 2048
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "lots", True])
+def test_validate_config_rejects_invalid_memory_ceiling_floor_mib(value):
+    cfg = make_cfg(
+        resources={
+            "llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_floor_mib": value}
+        }
+    )
+    errors = validate_config(cfg)
+    assert any("memory_ceiling_floor_mib" in error for error in errors)
 
 
 def test_validate_config_rejects_infinite_llm_server_cpus():
@@ -577,7 +663,12 @@ def test_migrate_config_adds_default_resources_section_when_gpu_absent():
     cfg = make_cfg()
     del cfg["gpu"]
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"] == {"cpus": 0, "memory_mib": 0}
+    assert migrated["resources"]["llm_server"] == {
+        "cpus": 0,
+        "memory_mib": 0,
+        "memory_ceiling_pct": 46,
+        "memory_ceiling_floor_mib": 10240,
+    }
 
 
 def test_config_without_resources_key_has_no_errors():

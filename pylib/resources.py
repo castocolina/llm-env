@@ -25,7 +25,10 @@ class ResourceError(Exception):
 
 
 def compute_resource_limits(
-    host_cpu_count: int, host_memory_total_mib: int
+    host_cpu_count: int,
+    host_memory_total_mib: int,
+    memory_ceiling_pct: float = 100,
+    memory_ceiling_floor_mib: int = 6144,
 ) -> dict[str, Any]:
     cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED
     memory_floor_mib = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB
@@ -41,6 +44,19 @@ def compute_resource_limits(
             f"{memory_floor_mib} MiB is required to reserve the host floor "
             "and OmniRoute's fixed allocation and still run llm-server"
         )
+    # pylib/compose.py omits `mem_limit` entirely when memory_mib is
+    # falsy/0, which would silently leave the container fully uncapped for
+    # a valid-but-tiny memory_ceiling_pct. memory_ceiling_floor_mib's
+    # real, user-facing default (10 GiB) lives in models.yml via
+    # migrate_config; the 6 GiB default here is only a code-level safety
+    # net for callers that don't thread the configured value through.
+    memory_ceiling_mib = max(
+        memory_ceiling_floor_mib,
+        round(host_memory_total_mib * memory_ceiling_pct / 100),
+    )
+    llm_server_memory_mib = min(
+        host_memory_total_mib - memory_floor_mib, memory_ceiling_mib
+    )
     return {
         "host_cpu_floor": HOST_CPU_FLOOR,
         "host_memory_floor_mib": HOST_MEMORY_FLOOR_MIB,
@@ -50,6 +66,6 @@ def compute_resource_limits(
         },
         "llm_server": {
             "cpus": host_cpu_count - cpu_floor,
-            "memory_mib": host_memory_total_mib - memory_floor_mib,
+            "memory_mib": llm_server_memory_mib,
         },
     }
