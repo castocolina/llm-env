@@ -527,7 +527,10 @@ def run_setup_with_numbered_selection(
         "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
         "  *' models select '*)\n"
         "    if [ \"$REAL_MODELS_SELECT\" = 1 ]; then exec \"$REAL_UV\" \"$@\"; fi\n"
-        "    \"$REAL_YQ\" -i '.models[] |= (.enabled = (.alias == \"gemma4\" or .alias == \"ornith\")) | .runtime.models_max = 1' \"$CONFIG_PATH_TEST\"\n"
+        "    for arg in \"$@\"; do selected_alias=\"$arg\"; done\n"
+        "    SELECTED_ALIAS=\"$selected_alias\" \"$REAL_YQ\" -i \\\n"
+        "      '.models[] |= (.enabled = (.alias == strenv(SELECTED_ALIAS))) | .runtime.models_max = 1' \\\n"
+        "      \"$CONFIG_PATH_TEST\"\n"
         "    printf '%s\\n' '{\"models_max\":1}' ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
@@ -616,13 +619,13 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
     tmp_path: pathlib.Path,
 ) -> None:
     """A zero-VRAM match must require and persist an explicit llama device choice."""
-    result, calls, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+    result, calls, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
 
     assert result.returncode == 0, result.stderr
     assert "Integrated GPU" in result.stdout
     assert 'Fallback Radeon: "safe"' in result.stdout
     call_log = calls.read_text()
-    assert "models select gemma4 ornith" in call_log
+    assert "models select gemma4" in call_log
     assert (
         "podman run --rm --device /dev/dri "
         "ghcr.io/ggml-org/llama.cpp:server-vulkan --list-devices" in call_log
@@ -639,21 +642,23 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
         "pci_address": "0000:03:00.0",
         "vram_total_mib": 16384,
         "device_name": 'Fallback Radeon: "safe"',
+        # vram_budget_ceiling_mib added by Task 4 — leave this assertion as
+        # today's shape for now; Task 4's own steps update it.
     }
     assert persisted["runtime"]["models_max"] == 1
-    assert [model["enabled"] for model in persisted["models"]] == [True, True]
+    assert [model["enabled"] for model in persisted["models"]] == [True, False]
 
 
 def test_setup_writes_computed_resource_limits(tmp_path: pathlib.Path) -> None:
     """Setup must persist llmenv resources output into resources.llm_server."""
-    _, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+    _, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
 
     assert yq_value(config, ".resources.llm_server.cpus") == "5"
     assert yq_value(config, ".resources.llm_server.memory_mib") == "27648"
 
 
 def test_setup_writes_computed_omniroute_resource_limits(tmp_path: pathlib.Path) -> None:
-    result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+    result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
     assert cfg["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
@@ -665,7 +670,7 @@ def test_setup_fails_instead_of_leaving_resources_uncapped(
     """A host too small to reserve the fixed floors must stop setup, not silently
     leave llm-server uncapped (render_compose treats 0 as no explicit limit)."""
     result, _, config = run_setup_with_numbered_selection(
-        tmp_path, "1\n1,2\n2\n", resources_failure=True
+        tmp_path, "1\n1\n2\n", resources_failure=True
     )
 
     assert result.returncode != 0
@@ -683,18 +688,37 @@ def test_setup_rejects_invalid_numbered_model_selection_before_download(
     assert "curl " not in calls.read_text()
 
 
+def test_setup_rejects_comma_separated_model_selection(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Only one model may be enabled by the guided setup flow — VRAM for two
+    models at once was never guaranteed to fit."""
+    result, calls, _ = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+
+    assert result.returncode != 0
+    assert "curl " not in calls.read_text()
+
+
 def test_reverse_setup_selection_drives_client_model_order(
     tmp_path: pathlib.Path,
 ) -> None:
-    setup_result, calls, config = run_setup_with_numbered_selection(
-        tmp_path,
-        "1\n2,1\n2\n",
-        config_text=VALID_AGENT_SETUP_CONFIG,
-        real_models_select=True,
+    setup_result, _calls, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1\n2\n", config_text=VALID_AGENT_SETUP_CONFIG
     )
-
     assert setup_result.returncode == 0, setup_result.stderr
-    assert "models select ornith gemma4" in calls.read_text()
+
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    reorder = subprocess.run(
+        [real_uv, "run", str(ROOT / "llmenv.py"), "--config", str(config),
+         "models", "select", "ornith", "gemma4"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert reorder.returncode == 0, reorder.stderr
+
     assert [model["alias"] for model in json.loads(
         subprocess.run(
             [shutil.which("yq") or "yq", "-o=json", ".", str(config)],

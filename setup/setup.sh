@@ -59,18 +59,11 @@ models="$(llmenv --config "$CONFIG_PATH" models list)"
 model_count="$(echo "$models" | jq '.models | length')"
 [ "$model_count" -gt 0 ] || die "no models are configured"
 yq -r '.models | to_entries[] | "  \(.key + 1)) \(.value.label) — \(.value.parameters), \(.value.quantization), \(.value.size_bytes / 1000000000) GB"' "$CONFIG_PATH"
-default_models="$(echo "$models" | jq -r '[.models | to_entries[] | select(.value.enabled) | (.key + 1 | tostring)] | join(",")')"
-model_choice="$(ask "  Model numbers [${default_models}]: " "$default_models")"
-[[ "$model_choice" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "model selection must be comma-separated positive integers"
-IFS=',' read -r -a model_indexes <<< "$model_choice"
-declare -A selected_indexes=()
-aliases=()
-for index in "${model_indexes[@]}"; do
-    [ "$index" -le "$model_count" ] || die "model selection is out of range"
-    [ -z "${selected_indexes[$index]:-}" ] || die "model selection contains duplicate index ${index}"
-    selected_indexes[$index]=1
-    aliases+=("$(echo "$models" | jq -r --argjson index "$index" '.models[$index - 1].alias')")
-done
+default_models="$(echo "$models" | jq -r '[.models | to_entries[] | select(.value.enabled) | (.key + 1 | tostring)] | first // "1"')"
+model_choice="$(ask "  Model number [${default_models}]: " "$default_models")"
+[[ "$model_choice" =~ ^[1-9][0-9]*$ ]] || die "model selection must be a single positive integer"
+[ "$model_choice" -le "$model_count" ] || die "model selection is out of range"
+aliases=("$(echo "$models" | jq -r --argjson index "$model_choice" '.models[$index - 1].alias')")
 llmenv --config "$CONFIG_PATH" models select "${aliases[@]}" >/dev/null
 log_info "selected ${aliases[*]}"
 
