@@ -3680,7 +3680,13 @@ def test_check_server_requires_normalized_ready_for_every_enabled_model(
     assert result.returncode != 0
     assert "gemma4: returned ready" in result.stdout
     assert "ornith: expected ready" in result.stderr
-    assert calls.read_text().count("/v1/chat/completions") == 5
+    # ornith's direct completion already failed, so its OmniRoute completion
+    # is skipped rather than re-probed -- one less call than a naive 2+2+1.
+    assert calls.read_text().count("/v1/chat/completions") == 4
+    assert (
+        "Verdict: SKIP identity=omniroute completion model=ornith "
+        "reason=server completion model=ornith already failed"
+    ) in result.stderr
 
 
 def test_check_server_accepts_normalized_ready_for_every_enabled_model(

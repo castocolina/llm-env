@@ -43,6 +43,13 @@ PASS=0; FAIL=0
 ok()   { log_info "$1"; PASS=$((PASS + 1)); }
 bad()  { log_error "$1"; FAIL=$((FAIL + 1)); }
 
+# Tracks each alias's direct (non-OmniRoute) completion result so the
+# OmniRoute completions loop below can skip instead of re-testing a model
+# that's already known to be broken -- otherwise a single broken model
+# produces two FAIL rows (direct and via OmniRoute) that look like two
+# separate problems, when routing was never the issue.
+declare -A LLM_SERVER_COMPLETION_OK
+
 REQUEST_CURL_STATUS=""
 REQUEST_HTTP_STATUS=""
 REQUEST_BODY_FILE=""
@@ -204,11 +211,13 @@ while read -r alias; do
     if [ -n "$failure_stage" ]; then
         close_diagnostic_capture 1
         bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
+        LLM_SERVER_COMPLETION_OK["$alias"]=0
         continue
     fi
 
     close_diagnostic_capture 0
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
+    LLM_SERVER_COMPLETION_OK["$alias"]=1
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 
 log_step "OmniRoute login"
@@ -255,6 +264,10 @@ fi
 log_step "OmniRoute completions"
 while read -r alias; do
     [ -n "$alias" ] || continue
+    if [ "${LLM_SERVER_COMPLETION_OK[$alias]:-1}" -eq 0 ]; then
+        log_warn "Verdict: SKIP identity=omniroute completion model=${alias} reason=server completion model=${alias} already failed; fix that first, OmniRoute proxies to the same model"
+        continue
+    fi
     # Routing keys on the provider slug ("llama-cpp"), not the connection's
     # own name -- confirmed live via GET /v1/models, which lists synced
     # models as "llama-cpp/<alias>" regardless of the connection's name.

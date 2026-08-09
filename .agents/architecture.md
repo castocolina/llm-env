@@ -144,6 +144,30 @@ by hand (`Add Connection` on a provider's page, e.g.
   404s with `model_not_found`; the correct model ID is
   `llama-cpp/<alias>`, confirmed via `GET /v1/models`.
 
+### check-server.sh's failure isolation
+
+`check-server.sh` runs its checks in a fixed, dependency-aware order so a
+FAIL points at one layer, not several:
+
+1. **Health** — if `/health` doesn't respond, the whole script exits
+   immediately (nothing downstream can possibly pass either).
+2. **Authentication**, **Model listing**, **Completions** — probe
+   `llm-server` directly (bypassing OmniRoute), per enabled model alias.
+3. **OmniRoute login**, **OmniRoute providers** — if login fails,
+   "OmniRoute providers" is reported as a skip, not re-attempted.
+4. **OmniRoute completions** — per alias, but only for aliases whose
+   direct **Completions** check (step 2) already passed. If a model's
+   direct completion already failed, the OmniRoute completion for that
+   same alias is a `SKIP`, not a second, redundant `FAIL` — OmniRoute
+   proxies to the same `llm-server`, so re-testing a model already known
+   to be broken would just print a second symptom of the same root cause.
+
+Net effect: a `FAIL` under "Completions" (not "OmniRoute completions")
+means the model or `llm-server` itself is broken, independent of
+OmniRoute. A `FAIL` under "OmniRoute completions" (with the matching
+"Completions" row showing PASS) means the model and `llm-server` are fine
+and the problem is specifically in OmniRoute's routing/provider config.
+
 ## Invariants
 
 - `runtime.models_max` is a validated residency limit between 1 and the enabled
