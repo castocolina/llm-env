@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import stat
 import subprocess
 
@@ -1761,6 +1762,7 @@ def run_lifecycle_script(
     parallel_slots: int = 1,
     sampling_temperature: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    omniroute_port: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -1792,7 +1794,8 @@ def run_lifecycle_script(
         "  vram_total_mib: 0\n"
         "  reserve_mode: auto\n"
         "  reserve_floor_mib: 1024\n"
-        "runtime:\n"
+        + (f"omniroute:\n  port: {omniroute_port}\n" if omniroute_port is not None else "")
+        + "runtime:\n"
         "  models_max: 1\n"
         f"  parallel_slots: {parallel_slots}\n"
         "  ubatch_size: 512\n"
@@ -3459,10 +3462,21 @@ def test_start_retains_an_existing_key(tmp_path: pathlib.Path) -> None:
 def test_start_warns_when_omniroute_is_unreachable_but_still_succeeds(
     tmp_path: pathlib.Path,
 ) -> None:
+    """Must not depend on the default OmniRoute port (20128) actually being
+    closed on the machine running the tests -- a dev box with the real
+    stack up has something genuinely listening there, which previously
+    made wait_for_tcp_port() succeed for real and this test flake/fail
+    outside a fully isolated CI sandbox. Bind an ephemeral port instead, so
+    "unreachable" is guaranteed true regardless of the host's own state."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
     result, _config, _calls = run_lifecycle_script(
         tmp_path,
         "scripts/start.sh",
         env_overrides={"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1"},
+        omniroute_port=unreachable_port,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OmniRoute did not become reachable" in result.stdout + result.stderr
