@@ -28,7 +28,7 @@ def compute_resource_limits(
     host_cpu_count: int,
     host_memory_total_mib: int,
     memory_ceiling_pct: float = 100,
-    memory_ceiling_floor_mib: int = 6144,
+    memory_ceiling_floor_pct: float = 20,
 ) -> dict[str, Any]:
     cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED
     memory_floor_mib = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB
@@ -46,12 +46,14 @@ def compute_resource_limits(
         )
     # pylib/compose.py omits `mem_limit` entirely when memory_mib is
     # falsy/0, which would silently leave the container fully uncapped for
-    # a valid-but-tiny memory_ceiling_pct. memory_ceiling_floor_mib's
-    # real, user-facing default (10 GiB) lives in models.yml via
-    # migrate_config; the 6 GiB default here is only a code-level safety
-    # net for callers that don't thread the configured value through.
+    # a valid-but-tiny memory_ceiling_pct. A percentage-of-total floor can
+    # never exceed the total it's a percentage of, so it's structurally
+    # impossible for this floor to be a no-op on any host. The real,
+    # user-facing default (30%) lives in models.yml via migrate_config; the
+    # 20% default here is only a code-level safety net for callers that
+    # don't thread the configured value through.
     memory_ceiling_mib = max(
-        memory_ceiling_floor_mib,
+        round(host_memory_total_mib * memory_ceiling_floor_pct / 100),
         round(host_memory_total_mib * memory_ceiling_pct / 100),
     )
     llm_server_memory_mib = min(

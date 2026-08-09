@@ -50,14 +50,16 @@ vram_total="$(echo "$gpu" | jq -r '.vram_total_mib')"
 vram_used="$(echo "$gpu" | jq -r '.vram_used_mib')"
 vram_free="$((vram_total - vram_used))"
 ceiling_pct="$(yq -r '.gpu.vram_budget_ceiling_pct // 95' "$CONFIG_PATH")"
-# The 6144 fallback here is only a code-level safety net for a config that
-# bypassed migrate_config (which backfills the real, 10240 default) — see
-# Global Constraints. A valid-but-tiny vram_budget_ceiling_pct must not
-# leave llm-server planning against a near-zero VRAM ceiling either way.
-ceiling_floor_mib="$(yq -r '.gpu.vram_budget_ceiling_floor_mib // 6144' "$CONFIG_PATH")"
-vram_budget_ceiling_mib="$(jq -n --argjson free "$vram_free" --argjson pct "$ceiling_pct" \
-    --argjson floor "$ceiling_floor_mib" \
-    '[(($free * $pct / 100) | round), $floor] | max')"
+# The 20% fallback here is only a code-level safety net for a config that
+# bypassed migrate_config (which backfills the real, 30% default) — see
+# Global Constraints. The ceiling is a percentage of vram_total (not
+# vram_free) so it is a stable hardware safety margin, independent of
+# what else is using the GPU right now; live contention is handled
+# separately by compute_budget()'s `reserve`.
+ceiling_floor_pct="$(yq -r '.gpu.vram_budget_ceiling_floor_pct // 20' "$CONFIG_PATH")"
+vram_budget_ceiling_mib="$(jq -n --argjson total "$vram_total" --argjson pct "$ceiling_pct" \
+    --argjson floor_pct "$ceiling_floor_pct" \
+    '[(($total * $pct / 100) | round), (($total * $floor_pct / 100) | round)] | max')"
 log_info "selected ${pci} with ${vram_total} MiB total, ${vram_used} MiB used, ${vram_free} MiB free"
 
 log_step "Step 3/8  Selecting models"

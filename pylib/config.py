@@ -75,7 +75,7 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             llm_server_resources.setdefault("cpus", 0)
             llm_server_resources.setdefault("memory_mib", 0)
             llm_server_resources.setdefault("memory_ceiling_pct", 46)
-            llm_server_resources.setdefault("memory_ceiling_floor_mib", 10240)
+            llm_server_resources.setdefault("memory_ceiling_floor_pct", 30)
         omniroute_resources = resources.setdefault("omniroute", {})
         if isinstance(omniroute_resources, dict):
             omniroute_resources.setdefault("cpus", 1)
@@ -92,7 +92,7 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         return cfg
     gpu.setdefault("vram_budget_ceiling_pct", 95)
     gpu.setdefault("vram_budget_ceiling_mib", gpu.get("vram_total_mib", 0))
-    gpu.setdefault("vram_budget_ceiling_floor_mib", 10240)
+    gpu.setdefault("vram_budget_ceiling_floor_pct", 30)
     benchmark = gpu.get("benchmark")
     if isinstance(benchmark, dict):
         benchmark.pop("rocm", None)
@@ -188,10 +188,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         _positive_int(ceiling_mib) or ceiling_mib == 0
     ):
         errors.append("gpu.vram_budget_ceiling_mib must be a non-negative integer")
-    ceiling_floor_mib = gpu.get("vram_budget_ceiling_floor_mib", 10240)
-    if isinstance(ceiling_floor_mib, bool) or not _positive_int(ceiling_floor_mib):
+    ceiling_floor_pct = gpu.get("vram_budget_ceiling_floor_pct", 30)
+    if isinstance(ceiling_floor_pct, bool) or not (
+        _finite_number(ceiling_floor_pct) and 0 < ceiling_floor_pct <= 100
+    ):
         errors.append(
-            "gpu.vram_budget_ceiling_floor_mib must be a positive integer"
+            "gpu.vram_budget_ceiling_floor_pct must be a finite number "
+            "greater than 0 and at most 100"
         )
 
     runtime = cfg["runtime"]
@@ -232,15 +235,16 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         "resources.llm_server.memory_ceiling_pct must be a "
                         "finite number greater than 0 and at most 100"
                     )
-                memory_ceiling_floor_mib = llm_server_resources.get(
-                    "memory_ceiling_floor_mib", 10240
+                memory_ceiling_floor_pct = llm_server_resources.get(
+                    "memory_ceiling_floor_pct", 30
                 )
-                if isinstance(memory_ceiling_floor_mib, bool) or not _positive_int(
-                    memory_ceiling_floor_mib
+                if isinstance(memory_ceiling_floor_pct, bool) or not (
+                    _finite_number(memory_ceiling_floor_pct)
+                    and 0 < memory_ceiling_floor_pct <= 100
                 ):
                     errors.append(
-                        "resources.llm_server.memory_ceiling_floor_mib must be "
-                        "a positive integer"
+                        "resources.llm_server.memory_ceiling_floor_pct must be a "
+                        "finite number greater than 0 and at most 100"
                     )
             omniroute_resources = resources.get("omniroute", {})
             if not isinstance(omniroute_resources, dict):

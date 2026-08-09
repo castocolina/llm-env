@@ -83,16 +83,16 @@ def test_memory_ceiling_does_not_affect_the_insufficient_memory_floor_check():
         )
 
 
-def test_memory_ceiling_floor_defaults_to_6_gib_when_unspecified():
+def test_memory_ceiling_floor_defaults_to_20_pct_when_unspecified():
     """Code-level safety net only — the real, user-facing floor lives in
-    models.yml via migrate_config's 10 GiB default (see the config tests
+    models.yml via migrate_config's 30% default (see the config tests
     below); this proves compute_resource_limits() itself never lets an
     unspecified floor disappear, even if a caller forgets to thread the
     config value through."""
     result = compute_resource_limits(
         host_cpu_count=8, host_memory_total_mib=32768, memory_ceiling_pct=0.001
     )
-    assert result["llm_server"]["memory_mib"] == 6144
+    assert result["llm_server"]["memory_mib"] == round(32768 * 20 / 100)
 
 
 def test_memory_ceiling_floors_at_the_configured_value_instead_of_rounding_to_zero():
@@ -100,12 +100,14 @@ def test_memory_ceiling_floors_at_the_configured_value_instead_of_rounding_to_ze
     must not round down to a near-zero cap — pylib/compose.py omits
     `mem_limit` entirely when memory_mib is falsy, which would silently
     uncap the container. Unfloored, 32768 * 0.001 / 100 rounds to 0;
-    floored at the configured 10240, the ceiling becomes exactly that, not
-    some other small percentage-only value."""
+    floored at the configured 30%, the ceiling becomes exactly
+    round(32768 * 30 / 100), not some other small percentage-only value.
+    A percentage-of-total floor can never exceed the total, unlike the old
+    fixed-MiB floor which could on a small enough host."""
     result = compute_resource_limits(
         host_cpu_count=8,
         host_memory_total_mib=32768,
         memory_ceiling_pct=0.001,
-        memory_ceiling_floor_mib=10240,
+        memory_ceiling_floor_pct=30,
     )
-    assert result["llm_server"]["memory_mib"] == 10240
+    assert result["llm_server"]["memory_mib"] == round(32768 * 30 / 100)

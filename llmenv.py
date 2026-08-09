@@ -220,7 +220,7 @@ def cmd_resources(args: argparse.Namespace) -> int:
         host["cpu_count"],
         host["memory_total_mib"],
         llm_server_resources["memory_ceiling_pct"],
-        llm_server_resources["memory_ceiling_floor_mib"],
+        llm_server_resources["memory_ceiling_floor_pct"],
     )
     return emit({"host": host, **limits})
 

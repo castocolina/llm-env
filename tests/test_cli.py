@@ -911,7 +911,7 @@ def test_resources_emits_host_and_llm_server_limits(tmp_path: Path):
     parsed = yaml.safe_load(config.read_text())
     llm_server_resources = parsed.setdefault("resources", {}).setdefault("llm_server", {})
     llm_server_resources["memory_ceiling_pct"] = 10
-    llm_server_resources["memory_ceiling_floor_mib"] = 1
+    llm_server_resources["memory_ceiling_floor_pct"] = 1
     config.write_text(yaml.safe_dump(parsed, sort_keys=False))
 
     result = run("resources", "--config", str(config))
@@ -920,10 +920,12 @@ def test_resources_emits_host_and_llm_server_limits(tmp_path: Path):
         assert payload["host"]["cpu_count"] > 0
         assert payload["llm_server"]["cpus"] >= 0
         host_total_mib = payload["host"]["memory_total_mib"]
-        # floor pinned to 1 MiB (below any realistic 10% of host RAM) so
+        # floor pinned to 1% of host total (below the 10% ceiling pct) so
         # this test proves memory_ceiling_pct reached
         # compute_resource_limits() and isn't masked by the floor.
-        expected_ceiling_mib = max(1, round(host_total_mib * 10 / 100))
+        expected_ceiling_mib = max(
+            round(host_total_mib * 1 / 100), round(host_total_mib * 10 / 100)
+        )
         assert payload["llm_server"]["memory_mib"] <= expected_ceiling_mib
         # A pct this low always caps below the uncapped remainder on any
         # host that clears the floor checks, so this also proves the
@@ -941,21 +943,23 @@ def test_resources_respects_the_configured_memory_ceiling_floor(tmp_path: Path):
     llm_server_resources = parsed.setdefault("resources", {}).setdefault("llm_server", {})
     # A pct tiny enough that, unfloored, it would round to far below the
     # configured floor -- this only passes if the floor is actually read
-    # from config rather than defaulting to 6144.
+    # from config rather than defaulting to the 20% code-level fallback.
     llm_server_resources["memory_ceiling_pct"] = 0.001
-    llm_server_resources["memory_ceiling_floor_mib"] = 9000
+    llm_server_resources["memory_ceiling_floor_pct"] = 30
     config.write_text(yaml.safe_dump(parsed, sort_keys=False))
 
     result = run("resources", "--config", str(config))
     payload = json.loads(result.stdout)
     if result.returncode == 0:
         # Computed relative to the real host's own reported total (like the
-        # neighboring test above), not a bare `== 9000` -- on a small-but-valid
-        # CI host, host_total_mib - memory_floor_mib can be below 9000, in
-        # which case min() keeps the ordinary remainder, not the floor.
+        # neighboring test above), not a bare fixed MiB value -- on a
+        # small-but-valid CI host, host_total_mib - memory_floor_mib can be
+        # below the floor's derived MiB value, in which case min() keeps the
+        # ordinary remainder, not the floor.
         host_total_mib = payload["host"]["memory_total_mib"]
         memory_floor_mib = payload["host_memory_floor_mib"] + payload["omniroute"]["memory_mib"]
-        expected_ceiling_mib = min(host_total_mib - memory_floor_mib, 9000)
+        floored_ceiling_mib = round(host_total_mib * 30 / 100)
+        expected_ceiling_mib = min(host_total_mib - memory_floor_mib, floored_ceiling_mib)
         assert payload["llm_server"]["memory_mib"] == expected_ceiling_mib
     else:
         assert result.returncode == 1

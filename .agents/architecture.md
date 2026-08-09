@@ -190,12 +190,19 @@ and the problem is specifically in OmniRoute's routing/provider config.
 - The `llm-env-local` OmniRoute provider connection is owned by this tool —
   never renamed or deleted by hand, or `make start` will create a duplicate.
 - `resources.llm_server.memory_ceiling_pct` (default 46) caps `llm-server`'s
-  RAM at that percent of total host RAM, regardless of how much is otherwise
-  free — computed live by `compute_resource_limits()` on every `llmenv
-  resources` call.
-- `gpu.vram_budget_ceiling_mib` caps VRAM planning at `gpu.vram_budget_ceiling_pct`
-  (default 95%) of whatever was free on the dGPU the last time `make setup`
-  ran — a resolved snapshot, not re-measured on every `make start`.
+  RAM at that percent of total host RAM, floored at
+  `memory_ceiling_floor_pct` (default 30%, also of total host RAM) so a
+  tiny configured percentage can never round the cap down to something
+  `pylib/compose.py` treats as "no limit" — computed live by
+  `compute_resource_limits()` on every `llmenv resources` call.
+- `gpu.vram_budget_ceiling_mib` caps VRAM planning at
+  `gpu.vram_budget_ceiling_pct` (default 95%) of the dGPU's total VRAM,
+  floored at `vram_budget_ceiling_floor_pct` (default 30%, also of total)
+  — a resolved snapshot computed once by `make setup`, not re-measured on
+  every `make start`. This is a stable hardware safety margin, independent
+  of what else is using the GPU at any given moment; live VRAM contention
+  (the desktop compositor, other GPU clients) is accounted for separately,
+  at budget-computation time, by `compute_budget()`'s `reserve`.
 
 ## Platform
 

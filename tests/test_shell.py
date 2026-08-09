@@ -497,7 +497,7 @@ def run_setup_with_numbered_selection(
     selection: str,
     *,
     config_text: str | None = None,
-    real_models_select: bool = False,
+    vram_used_mib: int = 2048,
     resources_failure: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run setup against deterministic GPU, model, and Vulkan command stubs."""
@@ -523,10 +523,9 @@ def run_setup_with_numbered_selection(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
-        "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
+        f"  *' detect') printf '%s\\n' '{{\"gpus\":[{{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"vram_used_mib\":{vram_used_mib},\"render_node\":\"renderD128\",\"connected_outputs\":[]}}]}}' ;;\n"
         "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true},{\"alias\":\"ornith\",\"label\":\"Ornith\",\"parameters\":\"9B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":5600000000,\"enabled\":false}]}' ;;\n"
         "  *' models select '*)\n"
-        "    if [ \"$REAL_MODELS_SELECT\" = 1 ]; then exec \"$REAL_UV\" \"$@\"; fi\n"
         "    for arg in \"$@\"; do selected_alias=\"$arg\"; done\n"
         "    SELECTED_ALIAS=\"$selected_alias\" \"$REAL_YQ\" -i \\\n"
         "      '.models[] |= (.enabled = (.alias == strenv(SELECTED_ALIAS))) | .runtime.models_max = 1' \\\n"
@@ -586,7 +585,6 @@ def run_setup_with_numbered_selection(
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "PATH": f"{commands}:/usr/bin:/bin",
-        "REAL_MODELS_SELECT": "1" if real_models_select else "0",
         "REAL_UV": shutil.which("uv") or "uv",
         "REAL_YQ": real_yq,
     }
@@ -615,16 +613,43 @@ def test_setup_gpu_rows_include_measured_used_and_free_vram(
     assert "selected 0000:03:00.0 with 16384 MiB total, 2048 MiB used, 14336 MiB free" in result.stdout
 
 
-def test_setup_persists_a_vram_ceiling_computed_from_free_vram_at_setup_time(
+def test_setup_persists_a_vram_ceiling_computed_from_total_vram_at_setup_time(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Ceiling = pct * (total - used) at the moment setup ran, not of total."""
+    """Ceiling = pct * total at the moment setup ran, not of free VRAM."""
     result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
 
     assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, default pct 95
-    # (16384 - 2048) * 95 / 100 = 13619.2 -> round to 13619
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "13619"
+    # fixture GPU: vram_total_mib=16384, default pct 95
+    # 16384 * 95 / 100 = 15564.8 -> round to 15565
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "15565"
+
+
+def test_setup_vram_ceiling_does_not_double_count_live_vram_usage(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression guard for the double-counting fix: the ceiling must derive
+    from vram_total alone, not vram_total - vram_used. Live VRAM contention
+    is already handled separately, downstream, by compute_budget()'s
+    `reserve`. Changing vram_used_mib in the fixture (with vram_total_mib
+    held fixed) must not change the computed ceiling."""
+    tmp_path_low = tmp_path / "low"
+    tmp_path_low.mkdir()
+    tmp_path_high = tmp_path / "high"
+    tmp_path_high.mkdir()
+    result_low_usage, _, config_low = run_setup_with_numbered_selection(
+        tmp_path_low, "1\n1\n2\n", vram_used_mib=0
+    )
+    result_high_usage, _, config_high = run_setup_with_numbered_selection(
+        tmp_path_high, "1\n1\n2\n", vram_used_mib=8000
+    )
+
+    assert result_low_usage.returncode == 0, result_low_usage.stderr
+    assert result_high_usage.returncode == 0, result_high_usage.stderr
+    # fixture GPU: vram_total_mib=16384 (unchanged), default pct 95
+    # 16384 * 95 / 100 = 15564.8 -> round to 15565, regardless of vram_used
+    assert yq_value(config_low, ".gpu.vram_budget_ceiling_mib") == "15565"
+    assert yq_value(config_high, ".gpu.vram_budget_ceiling_mib") == "15565"
 
 
 def test_setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default(
@@ -661,21 +686,22 @@ def test_setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default(
     )
 
     assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 80 (not the default 95)
-    # (16384 - 2048) * 80 / 100 = 11468.8 -> round to 11469
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "11469"
+    # fixture GPU: vram_total_mib=16384, pct 80 (not the default 95)
+    # 16384 * 80 / 100 = 13107.2 -> round to 13107
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "13107"
 
 
 def test_setup_floors_the_vram_ceiling_at_the_configured_floor(
     tmp_path: pathlib.Path,
 ) -> None:
     """A tiny configured pct must not leave llm-server planning against a
-    near-zero VRAM ceiling — floored at the configured floor (10 GiB /
-    10240 MiB here, matching migrate_config's real default)."""
+    near-zero VRAM ceiling — floored at the configured floor (30% of total
+    here, matching migrate_config's real default). Unlike the old fixed-MiB
+    floor, a percentage-of-total floor can never exceed vram_total_mib."""
     config_text = (
         "gpu:\n"
         "  vram_budget_ceiling_pct: 1\n"
-        "  vram_budget_ceiling_floor_mib: 10240\n"
+        "  vram_budget_ceiling_floor_pct: 30\n"
         "runtime:\n"
         "  models_max: 0\n"
         "models:\n"
@@ -701,19 +727,21 @@ def test_setup_floors_the_vram_ceiling_at_the_configured_floor(
     )
 
     assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 1
-    # (16384 - 2048) * 1 / 100 = 143.36 -> round 143, floored up to 10240
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "10240"
+    # fixture GPU: vram_total_mib=16384, pct 1
+    # 16384 * 1 / 100 = 163.84 -> round 164, floored up to
+    # 16384 * 30 / 100 = 4915.2 -> round 4915, which is <= vram_total_mib
+    # by construction.
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "4915"
 
 
 def test_setup_floors_the_vram_ceiling_at_the_code_default_when_unconfigured(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Without an explicit vram_budget_ceiling_floor_mib in config (this
+    """Without an explicit vram_budget_ceiling_floor_pct in config (this
     fixture's config_text never sets it, and the uv stub used by
     run_setup_with_numbered_selection doesn't run real migration to
-    backfill the 10240 default either), setup.sh's `// 6144` fallback is
-    the only thing preventing a near-zero VRAM ceiling."""
+    backfill the 30% default either), setup.sh's `// 20` fallback is the
+    only thing preventing a near-zero VRAM ceiling."""
     config_text = (
         "gpu:\n"
         "  vram_budget_ceiling_pct: 1\n"
@@ -742,10 +770,11 @@ def test_setup_floors_the_vram_ceiling_at_the_code_default_when_unconfigured(
     )
 
     assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 1
-    # (16384 - 2048) * 1 / 100 = 143.36 -> round 143, floored up to the
-    # code-level default 6144 (no vram_budget_ceiling_floor_mib in config)
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "6144"
+    # fixture GPU: vram_total_mib=16384, pct 1
+    # 16384 * 1 / 100 = 163.84 -> round 164, floored up to the code-level
+    # default 16384 * 20 / 100 = 3276.8 -> round 3277 (no
+    # vram_budget_ceiling_floor_pct in config)
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "3277"
 
 
 def test_setup_selects_zero_match_vulkan_device_and_persists_config(
@@ -775,7 +804,7 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
         "pci_address": "0000:03:00.0",
         "vram_total_mib": 16384,
         "device_name": 'Fallback Radeon: "safe"',
-        "vram_budget_ceiling_mib": 13619,
+        "vram_budget_ceiling_mib": 15565,
     }
     assert persisted["runtime"]["models_max"] == 1
     assert [model["enabled"] for model in persisted["models"]] == [True, False]
