@@ -61,6 +61,22 @@ fi
 log_step "Rendering the systemd wrapper unit"
 mkdir -p "$(dirname "$WRAPPER_UNIT_PATH")"
 
+# A pre-rename version of this project generated a "llm-mdns.service" unit
+# that published the mDNS hostname record with a literal IP argument
+# (avahi-publish -a -R llm.local <ip>) baked in at start time. That record
+# never updates on a DHCP lease change and silently wins races against the
+# service-record approach below (avahi-publish -s, which has no IP argument
+# and always resolves the host's *current* address) -- observed live as
+# agent clients connecting to a stale IP hours after the real one changed.
+# Not derived from $UNIT_NAME: this is the literal old, retired name.
+legacy_mdns_unit="${HOME}/.config/systemd/user/llm-mdns.service"
+if [ -f "$legacy_mdns_unit" ]; then
+    systemctl --user stop llm-mdns.service 2>/dev/null || true
+    systemctl --user disable llm-mdns.service 2>/dev/null || true
+    rm -f "$legacy_mdns_unit"
+    log_info "removed legacy llm-mdns.service (superseded by ${UNIT_NAME}-mdns.service, which tracks IP changes)"
+fi
+
 mdns_unit="${HOME}/.config/systemd/user/${UNIT_NAME}-mdns.service"
 mdns_wants=""
 if avahi_publish="$(command -v avahi-publish 2>/dev/null)"; then

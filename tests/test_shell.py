@@ -1231,6 +1231,108 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
     assert "ExecStop=podman compose -f docker-compose.yml down" in wrapper_unit.read_text()
 
 
+def test_render_unit_retires_the_legacy_static_ip_mdns_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A pre-rename "llm-mdns.service" publishes its mDNS record with a
+    literal IP baked in at start time (avahi-publish -a -R llm.local <ip>),
+    so it goes stale on any DHCP lease change and can win mDNS resolution
+    races against the current, dynamic-IP-safe llm-server-mdns.service
+    (avahi-publish -s, no IP argument -- always resolves the host's live
+    address). render-unit.sh must retire it on every run."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    home = tmp_path / "home"
+    legacy_unit = home / ".config/systemd/user/llm-mdns.service"
+    legacy_unit.parent.mkdir(parents=True)
+    legacy_unit.write_text(
+        "[Service]\nExecStart=/usr/bin/avahi-publish -a -R llm.local 192.0.2.219\n"
+    )
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8000\n"
+        "  api_key: key\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "gpu:\n"
+        "  backend: vulkan\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "  vram_total_mib: 8192\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
+        "models:\n"
+        "  - alias: test\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
+        "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
+    )
+
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nexit 0\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+    systemctl = commands / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/bash\nprintf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n"
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\nexec \"$REAL_UV\" \"$@\"\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+        "REAL_UV": real_uv,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/render-unit.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not legacy_unit.exists()
+    recorded = calls.read_text()
+    assert "systemctl --user stop llm-mdns.service" in recorded
+    assert "systemctl --user disable llm-mdns.service" in recorded
+
+
 def test_render_unit_wrapper_unit_omits_install_section_by_default(
     tmp_path: pathlib.Path,
 ) -> None:
