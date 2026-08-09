@@ -615,6 +615,139 @@ def test_setup_gpu_rows_include_measured_used_and_free_vram(
     assert "selected 0000:03:00.0 with 16384 MiB total, 2048 MiB used, 14336 MiB free" in result.stdout
 
 
+def test_setup_persists_a_vram_ceiling_computed_from_free_vram_at_setup_time(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Ceiling = pct * (total - used) at the moment setup ran, not of total."""
+    result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
+
+    assert result.returncode == 0, result.stderr
+    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, default pct 95
+    # (16384 - 2048) * 95 / 100 = 13619.2 -> round to 13619
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "13619"
+
+
+def test_setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression guard: a hardcoded 95 instead of reading
+    gpu.vram_budget_ceiling_pct would still pass every other ceiling test in
+    this plan, since they all use the default 95%."""
+    config_text = (
+        "gpu:\n"
+        "  vram_budget_ceiling_pct: 80\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+    )
+    result, _, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1\n2\n", config_text=config_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 80 (not the default 95)
+    # (16384 - 2048) * 80 / 100 = 11468.8 -> round to 11469
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "11469"
+
+
+def test_setup_floors_the_vram_ceiling_at_the_configured_floor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A tiny configured pct must not leave llm-server planning against a
+    near-zero VRAM ceiling — floored at the configured floor (10 GiB /
+    10240 MiB here, matching migrate_config's real default)."""
+    config_text = (
+        "gpu:\n"
+        "  vram_budget_ceiling_pct: 1\n"
+        "  vram_budget_ceiling_floor_mib: 10240\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+    )
+    result, _, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1\n2\n", config_text=config_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 1
+    # (16384 - 2048) * 1 / 100 = 143.36 -> round 143, floored up to 10240
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "10240"
+
+
+def test_setup_floors_the_vram_ceiling_at_the_code_default_when_unconfigured(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Without an explicit vram_budget_ceiling_floor_mib in config (this
+    fixture's config_text never sets it, and the uv stub used by
+    run_setup_with_numbered_selection doesn't run real migration to
+    backfill the 10240 default either), setup.sh's `// 6144` fallback is
+    the only thing preventing a near-zero VRAM ceiling."""
+    config_text = (
+        "gpu:\n"
+        "  vram_budget_ceiling_pct: 1\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+    )
+    result, _, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1\n2\n", config_text=config_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    # fixture GPU: vram_total_mib=16384, vram_used_mib=2048, pct 1
+    # (16384 - 2048) * 1 / 100 = 143.36 -> round 143, floored up to the
+    # code-level default 6144 (no vram_budget_ceiling_floor_mib in config)
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "6144"
+
+
 def test_setup_selects_zero_match_vulkan_device_and_persists_config(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -642,8 +775,7 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
         "pci_address": "0000:03:00.0",
         "vram_total_mib": 16384,
         "device_name": 'Fallback Radeon: "safe"',
-        # vram_budget_ceiling_mib added by Task 4 — leave this assertion as
-        # today's shape for now; Task 4's own steps update it.
+        "vram_budget_ceiling_mib": 13619,
     }
     assert persisted["runtime"]["models_max"] == 1
     assert [model["enabled"] for model in persisted["models"]] == [True, False]

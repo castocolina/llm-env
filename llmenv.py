@@ -202,6 +202,10 @@ def cmd_budget(args: argparse.Namespace) -> int:
         models_max=runtime["models_max"],
         cache_type_k=runtime["cache_type_k"],
         cache_type_v=runtime["cache_type_v"],
+        # `or None` folds both "key absent" (None from .get()) and a
+        # configured `0` into the same "uncapped" sentinel compute_budget()
+        # already understands, instead of letting a literal 0 through.
+        vram_budget_ceiling_mib=cfg["gpu"].get("vram_budget_ceiling_mib") or None,
     )
     result["compositor_on_this_gpu"] = compositor_used > 0
     result["models_max"] = cfg["runtime"]["models_max"]

@@ -157,6 +157,38 @@ def test_budget_feasible_when_models_fit():
     assert result["available_mib"] == 16304 - 1024 - SPIKE_HEADROOM_MIB
 
 
+def test_vram_ceiling_below_total_reduces_available_mib():
+    uncapped = compute_budget(
+        vram_total_mib=16304,
+        compositor_used_mib=300,
+        reserve_floor_mib=1024,
+        model_costs=[cost("a", 7305, 640)],
+        models_max=1,
+    )
+    capped = compute_budget(
+        vram_total_mib=16304,
+        compositor_used_mib=300,
+        reserve_floor_mib=1024,
+        model_costs=[cost("a", 7305, 640)],
+        models_max=1,
+        vram_budget_ceiling_mib=13619,
+    )
+    assert capped["available_mib"] == 13619 - 1024 - SPIKE_HEADROOM_MIB
+    assert capped["available_mib"] < uncapped["available_mib"]
+
+
+def test_vram_ceiling_above_total_is_a_no_op():
+    result = compute_budget(
+        vram_total_mib=16304,
+        compositor_used_mib=300,
+        reserve_floor_mib=1024,
+        model_costs=[cost("a", 7305, 640)],
+        models_max=1,
+        vram_budget_ceiling_mib=20000,
+    )
+    assert result["available_mib"] == 16304 - 1024 - SPIKE_HEADROOM_MIB
+
+
 def test_budget_uses_measurement_when_above_floor():
     result = compute_budget(
         vram_total_mib=16304,

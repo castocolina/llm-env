@@ -822,6 +822,78 @@ def test_cmd_budget_passes_configured_models_max(tmp_path, monkeypatch):
     assert captured["models_max"] == 1
 
 
+def test_budget_respects_the_configured_vram_ceiling(tmp_path, monkeypatch):
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["gpu"]["vram_budget_ceiling_mib"] = 100
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    captured = {}
+
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(llmenv, "_model_costs", lambda config, path: [{"alias": "a"}])
+
+    def fake_compute_budget(**kwargs):
+        captured.update(kwargs)
+        return {"feasible": True, "available_mib": 100}
+
+    monkeypatch.setattr(llmenv, "compute_budget", fake_compute_budget)
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+
+    assert result == 0
+    assert captured["vram_budget_ceiling_mib"] == 100
+
+
+def test_budget_treats_a_configured_zero_vram_ceiling_as_uncapped(tmp_path, monkeypatch):
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["gpu"]["vram_budget_ceiling_mib"] = 0
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    captured = {}
+
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(llmenv, "_model_costs", lambda config, path: [{"alias": "a"}])
+
+    def fake_compute_budget(**kwargs):
+        captured.update(kwargs)
+        return {"feasible": True, "available_mib": 100}
+
+    monkeypatch.setattr(llmenv, "compute_budget", fake_compute_budget)
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+
+    assert result == 0
+    # A configured 0 must reach compute_budget() as None (uncapped), never
+    # as a literal 0 — passing 0 straight through would make
+    # compute_budget()'s min(vram_total_mib, 0) == 0, producing a negative
+    # available_mib instead of the documented "no cap" behavior.
+    assert captured["vram_budget_ceiling_mib"] is None
+
+
 def test_classify_transcript_emits_an_excerpt(tmp_path):
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"error": "boom"}) + "\n")

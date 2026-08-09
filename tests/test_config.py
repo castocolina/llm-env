@@ -39,6 +39,9 @@ def make_cfg(**overrides):
             "vram_total_mib": 16304,
             "reserve_mode": "auto",
             "reserve_floor_mib": 1024,
+            "vram_budget_ceiling_pct": 95,
+            "vram_budget_ceiling_mib": 16304,
+            "vram_budget_ceiling_floor_mib": 10240,
             "benchmark": {
                 "vulkan": {
                     "pp_tps": None,
@@ -646,6 +649,62 @@ def test_validate_config_rejects_invalid_memory_ceiling_floor_mib(value):
     )
     errors = validate_config(cfg)
     assert any("memory_ceiling_floor_mib" in error for error in errors)
+
+
+def test_migrate_config_adds_default_vram_budget_ceiling():
+    cfg = make_cfg()
+    del cfg["gpu"]["vram_budget_ceiling_pct"]
+    del cfg["gpu"]["vram_budget_ceiling_mib"]
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["gpu"]["vram_budget_ceiling_pct"] == 95
+    assert migrated["gpu"]["vram_budget_ceiling_mib"] == cfg["gpu"]["vram_total_mib"]
+
+
+def test_migrate_config_preserves_existing_vram_budget_ceiling():
+    cfg = make_cfg()
+    cfg["gpu"]["vram_budget_ceiling_pct"] = 80
+    cfg["gpu"]["vram_budget_ceiling_mib"] = 12000
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["gpu"]["vram_budget_ceiling_pct"] == 80
+    assert migrated["gpu"]["vram_budget_ceiling_mib"] == 12000
+
+
+@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
+def test_validate_config_rejects_invalid_vram_ceiling_pct(value):
+    cfg = make_cfg()
+    cfg["gpu"]["vram_budget_ceiling_pct"] = value
+    errors = validate_config(cfg)
+    assert any("vram_budget_ceiling_pct" in error for error in errors)
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, "lots", True, False])
+def test_validate_config_rejects_invalid_vram_ceiling_mib(value):
+    cfg = make_cfg()
+    cfg["gpu"]["vram_budget_ceiling_mib"] = value
+    errors = validate_config(cfg)
+    assert any("vram_budget_ceiling_mib" in error for error in errors)
+
+
+def test_migrate_config_adds_default_vram_budget_ceiling_floor_mib():
+    cfg = make_cfg()
+    del cfg["gpu"]["vram_budget_ceiling_floor_mib"]
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["gpu"]["vram_budget_ceiling_floor_mib"] == 10240
+
+
+def test_migrate_config_preserves_existing_vram_budget_ceiling_floor_mib():
+    cfg = make_cfg()
+    cfg["gpu"]["vram_budget_ceiling_floor_mib"] = 2048
+    migrated = config_module.migrate_config(copy.deepcopy(cfg))
+    assert migrated["gpu"]["vram_budget_ceiling_floor_mib"] == 2048
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "lots", True])
+def test_validate_config_rejects_invalid_vram_ceiling_floor_mib(value):
+    cfg = make_cfg()
+    cfg["gpu"]["vram_budget_ceiling_floor_mib"] = value
+    errors = validate_config(cfg)
+    assert any("vram_budget_ceiling_floor_mib" in error for error in errors)
 
 
 def test_validate_config_rejects_infinite_llm_server_cpus():

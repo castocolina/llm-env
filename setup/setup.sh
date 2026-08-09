@@ -49,6 +49,15 @@ pci="$(echo "$gpu" | jq -r '.pci_address')"
 vram_total="$(echo "$gpu" | jq -r '.vram_total_mib')"
 vram_used="$(echo "$gpu" | jq -r '.vram_used_mib')"
 vram_free="$((vram_total - vram_used))"
+ceiling_pct="$(yq -r '.gpu.vram_budget_ceiling_pct // 95' "$CONFIG_PATH")"
+# The 6144 fallback here is only a code-level safety net for a config that
+# bypassed migrate_config (which backfills the real, 10240 default) — see
+# Global Constraints. A valid-but-tiny vram_budget_ceiling_pct must not
+# leave llm-server planning against a near-zero VRAM ceiling either way.
+ceiling_floor_mib="$(yq -r '.gpu.vram_budget_ceiling_floor_mib // 6144' "$CONFIG_PATH")"
+vram_budget_ceiling_mib="$(jq -n --argjson free "$vram_free" --argjson pct "$ceiling_pct" \
+    --argjson floor "$ceiling_floor_mib" \
+    '[(($free * $pct / 100) | round), $floor] | max')"
 log_info "selected ${pci} with ${vram_total} MiB total, ${vram_used} MiB used, ${vram_free} MiB free"
 
 log_step "Step 3/8  Selecting models"
@@ -108,10 +117,12 @@ else
     device_name="$(echo "$candidates" | jq -r --argjson index "$device_choice" '.[$index - 1].name')"
 fi
 PCI_ADDRESS="$pci" VRAM_TOTAL_MIB="$vram_total" DEVICE_NAME="$device_name" \
+  VRAM_BUDGET_CEILING_MIB="$vram_budget_ceiling_mib" \
   yq -i '
     .gpu.pci_address = strenv(PCI_ADDRESS) |
     .gpu.vram_total_mib = (strenv(VRAM_TOTAL_MIB) | tonumber) |
-    .gpu.device_name = strenv(DEVICE_NAME)
+    .gpu.device_name = strenv(DEVICE_NAME) |
+    .gpu.vram_budget_ceiling_mib = (strenv(VRAM_BUDGET_CEILING_MIB) | tonumber)
   ' "$CONFIG_PATH"
 chmod 600 "$CONFIG_PATH"
 log_info "prepared ${device_name} for ${pci}"

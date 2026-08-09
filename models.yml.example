@@ -16,6 +16,9 @@ gpu:
   vram_total_mib: 0
   reserve_mode: auto
   reserve_floor_mib: 1024
+  vram_budget_ceiling_pct: 95
+  vram_budget_ceiling_mib: 0
+  vram_budget_ceiling_floor_mib: 10240
   benchmark:
     vulkan:
       pp_tps: null

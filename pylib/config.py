@@ -90,6 +90,9 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
         return cfg
+    gpu.setdefault("vram_budget_ceiling_pct", 95)
+    gpu.setdefault("vram_budget_ceiling_mib", gpu.get("vram_total_mib", 0))
+    gpu.setdefault("vram_budget_ceiling_floor_mib", 10240)
     benchmark = gpu.get("benchmark")
     if isinstance(benchmark, dict):
         benchmark.pop("rocm", None)
@@ -172,6 +175,24 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append("gpu.vram_total_mib must be an integer")
     if gpu.get("reserve_mode") not in ("auto", "fixed"):
         errors.append("gpu.reserve_mode must be 'auto' or 'fixed'")
+    ceiling_pct = gpu.get("vram_budget_ceiling_pct", 95)
+    if isinstance(ceiling_pct, bool) or not (
+        _finite_number(ceiling_pct) and 0 < ceiling_pct <= 100
+    ):
+        errors.append(
+            "gpu.vram_budget_ceiling_pct must be a finite number greater "
+            "than 0 and at most 100"
+        )
+    ceiling_mib = gpu.get("vram_budget_ceiling_mib", gpu.get("vram_total_mib", 0))
+    if isinstance(ceiling_mib, bool) or not (
+        _positive_int(ceiling_mib) or ceiling_mib == 0
+    ):
+        errors.append("gpu.vram_budget_ceiling_mib must be a non-negative integer")
+    ceiling_floor_mib = gpu.get("vram_budget_ceiling_floor_mib", 10240)
+    if isinstance(ceiling_floor_mib, bool) or not _positive_int(ceiling_floor_mib):
+        errors.append(
+            "gpu.vram_budget_ceiling_floor_mib must be a positive integer"
+        )
 
     runtime = cfg["runtime"]
     for key in ("models_max", "parallel_slots", "ubatch_size"):
