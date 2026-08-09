@@ -189,6 +189,13 @@ and the problem is specifically in OmniRoute's routing/provider config.
   treats unproved cleanup as a model result.
 - The `llm-env-local` OmniRoute provider connection is owned by this tool —
   never renamed or deleted by hand, or `make start` will create a duplicate.
+- `resources.llm_server.memory_ceiling_pct` (default 46) caps `llm-server`'s
+  RAM at that percent of total host RAM, regardless of how much is otherwise
+  free — computed live by `compute_resource_limits()` on every `llmenv
+  resources` call.
+- `gpu.vram_budget_ceiling_mib` caps VRAM planning at `gpu.vram_budget_ceiling_pct`
+  (default 95%) of whatever was free on the dGPU the last time `make setup`
+  ran — a resolved snapshot, not re-measured on every `make start`.
 
 ## Platform
 
