@@ -1232,6 +1232,20 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
     assert "ExecStop=podman compose -f docker-compose.yml down" in wrapper_unit.read_text()
 
 
+def test_render_unit_copies_presets_ini_to_the_inspect_dir(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _wrapper_unit = run_render_unit_with_legacy_rocm_config(tmp_path)
+
+    presets_path = tmp_path / "home" / ".config/llm-env/presets.ini"
+    compose_inspect_dir = tmp_path / "compose-inspect"
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    inspect_copy = compose_inspect_dir / "presets.ini"
+    assert inspect_copy.is_file()
+    assert inspect_copy.read_text() == presets_path.read_text()
+
+
 def test_render_unit_retires_the_legacy_static_ip_mdns_unit(
     tmp_path: pathlib.Path,
 ) -> None:

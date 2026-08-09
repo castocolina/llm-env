@@ -42,6 +42,12 @@ llmenv --config "$CONFIG_PATH" presets \
     --models-dir /models --device "$device" --output "$presets_path" >/dev/null
 log_info "wrote ${presets_path}"
 
+if [ -f "$presets_path" ]; then
+    mkdir -p "$COMPOSE_INSPECT_DIR"
+    cp "$presets_path" "${COMPOSE_INSPECT_DIR}/presets.ini"
+    log_info "wrote ${COMPOSE_INSPECT_DIR}/presets.ini (inspection copy)"
+fi
+
 log_step "Rendering the compose file"
 llmenv --config "$CONFIG_PATH" render-compose \
     --models-dir "$MODELS_DIR" --presets-path "$presets_path" --output "$COMPOSE_FILE" >/dev/null
