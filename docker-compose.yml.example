@@ -1,0 +1,83 @@
+# NOT read by any script. This is a static reference showing the shape of
+# the compose file llm-env actually generates -- see pylib/compose.py
+# (render_compose) for the generator and .agents/architecture.md for the
+# full container lifecycle and persistence explanation.
+#
+# The real file is regenerated on every `make start` at
+# ~/.config/llm-env/docker-compose.yml, and a read-only copy of that exact
+# render is also left at ./tmp/docker-compose.yml (gitignored) so you can
+# inspect or diff what was actually produced without leaving the repo.
+#
+# Values below come from `models.yml.example`; your real render will differ
+# (real image, real port, real API key, absolute paths on this machine).
+services:
+  llm-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    container_name: llm-server
+    devices:
+    - /dev/dri:/dev/dri
+    volumes:
+    # Bind mounts, read-only: host directories, not managed by podman.
+    # Deleting/recreating this container never touches host content; killing
+    # the container or rebooting the host does not lose anything here
+    # either -- there is nothing container-owned to lose.
+    - /home/YOU/llm-workspace/models:/models:ro,z
+    - /home/YOU/.config/llm-env/presets.ini:/etc/llama/presets.ini:ro,z
+    ports:
+    - 8000:8000
+    environment:
+      LLAMA_ARG_MODELS_PRESET: /etc/llama/presets.ini
+      LLAMA_ARG_MODELS_MAX: '1'
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_PORT: '8000'
+      LLAMA_API_KEY: ''
+    command:
+    - --sleep-idle-seconds
+    - '300'
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl -fsS http://127.0.0.1:8000/health || exit 1
+      interval: 10s
+      retries: 30
+      start_period: 20s
+    restart: on-failure
+  omniroute:
+    image: docker.io/diegosouzapw/omniroute:latest
+    container_name: omniroute
+    ports:
+    - 127.0.0.1:20128:20128
+    volumes:
+    # Named volume, podman-managed: OmniRoute's own SQLite/db state
+    # (dashboard password, provider connections, anything you configure by
+    # hand in the dashboard). This SURVIVES container kill, `podman compose
+    # down` (no -v), `systemctl restart`/host reboot, and image upgrades --
+    # it is only destroyed by `podman compose down -v` or `make clean`
+    # (which runs exactly that, and warns you first).
+    - omniroute-data:/app/data
+    environment:
+      PORT: '20128'
+      OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS: 'true'
+      INITIAL_PASSWORD: ''
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - healthcheck.mjs
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 40s
+    depends_on:
+      # Both services join the compose stack's default network, giving
+      # omniroute DNS resolution of "llm-server" -- see
+      # pylib/omniroute.py / llmenv.py's `omniroute provision`, which points
+      # OmniRoute's `llm-env-local` connection at http://llm-server:<port>/v1.
+      llm-server:
+        condition: service_healthy
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1024m
+volumes:
+  omniroute-data: {}

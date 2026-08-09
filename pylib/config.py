@@ -83,7 +83,6 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     if isinstance(omniroute, dict):
         omniroute.setdefault("image", DEFAULT_OMNIROUTE_IMAGE)
         omniroute.setdefault("port", DEFAULT_OMNIROUTE_PORT)
-        omniroute.setdefault("cli_token", "")
         omniroute.setdefault("initial_password", "")
 
     gpu = cfg.get("gpu")
@@ -190,7 +189,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             else:
                 cpus = llm_server_resources.get("cpus", 0)
                 if isinstance(cpus, bool) or not (
-                    isinstance(cpus, (int, float)) and cpus >= 0
+                    _finite_number(cpus) and cpus >= 0
                 ):
                     errors.append(
                         "resources.llm_server.cpus must be a non-negative number"
@@ -207,7 +206,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             else:
                 o_cpus = omniroute_resources.get("cpus", 0)
                 if isinstance(o_cpus, bool) or not (
-                    isinstance(o_cpus, (int, float)) and o_cpus >= 0
+                    _finite_number(o_cpus) and o_cpus >= 0
                 ):
                     errors.append(
                         "resources.omniroute.cpus must be a non-negative number"
@@ -229,9 +228,8 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 errors.append("omniroute.image must be a non-empty string")
             if not _positive_int(omniroute.get("port")):
                 errors.append("omniroute.port must be a positive integer")
-            for key in ("cli_token", "initial_password"):
-                if not isinstance(omniroute.get(key, ""), str):
-                    errors.append(f"omniroute.{key} must be a string")
+            if not isinstance(omniroute.get("initial_password", ""), str):
+                errors.append("omniroute.initial_password must be a string")
 
     models = cfg["models"]
     if not isinstance(models, list) or not models:

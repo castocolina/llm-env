@@ -47,6 +47,17 @@ llmenv --config "$CONFIG_PATH" render-compose \
     --models-dir "$MODELS_DIR" --presets-path "$presets_path" --output "$COMPOSE_FILE" >/dev/null
 log_info "wrote ${COMPOSE_FILE}"
 
+# Kept alongside the repo (gitignored) so the rendered compose file can be
+# inspected or diffed without going to ~/.config/llm-env -- see
+# docker-compose.yml.example for the static, annotated shape it follows.
+# Guarded on existence: harmless no-op under test stubs that skip the real
+# renderer, but always present after a genuine `llmenv render-compose`.
+if [ -f "$COMPOSE_FILE" ]; then
+    mkdir -p "$COMPOSE_INSPECT_DIR"
+    cp "$COMPOSE_FILE" "${COMPOSE_INSPECT_DIR}/docker-compose.yml"
+    log_info "wrote ${COMPOSE_INSPECT_DIR}/docker-compose.yml (inspection copy)"
+fi
+
 log_step "Rendering the systemd wrapper unit"
 mkdir -p "$(dirname "$WRAPPER_UNIT_PATH")"
 

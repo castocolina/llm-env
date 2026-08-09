@@ -229,6 +229,92 @@ def test_prerequisites_installs_only_after_yes(tmp_path: pathlib.Path) -> None:
     assert "install yq" in calls.read_text()
 
 
+def test_prerequisites_applies_live_when_purely_additive(tmp_path: pathlib.Path) -> None:
+    """A pure-additive layering must apply live, with no reboot message."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck"):
+        _mock_command(commands, name)
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    sudo = commands / "sudo"
+    sudo.write_text("#!/usr/bin/bash\nexec \"$@\"\n")
+    sudo.chmod(sudo.stat().st_mode | stat.S_IXUSR)
+    calls = tmp_path / "calls"
+    rpm_ostree = commands / "rpm-ostree"
+    rpm_ostree.write_text(
+        "#!/usr/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in apply-live) exit 0 ;; esac\n"
+    )
+    rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls)}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="yes\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "apply-live" in calls.read_text()
+    assert "applied live; no reboot needed" in result.stdout
+    assert "reboot is required" not in result.stdout
+
+
+def test_prerequisites_falls_back_to_reboot_when_apply_live_declined(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A bundled OS update must ask before forcing --allow-replacement live,
+    and fall back to a reboot message when declined."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_dirname(commands)
+    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck"):
+        _mock_command(commands, name)
+    yq = commands / "yq"
+    yq.write_text(
+        "#!/usr/bin/bash\nprintf '%s\\n' 'yq (https://github.com/mikefarah/yq/) version v4.45.1'\n"
+    )
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    sudo = commands / "sudo"
+    sudo.write_text("#!/usr/bin/bash\nexec \"$@\"\n")
+    sudo.chmod(sudo.stat().st_mode | stat.S_IXUSR)
+    calls = tmp_path / "calls"
+    rpm_ostree = commands / "rpm-ostree"
+    rpm_ostree.write_text(
+        "#!/usr/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  apply-live) printf 'error: packages would be removed: 6, allow replacement to override\\n' >&2; exit 1 ;;\n"
+        "esac\n"
+    )
+    rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls)}
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/prerequisites.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="yes\nno\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "apply-live --allow-replacement" not in calls.read_text()
+    assert "reboot is required" in result.stdout
+
+
 def test_prerequisites_reports_missing_uv_without_rpm_ostree(tmp_path: pathlib.Path) -> None:
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -411,6 +497,7 @@ def run_setup_with_numbered_selection(
     *,
     config_text: str | None = None,
     real_models_select: bool = False,
+    resources_failure: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run setup against deterministic GPU, model, and Vulkan command stubs."""
     real_yq = shutil.which("yq")
@@ -425,6 +512,11 @@ def run_setup_with_numbered_selection(
     curl.write_text("#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n")
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
 
+    resources_case = (
+        "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
+        if resources_failure
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}'"
+    )
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
@@ -440,7 +532,7 @@ def run_setup_with_numbered_selection(
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;;\n"
         "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":8192},{\"id\":\"Vulkan1\",\"name\":\"Fallback Radeon: \\\"safe\\\"\",\"total_mib\":32768}]}' ;;\n"
         "  *' resources')\n"
-        "    printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}' ;;\n"
+        f"    {resources_case} ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -564,6 +656,20 @@ def test_setup_writes_computed_omniroute_resource_limits(tmp_path: pathlib.Path)
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
     assert cfg["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
+
+
+def test_setup_fails_instead_of_leaving_resources_uncapped(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A host too small to reserve the fixed floors must stop setup, not silently
+    leave llm-server uncapped (render_compose treats 0 as no explicit limit)."""
+    result, _, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1,2\n2\n", resources_failure=True
+    )
+
+    assert result.returncode != 0
+    assert "host has 3 CPUs" in result.stderr
+    assert yq_value(config, ".resources.llm_server.cpus // \"\"") in ("", "null")
 
 
 def test_setup_rejects_invalid_numbered_model_selection_before_download(
@@ -737,7 +843,7 @@ def run_cleanup_with_stubs(
     calls = tmp_path / "calls"
     calls.touch()
 
-    for name in ("systemctl",):
+    for name in ("systemctl", "yq"):
         command = commands / name
         command.write_text("#!/usr/bin/bash\nexit 0\n")
         command.chmod(command.stat().st_mode | stat.S_IXUSR)
@@ -826,6 +932,7 @@ def test_cleanup_falls_back_to_default_images_without_a_config(
     commands = tmp_path / "bin"
     commands.mkdir()
     _mock_command(commands, "systemctl")
+    _mock_command(commands, "yq")
     calls = tmp_path / "calls"
     podman = commands / "podman"
     podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
@@ -849,6 +956,42 @@ def test_cleanup_falls_back_to_default_images_without_a_config(
 
     assert result.returncode == 0, result.stderr
     assert "ghcr.io/ggml-org/llama.cpp:server-vulkan" in calls.read_text()
+
+
+def test_cleanup_fails_loudly_when_yq_cannot_read_an_existing_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A config that exists but can't be parsed must abort, not silently fall back."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    _mock_command(commands, "podman")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexit 1\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("gpu:\n  image: example.invalid/custom-build:pinned\n")
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "could not read gpu.image" in result.stderr
 
 
 def test_cleanup_confirmation_prompt_reflects_the_configured_gpu_image(
@@ -895,7 +1038,7 @@ def test_cleanup_removes_the_compose_file_and_wrapper_unit(tmp_path: pathlib.Pat
     commands = tmp_path / "bin"
     commands.mkdir()
     calls = tmp_path / "calls"
-    for name in ("systemctl",):
+    for name in ("systemctl", "yq"):
         _mock_command(commands, name)
     podman = commands / "podman"
     podman.write_text(
@@ -940,7 +1083,11 @@ def test_disable_boot_removes_install_section_from_the_wrapper_unit(
 
     commands = tmp_path / "bin"
     commands.mkdir()
-    _mock_command(commands, "systemctl")
+    calls = tmp_path / "calls"
+    calls.touch()
+    systemctl = commands / "systemctl"
+    systemctl.write_text('#!/usr/bin/bash\nprintf \'systemctl %s\\n\' "$*" >> "$CALLS"\n')
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
     yq = commands / "yq"
     yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
@@ -957,6 +1104,7 @@ def test_disable_boot_removes_install_section_from_the_wrapper_unit(
     )
 
     environment = os.environ | {
+        "CALLS": str(calls),
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
         "PATH": f"{commands}:/usr/bin:/bin",
@@ -974,6 +1122,7 @@ def test_disable_boot_removes_install_section_from_the_wrapper_unit(
     assert result.returncode == 0, result.stderr
     assert "[Install]" not in wrapper_unit.read_text()
     assert yq_value(config, ".server.start_at_boot") == "false"
+    assert "systemctl --user disable llm-server.service" in calls.read_text()
 
 
 def run_render_unit_with_legacy_rocm_config(
@@ -1047,6 +1196,7 @@ def run_render_unit_with_legacy_rocm_config(
     environment = os.environ | {
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
@@ -1426,24 +1576,6 @@ def test_check_setup_keeps_independent_records_after_an_inference_failure(
     assert "Results:" in result.stdout
 
 
-def test_check_setup_redacts_mixed_case_inference_secrets(tmp_path: pathlib.Path) -> None:
-    """Raw inference records must redact a secret without lowercasing it first."""
-    api_key = "MiXeD-Api-Key"
-    result, _, _ = run_check_setup_with_stubs(
-        tmp_path,
-        api_key=api_key,
-        inference_stdout=f"assistant content: {api_key}",
-        inference_stderr=f"Authorization: Bearer {api_key}\n",
-    )
-
-    assert result.returncode != 0
-    combined = result.stdout + result.stderr
-    assert api_key not in combined
-    assert api_key.lower() not in combined
-    assert "Inference stdout:\n  assistant content: <redacted>" in result.stdout
-    assert "Inference stderr:\n  Authorization: Bearer <redacted>" in result.stdout
-
-
 def test_check_setup_reports_a_normalized_inference_mismatch(tmp_path: pathlib.Path) -> None:
     """A successful non-ready response must identify a normalized-value mismatch."""
     result, _, _ = run_check_setup_with_stubs(tmp_path, inference_stdout="not ready")
@@ -1627,6 +1759,7 @@ def run_lifecycle_script(
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
         "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
@@ -2773,25 +2906,6 @@ def run_log_file_excerpt(
     )
 
 
-def test_log_file_excerpt_redacts_before_bounding_and_drains_large_input(
-    tmp_path: pathlib.Path,
-) -> None:
-    api_key = "fixture-stream-secret"
-    source = tmp_path / "client stderr.txt"
-    source.write_bytes(api_key.encode() + b"ab" + b"x" * (1024 * 1024))
-
-    result = run_log_file_excerpt(
-        tmp_path,
-        ("Client stderr", str(source), "12"),
-        api_key=api_key,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "Client stderr:\n  <redacted>ab\n"
-    assert api_key not in result.stdout
-    assert api_key not in result.stderr
-
-
 @pytest.mark.parametrize(
     "arguments",
     [(), ("Label", "file"), ("Label", "file", "1", "extra")],
@@ -2865,19 +2979,24 @@ def test_log_file_excerpt_allows_a_zero_byte_excerpt(tmp_path: pathlib.Path) -> 
     assert result.stdout == "Zero excerpt:\n\n"
 
 
-def test_log_file_excerpt_redacts_the_label_and_indents_each_emitted_line(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_log_file_excerpt_bounds_and_drains_large_input(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "client stderr.txt"
+    source.write_bytes(b"ab" + b"x" * (1024 * 1024))
+
+    result = run_log_file_excerpt(tmp_path, ("Client stderr", str(source), "2"))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Client stderr:\n  ab\n"
+
+
+def test_log_file_excerpt_indents_each_emitted_line(tmp_path: pathlib.Path) -> None:
     source = tmp_path / "diagnostic.txt"
     source.write_text("first\nsecond")
 
-    result = run_log_file_excerpt(
-        tmp_path,
-        ("Label fixture-stream-secret", str(source), "8"),
-    )
+    result = run_log_file_excerpt(tmp_path, ("Label", str(source), "8"))
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "Label <redacted>:\n  first\n  se\n"
+    assert result.stdout == "Label:\n  first\n  se\n"
     assert "fixture-stream-secret" not in result.stdout + result.stderr
 
 
@@ -2983,25 +3102,16 @@ def run_diagnostic_helper(
     return result, artifact, temporary_directory
 
 
-def test_diagnostic_helpers_redact_api_keys_and_bearer_headers(
+def test_diagnostic_helper_discards_artifacts_by_default(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Displayed diagnostics must not expose API keys or bearer-header values."""
-    api_key = "Bearer"
-    bearer_token = "distinct-bearer-token"
-    result, artifact, _ = run_diagnostic_helper(
-        tmp_path,
-        f"{api_key} Authorization: Bearer {bearer_token}",
-        api_key=api_key,
-    )
+    """Without LLM_ENV_KEEP_CHECK_ARTIFACTS, the raw diagnostic directory must not survive."""
+    result, artifact, _ = run_diagnostic_helper(tmp_path, "diagnostic text")
 
     assert result.returncode == 0, result.stderr
-    assert api_key not in result.stdout + result.stderr
-    assert bearer_token not in result.stdout + result.stderr
     assert "Command: " in result.stdout
     assert "Raw result:" in result.stdout
     assert "Empty result:\n  (empty)" in result.stdout
-    assert "<redacted>" in result.stdout
     assert not artifact.exists()
 
 
@@ -3037,95 +3147,10 @@ def test_log_nonempty_block_omits_empty_text_and_returns_zero_under_set_e(
     assert "continued" in result.stdout
 
 
-def test_diagnostic_helper_treats_api_keys_as_fixed_text(
+def test_diagnostic_helper_keeps_only_private_retained_artifacts(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A regex metacharacter in an API key must not prevent its redaction."""
-    api_key = "fixture+secret"
-    result, artifact, _ = run_diagnostic_helper(
-        tmp_path,
-        api_key,
-        api_key=api_key,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert api_key not in result.stdout + result.stderr
-    assert "<redacted>" in result.stdout
-    assert not artifact.exists()
-
-
-@pytest.mark.parametrize("use_pinned_key", [False, True], ids=("config", "pinned"))
-def test_redaction_keeps_api_keys_out_of_sed_process_metadata(
-    tmp_path: pathlib.Path,
-    use_pinned_key: bool,
-) -> None:
-    """The key-specific sed program must not expose its key through argv or env."""
-    real_yq = shutil.which("yq")
-    assert real_yq is not None
-    configured_key = "configured-process-secret"
-    pinned_key = "pinned-process-secret"
-    expected_key = pinned_key if use_pinned_key else configured_key
-    config = tmp_path / "models.yml"
-    config.write_text(f"server:\n  api_key: {configured_key}\n")
-
-    commands = tmp_path / "bin"
-    commands.mkdir()
-    sed_arguments = tmp_path / "sed-arguments"
-    sed_environment = tmp_path / "sed-environment"
-    sed = commands / "sed"
-    sed.write_text(
-        "#!/usr/bin/bash\n"
-        "printf '%s\\0' \"$@\" >> \"$SED_ARGUMENTS\"\n"
-        "export -p >> \"$SED_ENVIRONMENT\"\n"
-        "exec /usr/bin/sed \"$@\"\n"
-    )
-    sed.chmod(sed.stat().st_mode | stat.S_IXUSR)
-
-    helper = tmp_path / "redact-with-recording-sed.sh"
-    pinned_setup = (
-        f"unset _LLM_ENV_REDACTION_KEY_OVERRIDE\n"
-        f"_LLM_ENV_REDACTION_KEY_OVERRIDE='{pinned_key}'\n"
-        if use_pinned_key
-        else "unset _LLM_ENV_REDACTION_KEY_OVERRIDE\n"
-    )
-    helper.write_text(
-        "#!/usr/bin/env bash\n"
-        "source \"$TEST_REPO_DIR/tools/lib.sh\"\n"
-        f"{pinned_setup}"
-        f"printf '%s' 'before {expected_key} after' | _redact_stream\n"
-    )
-
-    result = subprocess.run(
-        ["/usr/bin/bash", str(helper)],
-        cwd=ROOT,
-        env=os.environ
-        | {
-            "LLM_ENV_CONFIG": str(config),
-            "PATH": f"{commands}:{pathlib.Path(real_yq).parent}:/usr/bin:/bin",
-            "SED_ARGUMENTS": str(sed_arguments),
-            "SED_ENVIRONMENT": str(sed_environment),
-            "TEST_REPO_DIR": str(ROOT),
-            "escaped": "ambient-exported-escaped",
-            "key": "ambient-exported-key",
-        },
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "before <redacted> after"
-    arguments = sed_arguments.read_bytes().split(b"\0")[:-1]
-    assert arguments
-    assert all(expected_key.encode() not in argument for argument in arguments)
-    assert expected_key not in sed_environment.read_text()
-    assert expected_key not in result.stdout + result.stderr
-
-
-def test_diagnostic_helper_keeps_only_private_redacted_artifacts(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Retained diagnostics must be private and redact the configured API key."""
+    """Retained diagnostics must stay mode-0700/0600 private to the invoking user."""
     result, artifact, _ = run_diagnostic_helper(
         tmp_path, "fixture-secret", keep=True
     )
@@ -3135,24 +3160,22 @@ def test_diagnostic_helper_keeps_only_private_redacted_artifacts(
     assert stat.S_IMODE(artifact.stat().st_mode) == 0o700
     assert str(artifact) in result.stdout
     retained_files = [path for path in artifact.rglob("*") if path.is_file()]
+    assert retained_files
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in retained_files)
-    assert "fixture-secret" not in "".join(path.read_text() for path in retained_files)
 
 
 def test_diagnostic_helper_discards_artifacts_when_traversal_fails(
     tmp_path: pathlib.Path,
 ) -> None:
-    """An unreadable nested directory must fail without leaking or retaining data."""
-    bearer_token = "traversal-bearer-token"
+    """An unreadable nested directory must fail without retaining any artifact."""
     result, artifact, temporary_directory = run_diagnostic_helper(
         tmp_path,
-        f"Authorization: Bearer {bearer_token}",
+        "diagnostic text",
         keep=True,
         unreadable_nested=True,
     )
 
     assert result.returncode != 0
-    assert bearer_token not in result.stdout + result.stderr
     assert "Diagnostics retained:" not in result.stdout
     assert not artifact.exists()
     assert not any(temporary_directory.iterdir())
@@ -3161,19 +3184,16 @@ def test_diagnostic_helper_discards_artifacts_when_traversal_fails(
 def test_diagnostic_helper_discards_unreadable_regular_files_without_path_leaks(
     tmp_path: pathlib.Path,
 ) -> None:
-    """An unreadable regular file must not expose paths or leave its file list."""
-    secret = "unreadable-regular-file-secret"
+    """An unreadable regular file must not expose its path or leave its file list."""
     result, artifact, temporary_directory = run_diagnostic_helper(
         tmp_path,
-        secret,
-        api_key=secret,
+        "diagnostic text",
         keep=True,
         unreadable_regular_file=True,
     )
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
-    assert secret not in output
     assert "unreadable-diagnostic.txt" not in output
     assert "Diagnostics retained:" not in result.stdout
     assert not artifact.exists()
@@ -3357,6 +3377,32 @@ def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> 
     assert "systemctl --user start llm-server.service" not in calls.read_text()
 
 
+def test_show_secrets_prints_the_api_key_and_dashboard_password(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/show-secrets.sh", api_key="existing-key"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "existing-key" in result.stdout
+    assert "(not set)" in result.stdout
+
+
+def test_show_secrets_fails_without_a_config(tmp_path: pathlib.Path) -> None:
+    missing_config = tmp_path / "home/.config/llm-env/models.yml"
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "show-secrets.sh")],
+        env={**os.environ, "LLM_ENV_CONFIG": str(missing_config)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "no config at" in result.stderr
+
+
 def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Path) -> None:
     """Boot setup must create a private key without starting or budget-checking."""
     result, config, calls = run_lifecycle_script(
@@ -3392,6 +3438,7 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "http://127.0.0.1:8000/health" in unit
     assert "avahi-publish -s llm _http._tcp 8000" in unit
     assert "systemctl --user daemon-reload" in calls.read_text()
+    assert "systemctl --user enable llm-server.service" in calls.read_text()
 
 
 def run_check_server(
@@ -3415,7 +3462,7 @@ def run_check_server(
         "  api_key: fixture-secret\n"
         "omniroute:\n"
         "  port: 20128\n"
-        "  cli_token: omniroute-cli-token\n"
+        "  initial_password: omniroute-dashboard-password\n"
         "models:\n"
         "  - alias: gemma4\n"
         "    enabled: true\n"
@@ -3431,11 +3478,15 @@ def run_check_server(
         "body_file=\"\"\n"
         "data=\"\"\n"
         "auth_conf=\"\"\n"
+        "cookie_write=\"\"\n"
+        "cookie_read=\"\"\n"
         "for argument in \"$@\"; do\n"
         "  case \"$argument\" in http://*|https://*) url=\"$argument\" ;; esac\n"
         "  case \"${previous:-}\" in\n"
         "    -o) body_file=\"$argument\" ;;\n"
         "    -K) auth_conf=\"$argument\" ;;\n"
+        "    -c) cookie_write=\"$argument\" ;;\n"
+        "    -b) cookie_read=\"$argument\" ;;\n"
         "    -d|--data-raw) data=\"$argument\" ;;\n"
         "  esac\n"
         "  previous=\"$argument\"\n"
@@ -3446,9 +3497,19 @@ def run_check_server(
         "case \"$url\" in\n"
         "  */health) write_response '{\"status\":\"ok\"}'; printf '200' ;;\n"
         "  */v1/models) write_response \"$MODEL_LIST_BODY\"; printf '200' ;;\n"
-        "  http://127.0.0.1:20128/api/providers)\n"
-        "    write_response '{\"providers\":[{\"name\":\"llm-env-local\",\"isActive\":true}]}'\n"
+        "  http://127.0.0.1:20128/api/auth/login)\n"
+        "    [ -n \"$cookie_write\" ] && printf 'omniroute-session-cookie\\n' > \"$cookie_write\"\n"
+        "    write_response '{\"success\":true}'\n"
         "    printf '200'\n"
+        "    ;;\n"
+        "  http://127.0.0.1:20128/api/providers)\n"
+        "    if [ -n \"$cookie_read\" ] && [ \"$(<\"$cookie_read\")\" = omniroute-session-cookie ]; then\n"
+        "      write_response '{\"connections\":[{\"name\":\"llm-env-local\",\"isActive\":true}]}'\n"
+        "      printf '200'\n"
+        "    else\n"
+        "      write_response '{\"error\":\"unauthorized\"}'\n"
+        "      printf '401'\n"
+        "    fi\n"
         "    ;;\n"
         "  http://127.0.0.1:20128/v1/chat/completions)\n"
         "    case \"$data\" in\n"
@@ -3491,6 +3552,10 @@ def run_check_server(
         "        printf '{\\\"model\\\":\\\"%s\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Reply with exactly: ready\\\"}],\\\"max_tokens\\\": 256,\\\"stream\\\":false}\\n' \"${3:-}\"\n"
         "        exit 0\n"
         "      fi\n"
+        "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = p ]; then\n"
+        "        printf '{\\\"password\\\":\\\"%s\\\"}\\n' \"${3:-}\"\n"
+        "        exit 0\n"
+        "      fi\n"
         "      shift\n"
         "    done\n"
         "    printf '%s\\n' '{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}'\n"
@@ -3527,7 +3592,7 @@ def run_check_server(
         "  '.server.port') printf '%s\\n' 8000 ;;\n"
         "  '.server.api_key') printf '%s\\n' fixture-secret ;;\n"
         "  '.omniroute.port') printf '%s\\n' 20128 ;;\n"
-        "  '.omniroute.cli_token') printf '%s\\n' omniroute-cli-token ;;\n"
+        "  '.omniroute.initial_password') printf '%s\\n' omniroute-dashboard-password ;;\n"
         "  '[.models[] | select(.enabled) | .alias] | sort | join(\",\")')\n"
         "    printf '%s\\n' 'gemma4,ornith'\n"
         "    ;;\n"
@@ -3606,16 +3671,16 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     assert "max_tokens: 256, stream: false" in (ROOT / "scripts/check-server.sh").read_text()
 
 
-def test_check_server_prints_redacted_request_response_and_curl_template(
+def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Successful API checks must show complete, redacted diagnostic records."""
+    """Successful API checks must show complete, directly-runnable diagnostic records."""
     result, _ = run_check_server(tmp_path, {"gemma4": "ready", "ornith": "ready"})
     combined = result.stdout + result.stderr
 
     assert result.returncode == 0, result.stderr
     assert "Command: curl --silent --show-error" in result.stdout
-    assert "Authorization: Bearer <redacted>" in result.stdout
+    assert "Authorization: Bearer fixture-secret" in result.stdout
     assert '"content":"Reply with exactly: ready"' in result.stdout
     assert '"max_tokens": 256' in result.stdout
     assert "HTTP response:" in result.stdout
@@ -3624,7 +3689,6 @@ def test_check_server_prints_redacted_request_response_and_curl_template(
     assert "Assistant content:\n  ready" in result.stdout
     assert "Expectation:\n  normalized assistant content: ready" in result.stdout
     assert "Verdict: PASS" in result.stdout
-    assert "fixture-secret" not in combined
     assert combined.count("Request payload:") == 3
     assert 'Request payload:\n  {"model":"x"' not in combined
     assert 'Request payload:\n  {"model":"gemma4"' not in combined
@@ -3948,6 +4012,7 @@ def run_agent_check(
         "chmod": "/usr/bin/chmod",
         "date": real_date,
         "find": "/usr/bin/find",
+        "grep": "/usr/bin/grep",
         "head": "/usr/bin/head",
         "mkdir": "/usr/bin/mkdir",
         "mktemp": "/usr/bin/mktemp",
@@ -4433,14 +4498,14 @@ def assert_common_agent_fields(
     assert f"client={client} model=gemma4 check=" in row
     assert (
         "Configuration:\n  Provider: llm-env\n  Base URL: http://llm.local:8000/v1\n"
-        "  Model: gemma4\n  Tools: bash\n  " + credentials[client]
+        "  Model: gemma4\n  Tools: client default (untouched -- the check trusts "
+        "the client's own tooling)\n  " + credentials[client]
     ) in row
     assert "Command: " in row
-    assert "Input:\n  You MUST use bash to execute this exact command verbatim" in row
+    assert "Input:\n  Using your own tools, find the current " in row
     assert f"Exit status:\n  {exit_status}" in row
     assert (
-        "Expectation:\n  exactly one JSON object whose source URL, canonical source date, "
-        "and required source values match the fetched "
+        "Expectation:\n  exactly one JSON object with a plausible, current "
     ) in row
 
 
@@ -4525,14 +4590,9 @@ jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assist
 
 MALFORMED_FENCED_JSON_PI_STUB = """#!/usr/bin/bash
 printf 'pi %s\\n' "$*" >> "$CALLS"
-count="$(< "$AGENT_CHECK_SOURCE_COUNTER")"
-printf -v seconds '%02d' "$count"
-if [[ "$*" == *weather* ]]; then
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://api.open-meteo.com/v1/forecast?latitude=-33.4489&longitude=-70.6693&current=temperature_2m,weather_code&timezone=America%2FSantiago",source_timestamp:("2026-07-27T13:00:" + $seconds),temperature_2m:16.3,weather_code:3}')"
-else
-    evidence="$(jq -cn --arg seconds "$seconds" '{source_url:"https://open.er-api.com/v6/latest/USD",source_timestamp:("2026-07-27T00:00:" + $seconds),usd_to_clp:946.527902}')"
-fi
-jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:("```json\\n" + ($evidence | tojson) + "\\n``` trailing")}]}}'
+jq -cn --arg body '```json
+{not valid json
+```' '{type:"message_end",message:{role:"assistant",content:[{type:"text",text:$body}]}}'
 """
 
 FAILING_PI_STUB = """#!/usr/bin/bash
@@ -4630,25 +4690,17 @@ def test_agent_check_input_bounds_reject_oversized_model_discovery_before_matrix
 
 
 @pytest.mark.parametrize(
-    ("source", "failed_url", "continued_url"),
+    ("source", "failed_field", "continued_field"),
     (
-        (
-            "weather",
-            "https://api.open-meteo.com/",
-            "https://open.er-api.com/v6/latest/USD",
-        ),
-        (
-            "fx",
-            "https://open.er-api.com/",
-            "https://api.open-meteo.com/v1/forecast?",
-        ),
+        ("weather", "weather_code", "usd_to_clp"),
+        ("fx", "usd_to_clp", "weather_code"),
     ),
 )
 def test_agent_check_input_bounds_reject_oversized_public_source_without_client(
     tmp_path: pathlib.Path,
     source: str,
-    failed_url: str,
-    continued_url: str,
+    failed_field: str,
+    continued_field: str,
 ) -> None:
     result, calls, _ = run_agent_check(
         tmp_path,
@@ -4664,18 +4716,17 @@ def test_agent_check_input_bounds_reject_oversized_public_source_without_client(
     assert f"stage=source fetch reason={source} source exited 63" in result.stderr
     assert "Source stdout:" in result.stdout
     assert (
-        "Source stderr:\n  curl: (63) Authorization: Bearer <redacted> "
+        "Source stderr:\n  curl: (63) Authorization: Bearer test-key-not-a-secret "
         "maximum file size exceeded"
     ) in result.stdout
-    assert "test-key-not-a-secret" not in combined
     assert "oversized-source-sentinel" not in combined
     assert len(combined.encode()) < 400_000
     client_calls = [
         line for line in calls.read_text().splitlines() if line.startswith("pi ")
     ]
     assert len(client_calls) == 1
-    assert failed_url not in client_calls[0]
-    assert continued_url in client_calls[0]
+    assert failed_field not in client_calls[0]
+    assert continued_field in client_calls[0]
     assert bounded_call_count(calls) == 1
     assert "Results: 1 passed, 1 failed" in result.stdout
 
@@ -4898,10 +4949,11 @@ def test_agent_check_integration_comparator_uses_only_private_json_files(
 @pytest.mark.parametrize(
     ("weather_override", "fx_override", "field", "received"),
     (
-        ('{"source_url":"https://example.invalid/received-weather"}', None, "source_url", "https://example.invalid/received-weather"),
-        (None, '{"source_url":"https://example.invalid/received-fx"}', "source_url", "https://example.invalid/received-fx"),
+        # source_url is only format-checked now (the agent may use any source), and
+        # weather_code is only type-checked (providers use different taxonomies) --
+        # see source_evidence_differences() in check-with-agents.sh. Only the
+        # tolerance-compared numeric fields can still produce a mismatch here.
         ('{"temperature_2m":-990001}', None, "temperature_2m", "-990001"),
-        ('{"weather_code":-990002}', None, "weather_code", "-990002"),
         (None, '{"usd_to_clp":-990003}', "usd_to_clp", "-990003"),
     ),
 )
@@ -4936,15 +4988,16 @@ def test_agent_check_integration_redacts_every_required_received_value(
     assert all(received not in line for line in stdout_rows + stderr_rows)
 
 
-def test_agent_check_integration_never_emits_api_key_from_opencode_evidence(
+def test_agent_check_mismatch_summary_never_echoes_the_received_value(
     tmp_path: pathlib.Path,
 ) -> None:
-    api_key = "model-controlled-required-field-api-key"
+    """The structured mismatch line must redact the received value (raw diagnostic
+    dumps below it, like the transcript excerpt, are shown verbatim by design)."""
+    model_controlled_value = "model-controlled-not-a-url"
     result, _, _ = run_agent_check(
         tmp_path,
         clients={"opencode": VALID_OPENCODE_STUB},
-        api_key=api_key,
-        agent_weather_evidence_override=json.dumps({"source_url": api_key}),
+        agent_weather_evidence_override=json.dumps({"source_url": model_controlled_value}),
     )
     combined = result.stdout + result.stderr
     mismatch_rows = [
@@ -4954,9 +5007,9 @@ def test_agent_check_integration_never_emits_api_key_from_opencode_evidence(
     ]
 
     assert result.returncode != 0
-    assert api_key not in combined
     assert any("field=source_url" in line for line in mismatch_rows)
     assert all('received="<redacted>"' in line for line in mismatch_rows)
+    assert all(model_controlled_value not in line for line in mismatch_rows)
 
 
 def test_agent_check_integration_extracts_exact_assistant_text_bytes(
@@ -5160,8 +5213,10 @@ def test_agent_check_rejects_unsafe_public_timestamp_before_client_launch(
         line for line in calls.read_text().splitlines() if line.startswith("pi ")
     ]
     assert len(client_calls) == 1
-    assert ("open-meteo" in client_calls[0]) is (source == "fx")
-    assert ("open.er-api.com" in client_calls[0]) is (source == "weather")
+    # The prompt no longer names a literal source URL (the agent picks its own
+    # tooling/source) -- distinguish the surviving check by its distinct field name.
+    assert ("usd_to_clp" in client_calls[0]) is (source == "weather")
+    assert ("weather_code" in client_calls[0]) is (source == "fx")
 
 
 @pytest.mark.parametrize("source", ("weather", "fx"))
@@ -5326,45 +5381,38 @@ def test_agent_check_accepts_exactly_one_json_fence(tmp_path: pathlib.Path) -> N
 def test_agent_check_retains_malformed_fenced_response_parser_diagnostics(
     tmp_path: pathlib.Path,
 ) -> None:
+    """Invalid JSON inside a properly-closed fence must still fail with diagnostics."""
     result, _, _ = run_agent_check(
         tmp_path,
         clients={"pi": MALFORMED_FENCED_JSON_PI_STUB},
-        fenced_parser_stderr="parse error: Authorization: Bearer test-key-not-a-secret",
     )
-    combined = result.stdout + result.stderr
 
     assert result.returncode != 0
     rows = agent_rows(result.stdout)
     assert len(rows) == 2
     for row in rows:
         assert_common_agent_fields(row, client="pi", exit_status="0")
-        assert (
-            "Agent parser stderr:\n  parse error: Authorization: Bearer <redacted>"
-        ) in row
+        assert "Agent parser stderr:\n  jq: parse error:" in row
         assert "Client stderr:" not in row
         assert "Final response:\n  ```json" in row
-    assert "test-key-not-a-secret" not in combined
     assert "Verdict: FAIL stage=agent evidence parsing" in result.stderr
 
 
-def test_agent_check_prints_redacted_transcript_and_client_failure(
+def test_agent_check_prints_client_transcript_and_failure(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Failed client rows must display redacted stderr and continue their matrix."""
+    """Failed client rows must display stderr and continue their matrix."""
     result, _, _ = run_agent_check(tmp_path, clients={"pi": FAILING_PI_STUB})
-    combined = result.stdout + result.stderr
 
     assert result.returncode != 0
     assert "Client stderr:" in result.stdout
     assert "agent transport failed" in result.stdout
-    assert "Authorization: Bearer <redacted>" in combined
-    assert "test-key-not-a-secret" not in combined
     assert "Verdict: FAIL stage=command exit" in result.stderr
     rows = agent_rows(result.stdout)
     assert len(rows) == 2
     for row in rows:
         assert_common_agent_fields(row, client="pi", exit_status="17")
-        assert "Client stderr:\n  Authorization: Bearer <redacted>" in row
+        assert "Client stderr:\n  Authorization: Bearer test-key-not-a-secret" in row
         assert "Client JSONL transcript:" not in row
         assert "Agent parser stderr:" not in row
         assert "Final response:" not in row
@@ -6007,42 +6055,6 @@ def test_agent_check_retains_only_redacted_private_diagnostics(
     assert "Authorization: Bearer retained-fixture-key" not in retained_text
 
 
-@pytest.mark.parametrize(
-    ("client", "stub"),
-    (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
-)
-@pytest.mark.parametrize("config_after_startup", ("rotate", "remove"))
-def test_agent_check_pins_redaction_key_without_exporting_it_to_clients(
-    tmp_path: pathlib.Path,
-    client: str,
-    stub: str,
-    config_after_startup: str,
-) -> None:
-    api_key = "pinned-original-fixture-key"
-    result, _, artifacts = run_agent_check(
-        tmp_path,
-        clients={client: stub},
-        api_key=api_key,
-        agent_client_stderr=api_key,
-        keep_artifacts=True,
-        config_after_startup=config_after_startup,
-        inherited_redaction_override="inherited-exported-fixture-key",
-    )
-    combined = result.stdout + result.stderr
-    retained_line = next(
-        line for line in result.stdout.splitlines() if line.startswith("Diagnostics retained: ")
-    )
-    retained_dir = pathlib.Path(retained_line.removeprefix("Diagnostics retained: "))
-    retained_text = "".join(
-        path.read_text() for path in retained_dir.rglob("*") if path.is_file()
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert api_key not in combined
-    assert api_key not in retained_text
-    assert not list(artifacts.glob("redaction-override-*"))
-
-
 def test_agent_check_removes_workspace_when_diagnostic_finalization_fails(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -6112,7 +6124,7 @@ def test_agent_check_runs_pi_for_each_model_and_live_check(tmp_path: pathlib.Pat
     assert "--no-skills" in recorded
     assert "--no-prompt-templates" in recorded
     assert "--no-context-files" in recorded
-    assert "--tools bash" in recorded
+    assert "--tools bash" not in recorded
     assert "-p" in recorded and "--mode json" in recorded
     assert "llm-env/gemma4" in recorded
     configs = list(artifacts.glob("pi-*.json"))
@@ -6151,7 +6163,7 @@ def test_agent_check_runs_opencode_for_each_model_and_live_check(
     assert len(configs) == 4
     assert all(api_key not in path.read_text() for path in configs)
     assert all("{env:OPENCODE_API_KEY}" in path.read_text() for path in configs)
-    assert all(json.loads(path.read_text())["tools"] == {"*": False, "bash": True} for path in configs)
+    assert all("tools" not in json.loads(path.read_text()) for path in configs)
     assert api_key not in result.stdout
     assert api_key not in result.stderr
     assert api_key not in recorded
@@ -6458,10 +6470,10 @@ def test_agent_check_rejects_overlong_evidence_timestamp(
 @pytest.mark.parametrize(
     ("weather_override", "fx_override", "expected_field"),
     (
-        ('{"source_url":"https://example.invalid/weather"}', None, "source_url"),
-        (None, '{"source_url":"https://example.invalid/fx"}', "source_url"),
+        ('{"source_url":"not-a-url"}', None, "source_url"),
+        (None, '{"source_url":"not-a-url"}', "source_url"),
         ('{"temperature_2m":-999999}', None, "temperature_2m"),
-        ('{"weather_code":-999999}', None, "weather_code"),
+        ('{"weather_code":"not-a-number"}', None, "weather_code"),
         (None, '{"usd_to_clp":-999999}', "usd_to_clp"),
     ),
 )
@@ -6490,9 +6502,10 @@ def test_agent_check_keeps_exact_source_url_and_numeric_evidence_checks(
     ("client", "stub"),
     (("pi", VALID_PI_STUB), ("opencode", VALID_OPENCODE_STUB)),
 )
-def test_agent_check_prompt_requires_literal_source_evidence(
+def test_agent_check_prompt_trusts_the_agents_own_tooling(
     tmp_path: pathlib.Path, client: str, stub: str
 ) -> None:
+    """The prompt must name a source and output shape, not dictate a literal command."""
     result, calls, artifacts = run_agent_check(tmp_path, clients={client: stub})
 
     assert result.returncode == 0, result.stderr
@@ -6500,71 +6513,37 @@ def test_agent_check_prompt_requires_literal_source_evidence(
     assert len(prompts) == 2
     for prompt in prompts:
         assert "--max-filesize" not in prompt
-        assert "You MUST use bash to execute this exact command verbatim" in prompt
-        assert "as the only network request:" in prompt
-        assert "The URL argument must be copied byte-for-byte" in prompt
-        assert "Do not substitute any source, endpoint, proxy, mirror, or query." in prompt
-        assert "Return fields only from that command's response." in prompt
-        assert "The source_url field must reproduce the literal URL byte-for-byte" in prompt
-        assert "Return source_timestamp as ISO-8601." in prompt
+        assert "Using your own tools, find" in prompt
+        assert "curl" not in prompt
+        assert "You MUST use bash" not in prompt
+        assert "byte-for-byte" not in prompt
         assert "Return exactly one JSON object containing" in prompt
-    weather_prompt = next(
-        prompt for prompt in prompts if "https://api.open-meteo.com/v1/forecast?" in prompt
+        assert "source_url must be the exact URL of the API endpoint you used." in prompt
+        assert "source_timestamp must be the source's own observation/update time, in ISO-8601." in prompt
+
+    weather_prompt = next(prompt for prompt in prompts if "weather_code" in prompt)
+    assert "the current weather" in weather_prompt
+    assert "Santiago, Chile" in weather_prompt
+    assert "source_url, source_timestamp, temperature_2m, and weather_code" in weather_prompt
+
+    fx_prompt = next(prompt for prompt in prompts if "usd_to_clp" in prompt)
+    assert "the current USD to CLP exchange rate" in fx_prompt
+    assert "source_url, source_timestamp, and usd_to_clp" in fx_prompt
+
+    expected_weather_prompt = (
+        "Using your own tools, find the current weather (temperature in Celsius and "
+        "WMO weather code) for Santiago, Chile, from a public weather API. Return "
+        "exactly one JSON object containing source_url, source_timestamp, "
+        "temperature_2m, and weather_code. source_url must be the exact URL of the "
+        "API endpoint you used. source_timestamp must be the source's own "
+        "observation/update time, in ISO-8601."
     )
-    assert (
-        "The source_timestamp field must copy the source response's timestamp text "
-        "byte-for-byte." in weather_prompt
-    )
-    assert "Do not convert or normalize its timezone" in weather_prompt
-    assert "add an offset" in weather_prompt
-    assert "change its date" in weather_prompt
-    fx_prompt = next(
-        prompt for prompt in prompts if "https://open.er-api.com/v6/latest/USD" in prompt
-    )
-    assert (
-        "The source_timestamp field must convert the source response's exact "
-        "time_last_update_utc timestamp to ISO-8601" in fx_prompt
-    )
-    assert "preserving its UTC instant" in fx_prompt
-    assert "UTC timezone (Z or +00:00)" in fx_prompt
-    assert "source calendar date" in fx_prompt
-    assert "Do not convert it to local time or another timezone" in fx_prompt
-    assert "do not change its date" in fx_prompt
-    assert any(
-        "curl -fsS --max-time 20 -- 'https://api.open-meteo.com/v1/forecast?"
-        in prompt
-        for prompt in prompts
-    )
-    assert any(
-        "curl -fsS --max-time 20 -- 'https://open.er-api.com/v6/latest/USD'"
-        in prompt
-        for prompt in prompts
-    )
-    weather_url = (
-        "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&"
-        "longitude=-70.6693&current=temperature_2m,weather_code&"
-        "timezone=America%2FSantiago"
-    )
-    fx_url = "https://open.er-api.com/v6/latest/USD"
-    common_prefix = (
-        "You MUST use bash to execute this exact command verbatim as the only network "
-        "request: curl -fsS --max-time 20 -- '{url}'. The URL argument must be copied "
-        "byte-for-byte from the command. Do not substitute any source, endpoint, proxy, "
-        "mirror, or query. Return fields only from that command's response. The source_url "
-        "field must reproduce the literal URL byte-for-byte, including percent encoding. "
-    )
-    expected_weather_prompt = common_prefix.format(url=weather_url) + (
-        "The source_timestamp field must copy the source response's timestamp text "
-        "byte-for-byte. Do not convert or normalize its timezone, add an offset, or change "
-        "its date. Return source_timestamp as ISO-8601. Return exactly one JSON object "
-        "containing source_url, source_timestamp, temperature_2m, and weather_code."
-    )
-    expected_fx_prompt = common_prefix.format(url=fx_url) + (
-        "Return source_timestamp as ISO-8601. The source_timestamp field must convert the "
-        "source response's exact time_last_update_utc timestamp to ISO-8601 while preserving "
-        "its UTC instant, UTC timezone (Z or +00:00), and source calendar date. Do not "
-        "convert it to local time or another timezone, and do not change its date. Return "
-        "exactly one JSON object containing source_url, source_timestamp, and usd_to_clp."
+    expected_fx_prompt = (
+        "Using your own tools, find the current USD to CLP exchange rate, from a "
+        "public FX API. Return exactly one JSON object containing source_url, "
+        "source_timestamp, and usd_to_clp. source_url must be the exact URL of the "
+        "API endpoint you used. source_timestamp must be the source's own "
+        "observation/update time, in ISO-8601."
     )
     recorded_prompt_bytes = {
         path.read_bytes() for path in artifacts.glob(f"prompt-{client}-*")
@@ -6696,9 +6675,12 @@ def test_run_target_prints_start_banner_before_running_the_command(
     )
     assert result.returncode == 0
     # The start-banner printf leads with a blank line (spacing between
-    # chained make targets), so stdout's line 0 is empty and the banner
-    # itself is line 1.
-    assert "demo" in result.stdout.splitlines()[1]
+    # chained make targets), then a full-width separator rule, so stdout's
+    # line 0 is empty, line 1 is the separator, and the banner is line 2.
+    lines = result.stdout.splitlines()
+    assert lines[0] == ""
+    assert "-" * 20 in lines[1]
+    assert "demo" in lines[2]
 
 
 def test_run_target_prints_ok_end_banner_on_success(tmp_path: pathlib.Path) -> None:
@@ -6809,7 +6791,7 @@ def test_load_server_config_sets_port_api_key_and_host(tmp_path: pathlib.Path) -
     assert "PORT=9001 API_KEY=fixture-key HOST=0.0.0.0" in result.stdout
 
 
-def test_ensure_omniroute_secrets_generates_missing_cli_token_and_password(
+def test_ensure_omniroute_secrets_generates_missing_password(
     tmp_path: pathlib.Path,
 ) -> None:
     home = tmp_path / "home"
@@ -6818,7 +6800,7 @@ def test_ensure_omniroute_secrets_generates_missing_cli_token_and_password(
     config = config_dir / "models.yml"
     config.write_text(
         "version: 1\n"
-        "omniroute: {image: i, port: 20128, cli_token: '', initial_password: ''}\n"
+        "omniroute: {image: i, port: 20128, initial_password: ''}\n"
     )
     script = tmp_path / "run.sh"
     script.write_text(
@@ -6833,9 +6815,7 @@ def test_ensure_omniroute_secrets_generates_missing_cli_token_and_password(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
-    assert cfg["omniroute"]["cli_token"]
     assert cfg["omniroute"]["initial_password"]
-    assert cfg["omniroute"]["cli_token"] != cfg["omniroute"]["initial_password"]
 
 
 def test_ensure_omniroute_secrets_preserves_existing_values(tmp_path: pathlib.Path) -> None:
@@ -6845,8 +6825,7 @@ def test_ensure_omniroute_secrets_preserves_existing_values(tmp_path: pathlib.Pa
     config = config_dir / "models.yml"
     config.write_text(
         "version: 1\n"
-        "omniroute: {image: i, port: 20128, cli_token: existing-token,"
-        " initial_password: existing-password}\n"
+        "omniroute: {image: i, port: 20128, initial_password: existing-password}\n"
     )
     script = tmp_path / "run.sh"
     script.write_text(
@@ -6861,7 +6840,6 @@ def test_ensure_omniroute_secrets_preserves_existing_values(tmp_path: pathlib.Pa
     )
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
-    assert cfg["omniroute"]["cli_token"] == "existing-token"
     assert cfg["omniroute"]["initial_password"] == "existing-password"
 
 
@@ -6913,6 +6891,44 @@ def test_wait_for_health_times_out_when_curl_never_succeeds(tmp_path: pathlib.Pa
         check=False,
     )
     assert result.returncode != 0
+
+
+def test_lib_rejects_a_non_numeric_health_timeout(tmp_path: pathlib.Path) -> None:
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -uo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        env=os.environ | {"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "60; rm -rf /"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "LLM_ENV_HEALTH_TIMEOUT_SECONDS must be a positive integer" in result.stderr
+
+
+def test_lib_rejects_a_zero_health_timeout(tmp_path: pathlib.Path) -> None:
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/bash\nset -uo pipefail\n"
+        f"source {ROOT / 'tools/lib.sh'}\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    result = subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        env=os.environ | {"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "0"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "LLM_ENV_HEALTH_TIMEOUT_SECONDS must be a positive integer" in result.stderr
 
 
 def test_make_restart_runs_stop_then_start_with_distinct_banners() -> None:

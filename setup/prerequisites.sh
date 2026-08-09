@@ -99,6 +99,35 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     exit 1
 fi
 
+# Try to make the layered packages usable without a reboot. rpm-ostree
+# apply-live only patches the running deployment's /usr in place; it
+# refuses (rather than silently reboot-requiring) when the staged
+# deployment also carries a pending OS update bundled in alongside the
+# packages just installed, since that would remove/replace packages out
+# from under the running session. That case still needs an explicit yes.
+apply_live_if_possible() {
+    local apply_output apply_status reply
+    apply_output="$(sudo rpm-ostree apply-live 2>&1)"
+    apply_status=$?
+    if [ "$apply_status" -eq 0 ]; then
+        log_info "applied live; no reboot needed"
+        return 0
+    fi
+    if [[ "$apply_output" == *'packages would be removed'* ]]; then
+        log_warn "the staged deployment also carries a pending OS update (packages would be removed/replaced live)"
+        read -rp "Apply everything live now with --allow-replacement instead of rebooting? (yes/no) " reply
+        if [ "$reply" = "yes" ]; then
+            sudo rpm-ostree apply-live --allow-replacement
+            log_info "applied live"
+            return 0
+        fi
+    else
+        printf '%s\n' "$apply_output" >&2
+    fi
+    log_info "reboot is required before rerunning setup"
+    return 1
+}
+
 install_packages() {
     local prompt="$1"
     shift
@@ -108,8 +137,8 @@ install_packages() {
     printf '\n'
     read -rp "$prompt" reply
     if [ "$reply" = "yes" ]; then
-        sudo rpm-ostree install "$@"
-        log_info "package transaction completed; reboot is required before rerunning setup"
+        sudo rpm-ostree install "$@" || return 1
+        apply_live_if_possible || true
         return 0
     fi
     return 1

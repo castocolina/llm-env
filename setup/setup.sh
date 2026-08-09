@@ -155,8 +155,12 @@ if llmenv resources > "$resources_json"; then
     log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
     log_info "reserved ${omniroute_cpus} CPUs, ${omniroute_memory_mib} MiB RAM for omniroute"
 else
-    log_warn "$(jq -r '.error' "$resources_json")"
-    log_warn "leaving resources.llm_server/omniroute uncapped (0 = no explicit limit)"
+    # A host too small to reserve the fixed floors is exactly the host where
+    # an uncapped container is most dangerous — render_compose() treats
+    # cpus/memory_mib == 0 as "no explicit limit", so falling back to 0/0
+    # here would silently disable the safety mechanism precisely when it
+    # matters most. Fail loudly instead.
+    die "$(jq -r '.error' "$resources_json")"
 fi
 
 echo

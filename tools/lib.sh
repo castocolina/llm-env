@@ -8,6 +8,7 @@ CONFIG_PATH="${LLM_ENV_CONFIG:-${HOME}/.config/llm-env/models.yml}"
 MODELS_DIR="${LLM_ENV_MODELS_DIR:-${HOME}/llm-workspace/models}"
 UNIT_NAME="llm-server"
 COMPOSE_FILE="${HOME}/.config/llm-env/docker-compose.yml"
+COMPOSE_INSPECT_DIR="${LLM_ENV_COMPOSE_INSPECT_DIR:-${REPO_DIR}/tmp}"
 WRAPPER_UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}.service"
 VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
 CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
@@ -15,7 +16,7 @@ LLM_ENV_HEALTH_TIMEOUT_SECONDS="${LLM_ENV_HEALTH_TIMEOUT_SECONDS:-60}"
 
 # Exported so scripts that source this file expose them to child processes, and so
 # the linter does not flag them as unused (SC2034) in this library.
-export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME COMPOSE_FILE WRAPPER_UNIT_PATH VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME COMPOSE_FILE COMPOSE_INSPECT_DIR WRAPPER_UNIT_PATH VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
 
 GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'
 RED=$'\033[0;31m'; NC=$'\033[0m'
@@ -27,25 +28,16 @@ log_info()  { printf '%s  ok%s %s\n' "$GREEN" "$NC" "$*"; }
 log_warn()  { printf '%swarn%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
 log_error() { printf '%s fail%s %s\n' "$RED"  "$NC" "$*" >&2; }
 
+# Checks run only against localhost, and `make show-secrets` already prints these
+# credentials on request, so logged commands are left copy-pasteable rather than
+# redacted -- these functions are kept as pass-throughs (not inlined at call sites)
+# so log_command/log_block/log_file_excerpt below need no changes.
 _redact_stream() {
-    local +x key escaped
-    if [ "${_LLM_ENV_REDACTION_KEY_OVERRIDE+x}" = x ]; then
-        key="${_LLM_ENV_REDACTION_KEY_OVERRIDE-}"
-    else
-        key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH" 2>/dev/null)"
-    fi
-
-    sed -E 's/(Authorization:[[:space:]]*Bearer)[[:space:]]+[^[:space:]"'"'"']+/\1 <redacted>/g' |
-        if [ -n "$key" ]; then
-            escaped="$(printf '%s' "$key" | sed 's/[][\\.^$*\/]/\\&/g')"
-            sed -f /dev/fd/3 3<<<"s/${escaped}/<redacted>/g"
-        else
-            cat
-        fi
+    cat
 }
 
 redact_text() {
-    printf '%s' "$1" | _redact_stream
+    printf '%s' "$1"
 }
 
 log_command() {
@@ -197,6 +189,12 @@ finish_diagnostic_dir() {
 
 die() { log_error "$*"; exit 1; }
 
+# Validated once here: consumers do bash arithmetic with this value (wait_for_health,
+# wait_for_tcp_port) and render-unit.sh interpolates it verbatim into a generated
+# systemd unit, so an unvalidated value could corrupt arithmetic or the unit file.
+[[ "$LLM_ENV_HEALTH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || die "LLM_ENV_HEALTH_TIMEOUT_SECONDS must be a positive integer, got: ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}"
+
 require_cmd() {
     for cmd in "$@"; do
         command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
@@ -231,14 +229,7 @@ ensure_api_key() {
 }
 
 ensure_omniroute_secrets() {
-    local cli_token initial_password
-    cli_token="$(yq -r '.omniroute.cli_token' "$CONFIG_PATH")"
-    if [ -z "$cli_token" ] || [ "$cli_token" = "null" ]; then
-        cli_token="$(new_api_key)"
-        chmod 600 "$CONFIG_PATH"
-        CLI_TOKEN="$cli_token" yq -i '.omniroute.cli_token = strenv(CLI_TOKEN)' "$CONFIG_PATH"
-        log_info "generated an OmniRoute CLI token"
-    fi
+    local initial_password
     initial_password="$(yq -r '.omniroute.initial_password' "$CONFIG_PATH")"
     if [ -z "$initial_password" ] || [ "$initial_password" = "null" ]; then
         initial_password="$(new_api_key)"

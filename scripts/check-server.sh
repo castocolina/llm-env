@@ -20,18 +20,17 @@ printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
 bad_conf="$(mktemp)"
 chmod 600 "$bad_conf"
 printf 'header = "Authorization: Bearer definitely-not-the-key"\n' > "$bad_conf"
-omniroute_conf="$(mktemp)"
-chmod 600 "$omniroute_conf"
+omniroute_cookie_jar="$(mktemp)"
+chmod 600 "$omniroute_cookie_jar"
 omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
-omniroute_cli_token="$(yq -r '.omniroute.cli_token' "$CONFIG_PATH")"
-printf 'header = "x-omniroute-cli-token: %s"\n' "$omniroute_cli_token" > "$omniroute_conf"
+omniroute_password="$(yq -r '.omniroute.initial_password' "$CONFIG_PATH")"
 omniroute_base="http://127.0.0.1:${omniroute_port}"
 diagnostic_dir="$(prepare_diagnostic_dir server)"
 
 cleanup() {
     local status=$?
     finish_diagnostic_dir "$diagnostic_dir"
-    rm -f "$auth_conf" "$bad_conf" "$omniroute_conf"
+    rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar"
     exit "$status"
 }
 trap cleanup EXIT
@@ -110,7 +109,7 @@ fi
 log_step "Authentication"
 auth_probe_body="$(jq -n '{model: "x", messages: [{role: "user", content: "x"}], max_tokens: 1}')"
 request_record "server invalid-key probe" \
-    "curl --silent --show-error --max-time 10 -H 'Authorization: Bearer <redacted>' -H 'Content-Type: application/json' --data-raw '${auth_probe_body}' ${base}/v1/chat/completions" \
+    "curl --silent --show-error --max-time 10 -H 'Authorization: Bearer definitely-not-the-key' -H 'Content-Type: application/json' --data-raw '${auth_probe_body}' ${base}/v1/chat/completions" \
     "$auth_probe_body" "HTTP status: 401" -- \
     curl --silent --show-error --max-time 10 \
     -K "$bad_conf" -H "Content-Type: application/json" \
@@ -125,7 +124,7 @@ fi
 log_step "Model listing"
 expected="$(yq -r '[.models[] | select(.enabled) | .alias] | sort | join(",")' "$CONFIG_PATH")"
 request_record "server model listing" \
-    "curl --silent --show-error --max-time 10 -H 'Authorization: Bearer <redacted>' ${base}/v1/models" \
+    "curl --silent --show-error --max-time 10 -H 'Authorization: Bearer ${api_key}' ${base}/v1/models" \
     "" "model IDs: ${expected}" -- \
     curl --silent --show-error --max-time 10 -K "$auth_conf" "${base}/v1/models"
 log_block "Expectation" "$REQUEST_EXPECTATION"
@@ -157,7 +156,7 @@ while read -r alias; do
     identity="server completion model=${alias}"
     expectation="normalized assistant content: ready"
     request_record "$identity" \
-        "curl --silent --show-error --max-time 120 -H 'Authorization: Bearer <redacted>' -H 'Content-Type: application/json' --data-raw '${body}' ${base}/v1/chat/completions" \
+        "curl --silent --show-error --max-time 120 -H 'Authorization: Bearer ${api_key}' -H 'Content-Type: application/json' --data-raw '${body}' ${base}/v1/chat/completions" \
         "$body" "$expectation" -- \
         curl --silent --show-error --max-time 120 \
         -K "$auth_conf" \
@@ -165,7 +164,6 @@ while read -r alias; do
         --data-raw "$body" "${base}/v1/chat/completions"
 
     content=""
-    reasoning=""
     normalized=""
     failure_stage=""
     failure_detail=""
@@ -181,8 +179,6 @@ while read -r alias; do
     else
         content="$(jq -r '.choices?[0]?.message?.content? // empty' \
             < "$REQUEST_BODY_FILE" 2>>"$completion_parse_stderr")"
-        reasoning="$(jq -r '.choices?[0]?.message?.reasoning_content? // empty' \
-            < "$REQUEST_BODY_FILE" 2>>"$completion_parse_stderr")"
         normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
             sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
         if [ -z "$content" ]; then
@@ -194,7 +190,6 @@ while read -r alias; do
     fi
 
     log_block "Assistant content" "$content"
-    log_block "Reasoning content" "$reasoning"
     log_block "Normalized content" "$normalized"
     log_nonempty_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
     log_block "Expectation" "$REQUEST_EXPECTATION"
@@ -206,42 +201,64 @@ while read -r alias; do
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
 done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
 
-log_step "OmniRoute providers"
-request_record "omniroute provider listing" \
-    "curl --silent --show-error --max-time 10 -H 'x-omniroute-cli-token: <redacted>' ${omniroute_base}/api/providers" \
+log_step "OmniRoute login"
+omniroute_login_body="$(jq -n --arg p "$omniroute_password" '{password: $p}')"
+request_record "omniroute dashboard login" \
+    "curl --silent --show-error --max-time 10 -H 'Content-Type: application/json' --data-raw '${omniroute_login_body}' ${omniroute_base}/api/auth/login" \
     "" "HTTP status: 200" -- \
-    curl --silent --show-error --max-time 10 -K "$omniroute_conf" "${omniroute_base}/api/providers"
+    curl --silent --show-error --max-time 10 -c "$omniroute_cookie_jar" \
+    -H "Content-Type: application/json" \
+    --data-raw "$omniroute_login_body" "${omniroute_base}/api/auth/login"
 log_block "Expectation" "$REQUEST_EXPECTATION"
-if request_failed 200 "omniroute provider listing"; then
-    :
+if request_failed 200 "omniroute dashboard login"; then
+    log_step "OmniRoute providers"
+    bad "Verdict: FAIL stage=skipped reason=omniroute dashboard login failed"
 else
-    connection_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
-    is_active="$(jq -r '
-        (if type == "array" then . else (.providers // .data // []) end)
-        | map(select(.name == "llm-env-local"))[0].isActive // false
-      ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
-    log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
-    if [ "$is_active" = "true" ]; then
-        ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
+    ok "Verdict: PASS identity=omniroute dashboard login session established"
+
+    log_step "OmniRoute providers"
+    request_record "omniroute provider listing" \
+        "curl --silent --show-error --max-time 10 -b <omniroute session cookie> ${omniroute_base}/api/providers" \
+        "" "HTTP status: 200" -- \
+        curl --silent --show-error --max-time 10 -b "$omniroute_cookie_jar" "${omniroute_base}/api/providers"
+    log_block "Expectation" "$REQUEST_EXPECTATION"
+    if request_failed 200 "omniroute provider listing"; then
+        :
     else
-        bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
+        connection_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
+        is_active="$(jq -r '
+            (if type == "array" then . else (.connections // .providers // .data // []) end)
+            | map(select(.name == "llm-env-local"))[0].isActive // false
+          ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
+        log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
+        if [ "$is_active" = "true" ]; then
+            ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
+        else
+            bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
+        fi
     fi
 fi
 
 log_step "OmniRoute completions"
 while read -r alias; do
     [ -n "$alias" ] || continue
-    body="$(jq -n --arg m "llm-env-local/${alias}" \
+    # Routing keys on the provider slug ("llama-cpp"), not the connection's
+    # own name -- confirmed live via GET /v1/models, which lists synced
+    # models as "llama-cpp/<alias>" regardless of the connection's name.
+    body="$(jq -n --arg m "llama-cpp/${alias}" \
         '{model: $m,
           messages: [{role: "user", content: "Reply with exactly: ready"}],
           max_tokens: 256, stream: false}')"
 
     identity="omniroute completion model=${alias}"
     expectation="normalized assistant content: ready"
+    # The dashboard password doubles as the bearer token for /v1/* routes,
+    # not only for the management API's cookie session -- confirmed live.
     request_record "$identity" \
-        "curl --silent --show-error --max-time 120 -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
+        "curl --silent --show-error --max-time 120 -H 'Authorization: Bearer ${omniroute_password}' -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
         "$body" "$expectation" -- \
         curl --silent --show-error --max-time 120 \
+        -H "Authorization: Bearer ${omniroute_password}" \
         -H "Content-Type: application/json" \
         --data-raw "$body" "${omniroute_base}/v1/chat/completions"
 

@@ -5,9 +5,12 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+require_cmd yq podman systemctl
+
 configured_image=""
 if [ -f "$CONFIG_PATH" ]; then
-    configured_image="$(yq -r '.gpu.image // ""' "$CONFIG_PATH" 2>/dev/null || true)"
+    configured_image="$(yq -r '.gpu.image // ""' "$CONFIG_PATH")" \
+        || die "could not read gpu.image from ${CONFIG_PATH}; config may be corrupt"
 fi
 if [ -n "$configured_image" ] && [ "$configured_image" != null ]; then
     images_to_remove="$configured_image"
@@ -18,7 +21,8 @@ fi
 
 configured_omniroute_image=""
 if [ -f "$CONFIG_PATH" ]; then
-    configured_omniroute_image="$(yq -r '.omniroute.image // ""' "$CONFIG_PATH" 2>/dev/null || true)"
+    configured_omniroute_image="$(yq -r '.omniroute.image // ""' "$CONFIG_PATH")" \
+        || die "could not read omniroute.image from ${CONFIG_PATH}; config may be corrupt"
 fi
 if [ -n "$configured_omniroute_image" ] && [ "$configured_omniroute_image" != null ]; then
     images_to_remove="${images_to_remove}, ${configured_omniroute_image}"

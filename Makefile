@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset enable-boot disable-boot status logs validate test clean
+        key-reset show-secrets enable-boot disable-boot status logs validate test clean
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -40,6 +40,9 @@ benchmark:
 
 key-reset:
 	@bash tools/run-target.sh key-reset -- bash scripts/key-reset.sh
+
+show-secrets:
+	@bash tools/run-target.sh show-secrets -- bash scripts/show-secrets.sh
 
 enable-boot:
 	@bash tools/run-target.sh enable-boot -- bash setup/enable-boot.sh

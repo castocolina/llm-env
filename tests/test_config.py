@@ -62,7 +62,6 @@ def make_cfg(**overrides):
         "omniroute": {
             "image": "docker.io/diegosouzapw/omniroute:latest",
             "port": 20128,
-            "cli_token": "test-cli-token",
             "initial_password": "test-password",
         },
         "models": [
@@ -563,6 +562,16 @@ def test_migrate_config_preserves_existing_resources_values():
     assert migrated["resources"]["llm_server"] == {"cpus": 6, "memory_mib": 28672}
 
 
+def test_validate_config_rejects_infinite_llm_server_cpus():
+    cfg = make_cfg(resources={"llm_server": {"cpus": float("inf"), "memory_mib": 0}})
+    assert "resources.llm_server.cpus must be a non-negative number" in validate_config(cfg)
+
+
+def test_validate_config_rejects_infinite_omniroute_cpus():
+    cfg = make_cfg(resources={"omniroute": {"cpus": float("inf"), "memory_mib": 1024}})
+    assert "resources.omniroute.cpus must be a non-negative number" in validate_config(cfg)
+
+
 def test_migrate_config_adds_default_resources_section_when_gpu_absent():
     """The resources default must not be skipped by the gpu early-return branch."""
     cfg = make_cfg()
@@ -614,7 +623,6 @@ def test_migrate_config_adds_default_omniroute_section():
     assert migrated["omniroute"] == {
         "image": "docker.io/diegosouzapw/omniroute:latest",
         "port": 20128,
-        "cli_token": "",
         "initial_password": "",
     }
 
@@ -624,13 +632,12 @@ def test_migrate_config_preserves_existing_omniroute_values():
         omniroute={
             "image": "docker.io/diegosouzapw/omniroute:latest",
             "port": 21000,
-            "cli_token": "existing-token",
             "initial_password": "existing-password",
         }
     )
     migrated = migrate_config(cfg)
     assert migrated["omniroute"]["port"] == 21000
-    assert migrated["omniroute"]["cli_token"] == "existing-token"
+    assert migrated["omniroute"]["initial_password"] == "existing-password"
 
 
 def test_migrate_config_adds_default_resources_omniroute_section():
@@ -664,7 +671,6 @@ def test_config_rejects_non_mapping_omniroute_section():
         ("image", 5, "omniroute.image must be a non-empty string"),
         ("port", 0, "omniroute.port must be a positive integer"),
         ("port", "20128", "omniroute.port must be a positive integer"),
-        ("cli_token", 5, "omniroute.cli_token must be a string"),
         ("initial_password", 5, "omniroute.initial_password must be a string"),
     ],
 )
@@ -672,7 +678,6 @@ def test_config_rejects_invalid_omniroute_values(field, value, expected_error):
     omniroute = {
         "image": "docker.io/diegosouzapw/omniroute:latest",
         "port": 20128,
-        "cli_token": "",
         "initial_password": "",
     }
     omniroute[field] = value

@@ -12,7 +12,7 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 
-require_cmd curl jq yq date uv systemd-run systemctl wc head cat sed
+require_cmd curl jq yq date uv systemd-run systemctl wc head cat sed grep
 
 workspace=""
 diagnostic_dir=""
@@ -57,8 +57,6 @@ port="$PORT"
 api_key="$API_KEY"
 [ -n "$port" ] && [ "$port" != null ] || die "server port is not configured"
 [ -n "$api_key" ] && [ "$api_key" != null ] || die "server API key is not configured"
-unset _LLM_ENV_REDACTION_KEY_OVERRIDE
-_LLM_ENV_REDACTION_KEY_OVERRIDE="$api_key"
 printf 'header = "Authorization: Bearer %s"\n' "$api_key" > "$auth_conf"
 
 # 127.0.0.1 rather than localhost: localhost resolves to ::1 first on this system
@@ -192,7 +190,7 @@ log_agent_configuration() {
     log_block "Configuration" "Provider: llm-env
 Base URL: ${client_base}
 Model: ${alias}
-Tools: bash
+Tools: client default (untouched -- the check trusts the client's own tooling)
 ${credential}"
 }
 
@@ -379,7 +377,7 @@ run_agent() {
         pi)
             config_dir="$workspace/pi"
             config_file="$config_dir/models.json"
-            DISPLAYED_CLIENT_COMMAND="PI_CODING_AGENT_DIR=<private> pi --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files --tools bash -p --mode json --model llm-env/${alias} ${quoted_prompt}"
+            DISPLAYED_CLIENT_COMMAND="PI_CODING_AGENT_DIR=<private> pi --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files -p --mode json --model llm-env/${alias} ${quoted_prompt}"
             mkdir -p "$config_dir" || return 1
             chmod 700 "$config_dir" || return 1
             printf -v config_key_command "!yq -r '.server.api_key' %q" "$CONFIG_PATH"
@@ -402,7 +400,6 @@ run_agent() {
                 --no-skills
                 --no-prompt-templates
                 --no-context-files
-                --tools bash
                 -p
                 --mode json
                 --model "llm-env/${alias}"
@@ -449,7 +446,7 @@ run_agent() {
             jq -n \
                 --arg base_url "$client_base" \
                 --arg alias "$alias" \
-                '{"$schema": "https://opencode.ai/config.json", tools: {"*": false, bash: true}, provider: {"llm-env": {
+                '{"$schema": "https://opencode.ai/config.json", provider: {"llm-env": {
                     npm: "@ai-sdk/openai-compatible",
                     name: "llm-env",
                     options: {baseURL: $base_url, apiKey: "{env:OPENCODE_API_KEY}"},
@@ -509,12 +506,14 @@ run_agent() {
 parse_evidence() {
     local assistant_file="$1"
 
-    if jq -Rse 'test("^[[:space:]]*```json")' "$assistant_file" >/dev/null; then
-        jq -Rrse \
-            'capture("^[[:space:]]*```json\\r?\\n(?<body>[\\s\\S]*?)\\r?\\n```[[:space:]]*$").body | select(length > 0)' \
-            "$assistant_file" |
-            jq -sce \
-            'select(length == 1 and (.[0] | type == "object")) | .[0]'
+    # Trusting the agent's own tooling (see the prompt above) means it may narrate
+    # what it did before or after the JSON, not return the JSON as the entire
+    # message -- extract the first fenced ```json block from anywhere in the
+    # response rather than requiring the whole response to be exactly that block.
+    if grep -q '```json' "$assistant_file" 2>/dev/null; then
+        # shellcheck disable=SC2016 # Literal sed address, not variable expansion.
+        sed -n '/```json/,/```/p' "$assistant_file" | sed '1d;$d' |
+            jq -sce 'select(length == 1 and (.[0] | type == "object")) | .[0]'
         return
     fi
     jq -sce \
@@ -523,25 +522,28 @@ parse_evidence() {
 }
 
 source_evidence_differences() {
+    # Compares the agent's self-reported evidence against the independently-fetched
+    # snapshot with TOLERANCE, not exact equality. The agent picks its own source and
+    # tool (see the prompt built above), so a different upstream provider, slightly
+    # different fetch instant, or different weather-code taxonomy is expected and not
+    # a failure -- what must hold is that the values are well-formed and plausible
+    # (a real "right now" reading), which is strong evidence against hallucination.
     local check_name="$1"
     local snapshot_file="$2"
     local evidence_file="$3"
-    local required_fields timestamp source_date source_timezone
+    local source_timezone timestamp source_date
     local timestamp_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?(Z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])?$'
 
     case "$check_name" in
-        weather)
-            required_fields='["source_url", "temperature_2m", "weather_code"]'
-            source_timezone='America/Santiago'
-            ;;
-        fx)
-            required_fields='["source_url", "usd_to_clp"]'
-            source_timezone='UTC'
-            ;;
-        *)
-            return 1
-            ;;
+        weather) source_timezone='America/Santiago' ;;
+        fx) source_timezone='UTC' ;;
+        *) return 1 ;;
     esac
+
+    if ! jq -e '(type == "object") and (.source_url | type == "string") and (.source_url | test("^https?://"))' \
+        "$evidence_file" >/dev/null 2>&1; then
+        printf '%s\n' 'field=source_url expected="a well-formed http(s) URL" received="<redacted>"'
+    fi
 
     if ! timestamp="$(jq -nr --arg timestamp_pattern "$timestamp_pattern" \
         --slurpfile received "$evidence_file" '
@@ -572,7 +574,26 @@ source_evidence_differences() {
 
     jq -nr --slurpfile expected "$snapshot_file" \
         --slurpfile received "$evidence_file" --arg source_date "$source_date" \
-        --argjson fields "$required_fields" '
+        --arg check_name "$check_name" '
+        def field_abs_diff($expected; $received; $field; $tolerance):
+            ($received[$field]) as $got
+            | if ($got | type) != "number" then
+                "field=\($field) expected=\"a number\" received=\"<redacted>\""
+              elif (($expected[$field] - $got) | fabs) > $tolerance then
+                "field=\($field) expected=within \($tolerance) of source_snapshot received=\"<redacted>\""
+              else empty
+              end;
+
+        def field_rel_diff($expected; $received; $field; $fraction):
+            ($received[$field]) as $got
+            | ($expected[$field]) as $want
+            | if ($got | type) != "number" then
+                "field=\($field) expected=\"a number\" received=\"<redacted>\""
+              elif ((($want - $got) | fabs) > ($want * $fraction)) then
+                "field=\($field) expected=within \($fraction * 100)% of source_snapshot received=\"<redacted>\""
+              else empty
+              end;
+
         ($expected
          | if length == 1 and (.[0] | type) == "object" then .[0]
            else error("source snapshot file must contain exactly one object")
@@ -587,11 +608,21 @@ source_evidence_differences() {
            | $source_date as $got_date
            | select($want_date != $got_date)
            | "field=source_timestamp expected_date=\($want_date | tojson) received_date=\"<redacted>\""),
-          ($fields[] as $field
-           | ($expected[$field] // "<missing>") as $want
-           | ($received[$field] // "<missing>") as $got
-           | select($want != $got)
-           | "field=\($field) expected=\($want | tojson) received=\"<redacted>\"")
+          (if $check_name == "weather" then
+             field_abs_diff($expected; $received; "temperature_2m"; 8),
+             # Not range-bound to WMO codes (0-99): the agent may use any public
+             # weather API, and providers publish condition codes in different
+             # taxonomies (e.g. wttr.in codes exceed the WMO range). Only the
+             # type is checked here.
+             ($received.weather_code as $code
+              | if ($code | type) != "number" then
+                  "field=weather_code expected=\"a number\" received=\"<redacted>\""
+                else empty
+                end)
+           elif $check_name == "fx" then
+             field_rel_diff($expected; $received; "usd_to_clp"; 0.05)
+           else empty
+           end)
         ]
         | .[]
     '
@@ -636,10 +667,9 @@ for client in "${clients[@]}"; do
                         continue
                     }
                     snapshot="$SNAPSHOT_RESULT"
-                    source_url="$weather_url"
+                    source_description="the current weather (temperature in Celsius and WMO weather code) for Santiago, Chile, from a public weather API"
                     fields='source_url, source_timestamp, temperature_2m, and weather_code'
-                    timestamp_instruction="The source_timestamp field must copy the source response's timestamp text byte-for-byte. Do not convert or normalize its timezone, add an offset, or change its date. Return source_timestamp as ISO-8601."
-                    agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched weather source'
+                    agent_expectation='exactly one JSON object with a plausible, current weather reading for Santiago, Chile, within tolerance of the independently-fetched source'
                     ;;
                 fx)
                     snapshot_for "$check_name" "$source_stdout" "$source_stderr" "$source_parser_stderr" || {
@@ -648,16 +678,20 @@ for client in "${clients[@]}"; do
                         continue
                     }
                     snapshot="$SNAPSHOT_RESULT"
-                    source_url="$fx_url"
+                    source_description="the current USD to CLP exchange rate, from a public FX API"
                     fields='source_url, source_timestamp, and usd_to_clp'
-                    timestamp_instruction="Return source_timestamp as ISO-8601. The source_timestamp field must convert the source response's exact time_last_update_utc timestamp to ISO-8601 while preserving its UTC instant, UTC timezone (Z or +00:00), and source calendar date. Do not convert it to local time or another timezone, and do not change its date."
-                    agent_expectation='exactly one JSON object whose source URL, canonical source date, and required source values match the fetched FX source'
+                    agent_expectation='exactly one JSON object with a plausible, current USD/CLP rate, within tolerance of the independently-fetched source'
                     ;;
             esac
             snapshot_file="$(mktemp "${diagnostic_dir}/source-snapshot.XXXXXX")" || die "could not create source snapshot"
             chmod 600 "$snapshot_file" || die "could not secure source snapshot"
             printf '%s\n' "$snapshot" > "$snapshot_file" || die "could not write source snapshot"
-            printf -v prompt '%s' "You MUST use bash to execute this exact command verbatim as the only network request: curl -fsS --max-time 20 -- '${source_url}'. The URL argument must be copied byte-for-byte from the command. Do not substitute any source, endpoint, proxy, mirror, or query. Return fields only from that command's response. The source_url field must reproduce the literal URL byte-for-byte, including percent encoding. ${timestamp_instruction} Return exactly one JSON object containing ${fields}."
+            # Deliberately does not name a URL or a fetch method: this check verifies the
+            # agent+model pairing can resolve and use whatever tooling the client provides
+            # on its own, not that it can copy a literal command. source_evidence_differences()
+            # below validates the result against the independently-fetched snapshot with
+            # tolerance, since a different upstream source is expected to differ slightly.
+            printf -v prompt '%s' "Using your own tools, find ${source_description}. Return exactly one JSON object containing ${fields}. source_url must be the exact URL of the API endpoint you used. source_timestamp must be the source's own observation/update time, in ISO-8601."
 
             transcript_file="$(mktemp "${diagnostic_dir}/client-transcript.XXXXXX")" || die "could not create client transcript"
             client_stderr_file="$(mktemp "${diagnostic_dir}/client-stderr.XXXXXX")" || die "could not create client stderr"

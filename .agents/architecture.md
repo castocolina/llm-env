@@ -56,13 +56,93 @@ The compose file also runs `omniroute`, network-joined to `llm-server` and
 gated on its `service_healthy` condition. `scripts/start.sh` calls `llmenv
 omniroute provision` once both containers are reachable, which idempotently
 creates or updates a provider connection named `llm-env-local` pointing at
-`http://llm-server:<port>/v1` with the router's real API key — see
-`pylib/omniroute.py`. To inspect what is actually configured in OmniRoute:
+`http://llm-server:<port>/v1` (`llm-server` is the compose service's
+`container_name`, which is also its DNS name on the shared podman network)
+with the router's real API key — see `pylib/omniroute.py`. OmniRoute's
+management API (`/api/providers`) accepts only a dashboard session or a
+Bearer key with `manage` scope; there is no CLI-token header, so
+provisioning logs in with the dashboard password (`POST /api/auth/login`)
+and reuses the resulting `auth_token` session cookie for subsequent
+requests. To inspect what is actually configured in OmniRoute:
 
 ```bash
-curl -H "x-omniroute-cli-token: $(yq -r '.omniroute.cli_token' ~/.config/llm-env/models.yml)" \
-  http://127.0.0.1:20128/api/providers
+pw="$(yq -r '.omniroute.initial_password' ~/.config/llm-env/models.yml)"
+curl -c /tmp/omni-cookies -X POST -H "Content-Type: application/json" \
+  -d "{\"password\":\"${pw}\"}" http://127.0.0.1:20128/api/auth/login
+curl -b /tmp/omni-cookies http://127.0.0.1:20128/api/providers
 ```
+
+### Topology and what survives a restart
+
+```
+                 podman-compose default network (compose project network)
+                 ┌──────────────────────────────────────────────────┐
+                 │                                                  │
+ host:8000 ─────▶│  llm-server  ◀───DNS "llm-server"────  omniroute │◀──── host:127.0.0.1:20128
+ (LLAMA_ARG_PORT) │  (llama.cpp)                          (router)  │      (dashboard + /v1/*)
+                 │      ▲                                    ▲     │
+                 └──────┼────────────────────────────────────┼─────┘
+                        │                                    │
+              bind mount (ro)                        named volume
+       ~/llm-workspace/models  :/models              omniroute-data:/app/data
+       ~/.config/llm-env/presets.ini                 (dashboard password, provider
+       (host directories -- not podman-managed)        connections, everything you
+                                                        configure in the dashboard)
+```
+
+See `docker-compose.yml.example` for the full annotated compose shape this
+diagram summarizes (checked-in, static, NOT read by any script -- purely a
+reference; the real file is generated, see below).
+
+**What survives what:**
+
+| Event | `llm-server`/`omniroute` containers | `omniroute-data` volume | bind-mounted models/presets |
+| --- | --- | --- | --- |
+| `podman kill`/crash, then `restart:` policy relaunches | recreated | untouched | untouched (host files) |
+| `make stop` / `systemctl --user stop llm-server.service` (`podman compose down`, no `-v`) | removed, volume detached | **kept** | untouched |
+| `make start` (`podman compose up -d` again) | recreated | reattached, same data | untouched |
+| host reboot (`start_at_boot` unit, or manual `make start` after) | recreated | **kept** | untouched |
+| `make clean` (`podman compose down -v`) | removed | **destroyed** — explicitly warned before confirming | untouched (models are never deleted) |
+
+In short: anything you configure by hand in the OmniRoute dashboard (extra
+provider connections, settings) lives in the `omniroute-data` named volume
+and survives every normal lifecycle operation — stopping, starting,
+rebooting the host, or the container crashing and being restarted. It is
+only lost if you run `make clean`, or manually `podman volume rm
+omniroute-data` / `podman compose down -v`.
+
+To provision more than the one `llm-env-local` connection this repo sets up
+automatically, either add it by hand in the dashboard (persists in the
+volume the same way), or extend `llmenv.py omniroute provision` /
+`pylib/omniroute.py` — today it only idempotently creates/updates that one
+connection; generalizing it to read a list of desired connections from
+`models.yml` would make additional provisioning reproducible instead of
+manual.
+
+**Inspecting the generated compose file:** `setup/render-unit.sh` writes the
+real, live compose file to `~/.config/llm-env/docker-compose.yml` on every
+`make start`, and also copies that exact render to `./tmp/docker-compose.yml`
+(gitignored) so it can be inspected or diffed from inside the repo without
+touching `~/.config`. `docker-compose.yml.example` above is the static,
+annotated counterpart for reading without running anything.
+
+Three OmniRoute API shapes are undocumented and were only confirmed by
+capturing the dashboard UI's own network traffic while adding a connection
+by hand (`Add Connection` on a provider's page, e.g.
+`/dashboard/providers/llama-cpp`):
+
+- A connection's outbound URL lives at `providerSpecificData.baseUrl`, not
+  a top-level `url`/`baseUrl` key. A top-level key is silently accepted by
+  `POST /api/providers` (`201 Created`) and even passes the separate
+  `POST /api/providers/validate` syntax check, but is never persisted —
+  `GET /api/providers` afterward shows no URL at all.
+- `/v1/*` inference routes (`/v1/chat/completions`, `/v1/models`) accept
+  the same dashboard password as a plain `Authorization: Bearer <password>`
+  header — no separate API key needs to be minted via `POST /api/keys`.
+- Routing keys on the **provider slug** (e.g. `llama-cpp`), not the
+  connection's own `name`. A request for model `llm-env-local/<alias>`
+  404s with `model_not_found`; the correct model ID is
+  `llama-cpp/<alias>`, confirmed via `GET /v1/models`.
 
 ## Invariants
 

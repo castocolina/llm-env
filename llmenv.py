@@ -217,15 +217,15 @@ def cmd_resources(args: argparse.Namespace) -> int:
 def cmd_omniroute(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     omniroute_cfg = cfg.get("omniroute") or {}
-    cli_token = omniroute_cfg.get("cli_token")
+    initial_password = omniroute_cfg.get("initial_password")
     port = omniroute_cfg.get("port")
-    if not cli_token or not port:
+    if not initial_password or not port:
         return fail(
-            "omniroute.cli_token and omniroute.port must be set; run 'make start' "
-            "after 'make setup' to generate them"
+            "omniroute.initial_password and omniroute.port must be set; run "
+            "'make start' after 'make setup' to generate them"
         )
     base_url = f"http://127.0.0.1:{port}"
-    result = provision(base_url, cli_token, cfg["server"]["port"], cfg["server"]["api_key"])
+    result = provision(base_url, initial_password, cfg["server"]["port"], cfg["server"]["api_key"])
     return emit(result)
 
 

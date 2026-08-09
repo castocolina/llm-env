@@ -29,7 +29,6 @@ CFG = {
     "omniroute": {
         "image": "docker.io/diegosouzapw/omniroute:latest",
         "port": 20128,
-        "cli_token": "test-cli-token",
         "initial_password": "test-password",
     },
 }
@@ -128,7 +127,6 @@ def test_omniroute_service_sets_its_environment():
     _, document = compose_dict()
     env = document["services"]["omniroute"]["environment"]
     assert env["PORT"] == "20128"
-    assert env["OMNIROUTE_CLI_TOKEN"] == "test-cli-token"
     assert env["OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS"] == "true"
     assert env["INITIAL_PASSWORD"] == "test-password"
 
@@ -166,6 +164,21 @@ def test_omniroute_nonzero_resource_limits_are_applied():
     omniroute = document["services"]["omniroute"]
     assert omniroute["cpus"] == 1
     assert omniroute["mem_limit"] == "1024m"
+
+
+def test_dollar_signs_in_secrets_are_escaped_against_compose_interpolation():
+    cfg = {
+        **CFG,
+        "server": {**CFG["server"], "api_key": "sekret$with$dollars"},
+        "omniroute": {
+            **CFG["omniroute"],
+            "initial_password": "pw$word",
+        },
+    }
+    _, document = compose_dict(cfg)
+    assert document["services"]["llm-server"]["environment"]["LLAMA_API_KEY"] == "sekret$$with$$dollars"
+    omniroute_env = document["services"]["omniroute"]["environment"]
+    assert omniroute_env["INITIAL_PASSWORD"] == "pw$$word"
 
 
 def test_write_compose_creates_parent_directories(tmp_path):

@@ -15,6 +15,9 @@ ensure_api_key
 bash "${REPO_DIR}/setup/render-unit.sh"
 log_info "unit rendered with [Install]"
 
+systemctl --user enable "${UNIT_NAME}.service"
+log_info "enabled ${UNIT_NAME}.service to start at boot"
+
 loginctl enable-linger "$USER"
 log_info "lingering enabled for ${USER}"
 log_info "the server will now start at boot. Verify with: make status"

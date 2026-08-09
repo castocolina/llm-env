@@ -13,7 +13,10 @@ yq -i '.server.start_at_boot = false' "$CONFIG_PATH"
 
 unit="$WRAPPER_UNIT_PATH"
 if [ -f "$unit" ]; then
-    # Drop the [Install] section so the generator stops wanting it at boot.
+    # Disable while [Install] is still present so systemd can find and
+    # remove the enablement symlink it created; only then drop the section
+    # so the generator stops rendering it as wanted at boot.
+    systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
     sed -i '/^\[Install\]$/,$d' "$unit"
     log_info "removed [Install] from the unit"
 fi
