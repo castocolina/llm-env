@@ -64,24 +64,102 @@ already support N enabled models and are exercised directly by tests and by
 `llmenv models select` for advanced/manual use outside the guided setup
 flow. Only the interactive prompt's contract narrows.
 
-## 3. Explicit RAM ceiling
+## 3. Explicit RAM ceiling (percentage of total host RAM)
 
-`resources.llm_server.memory_mib` already exists in the schema and is
-already translated to podman's `mem_limit` by `pylib/compose.py` — no code
-changes needed there. Change the default from `0` (unlimited) to `14336`
-(14 GiB) in `models.yml.example`, and set the same value in the live config
-via `make setup` or a manual `yq` edit. `resources.omniroute.memory_mib`
-(1024 MiB) is unchanged.
+Today `pylib/resources.py::compute_resource_limits()` hands `llm-server`
+*all* remaining host RAM after fixed floors
+(`host_memory_total_mib - HOST_MEMORY_FLOOR_MIB - OMNIROUTE_MEMORY_FIXED_MIB`)
+— there is no cap. `setup.sh` Step 8/8 calls this live on every `make
+setup` run (via `llmenv resources`) and writes whatever it returns into
+`resources.llm_server.memory_mib`. Changing only the example file's default
+would get silently overwritten the next time setup runs, so the cap has to
+live in `compute_resource_limits()` itself.
 
-## 4. Explicit VRAM ceiling
+New config field `resources.llm_server.memory_ceiling_pct` (plain number,
+percent of `host_memory_total_mib`, not of what's free — RAM isn't
+contended the way VRAM is here). Default `46` (≈14.4 GiB on your 32 GiB
+host, closest whole percent to the 14 GiB you asked for; scales
+proportionally on other hosts instead of hard-coding a byte count that
+means something different on different machines).
 
-New config field `gpu.vram_budget_ceiling`, same syntax as a model's
-existing `vram_budget` (`"95%"`, `"15GB"`, or `"15488MiB"` — reuses
-`budget.py`'s existing `BUDGET_RE`/`parse_vram_budget`). Default `"95%"`.
+The computed ceiling is itself floored, at two tiers: a real, user-facing
+config default of `resources.llm_server.memory_ceiling_floor_mib` (10 GiB /
+10240 MiB, backfilled by `migrate_config`) and a lower, code-level fallback
+of 6 GiB / 6144 MiB used only when a config genuinely bypassed migration
+(a hand-crafted config, or a stubbed test fixture). Without this, a
+valid-but-tiny `memory_ceiling_pct` could round the ceiling down to
+something `pylib/compose.py` treats as "no limit" (it omits `mem_limit`
+entirely when `memory_mib` is falsy/`0`) — the opposite of the intended
+guarantee.
+
+`compute_resource_limits()` gains `memory_ceiling_pct` and
+`memory_ceiling_floor_mib` parameters:
+
+```python
+def compute_resource_limits(
+    host_cpu_count: int,
+    host_memory_total_mib: int,
+    memory_ceiling_pct: float = 100,
+    memory_ceiling_floor_mib: int = 6144,
+) -> dict[str, Any]:
+    ...
+    memory_ceiling_mib = max(
+        memory_ceiling_floor_mib,
+        round(host_memory_total_mib * memory_ceiling_pct / 100),
+    )
+    llm_server_memory_mib = min(
+        host_memory_total_mib - memory_floor_mib, memory_ceiling_mib
+    )
+```
+
+`llm_server.memory_mib` in the returned dict uses `llm_server_memory_mib`.
+The `ResourceError` floor check is unchanged (it's about whether the fixed
+floors fit at all, independent of the ceiling). Whatever caller currently
+invokes `compute_resource_limits()` (the `llmenv resources` CLI command)
+resolves both `resources.llm_server.memory_ceiling_pct` and
+`resources.llm_server.memory_ceiling_floor_mib` from config and passes them
+through — same shape as how `budget` already reads config before calling
+`compute_budget()`.
+
+`pylib/config.py`:
+- `migrate_config`: `llm_server_resources.setdefault("memory_ceiling_pct", 46)`
+  and `llm_server_resources.setdefault("memory_ceiling_floor_mib", 10240)`
+  alongside the existing `cpus`/`memory_mib` defaults.
+- `validate_config`: `memory_ceiling_pct` must be a finite number in `(0, 100]`;
+  `memory_ceiling_floor_mib` must be a positive integer.
+
+## 4. Explicit VRAM ceiling (percentage of VRAM free at setup time)
+
+Unlike RAM, VRAM contention is real and time-varying (desktop compositor +
+other GPU clients), so the ceiling is a percentage of what's *actually free
+right now*, computed once during `make setup` (Step 2, "Detecting GPUs" —
+where `vram_total`/`vram_used` for the chosen GPU are already known) and
+stored as a resolved absolute value, the same way `gpu.pci_address` and
+`gpu.vram_total_mib` themselves are captured at setup time rather than
+re-detected on every start.
+
+Three new config fields:
+- `gpu.vram_budget_ceiling_pct` — plain number, the configurable knob.
+  Default `95`.
+- `gpu.vram_budget_ceiling_mib` — absolute MiB, computed and written by
+  `setup.sh` alongside its existing `pci_address`/`vram_total_mib`/
+  `device_name` write in Step 2:
+  `max(vram_budget_ceiling_floor_mib, round((vram_total - vram_used) * vram_budget_ceiling_pct / 100))`.
+  Recomputed (overwritten) every time `make setup` runs, using whatever is
+  free on the GPU at that moment.
+- `gpu.vram_budget_ceiling_floor_mib` — the floor applied above, at the
+  same two tiers as the RAM ceiling: a real, user-facing config default of
+  10 GiB / 10240 MiB (backfilled by `migrate_config`), read by `setup.sh`
+  via `yq -r '.gpu.vram_budget_ceiling_floor_mib // 6144' "$CONFIG_PATH"` —
+  the `// 6144` is a code-level fallback for a config that bypassed
+  migration, not the normal-operation value.
 
 `pylib/budget.py`'s `compute_budget()` gains a `vram_budget_ceiling_mib`
-parameter (resolved by the caller via `parse_vram_budget(ceiling,
-vram_total_mib)` before calling in). `available_mib` becomes:
+parameter (the already-resolved, already-floored absolute value read
+straight from config — no parsing or flooring needed here, unlike a
+model's `vram_budget` which stays a `%`/`GB`/`MiB` string because it's
+evaluated fresh against `vram_total_mib` every time). `available_mib`
+becomes:
 
 ```python
 ceiling = min(vram_total_mib, vram_budget_ceiling_mib)
@@ -90,30 +168,46 @@ available = ceiling - reserve - SPIKE_HEADROOM_MIB
 
 i.e. the ceiling acts as an artificial cap on `vram_total_mib` before the
 existing reserve/spike-headroom arithmetic runs — everything downstream
-(feasibility check, remedies, resident model selection) is unchanged. If
-`vram_budget_ceiling_mib` is not configured (config migration backfills a
-default of `"95%"`, mirroring how `omniroute.port` gets backfilled), the
-ceiling equals the full total and behavior is identical to today's.
+(feasibility check, remedies, resident model selection) is unchanged.
 
 `pylib/config.py`:
-- `migrate_config`: `gpu.setdefault("vram_budget_ceiling", "95%")`.
-- `validate_config`: validate with the same `VRAM_BUDGET_RE` used for model
-  `vram_budget`.
+- `migrate_config`: `gpu.setdefault("vram_budget_ceiling_pct", 95)`,
+  `gpu.setdefault("vram_budget_ceiling_mib", gpu.get("vram_total_mib", 0))`
+  (backfill to the full total — i.e. no additional cap — for configs
+  created before this field existed and not yet re-run through `make
+  setup`; the real, tighter value is written the next time setup runs), and
+  `gpu.setdefault("vram_budget_ceiling_floor_mib", 10240)`.
+- `validate_config`: `vram_budget_ceiling_pct` must be a finite number in
+  `(0, 100]`; `vram_budget_ceiling_mib` must be a non-negative integer;
+  `vram_budget_ceiling_floor_mib` must be a positive integer.
 
-Whatever script currently calls `compute_budget()` (device/budget resolution
-in `llmenv.py`) resolves `gpu.vram_budget_ceiling` via `parse_vram_budget`
-the same way it presumably already resolves each model's `vram_budget`, and
-passes the result through.
+Whatever caller resolves `gpu.vram_budget_ceiling_mib` from config and
+passes it straight into `compute_budget()` — note that a configured `0`
+(the `models.yml.example` placeholder before `make setup` has ever run) is
+a documented "no cap" sentinel and must be translated to `None` before
+reaching `compute_budget()`, not passed through literally (`min(total, 0)`
+would otherwise collapse the budget to zero/negative).
 
 ## Testing
 
 - `tests/test_shell.py`: assert `render-unit.sh` writes
   `${COMPOSE_INSPECT_DIR}/presets.ini`; assert `setup.sh` rejects
-  comma-separated model selection and accepts a single index.
-- `tests/test_config.py`: migration backfills `gpu.vram_budget_ceiling`;
-  validation accepts/rejects the same shapes as `vram_budget`.
-- `tests/test_compose.py` (or wherever `budget.py` is unit-tested): ceiling
-  below total reduces `available_mib` accordingly; ceiling above total is a
-  no-op; default `95%` behavior against the example config's 16304 MiB total
-  (≈15488 MiB ceiling).
-- Update `models.yml.example` and re-run the full suite + ruff.
+  comma-separated model selection and accepts a single index; assert
+  `setup.sh` Step 2 writes `gpu.vram_budget_ceiling_mib` computed from
+  `(vram_total - vram_used) * vram_budget_ceiling_pct / 100` against a
+  stubbed `llmenv detect`.
+- `tests/test_config.py`: migration backfills `resources.llm_server.memory_ceiling_pct`
+  (46), `gpu.vram_budget_ceiling_pct` (95), and `gpu.vram_budget_ceiling_mib`
+  (falls back to `vram_total_mib`); validation accepts/rejects each new
+  field's range.
+- `pylib/resources.py` unit tests: `compute_resource_limits()` with a small
+  `memory_ceiling_pct` caps `llm_server.memory_mib` below
+  `host_memory_total_mib - memory_floor_mib`; a `memory_ceiling_pct` of
+  `100` (or high enough) reproduces today's uncapped behavior; the
+  `ResourceError` floor check is unaffected by the ceiling.
+- `pylib/budget.py` unit tests: `vram_budget_ceiling_mib` below
+  `vram_total_mib` reduces `available_mib` accordingly; a ceiling at or
+  above `vram_total_mib` is a no-op.
+- Update `models.yml.example` (new fields at their defaults, `resources.llm_server.memory_mib`
+  left as the computed convention — set by `make setup`, not hand-edited)
+  and re-run the full suite + ruff.
