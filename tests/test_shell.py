@@ -1234,12 +1234,13 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
 def test_render_unit_retires_the_legacy_static_ip_mdns_unit(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A pre-rename "llm-mdns.service" publishes its mDNS record with a
-    literal IP baked in at start time (avahi-publish -a -R llm.local <ip>),
-    so it goes stale on any DHCP lease change and can win mDNS resolution
-    races against the current, dynamic-IP-safe llm-server-mdns.service
-    (avahi-publish -s, no IP argument -- always resolves the host's live
-    address). render-unit.sh must retire it on every run."""
+    """A pre-rename "llm-mdns.service" ran a one-shot
+    `avahi-publish -a -R llm.local <ip>` with the IP baked in at start time,
+    so it goes stale on any DHCP lease change. render-unit.sh must retire it
+    on every run -- its replacement (llm-server-mdns.service, driven by
+    tools/publish-mdns-hostname.sh) now owns republishing that same alias
+    whenever the address actually changes, so removing the legacy unit does
+    not regress hostname resolution."""
     real_yq = shutil.which("yq")
     assert real_yq is not None
     real_uv = shutil.which("uv")
@@ -3562,7 +3563,8 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "ExecStart=podman compose" in wrapper
     assert "ExecStartPre=" in unit
     assert "http://127.0.0.1:8000/health" in unit
-    assert "avahi-publish -s llm _http._tcp 8000" in unit
+    assert "ExecStart=/usr/bin/bash" in unit
+    assert "tools/publish-mdns-hostname.sh llm.local llm 8000" in unit
     assert "systemctl --user daemon-reload" in calls.read_text()
     assert "systemctl --user enable llm-server.service" in calls.read_text()
 
