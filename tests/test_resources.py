@@ -111,3 +111,63 @@ def test_memory_ceiling_floors_at_the_configured_value_instead_of_rounding_to_ze
         memory_ceiling_floor_pct=30,
     )
     assert result["llm_server"]["memory_mib"] == round(32768 * 30 / 100)
+
+
+def test_cpu_ceiling_caps_llm_server_below_the_uncapped_remainder():
+    uncapped = compute_resource_limits(host_cpu_count=24, host_memory_total_mib=32768)
+    capped = compute_resource_limits(
+        host_cpu_count=24, host_memory_total_mib=32768, cpu_ceiling_pct=60
+    )
+    assert capped["llm_server"]["cpus"] < uncapped["llm_server"]["cpus"]
+    assert capped["llm_server"]["cpus"] == 14  # round(24 * 0.60) == 14.4 -> 14
+
+
+def test_cpu_ceiling_above_the_remainder_is_a_no_op():
+    result = compute_resource_limits(
+        host_cpu_count=8, host_memory_total_mib=32768, cpu_ceiling_pct=100
+    )
+    assert result["llm_server"]["cpus"] == 8 - HOST_CPU_FLOOR - OMNIROUTE_CPU_FIXED
+
+
+def test_cpu_ceiling_floor_defaults_to_20_pct_when_unspecified():
+    result = compute_resource_limits(
+        host_cpu_count=24, host_memory_total_mib=32768, cpu_ceiling_pct=0.001
+    )
+    assert result["llm_server"]["cpus"] == round(24 * 20 / 100)
+
+
+def test_cpu_ceiling_floors_at_the_configured_value_instead_of_rounding_to_zero():
+    result = compute_resource_limits(
+        host_cpu_count=24,
+        host_memory_total_mib=32768,
+        cpu_ceiling_pct=0.001,
+        cpu_ceiling_floor_pct=60,
+    )
+    assert result["llm_server"]["cpus"] == round(24 * 60 / 100)
+
+
+def test_cpu_ceiling_never_rounds_down_to_zero_on_a_small_host():
+    """Unlike the memory ceiling (MiB values are always large enough that a
+    valid 0-100% pct can never round to 0), CPU core counts are small whole
+    numbers -- on a host with only 1 usable core after the fixed floor, both
+    a tiny cpu_ceiling_pct AND a tiny cpu_ceiling_floor_pct can independently
+    round to 0 (round(4 * 1 / 100) == 0), which compose.py then treats as
+    "no cpus: limit at all" (fully uncapped), not "cap at 0 cores"."""
+    result = compute_resource_limits(
+        host_cpu_count=4,  # cpu_floor is 3 (HOST_CPU_FLOOR=2 + OMNIROUTE_CPU_FIXED=1)
+        host_memory_total_mib=32768,
+        cpu_ceiling_pct=1,
+        cpu_ceiling_floor_pct=1,
+    )
+    assert result["llm_server"]["cpus"] == 1
+
+
+@pytest.mark.parametrize("cpu_ceiling_pct", [1, 5, 10, 19])
+def test_cpu_ceiling_never_rounds_down_to_zero_across_tiny_percentages(cpu_ceiling_pct):
+    result = compute_resource_limits(
+        host_cpu_count=4,
+        host_memory_total_mib=32768,
+        cpu_ceiling_pct=cpu_ceiling_pct,
+        cpu_ceiling_floor_pct=1,
+    )
+    assert result["llm_server"]["cpus"] >= 1
