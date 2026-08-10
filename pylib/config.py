@@ -76,6 +76,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             llm_server_resources.setdefault("memory_mib", 0)
             llm_server_resources.setdefault("memory_ceiling_pct", 46)
             llm_server_resources.setdefault("memory_ceiling_floor_pct", 30)
+            llm_server_resources.setdefault("cpu_ceiling_pct", 60)
+            llm_server_resources.setdefault("cpu_ceiling_floor_pct", 20)
         omniroute_resources = resources.setdefault("omniroute", {})
         if isinstance(omniroute_resources, dict):
             omniroute_resources.setdefault("cpus", 1)
@@ -246,6 +248,25 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         "resources.llm_server.memory_ceiling_floor_pct must be a "
                         "finite number greater than 0 and at most 100"
                     )
+                cpu_ceiling_pct = llm_server_resources.get("cpu_ceiling_pct", 60)
+                if isinstance(cpu_ceiling_pct, bool) or not (
+                    _finite_number(cpu_ceiling_pct) and 0 < cpu_ceiling_pct <= 100
+                ):
+                    errors.append(
+                        "resources.llm_server.cpu_ceiling_pct must be a "
+                        "finite number greater than 0 and at most 100"
+                    )
+                cpu_ceiling_floor_pct = llm_server_resources.get(
+                    "cpu_ceiling_floor_pct", 20
+                )
+                if isinstance(cpu_ceiling_floor_pct, bool) or not (
+                    _finite_number(cpu_ceiling_floor_pct)
+                    and 0 < cpu_ceiling_floor_pct <= 100
+                ):
+                    errors.append(
+                        "resources.llm_server.cpu_ceiling_floor_pct must be a "
+                        "finite number greater than 0 and at most 100"
+                    )
             omniroute_resources = resources.get("omniroute", {})
             if not isinstance(omniroute_resources, dict):
                 errors.append("resources.omniroute must be a mapping")
@@ -358,6 +379,14 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(
                 f"model {model_name} client_max_output_tokens must not exceed ctx_size"
             )
+        if "n_cpu_moe" in model:
+            n_cpu_moe = model["n_cpu_moe"]
+            if isinstance(n_cpu_moe, bool) or not (
+                isinstance(n_cpu_moe, int) and n_cpu_moe >= 0
+            ):
+                errors.append(
+                    f"model {model_name} n_cpu_moe must be a non-negative integer"
+                )
 
     enabled_count = len(enabled_models(cfg))
     if enabled_count == 0:
