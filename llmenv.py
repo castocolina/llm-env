@@ -45,7 +45,7 @@ from pylib.config import (
     set_model_enabled,
     sync_models_max,
 )
-from pylib.detect import DetectError, detect, host_resources
+from pylib.detect import DetectError, detect, host_resources, processes_on_render_node
 from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
 from pylib.omniroute import OmniRouteError, provision
 from pylib.presets import write_presets
@@ -91,6 +91,10 @@ def positive_int(value: str) -> int:
 
 def cmd_detect(args: argparse.Namespace) -> int:
     return emit(detect())
+
+
+def cmd_processes_on_render_node(args: argparse.Namespace) -> int:
+    return emit({"processes": processes_on_render_node(args.render_node)})
 
 
 def parse_device_listing(text: str) -> list[dict[str, int | str]]:
@@ -347,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("detect").set_defaults(func=cmd_detect)
+
+    processes_parser = sub.add_parser("processes-on-render-node")
+    processes_parser.add_argument("--render-node", required=True)
+    processes_parser.set_defaults(func=cmd_processes_on_render_node)
 
     list_devices = sub.add_parser("list-devices")
     list_devices.add_argument("--listing-file")

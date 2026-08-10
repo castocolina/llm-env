@@ -136,6 +136,133 @@ def compositor_render_node(proc_root: Path = Path("/proc")) -> str | None:
     return None
 
 
+def _parse_fdinfo(text: str) -> tuple[int, str | None]:
+    """Return (vram_bytes, drm_client_id) parsed from fdinfo content.
+
+    vram_bytes (not MiB) so multiple fds for the same PID can be summed at
+    full precision before any MiB rounding happens -- summing
+    already-floored per-fd MiB values would lose small fds entirely (e.g.
+    two 512 KiB fds would each floor to 0 MiB and sum to 0, when the
+    correct combined total is 1024 KiB = 1 MiB). 0 for missing/unparseable
+    content -- best-effort, matching the kernel's own "a process can hold
+    the fd without VRAM accounting being exposed for it" behavior.
+
+    `drm-memory-vram:` accepts two forms per the kernel's fdinfo spec: the
+    usual `<amount> <unit>` pair (KiB/MiB/GiB/B, case-insensitive), and a
+    single bare number with no unit suffix at all -- the spec's documented
+    default of raw bytes when no unit is given. Both must parse correctly;
+    only a line that is neither of these (missing entirely, or with a
+    non-numeric/unrecognized token) falls through to the 0 default.
+
+    drm_client_id is the raw `drm-client-id:` value (a string; the kernel
+    defines no particular format for it, so it's never parsed as an int),
+    or None when the fdinfo record has no such line (older kernels/drivers
+    that don't expose it). The kernel's DRM fdinfo interface
+    (https://origin.kernel.org/doc/html/latest/gpu/drm-usage-stats.html)
+    defines drm-client-id specifically to identify duplicated/shared fds
+    (e.g. via dup()) that refer to the same logical client, and documents
+    that consumers should count each client once, not once per fd --
+    callers use this to de-duplicate VRAM across fds for the same PID.
+    """
+    vram_bytes = 0
+    client_id: str | None = None
+    for line in text.splitlines():
+        if line.startswith("drm-memory-vram:"):
+            parts = line.split(":", 1)[1].split()
+            if len(parts) == 2:
+                amount_text, unit = parts
+                try:
+                    amount = int(amount_text)
+                except ValueError:
+                    amount = None
+                if amount is not None:
+                    unit = unit.lower()
+                    if unit == "kib":
+                        vram_bytes = amount * 1024
+                    elif unit == "mib":
+                        vram_bytes = amount * MIB
+                    elif unit == "gib":
+                        vram_bytes = amount * 1024 * MIB
+                    elif unit == "b":
+                        vram_bytes = amount
+            elif len(parts) == 1:
+                # No unit suffix at all -- the fdinfo spec's documented
+                # default is raw bytes (e.g. "drm-memory-vram:\t1048576").
+                try:
+                    vram_bytes = int(parts[0])
+                except ValueError:
+                    pass
+        elif line.startswith("drm-client-id:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                client_id = value
+    return vram_bytes, client_id
+
+
+def processes_on_render_node(render_node: str, proc_root: Path = Path("/proc")) -> list[dict]:
+    """Return every process with an open fd on render_node, with its VRAM use.
+
+    Fds sharing the same drm-client-id (duplicated fds referring to one
+    logical DRM client, e.g. via dup()) are counted once, not once per fd.
+    An fd whose fdinfo record has no drm-client-id line at all (older
+    kernel/driver) is always counted on its own, preserving today's
+    behavior for kernels that don't expose the id.
+    """
+    proc_root = Path(proc_root)
+    if not proc_root.is_dir():
+        return []
+
+    results: list[dict] = []
+    for pid_dir in proc_root.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            comm = (pid_dir / "comm").read_text().strip()
+        except OSError:
+            continue
+
+        try:
+            fds = list((pid_dir / "fd").iterdir())
+        except OSError:
+            continue
+
+        matched = False
+        vram_bytes = 0
+        seen_client_ids: set[str] = set()
+        for fd in fds:
+            try:
+                target = fd.resolve().name
+            except OSError:
+                continue
+            if target != render_node:
+                continue
+            matched = True
+            try:
+                fdinfo_text = (pid_dir / "fdinfo" / fd.name).read_text()
+            except OSError:
+                continue
+            fd_vram_bytes, client_id = _parse_fdinfo(fdinfo_text)
+            if client_id is not None:
+                if client_id in seen_client_ids:
+                    continue
+                seen_client_ids.add(client_id)
+            vram_bytes += fd_vram_bytes
+
+        if not matched:
+            continue
+
+        try:
+            exe = (pid_dir / "exe").readlink().name
+        except OSError:
+            exe = comm
+
+        results.append(
+            {"pid": int(pid_dir.name), "comm": comm, "exe": exe, "vram_mib": vram_bytes // MIB}
+        )
+
+    return results
+
+
 def host_resources(proc_root: Path = Path("/proc")) -> dict[str, int]:
     """Return the host's total CPU count and total RAM, read from procfs directly."""
     proc_root = Path(proc_root)

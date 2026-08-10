@@ -61,6 +61,18 @@ def test_detect_emits_json_with_gpus_key():
     assert "gpus" in json.loads(result.stdout)
 
 
+def test_cmd_processes_on_render_node_returns_a_processes_list() -> None:
+    result = run("processes-on-render-node", "--render-node", "renderD128")
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert isinstance(payload["processes"], list)
+
+
+def test_cmd_processes_on_render_node_requires_render_node() -> None:
+    result = run("processes-on-render-node")
+    assert result.returncode == 2
+
+
 def test_resolve_device_matches_pci_from_device_listing(tmp_path):
     listing = tmp_path / "devices.txt"
     listing.write_text(
