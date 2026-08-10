@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status logs validate test clean
+        key-reset show-secrets enable-boot disable-boot status gpu-status logs validate test clean
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -52,6 +52,9 @@ disable-boot:
 
 status:
 	@bash tools/run-target.sh status -- bash scripts/status.sh
+
+gpu-status:
+	@bash tools/run-target.sh gpu-status -- bash scripts/gpu-status.sh
 
 logs:
 	@bash tools/run-target.sh logs -- bash scripts/logs.sh

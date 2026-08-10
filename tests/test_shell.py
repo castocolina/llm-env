@@ -88,6 +88,7 @@ def test_shell_scripts_use_the_approved_directories() -> None:
     assert (SETUP_DIR / "setup.sh").is_file()
     assert (SETUP_DIR / "setup-local-llm-agents.sh").is_file()
     assert (SCRIPT_DIR / "check-server.sh").is_file()
+    assert (SCRIPT_DIR / "gpu-status.sh").is_file()
 
 
 def test_makefile_dispatches_relocated_entrypoints() -> None:
@@ -97,6 +98,7 @@ def test_makefile_dispatches_relocated_entrypoints() -> None:
     assert "bash setup/setup.sh" in makefile
     assert "bash setup/setup-local-llm-agents.sh" in makefile
     assert "bash scripts/check-server.sh" in makefile
+    assert "bash scripts/gpu-status.sh" in makefile
 
 
 def _mock_command(directory: pathlib.Path, name: str) -> None:
@@ -908,6 +910,318 @@ def test_reverse_setup_selection_drives_client_model_order(
         {"providerID": "local-llm-env", "modelID": "ornith"},
         {"providerID": "local-llm-env", "modelID": "gemma4"},
     ]
+
+
+def run_gpu_status_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    processes_json: str = '{"processes":[]}',
+    config_text: str | None = None,
+    input_text: str = "",
+    system_applications_dir: pathlib.Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run gpu-status.sh against a stubbed llmenv/detect/budget/processes pipeline."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' detect')\n"
+        "    printf '%s\\n' '{\"gpus\":["
+        "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
+        "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]},"
+        "{\"card\":\"card0\",\"pci_address\":\"0000:0e:00.0\",\"vram_total_mib\":512,"
+        "\"vram_used_mib\":51,\"render_node\":\"renderD129\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":6000,\"feasible\":true}' ;;\n"
+        f"  *' processes-on-render-node '*) printf '%s\\n' '{processes_json}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = tmp_path / "models.yml"
+    config.write_text(
+        config_text
+        or 'gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n'
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    if system_applications_dir is not None:
+        environment["LLM_ENV_SYSTEM_APPLICATIONS_DIR"] = str(system_applications_dir)
+    if extra_env:
+        environment |= extra_env
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config, home
+
+
+def test_gpu_status_reports_total_used_ceiling_and_headroom(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(tmp_path)
+    assert result.returncode == 0
+    assert "total VRAM:         16384 MiB" in result.stdout
+    assert "used (system-wide): 2048 MiB" in result.stdout
+    assert "llm-env ceiling:    15565 MiB" in result.stdout
+    assert "budget headroom:    9000 MiB" in result.stdout
+
+
+def test_gpu_status_reports_uncapped_ceiling_as_uncapped_not_zero(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(
+        tmp_path,
+        config_text='gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 0\n',
+    )
+    assert "llm-env ceiling:    uncapped" in result.stdout
+
+
+def test_gpu_status_migrates_the_config_before_reading_the_ceiling(tmp_path: pathlib.Path) -> None:
+    """A config that predates gpu.vram_budget_ceiling_mib (a real,
+    anticipated upgrade path -- pylib/config.py's migrate_config()
+    persists gpu.setdefault("vram_budget_ceiling_mib", ...) to disk) must
+    not make the script read a raw, unmigrated field via `yq`'s `// 0`
+    default and print "uncapped" while the very next line (budget
+    headroom, via `llmenv budget`, which migrates in-memory by default
+    through pylib/config.py's load_config()) reflects the real, non-zero
+    ceiling -- two adjacent lines of the same diagnostic must never
+    disagree about whether a cap exists. This uv stub's migrate-config
+    case actually rewrites $LLM_ENV_CONFIG on disk with `yq -i`, mirroring
+    cmd_migrate_config's real persistence behavior, so the test proves
+    gpu-status.sh calls migrate_config_file (which shells out to
+    `llmenv migrate-config`) before reading the ceiling with `yq` -- not
+    merely that it tolerates the call being made."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    yq -i '.gpu.vram_budget_ceiling_mib = 15565' \"$LLM_ENV_CONFIG\"\n"
+        "    printf '{\"written\":true,\"path\":\"%s\"}\\n' \"$LLM_ENV_CONFIG\" ;;\n"
+        "  *' detect')\n"
+        "    printf '%s\\n' '{\"gpus\":["
+        "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
+        "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]},"
+        "{\"card\":\"card0\",\"pci_address\":\"0000:0e:00.0\",\"vram_total_mib\":512,"
+        "\"vram_used_mib\":51,\"render_node\":\"renderD129\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":6000,\"feasible\":true}' ;;\n"
+        "  *' processes-on-render-node '*) printf '%s\\n' '{\"processes\":[]}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text('gpu:\n  pci_address: "0000:03:00.0"\n')  # no vram_budget_ceiling_mib at all
+
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "llm-env ceiling:    15565 MiB" in result.stdout
+    assert "budget headroom:    9000 MiB" in result.stdout
+
+
+def test_gpu_status_prints_only_the_top_three_processes_by_vram(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {
+            "processes": [
+                {"pid": 1, "comm": "a", "exe": "a", "vram_mib": 100},
+                {"pid": 2, "comm": "b", "exe": "b", "vram_mib": 400},
+                {"pid": 3, "comm": "c", "exe": "c", "vram_mib": 200},
+                {"pid": 4, "comm": "d", "exe": "d", "vram_mib": 300},
+            ]
+        }
+    )
+    result, _, _ = run_gpu_status_with_stubs(tmp_path, processes_json=processes)
+    assert "400 MiB" in result.stdout
+    assert "300 MiB" in result.stdout
+    assert "200 MiB" in result.stdout
+    assert "100 MiB" not in result.stdout
+    b_index = result.stdout.index("400 MiB")
+    d_index = result.stdout.index("300 MiB")
+    c_index = result.stdout.index("200 MiB")
+    assert b_index < d_index < c_index
+
+
+def test_gpu_status_excludes_the_llm_env_stack_from_the_table(tmp_path: pathlib.Path) -> None:
+    """Excludes by `comm` name, which is inherently approximate, by-name
+    best-effort matching -- a legitimately-named user process called e.g.
+    `podman` would be wrongly excluded too, a documented, accepted
+    limitation, not fixed here. This is deliberately *not* a self-exclusion
+    mechanism: a running bash script's own `comm` (as read from
+    /proc/<pid>/comm by Task 1's processes_on_render_node()) is always
+    `bash`, never the script's filename, so no name-based entry could ever
+    match gpu-status.sh's own process -- and in practice this essentially
+    never matters, since a plain bash script doing procfs reads does not
+    hold an open fd on a DRM render node."""
+    processes = json.dumps(
+        {
+            "processes": [
+                {"pid": 1, "comm": "llama-server", "exe": "llama-server", "vram_mib": 9000},
+                {"pid": 2, "comm": "conmon", "exe": "conmon", "vram_mib": 10},
+                {"pid": 3, "comm": "podman", "exe": "podman", "vram_mib": 5},
+                {"pid": 4, "comm": "firefox", "exe": "firefox", "vram_mib": 500},
+            ]
+        }
+    )
+    result, _, _ = run_gpu_status_with_stubs(tmp_path, processes_json=processes)
+    assert "firefox" in result.stdout
+    assert "llama-server" not in result.stdout
+    assert "conmon" not in result.stdout
+    assert "podman" not in result.stdout
+
+
+def test_gpu_status_exits_cleanly_with_no_other_processes(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(tmp_path, processes_json='{"processes":[]}')
+    assert result.returncode == 0
+    assert "no other processes using the dGPU" in result.stdout
+
+
+def test_gpu_status_requires_an_existing_config(tmp_path: pathlib.Path) -> None:
+    result, config, _ = run_gpu_status_with_stubs(tmp_path)
+    config.unlink()
+    commands = tmp_path / "bin"
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "no config found" in result.stderr
+
+
+def test_gpu_status_requires_a_configured_gpu(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(tmp_path, config_text="gpu: {}\n")
+    assert result.returncode != 0
+    assert "gpu.pci_address is not set" in result.stderr
+
+
+def test_gpu_status_dies_clearly_when_detect_fails(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text("#!/usr/bin/bash\ncase \"$*\" in\n  *' detect') exit 1 ;;\nesac\n")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "models.yml"
+    config.write_text('gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n')
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "could not detect GPUs" in result.stderr
+
+
+def test_gpu_status_shows_headroom_even_when_budget_is_infeasible(tmp_path: pathlib.Path) -> None:
+    """cmd_budget emits a full, valid JSON payload (including available_mib)
+    even when the budget doesn't fit, but exits nonzero in that case
+    (existing, correct, diagnostic-only behavior). gpu-status.sh must still
+    show the headroom number in exactly this scenario -- an infeasible
+    budget is when an operator most needs to see it. Builds its own uv
+    stub directly (rather than via run_gpu_status_with_stubs) so the budget
+    case can both print a payload and exit 1."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' detect')\n"
+        "    printf '%s\\n' '{\"gpus\":["
+        "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
+        "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]},"
+        "{\"card\":\"card0\",\"pci_address\":\"0000:0e:00.0\",\"vram_total_mib\":512,"
+        "\"vram_used_mib\":51,\"render_node\":\"renderD129\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' budget '*)\n"
+        "    printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":12000,\"feasible\":false}'\n"
+        "    exit 1 ;;\n"
+        "  *' processes-on-render-node '*) printf '%s\\n' '{\"processes\":[]}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text('gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n')
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert "budget headroom:    9000 MiB" in result.stdout
 
 
 def run_benchmark(
