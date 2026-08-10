@@ -203,6 +203,12 @@ and the problem is specifically in OmniRoute's routing/provider config.
   of what else is using the GPU at any given moment; live VRAM contention
   (the desktop compositor, other GPU clients) is accounted for separately,
   at budget-computation time, by `compute_budget()`'s `reserve`.
+- `make gpu-status` is informational only — it never runs automatically and
+  never gates `make start`. Any remediation it applies is opt-in via an
+  explicit `[y/N]` confirmation, and is limited to XDG per-user overrides
+  (`~/.local/share/applications/*.desktop`, `~/.config/environment.d/`) —
+  it never modifies a system file, and never touches an already-running
+  process (only future launches of the same app are affected).
 
 ## Platform
 
