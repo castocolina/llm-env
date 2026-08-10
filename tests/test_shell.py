@@ -923,7 +923,7 @@ def run_gpu_status_with_stubs(
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run gpu-status.sh against a stubbed llmenv/detect/budget/processes pipeline."""
     commands = tmp_path / "bin"
-    commands.mkdir()
+    commands.mkdir(exist_ok=True)
 
     uv = commands / "uv"
     uv.write_text(
@@ -1222,6 +1222,281 @@ def test_gpu_status_shows_headroom_even_when_budget_is_infeasible(tmp_path: path
         check=False,
     )
     assert "budget headroom:    9000 MiB" in result.stdout
+
+
+def _desktop_file(directory: pathlib.Path, filename: str, exec_line: str) -> pathlib.Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / filename
+    path.write_text(f"[Desktop Entry]\nType=Application\nName=Test App\nExec={exec_line}\nIcon=test\n")
+    return path
+
+
+def test_gpu_status_prompts_once_for_all_flagged_processes(tmp_path: pathlib.Path) -> None:
+    """A single combined confirmation covers every flagged process, never
+    one prompt per process. This can't be proven by asserting on the
+    prompt's literal text: under piped, non-terminal stdin (exactly how
+    every test in this file invokes the script), bash's `read -rp` prompt
+    is written to neither stdout nor stderr at all -- per the bash manual,
+    "the prompt is displayed only if input is coming from a terminal."
+    (This codebase's own `test_cleanup_confirmation_prompt_...` in this
+    file follows the same rule: it never asserts on `clean.sh`'s `read -rp`
+    prompt text.) Prove it by *effect* instead: two flagged processes, and
+    exactly one "y" line for the (first) migration prompt. If the script
+    prompted once per process, that single "y" would only accept the first
+    process, leaving the second line ("n") to be consumed by a second
+    per-process prompt -- and the later, independent default-preference
+    prompt (Task 4) would then have no input left. Since both processes end
+    up migrated from that one "y" line, and the run still exits cleanly
+    after consuming the second line for the separate default-preference
+    prompt, the confirmation must be single and combined.
+    """
+    processes = json.dumps(
+        {
+            "processes": [
+                {"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500},
+                {"pid": 2, "comm": "thunderbird", "exe": "thunderbird", "vram_mib": 400},
+            ]
+        }
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    _desktop_file(system_apps, "thunderbird.desktop", "thunderbird %u")
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert result.returncode == 0
+    assert (home / ".local/share/applications/firefox.desktop").is_file()
+    assert (home / ".local/share/applications/thunderbird.desktop").is_file()
+    assert "migration summary: 2 overridden, 0 skipped" in result.stdout
+
+
+def test_gpu_status_writes_a_user_override_on_confirmed_migration(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    override = home / ".local/share/applications/firefox.desktop"
+    assert override.is_file()
+    content = override.read_text()
+    assert "Exec=env DRI_PRIME=pci-0000_0e_00_0 firefox %u" in content
+    assert "overridden -> firefox.desktop" in result.stdout
+    assert "migration summary: 1 overridden, 0 skipped" in result.stdout
+
+
+def test_gpu_status_never_touches_the_system_desktop_file(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    system_file = _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    original = system_file.read_text()
+    run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert system_file.read_text() == original
+
+
+def test_gpu_status_skips_a_process_with_no_matching_launcher(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "unmatched-app", "exe": "unmatched-app", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    system_apps.mkdir()
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert "no launcher found, skipped" in result.stdout
+    assert "migration summary: 0 overridden, 1 skipped" in result.stdout
+    assert not (home / ".local/share/applications").exists() or not list(
+        (home / ".local/share/applications").glob("*.desktop")
+    )
+
+
+def test_gpu_status_declines_migration_writes_nothing(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="n\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert not (home / ".local/share/applications").exists() or not list(
+        (home / ".local/share/applications").glob("*.desktop")
+    )
+    assert "overridden" not in result.stdout
+
+
+def test_gpu_status_migration_is_idempotent_on_repeat_runs(tmp_path: pathlib.Path) -> None:
+    """A second confirmed migration for the same app must not stack a
+    second `env DRI_PRIME=...` prefix onto the first run's already-written
+    override. find_desktop_file() searches the user override directory
+    before the system one, so the second run finds its own prior output as
+    input -- apply_igpu_override()'s awk substitution must replace an
+    existing `env DRI_PRIME=...` prefix rather than prepending another."""
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    _result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    override = home / ".local/share/applications/firefox.desktop"
+    content = override.read_text()
+    exec_line = next(line for line in content.splitlines() if line.startswith("Exec="))
+    assert exec_line.count("DRI_PRIME") == 1
+    assert exec_line == "Exec=env DRI_PRIME=pci-0000_0e_00_0 firefox %u"
+
+
+def test_gpu_status_finds_and_reprefixes_an_existing_override_when_system_file_is_gone(
+    tmp_path: pathlib.Path,
+) -> None:
+    """find_desktop_file() must genuinely recognize its own previously-written
+    override, not merely appear idempotent because it fell through to a
+    still-present, untouched system file. Pre-seed the HOME override
+    directory directly (bypassing the script) with an already-applied
+    `Exec=env DRI_PRIME=pci-old-value firefox %u` line, then point
+    LLM_ENV_SYSTEM_APPLICATIONS_DIR at a directory that doesn't exist at
+    all -- so the system file is genuinely unreachable and the only way
+    this run can find a launcher for firefox is by matching the existing
+    HOME override. Confirms two things at once: find_desktop_file() strips
+    the "env DRI_PRIME=..." prefix before extracting its match token (the
+    fix for HIGH #2), and apply_igpu_override() safely rewrites a target
+    file that is the SAME path as its input via a temp-file-then-rename
+    (the fix for CRITICAL #1) -- producing exactly one DRI_PRIME
+    assignment with the new value, not zero, not two, and not an empty
+    file."""
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    home = tmp_path / "home"
+    apps_dir = home / ".local" / "share" / "applications"
+    apps_dir.mkdir(parents=True)
+    (apps_dir / "firefox.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Test App\n"
+        "Exec=env DRI_PRIME=pci-old-value firefox %u\nIcon=test\n"
+    )
+    system_apps = tmp_path / "system-apps-does-not-exist"
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert result.returncode == 0
+    override = home / ".local/share/applications/firefox.desktop"
+    content = override.read_text()
+    exec_line = next(line for line in content.splitlines() if line.startswith("Exec="))
+    assert exec_line.count("DRI_PRIME") == 1
+    assert exec_line == "Exec=env DRI_PRIME=pci-0000_0e_00_0 firefox %u"
+    assert "overridden -> firefox.desktop" in result.stdout
+    assert "migration summary: 1 overridden, 0 skipped" in result.stdout
+
+
+def test_gpu_status_skips_a_process_when_override_write_fails(tmp_path: pathlib.Path) -> None:
+    """One process's .desktop override write failing (e.g. an unwritable
+    target directory) must be reported as skipped and must not abort the
+    run under `set -euo pipefail` -- the run must still exit 0 overall."""
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    home = tmp_path / "home"
+    share_dir = home / ".local" / "share"
+    share_dir.mkdir(parents=True)
+    share_dir.chmod(0o555)  # read-only: mkdir of "applications" inside it fails
+    try:
+        result, _, _ = run_gpu_status_with_stubs(
+            tmp_path,
+            processes_json=processes,
+            input_text="y\nn\n",
+            system_applications_dir=system_apps,
+        )
+    finally:
+        share_dir.chmod(0o755)
+    assert result.returncode == 0
+    assert "override failed, skipped" in result.stdout
+    assert "migration summary: 0 overridden, 1 skipped" in result.stdout
+
+
+def test_gpu_status_warns_and_skips_migration_with_no_alternate_gpu(tmp_path: pathlib.Path) -> None:
+    """Asserted against result.stderr, not result.stdout: this message is
+    emitted via tools/lib.sh's log_warn(), whose `printf ... >&2` is an
+    unconditional redirect to stderr regardless of tty state -- unlike the
+    `read -rp` prompt text elsewhere in this file (which bash only ever
+    writes to a terminal, never to a pipe), log_warn's output always lands
+    on stderr in a piped/non-terminal test run."""
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' detect') printf '%s\\n' '{\"gpus\":["
+        "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
+        "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' budget '*) printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":6000,\"feasible\":true}' ;;\n"
+        f"  *' processes-on-render-node '*) printf '%s\\n' '{processes}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text('gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n')
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="n\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert "no alternate GPU detected; skipping migration" in result.stderr
 
 
 def run_benchmark(
