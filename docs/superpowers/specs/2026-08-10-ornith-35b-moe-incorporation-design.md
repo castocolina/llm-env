@@ -12,6 +12,7 @@
 - Never silently correct an infeasible config — every new failure mode (RAM ceiling too low, `n_cpu_moe` on a non-MoE model, VRAM budget exceeded) must fail explicitly with a specific, actionable remedy, matching the existing philosophy in `.agents/architecture.md` and `pylib/budget.py`'s `remedies` list.
 - `make clean` must keep downloaded models (already true — `scripts/clean.sh` explicitly preserves `$MODELS_DIR`). Do not regress this.
 - All exact values below (quant, `n_cpu_moe`, `vram_budget`, `ctx_size`, `memory_ceiling_pct`) come from real measurements taken on this host (AMD RX 9070 XT, 16304 MiB VRAM; 30GB host RAM; 24 CPU threads) during this design's research — not estimates.
+- `resources.llm_server` must cap CPU cores the same way it already caps RAM: never hand `llm-server` every host thread. A `cpu_ceiling_pct` (default 60%) applies to every model, not just MoE ones — it's a general resource-hygiene gap this research surfaced, not something scoped to Ornith 35B specifically.
 
 ## Background / Research Findings
 
@@ -67,18 +68,25 @@ After computing `llm_server.memory_mib` (existing logic), compare it against the
 
 Add `n-cpu-moe` to the per-model section when `model.get("n_cpu_moe")` is set, alongside the existing `n-gpu-layers`.
 
-### 5. `scripts/prune.sh` + `make prune` (new)
+### 5. `pylib/resources.py`: CPU core ceiling (new — general, not MoE-specific)
+
+Today `compute_resource_limits()` gives `llm-server` every host core minus a fixed floor (`HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED = 3`) — on this 24-thread host that's 21 cores, effectively "all of it." This was never a problem for dense models fully on GPU (llama.cpp barely touches CPU), but MoE CPU-offload changes that: the research above measured ~43-44% sustained CPU utilization across all 24 threads during `n_cpu_moe 28` inference. Uncapped, a future heavier-offload config could starve the host desktop.
+
+Add a `resources.llm_server.cpu_ceiling_pct` config value (default **60**), mirroring the existing `memory_ceiling_pct`/`memory_ceiling_floor_pct` pattern: `cpus = min(host_cpu_count - cpu_floor, round(host_cpu_count * cpu_ceiling_pct / 100))`. On this 24-core host that caps `llm-server` at 14 cores instead of 21, regardless of model. This is a general resource-hygiene fix (applies to every model, not just MoE ones) surfaced by this research, not a new per-model field — no `models.yml` schema change, only `resources.llm_server`.
+
+### 6. `scripts/prune.sh` + `make prune` (new)
 
 Calls `scripts/clean.sh`'s logic (or invokes it directly), then additionally removes everything under `$MODELS_DIR`. Same confirmation pattern as `clean.sh` (`LLM_ENV_ASSUME_YES` / interactive prompt), with its own explicit listing of what gets deleted (the model files, with total reclaimed size) so it reads as a distinct, more destructive action from `clean`.
 
-### 6. `models.yml.example`: final values
+### 7. `models.yml.example`: final values
 
-As specified in the Global Constraints section above — `ornith` gets `ctx_size: 262144` (corrected) and `vram_budget: 55%`; new `ornith-35b` entry with `quantization: Q4_K_M`, `n_cpu_moe: 28`, `ctx_size: 262144`, `vram_budget: 85%`, `enabled: false` (opt-in); `resources.llm_server.memory_ceiling_pct` raised to `60%`.
+As specified in the Global Constraints section above — `ornith` gets `ctx_size: 262144` (corrected) and `vram_budget: 55%`; new `ornith-35b` entry with `quantization: Q4_K_M`, `n_cpu_moe: 28`, `ctx_size: 262144`, `vram_budget: 85%`, `enabled: false` (opt-in); `resources.llm_server.memory_ceiling_pct` raised to `60%`; new `resources.llm_server.cpu_ceiling_pct: 60`.
 
 ## Testing
 
 - Unit tests for `pylib/budget.py`'s new RAM/VRAM split (given fixed GGUF-metadata-shaped fixtures, not real GGUF files — following existing test patterns in `tests/test_budget.py`).
 - Unit tests for `pylib/resources.py`'s new RAM feasibility check and its error remedy.
+- Unit tests for `pylib/resources.py`'s new `cpu_ceiling_pct` behavior: caps cores below the current floor-based value on a many-core host, never exceeds `host_cpu_count - cpu_floor`, and still raises `ResourceError` if the host doesn't have enough cores for the fixed floors (existing behavior preserved).
 - Unit test for `pylib/presets.py` emitting `--n-cpu-moe` only when configured.
 - `scripts/prune.sh` gets the same test treatment as `scripts/clean.sh` in `tests/test_shell.py` (confirmation gate, `LLM_ENV_ASSUME_YES`, correct deletion scope).
 - Manual validation (documented in README, not automated): `make setup` with `ornith-35b` enabled, `make start`, `make check-server`, and a `make benchmark`-style throughput spot-check comparing against the numbers recorded in this design doc — catches regressions in the actual container image/flags, which unit tests can't.
