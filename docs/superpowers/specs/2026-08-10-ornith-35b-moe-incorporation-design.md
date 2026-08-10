@@ -2,7 +2,7 @@
 
 **Goal:** Add Ornith 1.0 35B (a MoE model) as a selectable model alongside the existing Ornith 1.0 9B, with a generic, reusable CPU-offload mechanism for MoE expert tensors so the model fits this host's 16GB VRAM / 30GB RAM, and correct the 9B's `ctx_size` to match its real native context window.
 
-**Architecture:** Extend the existing VRAM-budget system (`pylib/budget.py`) with a parallel RAM-budget check for MoE models that offload routed-expert tensors to CPU via llama.cpp's `--n-cpu-moe` flag. The offload amount is a per-model config value (`n_cpu_moe`), tuned empirically per model/quant rather than computed, because the right value depends on measured VRAM headroom under load, not just static tensor sizes.
+**Architecture:** Extend the existing VRAM-budget system with a parallel RAM-budget check for MoE models that offload routed-expert tensors to CPU via llama.cpp's `--n-cpu-moe` flag. GGUF tensor parsing lives in `pylib/gguf.py`; the weight-cost split and the RAM feasibility cross-check live in `llmenv.py`, reported through `compute_budget()`'s existing `feasible`/`remedies` shape rather than a raised exception (see Component 2 for why). The offload amount is a per-model config value (`n_cpu_moe`), tuned empirically per model/quant rather than computed, because the right value depends on measured VRAM headroom under load, not just static tensor sizes.
 
 **Tech stack:** No new dependencies. Uses the GGUF metadata already read by `pylib/budget.py`, and llama.cpp's built-in `--n-cpu-moe` server flag (confirmed present in `ghcr.io/ggml-org/llama.cpp:server-vulkan`, build 10326).
 
@@ -52,43 +52,43 @@
 
 Optional integer field on a model entry. When present, `pylib/presets.py` emits `--n-cpu-moe <n>` in that model's `presets.ini` section. Absent (the common case for dense models) emits nothing, preserving current behavior exactly.
 
-### 2. `pylib/budget.py`: RAM-side cost for MoE-offloaded models
+### 2. `pylib/gguf.py`: tensor-level parsing + `pylib/budget.py`-equivalent RAM-side cost for MoE-offloaded models
 
-For a model with `n_cpu_moe` set, compute two weight figures instead of one:
-- `ram_weights_mib`: sum of GGUF tensor sizes matching `blk.{0..n_cpu_moe-1}.ffn_*_exps.*` (or whichever `n_cpu_moe` layers llama.cpp actually offloads — verify offload direction, first-N vs last-N, against llama.cpp source/docs before implementing, since this determines which blocks' tensors count toward RAM vs VRAM).
-- `vram_weights_mib`: total model size minus `ram_weights_mib` (everything else: non-expert tensors + the GPU-resident experts).
+**Confirmed by implementation, revising this component from the original design:** the split does not live in `pylib/budget.py`, and RAM infeasibility is not raised from `pylib/resources.py`. Both landed in `pylib/gguf.py` (parsing) and `llmenv.py` (the split + the cross-check), reported through `feasible`/`remedies` — the same shape `compute_budget()` already uses for VRAM, not a raised exception. Rationale for the deviation: `compute_budget()` never raises for an infeasible VRAM budget — it returns `feasible: false` plus an actionable `remedies` list, and `cmd_budget` is the single place that already turns that into a CLI exit code and a JSON payload `make setup`/`make start` parse. Introducing a *second*, exception-based failure mode for the RAM side of the exact same command would mean two different error-handling shapes for what is, from the caller's perspective, one feasibility check — worse ergonomics for no real benefit, since both `make setup` and `make start` already have to parse `cmd_budget`'s JSON output either way.
 
-`vram_weights_mib` feeds the existing VRAM budget path unchanged. `ram_weights_mib` is a new figure threaded to the resource check below.
+Concretely:
+- `pylib/gguf.py::tensor_sizes(path) -> dict[str, int]` parses the GGUF tensor-info section directly (byte-offset deltas) to get each tensor's exact size, and `moe_expert_offload_mib(path, metadata, n_cpu_moe)` sums the routed-expert tensors (`blk.{0..n_cpu_moe-1}.ffn_{gate,up,down}_exps.*`) for a model's first `n_cpu_moe` transformer blocks — confirmed via `-v` llama-server logs that `--n-cpu-moe N` offloads ascending block indices (`blk.0..N-1`), not descending.
+- `llmenv.py::_model_costs()` calls `moe_expert_offload_mib()` for any model with `n_cpu_moe` set, and reports `ram_weights_mib` (the offloaded portion) separately from `weights_mib` (everything that stays resident in VRAM: non-expert tensors + the GPU-resident experts) for that model.
+- `llmenv.py::cmd_budget()` sums `ram_weights_mib` across the worst-case set of concurrently-resident models (ranked by RAM cost, not VRAM cost — a model cheap in VRAM but expensive in offloaded RAM can lose `compute_budget()`'s VRAM ranking and still be selectable) against `resources.llm_server.memory_mib` (from `compute_resource_limits()`, see Component 4), and reports `ram_feasible`/`ram_shortfall_mib`/`ram_available_mib`/`ram_required_mib` alongside the existing `vram_feasible`/`shortfall_mib`/`available_mib`/`required_mib`, plus a `remedies` entry computing the minimum `memory_ceiling_pct` that would fit (or an explicit "no percentage can ever fit" remedy when even the host's absolute maximum can't cover it) — same style as `compute_budget()`'s existing remedies.
+- `pylib/resources.py` itself is unchanged in shape (see Component 4 for its one real change, the CPU ceiling) — it still only ever raises `ResourceError` for the pre-existing "host can't reserve the fixed floors at all" case, never for a configurable-ceiling RAM shortfall.
 
-### 3. `pylib/resources.py`: new RAM feasibility check
+`vram_weights_mib` (via `weights_mib`) feeds the existing VRAM budget path unchanged.
 
-After computing `llm_server.memory_mib` (existing logic), compare it against the resident model's `ram_weights_mib` (from budget.py). If `ram_weights_mib` exceeds it, raise `ResourceError` with a remedy: the minimum `memory_ceiling_pct` that would fit, computed from the actual numbers (not a guessed constant) — same style as `budget.py`'s existing remedies list.
-
-### 4. `pylib/presets.py`: emit the flag
+### 3. `pylib/presets.py`: emit the flag
 
 Add `n-cpu-moe` to the per-model section when `model.get("n_cpu_moe")` is set, alongside the existing `n-gpu-layers`.
 
-### 5. `pylib/resources.py`: CPU core ceiling (new — general, not MoE-specific)
+### 4. `pylib/resources.py`: CPU core ceiling (new — general, not MoE-specific)
 
 Today `compute_resource_limits()` gives `llm-server` every host core minus a fixed floor (`HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED = 3`) — on this 24-thread host that's 21 cores, effectively "all of it." This was never a problem for dense models fully on GPU (llama.cpp barely touches CPU), but MoE CPU-offload changes that: the research above measured ~43-44% sustained CPU utilization across all 24 threads during `n_cpu_moe 28` inference. Uncapped, a future heavier-offload config could starve the host desktop.
 
-Add a `resources.llm_server.cpu_ceiling_pct` config value (default **60**), mirroring the existing `memory_ceiling_pct`/`memory_ceiling_floor_pct` pattern: `cpus = min(host_cpu_count - cpu_floor, round(host_cpu_count * cpu_ceiling_pct / 100))`. On this 24-core host that caps `llm-server` at 14 cores instead of 21, regardless of model. This is a general resource-hygiene fix (applies to every model, not just MoE ones) surfaced by this research, not a new per-model field — no `models.yml` schema change, only `resources.llm_server`.
+Add a `resources.llm_server.cpu_ceiling_pct` config value (default **60**), mirroring the existing `memory_ceiling_pct`/`memory_ceiling_floor_pct` pattern: `cpus = min(host_cpu_count - cpu_floor, max(1, round(host_cpu_count * cpu_ceiling_floor_pct / 100), round(host_cpu_count * cpu_ceiling_pct / 100)))`. On this 24-core host that caps `llm-server` at 14 cores instead of 21, regardless of model. The `max(1, ...)` floor exists because CPU core counts are small whole numbers, unlike the memory ceiling's MiB values — on a small host (e.g. 4 usable cores) a low `cpu_ceiling_pct`/`cpu_ceiling_floor_pct` can independently round to 0, which `pylib/compose.py` would then treat as "no `cpus:` limit at all" (fully uncapped) rather than "cap at 0 cores," silently defeating the ceiling on exactly the host where over-committing CPU hurts most. This is a general resource-hygiene fix (applies to every model, not just MoE ones) surfaced by this research, not a new per-model field — no `models.yml` schema change, only `resources.llm_server`.
 
-### 6. `scripts/prune.sh` + `make prune` (new)
+### 5. `scripts/prune.sh` + `make prune` (new)
 
 Calls `scripts/clean.sh`'s logic (or invokes it directly), then additionally removes everything under `$MODELS_DIR`. Same confirmation pattern as `clean.sh` (`LLM_ENV_ASSUME_YES` / interactive prompt), with its own explicit listing of what gets deleted (the model files, with total reclaimed size) so it reads as a distinct, more destructive action from `clean`.
 
-### 7. `models.yml.example`: final values
+### 6. `models.yml.example`: final values
 
-As specified in the Global Constraints section above — `ornith` gets `ctx_size: 262144` (corrected) and `vram_budget: 55%`; new `ornith-35b` entry with `quantization: Q4_K_M`, `n_cpu_moe: 28`, `ctx_size: 262144`, `vram_budget: 85%`, `enabled: false` (opt-in); `resources.llm_server.memory_ceiling_pct` raised to `60%`; new `resources.llm_server.cpu_ceiling_pct: 60`.
+As specified in the Global Constraints section above — `ornith` gets `ctx_size: 262144` (corrected) and `vram_budget: 55%`; new `ornith-35b` entry with `quantization: Q4_K_M`, `n_cpu_moe: 28`, `ctx_size: 262144`, `vram_budget: 85%`, `enabled: false` (opt-in); `resources.llm_server.memory_ceiling_pct` raised to `60%`; new `resources.llm_server.cpu_ceiling_pct: 60`. A config that predates the `ornith-35b` entry (created by `make setup` before this change) does not get it from `migrate_config()` alone (that function only backfills missing top-level keys, never new model list entries) — `setup/setup.sh`'s model-selection step backfills it explicitly, the same way it already removes the legacy `openhermes` alias from pre-existing configs, without touching any of that config's other, possibly hand-customized, model entries.
 
 ## Testing
 
-- Unit tests for `pylib/budget.py`'s new RAM/VRAM split (given fixed GGUF-metadata-shaped fixtures, not real GGUF files — following existing test patterns in `tests/test_budget.py`).
-- Unit tests for `pylib/resources.py`'s new RAM feasibility check and its error remedy.
-- Unit tests for `pylib/resources.py`'s new `cpu_ceiling_pct` behavior: caps cores below the current floor-based value on a many-core host, never exceeds `host_cpu_count - cpu_floor`, and still raises `ResourceError` if the host doesn't have enough cores for the fixed floors (existing behavior preserved).
+- Unit tests for `pylib/gguf.py`'s new tensor-size parsing and RAM/VRAM split (given fixed GGUF-metadata-shaped fixtures, not real GGUF files — following existing test patterns in `tests/test_gguf.py`), and for `llmenv.py`'s RAM feasibility cross-check and its remedy (`tests/test_cli.py`, alongside the existing `cmd_budget` tests).
+- Unit tests for `pylib/resources.py`'s new `cpu_ceiling_pct` behavior: caps cores below the current floor-based value on a many-core host, never rounds down to 0 cores on a small host, never exceeds `host_cpu_count - cpu_floor`, and still raises `ResourceError` if the host doesn't have enough cores for the fixed floors (existing behavior preserved).
 - Unit test for `pylib/presets.py` emitting `--n-cpu-moe` only when configured.
-- `scripts/prune.sh` gets the same test treatment as `scripts/clean.sh` in `tests/test_shell.py` (confirmation gate, `LLM_ENV_ASSUME_YES`, correct deletion scope).
+- `scripts/prune.sh` gets the same test treatment as `scripts/clean.sh` in `tests/test_shell.py` (confirmation gate, `LLM_ENV_ASSUME_YES`, correct deletion scope), plus a path-safety test that a target other than the true models directory is rejected before any deletion.
+- A `setup/setup.sh` test proving the `ornith-35b` backfill (Component 6) adds the alias to a pre-existing config without touching that config's other model entries.
 - Manual validation (documented in README, not automated): `make setup` with `ornith-35b` enabled, `make start`, `make check-server`, and a `make benchmark`-style throughput spot-check comparing against the numbers recorded in this design doc — catches regressions in the actual container image/flags, which unit tests can't.
 
 ## Out of scope

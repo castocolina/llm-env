@@ -2378,6 +2378,90 @@ def test_default_config_uses_128k_q5_1_runtime(tmp_path):
 
 Run `make test` first to confirm this fails against the template as it stood *before* Step 6 (proving the old assertion was tied to the old 2-model/131072 shape), then re-run after Step 6's edit to confirm it now passes. Include this file in Step 11's commit below.
 
+- [ ] **Step 6c: Write the failing test for backfilling `ornith-35b` into a pre-existing config**
+
+`setup/setup.sh`'s `init`/template path (`setup/setup.sh:27-31`) only ever writes `models.yml.example` into `$CONFIG_PATH` when NO config exists yet (`if [ -f "$CONFIG_PATH" ]; ... else ... init --template ...`). `migrate_config()` (Task 3) only backfills missing top-level *keys* on an existing config (`memory_ceiling_pct`, `cpu_ceiling_pct`, etc.) — it never adds new *model list entries*. So a config that predates this plan (created by a `make setup` run before `ornith-35b` existed in the template) has no `ornith-35b` alias at all, and the acceptance procedure's first command (`models select ornith-35b`, Step 12 below) would fail with an unknown-alias error on exactly that config. This repo already has a precedent for this exact problem: `setup/setup.sh:66-67` surgically deletes a legacy `openhermes` alias from pre-existing configs (`if [ -f "$CONFIG_PATH" ]; then yq -i 'del(...)' ...; fi`) at the same point in the script, right before models are listed for selection. Mirror that pattern to ADD the new alias instead of removing an old one — and ONLY add it (never touch the pre-existing `ornith` entry's fields), since silently overwriting a value the user may have already customized (e.g. a hand-tuned `ctx_size`/`vram_budget`) would violate this plan's Global Constraint against silently correcting a config.
+
+Add to `tests/test_shell.py`, alongside the other `run_setup_with_numbered_selection`-based tests:
+
+```python
+def test_setup_backfills_ornith_35b_into_a_pre_existing_config(tmp_path: pathlib.Path) -> None:
+    """A config written by `make setup` before ornith-35b existed in the
+    template has no ornith-35b alias at all -- migrate_config() only
+    backfills missing top-level keys, never new model list entries. Step 3
+    ("Selecting models") must add it from the shipped template, the same
+    way it already deletes the legacy 'openhermes' alias, so the model is
+    selectable without the user hand-editing their config."""
+    config_text = (
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+        "    ctx_size: 4096\n"  # deliberately non-default, to prove it survives untouched
+    )
+    result, config, _ = run_setup_with_numbered_selection(tmp_path, "1", config_text=config_text)
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, '.models[] | select(.alias == "ornith-35b") | .alias') == "ornith-35b"
+    assert yq_value(config, '.models[] | select(.alias == "ornith-35b") | .n_cpu_moe') == "28"
+    # The pre-existing ornith entry's hand-set value must survive untouched
+    # -- this step only ADDS the missing alias, never edits an existing one.
+    assert yq_value(config, '.models[] | select(.alias == "ornith") | .ctx_size') == "4096"
+```
+
+(`yq_value` is the existing helper already used throughout `tests/test_shell.py` for single-value `yq -r` lookups against a config path.)
+
+- [ ] **Step 6d: Run the test to verify it fails**
+
+Run: `make test`
+Expected: FAIL — `setup/setup.sh` has no logic to add `ornith-35b` to an existing config yet, so `yq_value(config, '.models[] | select(.alias == "ornith-35b") | .alias')` returns an empty string, not `"ornith-35b"`.
+
+- [ ] **Step 6e: Backfill the missing model entry**
+
+Insert immediately after the existing `openhermes` deletion block at `setup/setup.sh:66-67`:
+
+```bash
+if [ -f "$CONFIG_PATH" ]; then
+    yq -i 'del(.models[] | select(.alias == "openhermes"))' "$CONFIG_PATH"
+fi
+if [ -f "$CONFIG_PATH" ] && [ -z "$(yq -r '.models[] | select(.alias == "ornith-35b") | .alias' "$CONFIG_PATH")" ]; then
+    TEMPLATE_PATH="${REPO_DIR}/models.yml.example" yq -i \
+      '.models += [load(strenv(TEMPLATE_PATH)).models[] | select(.alias == "ornith-35b")]' \
+      "$CONFIG_PATH"
+    log_info "added ornith-35b to the existing config from the shipped template"
+fi
+```
+
+(only ADDS the entry when the alias is entirely absent — a config that already has `ornith-35b`, whether from a fresh `init --template` or a prior run of this same backfill, is left untouched; the pre-existing `ornith` entry is never read or written by this block at all).
+
+- [ ] **Step 6f: Run the test to verify it passes**
+
+Run: `make validate && make test`
+Expected: PASS — including every pre-existing `setup/setup.sh` test (all of them already write configs whose `models` list either has no `ornith-35b` alias yet, in which case this block now adds it harmlessly before model selection proceeds as before, or none of them assert on the exact `models` list length in a way this addition would break — check `test_setup_fails_when_the_budget_is_infeasible`'s fixture (Step 1 above) and the default `run_setup_with_numbered_selection` fixture (`tests/test_shell.py:557-582`) specifically, since both lack an `ornith-35b` entry and will now gain one after this change).
+
+- [ ] **Step 6g: Commit**
+
+```bash
+git add setup/setup.sh tests/test_shell.py
+git commit -m "fix(setup): backfill the ornith-35b model entry into pre-existing configs"
+```
+
 - [ ] **Step 7: Update `README.md`**
 
 Replace both paragraphs together (search for `Clean setup maps` in the Configuration section — `README.md:47-57`), since the second paragraph's "one 131,072-token slot" claim becomes false once Ornith moves to 262,144 tokens while Gemma stays at 131,072:
