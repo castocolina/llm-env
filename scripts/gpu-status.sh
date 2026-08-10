@@ -174,3 +174,13 @@ elif confirm "Move these ${count} processes to the iGPU? [y/N] "; then
     done < <(echo "$top3" | jq -r '.[] | "\(.pid)\t\(.comm)\t\(.exe)"')
     log_info "migration summary: ${moved} overridden, ${skipped} skipped"
 fi
+
+if [ -n "$igpu_pci" ]; then
+    if confirm "Set the iGPU as the default GPU for new apps? [y/N] "; then
+        env_dir="${HOME}/.config/environment.d"
+        mkdir -p "$env_dir"
+        printf 'DRI_PRIME=%s\n' "$dri_prime" > "${env_dir}/60-llm-env-igpu-default.conf"
+        log_info "wrote ${env_dir}/60-llm-env-igpu-default.conf"
+        log_info "best-effort: only affects apps that respect Mesa's DRI_PRIME convention, only takes effect on your next login/session (not already-running processes), and never affects llm-server itself"
+    fi
+fi

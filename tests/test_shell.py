@@ -1499,6 +1499,90 @@ def test_gpu_status_warns_and_skips_migration_with_no_alternate_gpu(tmp_path: pa
     assert "no alternate GPU detected; skipping migration" in result.stderr
 
 
+def test_gpu_status_writes_environment_d_default_on_confirmation(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="n\ny\n",
+        system_applications_dir=system_apps,
+    )
+    conf = home / ".config/environment.d/60-llm-env-igpu-default.conf"
+    assert conf.is_file()
+    assert conf.read_text() == "DRI_PRIME=pci-0000_0e_00_0\n"
+    assert "wrote" in result.stdout
+    assert "best-effort" in result.stdout
+    assert "DRI_PRIME convention" in result.stdout
+    assert "next login" in result.stdout
+    assert "llm-server itself" in result.stdout
+
+
+def test_gpu_status_default_preference_declined_writes_nothing(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    _result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="n\nn\n",
+        system_applications_dir=system_apps,
+    )
+    assert not (home / ".config/environment.d/60-llm-env-igpu-default.conf").exists()
+
+
+def test_gpu_status_default_preference_is_idempotent_on_repeat_runs(tmp_path: pathlib.Path) -> None:
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="n\ny\n",
+        system_applications_dir=system_apps,
+    )
+    _result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="n\ny\n",
+        system_applications_dir=system_apps,
+    )
+    conf_dir = home / ".config/environment.d"
+    assert len(list(conf_dir.glob("*llm-env*"))) == 1
+
+
+def test_gpu_status_assume_yes_never_writes_any_override(tmp_path: pathlib.Path) -> None:
+    """LLM_ENV_ASSUME_YES=1 means "auto-decline" for gpu-status.sh's two
+    prompts (see the plan's Global Constraints) -- confirm this holds even
+    when stdin would answer "y" to both prompts if they were ever read,
+    proving ASSUME_YES short-circuits confirm() before either prompt is
+    reached at all, not merely that "y" happens not to arrive."""
+    processes = json.dumps(
+        {"processes": [{"pid": 1, "comm": "firefox", "exe": "firefox", "vram_mib": 500}]}
+    )
+    system_apps = tmp_path / "system-apps"
+    _desktop_file(system_apps, "firefox.desktop", "firefox %u")
+    result, _, home = run_gpu_status_with_stubs(
+        tmp_path,
+        processes_json=processes,
+        input_text="y\ny\n",
+        system_applications_dir=system_apps,
+        extra_env={"LLM_ENV_ASSUME_YES": "1"},
+    )
+    assert result.returncode == 0
+    assert not (home / ".local/share/applications").exists() or not list(
+        (home / ".local/share/applications").glob("*.desktop")
+    )
+    assert not (home / ".config/environment.d/60-llm-env-igpu-default.conf").exists()
+
+
 def run_benchmark(
     tmp_path: pathlib.Path, benchmark_stdout: str, benchmark_stderr: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
