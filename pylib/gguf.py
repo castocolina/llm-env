@@ -10,6 +10,8 @@ Format reference: llama.cpp ggml/docs/gguf.md
 
 from __future__ import annotations
 
+import math
+import re
 import struct
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -122,6 +124,154 @@ def read_gguf_header(path: Path) -> dict[str, Any]:
             metadata[key] = _read_value(fh, type_code)
 
     return {"version": version, "tensor_count": tensor_count, "metadata": metadata}
+
+
+# GGUF pads the tensor-data section (and, per the format spec, each
+# individual tensor's offset) to `general.alignment` bytes -- 32 by default.
+# A file that overrides this key must have that override honored, or the
+# computed data-start boundary (and therefore every tensor size derived from
+# it) would be wrong for that file.
+DEFAULT_ALIGNMENT = 32
+
+EXPERT_TENSOR_RE = re.compile(
+    r"^blk\.(\d+)\.ffn_(?:gate|up|down)_exps\.(?:weight|scale|input_scale)$"
+)
+
+
+def _alignment(metadata: dict[str, Any]) -> int:
+    value = metadata.get("general.alignment", DEFAULT_ALIGNMENT)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise GgufError(f"general.alignment must be a positive integer, got {value!r}")
+    return value
+
+
+def tensor_sizes(path: Path) -> dict[str, int]:
+    """Map each tensor name to its on-disk byte size (including any
+    inter-tensor alignment padding GGUF itself already applied).
+
+    Sizes are computed from offset deltas between consecutive tensors
+    (sorted by their declared offset). GGUF stores each tensor's byte offset
+    directly and requires every offset to be a multiple of
+    `general.alignment`, so the gap to the next tensor's offset is exact
+    regardless of quantization type -- no per-ggml-type size formula is
+    needed, and misaligned offsets (corrupt or hand-crafted files) are
+    rejected up front rather than silently mis-sized.
+    """
+    path = Path(path)
+    file_size = path.stat().st_size
+    with path.open("rb") as fh:
+        magic = _read_exact(fh, 4)
+        if magic != GGUF_MAGIC:
+            raise GgufError(f"bad magic {magic!r}, expected {GGUF_MAGIC!r}")
+        struct.unpack("<I", _read_exact(fh, 4))  # version, unused here
+        tensor_count, kv_count = struct.unpack("<QQ", _read_exact(fh, 16))
+        if kv_count > MAX_METADATA_ENTRIES:
+            raise GgufError(f"metadata count too large: {kv_count}")
+
+        metadata: dict[str, Any] = {}
+        for _ in range(kv_count):
+            key = _read_string(fh)
+            (type_code,) = struct.unpack("<I", _read_exact(fh, 4))
+            metadata[key] = _read_value(fh, type_code)
+        alignment = _alignment(metadata)
+
+        infos: list[tuple[str, int]] = []
+        for _ in range(tensor_count):
+            name = _read_string(fh)
+            (n_dims,) = struct.unpack("<I", _read_exact(fh, 4))
+            _skip_exact(fh, 8 * n_dims)  # dims: n_dims x uint64
+            _skip_exact(fh, 4)  # ggml tensor type: uint32
+            (offset,) = struct.unpack("<Q", _read_exact(fh, 8))
+            if offset % alignment != 0:
+                raise GgufError(
+                    f"tensor {name!r} offset {offset} is not a multiple of "
+                    f"general.alignment ({alignment}); GGUF requires every "
+                    "tensor's data to start on an alignment boundary"
+                )
+            infos.append((name, offset))
+
+        data_start = fh.tell()
+
+    if data_start % alignment != 0:
+        data_start += alignment - (data_start % alignment)
+
+    infos.sort(key=lambda item: item[1])
+
+    # The alignment check above only rejects an individual offset that
+    # isn't a multiple of `alignment` -- it says nothing about offsets
+    # colliding or going backwards relative to each other. A corrupt or
+    # hand-crafted file can still declare two tensors at the same offset
+    # (every offset here already passed the alignment check, e.g. two
+    # tensors both at offset 0), which the offset-delta sizing below would
+    # silently turn into a 0-byte size for one of them instead of an error.
+    for index in range(len(infos) - 1):
+        if infos[index][1] >= infos[index + 1][1]:
+            raise GgufError(
+                f"tensor {infos[index + 1][0]!r} offset {infos[index + 1][1]} "
+                "is not strictly greater than the preceding tensor's offset "
+                f"({infos[index][1]}); duplicate or out-of-order tensor "
+                "offsets indicate a corrupt or hand-crafted GGUF file"
+            )
+
+    # Similarly, the last tensor's size is computed against the end of the
+    # file rather than another tensor's offset -- a truncated file (or one
+    # with a corrupt final offset) can declare an offset past the actual
+    # tensor-data span, which would make `file_size - data_start - offset`
+    # negative instead of raising.
+    data_span = file_size - data_start
+    if infos and infos[-1][1] > data_span:
+        raise GgufError(
+            f"tensor {infos[-1][0]!r} offset {infos[-1][1]} exceeds the "
+            f"tensor data span ({data_span} bytes available after the "
+            "header); the file is truncated or its offsets are corrupt"
+        )
+
+    sizes: dict[str, int] = {}
+    for index, (name, offset) in enumerate(infos):
+        next_offset = (
+            infos[index + 1][1] if index + 1 < len(infos) else file_size - data_start
+        )
+        sizes[name] = next_offset - offset
+    return sizes
+
+
+def moe_expert_offload_mib(
+    path: Path, metadata: dict[str, Any], n_cpu_moe: int
+) -> int:
+    """Bytes (rounded up to MiB) of routed-expert tensors that
+    `--n-cpu-moe n_cpu_moe` sends to CPU: every tensor matching
+    `blk.<i>.ffn_<gate|up|down>_exps.<weight|scale|input_scale>` for block
+    index i < n_cpu_moe. Shared-expert tensors (`*_shexp*`), the routing
+    gate (`*_inp*`), and non-expert tensors are never included -- they stay
+    GPU-resident regardless of `--n-cpu-moe`.
+
+    Always validates that the model actually has routed experts (raises
+    GgufError otherwise), even when n_cpu_moe is 0 -- a config author who
+    sets `n_cpu_moe: 0` on a dense model gets the same explicit failure as
+    one who sets any positive value, rather than a silent no-op.
+
+    Confirmed empirically (not from documentation) that `--n-cpu-moe N`
+    offloads the FIRST N blocks (ascending index), via llama-server's
+    verbose load log: see this plan's Global Constraints section.
+    """
+    arch = metadata.get("general.architecture")
+    if not isinstance(arch, str) or not arch:
+        raise GgufError("general.architecture missing from GGUF metadata")
+    if f"{arch}.expert_count" not in metadata:
+        raise GgufError(
+            f"n_cpu_moe is set but {arch} has no routed experts (missing "
+            f"{arch}.expert_count metadata) -- n_cpu_moe only applies to MoE models"
+        )
+    if n_cpu_moe <= 0:
+        return 0
+
+    sizes = tensor_sizes(path)
+    offload_bytes = 0
+    for name, size in sizes.items():
+        match = EXPERT_TENSOR_RE.match(name)
+        if match and int(match.group(1)) < n_cpu_moe:
+            offload_bytes += size
+    return math.ceil(offload_bytes / (1024 * 1024))
 
 
 def validate_gguf(path: Path) -> tuple[bool, str]:
