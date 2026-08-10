@@ -46,7 +46,8 @@ fi
 headroom_display="unavailable"
 budget_json="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" 2>/dev/null)" || true
 if [ -n "$budget_json" ]; then
-    headroom_display="$(echo "$budget_json" | jq -r '"\(.available_mib) MiB"')"
+    headroom_mib="$(echo "$budget_json" | jq -r '.available_mib // empty')"
+    [ -n "$headroom_mib" ] && headroom_display="${headroom_mib} MiB"
 fi
 
 log_step "GPU ${pci} (${render_node})"
@@ -90,6 +91,13 @@ dri_prime=""
 
 confirm() {
     local prompt="$1" reply
+    # Deliberately inverted from the codebase-wide LLM_ENV_ASSUME_YES=1
+    # convention ("run unattended, accepting defaults"): here it means
+    # "always decline". These two prompts are the only ones in the
+    # codebase that mutate the host outside the repo's own config (desktop
+    # launcher overrides, environment.d files), so auto-accepting them
+    # under an unattended run would silently rewrite the operator's
+    # desktop. Do not "fix" this to match the usual auto-accept behavior.
     if [ "${LLM_ENV_ASSUME_YES:-0}" = "1" ]; then
         return 1
     fi

@@ -208,7 +208,12 @@ and the problem is specifically in OmniRoute's routing/provider config.
   explicit `[y/N]` confirmation, and is limited to XDG per-user overrides
   (`~/.local/share/applications/*.desktop`, `~/.config/environment.d/`) —
   it never modifies a system file, and never touches an already-running
-  process (only future launches of the same app are affected).
+  process (only future launches of the same app are affected). Flatpak-
+  installed applications are a known, out-of-scope limitation: their
+  `.desktop` files live under `/var/lib/flatpak/exports/share/applications`,
+  outside the directories this tool searches, and even if found, its
+  `DRI_PRIME` override prefix does not propagate into the Flatpak sandbox
+  (`Exec=` there invokes `flatpak run ...`).
 
 ## Platform
 

@@ -1097,6 +1097,7 @@ def test_gpu_status_excludes_the_llm_env_stack_from_the_table(tmp_path: pathlib.
                 {"pid": 2, "comm": "conmon", "exe": "conmon", "vram_mib": 10},
                 {"pid": 3, "comm": "podman", "exe": "podman", "vram_mib": 5},
                 {"pid": 4, "comm": "firefox", "exe": "firefox", "vram_mib": 500},
+                {"pid": 5, "comm": "man", "exe": "man", "vram_mib": 50},
             ]
         }
     )
@@ -1105,6 +1106,12 @@ def test_gpu_status_excludes_the_llm_env_stack_from_the_table(tmp_path: pathlib.
     assert "llama-server" not in result.stdout
     assert "conmon" not in result.stdout
     assert "podman" not in result.stdout
+    # `man` is a literal substring of the excluded name `podman`, but the
+    # script's exclusion filter is an exact `comm` match (`. == $c`), not a
+    # substring match (`inside()`). This locks in that exact-match
+    # semantics: if the filter ever regressed to `inside()`, `man` would be
+    # wrongly excluded here too.
+    assert "man" in result.stdout
 
 
 def test_gpu_status_exits_cleanly_with_no_other_processes(tmp_path: pathlib.Path) -> None:
@@ -1222,6 +1229,58 @@ def test_gpu_status_shows_headroom_even_when_budget_is_infeasible(tmp_path: path
         check=False,
     )
     assert "budget headroom:    9000 MiB" in result.stdout
+
+
+def test_gpu_status_shows_headroom_unavailable_on_a_budget_error(tmp_path: pathlib.Path) -> None:
+    """cmd_budget can also fail outright (e.g. a configured GGUF file is
+    missing) and emit `{"error": "..."}` -- a non-empty JSON object with no
+    `available_mib` key at all -- while exiting 1. gpu-status.sh must fall
+    through to the "unavailable" default in exactly this scenario, not
+    render the literal string "null" by blindly interpolating a missing
+    field."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' detect')\n"
+        "    printf '%s\\n' '{\"gpus\":["
+        "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
+        "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]},"
+        "{\"card\":\"card0\",\"pci_address\":\"0000:0e:00.0\",\"vram_total_mib\":512,"
+        "\"vram_used_mib\":51,\"render_node\":\"renderD129\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' budget '*)\n"
+        "    printf '%s\\n' '{\"error\": \"some failure\"}'\n"
+        "    exit 1 ;;\n"
+        "  *' processes-on-render-node '*) printf '%s\\n' '{\"processes\":[]}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text('gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n')
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/gpu-status.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert "budget headroom:    unavailable" in result.stdout
+    assert "null" not in result.stdout
 
 
 def _desktop_file(directory: pathlib.Path, filename: str, exec_line: str) -> pathlib.Path:

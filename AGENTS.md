@@ -30,7 +30,11 @@ make clean         # Remove everything
 ### Environment variables
 
 - `LLM_ENV_ASSUME_YES=1` — run `make setup` / `make clean` unattended,
-  accepting defaults instead of prompting.
+  accepting defaults instead of prompting. `make gpu-status` is the
+  exception: for its two remediation prompts specifically, this means
+  "always decline", not "auto-accept" — those are the only prompts in the
+  codebase that mutate the host outside the repo's own config (desktop
+  launcher overrides, environment.d files).
 - `LLM_ENV_ROTATE_KEY=1` — force `make setup` to rotate the API key instead
   of keeping the existing one.
 
