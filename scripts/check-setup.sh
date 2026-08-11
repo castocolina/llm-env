@@ -118,7 +118,7 @@ record_inferences() {
         file="$(jq -r '.file' <<<"$model_json")"
         check_ctx_override="$(jq -r '.check_ctx_size // empty' <<<"$model_json")"
         max_output_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
-        timeout_seconds="$(jq -r '.check_timeout_seconds // 180' <<<"$model_json")"
+        timeout_seconds="$(jq -r '.check_timeout_seconds // 140' <<<"$model_json")"
         if [ -n "$skip_reason" ]; then
             record_inference_skip "$alias" "not run: inference prerequisite unavailable" "$skip_reason"
             continue

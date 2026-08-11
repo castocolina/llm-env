@@ -182,7 +182,7 @@ while IFS= read -r model_b64; do
     model_json="$(printf '%s' "$model_b64" | base64 --decode)"
     alias="$(jq -r '.alias' <<<"$model_json")"
     max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
-    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 131' <<<"$model_json")"
     checked_models=$((checked_models + 1))
     body="$(jq -n --arg m "$alias" --argjson mt "$max_tokens" \
         '{model: $m, messages: [{role: "user", content: "Reply with exactly: ready"}], max_tokens: $mt, stream: false}')"
@@ -292,7 +292,7 @@ while IFS= read -r model_b64; do
     model_json="$(printf '%s' "$model_b64" | base64 --decode)"
     alias="$(jq -r '.alias' <<<"$model_json")"
     max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
-    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 131' <<<"$model_json")"
     if [ "${LLM_SERVER_COMPLETION_OK[$alias]:-1}" -eq 0 ]; then
         log_warn "Verdict: SKIP identity=omniroute completion model=${alias} reason=server completion model=${alias} already failed; fix that first, OmniRoute proxies to the same model"
         continue

@@ -126,22 +126,26 @@ touches MoE offload, the resource ceilings, or the Ornith 35B model entry:
 2. `make setup` — must complete without the VRAM/RAM budget gate firing, at
    the recommended `n_cpu_moe: 28` / `memory_ceiling_pct: 60`.
 3. `make start` — must reach a healthy state (`make check-server` passes).
-4. A throughput spot-check, run directly against the model file the same
-   way `scripts/benchmark.sh` does (there is no standalone `llama-bench`
-   binary, and this does not run against the already-started `llm-server`
-   container):
+4. `make benchmark` — measures every enabled model (here, just `ornith-35b`)
+   pinned to the configured GPU device, using its own presets-sourced
+   `--n-gpu-layers`/`--n-cpu-moe` and its `check_ctx_size`/
+   `client_max_output_tokens` for `-p`/`-n` (there is no standalone
+   `llama-bench` binary — this runs `llama bench`, a subcommand of `/app/llama`
+   in the image, and does not run against the already-started `llm-server`
+   container). Results land under
+   `.models[] | select(.alias == "ornith-35b") | .benchmark.vulkan` in
+   `models.yml` (`pp_tps`, `tg_tps`, `measured_at`) — read it with:
    ```bash
-   podman run --rm --device /dev/dri \
-     -v "${LLM_ENV_MODELS_DIR:-${HOME}/llm-workspace/models}:/models:ro,z" \
-     --entrypoint /app/llama \
-     ghcr.io/ggml-org/llama.cpp:server-vulkan \
-     bench -m /models/ornith-1.0-35b-Q4_K_M.gguf -ngl 99 --n-cpu-moe 28 -p 512 -n 128 -d 0,32768 -r 2 -o json
+   yq '.models[] | select(.alias == "ornith-35b") | .benchmark.vulkan' \
+     ~/.config/llm-env/models.yml
    ```
-   Compare the `avg_ts` of the `n_prompt > 0` row (pp) and the `n_gen > 0`
-   row (tg) against the baseline recorded in
+   Compare `pp_tps`/`tg_tps` against the baseline recorded in
    `docs/superpowers/specs/2026-08-10-ornith-35b-moe-incorporation-design.md`
-   (`n_cpu_moe 28`: pp @ depth 0 ≈ 441 tok/s, tg @ depth 0 ≈ 39 tok/s). A
-   large regression indicates the offload split, quantization, or
+   (`n_cpu_moe 28`: pp @ depth 0 ≈ 441 tok/s, tg @ depth 0 ≈ 39 tok/s) — note
+   that baseline used a short `-p 512 -n 128 -d 0,32768` probe, while
+   `make benchmark` now measures at the model's full configured context size,
+   so a lower `pp_tps` at a much larger `-p` is expected, not a regression by
+   itself. A large regression indicates the offload split, quantization, or
    `n_gpu_layers` changed, not just the budgeting arithmetic.
 5. During a generation request against the running server, confirm
    sustained CPU utilization (`podman stats llm-server`) is in the same

@@ -2910,7 +2910,7 @@ def run_check_setup_with_stubs(
         "#!/usr/bin/bash\n"
         "printf 'timeout %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$1\" in\n"
-        "    180|300) ;;\n"
+        "    140|300) ;;\n"
         "    *) exit 64 ;;\n"
         "esac\n"
         "shift\n"
@@ -3076,7 +3076,7 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         ),
         None,
     )
-    assert first_call is not None and first_call.startswith("timeout 180 podman run")
+    assert first_call is not None and first_call.startswith("timeout 140 podman run")
     assert second_call is not None and second_call.startswith("timeout 300 podman run")
     assert "--n-gpu-layers 42 --ctx-size 8192" in first_call
     assert "--n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048" in second_call
@@ -5579,8 +5579,8 @@ def test_check_server_keeps_each_models_budget_and_timeout_together(tmp_path):
         for row in completion_rows
     }
     assert observed == {
-        ("gemma4", 2048, "120"),
-        ("llama-cpp/gemma4", 2048, "120"),
+        ("gemma4", 2048, "131"),
+        ("llama-cpp/gemma4", 2048, "131"),
         ("ornith", 8192, "600"),
         ("llama-cpp/ornith", 8192, "600"),
     }

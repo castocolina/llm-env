@@ -12,7 +12,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `Makefile` | Thin dispatcher, no logic beyond 3 lines |
 | `tools/lib.sh` | Logging, paths, `require_cmd`, the `llmenv` wrapper |
 | `setup/setup.sh` | Interactive configuration, downloads, network exposure |
-| `scripts/benchmark.sh` | Vulkan-only measurement with CPU fallback; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary) |
+| `scripts/benchmark.sh` | Per-model Vulkan measurement (with CPU fallback) pinned to the configured GPU device, using each model's own presets-sourced offload flags and `client_max_output_tokens`/`check_ctx_size`; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary); persists results to `.models[<alias>].benchmark.vulkan` |
 | `scripts/start.sh` | Budget check, device resolution, compose+wrapper-unit render, health gate |
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
 | `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
@@ -184,6 +184,43 @@ and the problem is specifically in OmniRoute's routing/provider config.
   register a phantom model.
 - Host-side probes use `127.0.0.1`, never `localhost`.
 - A failed Vulkan benchmark configures CPU fallback and exits nonzero.
+- `gpu.benchmark` (a single shared config key) is retired. `make benchmark`
+  measures every enabled model, pinned to the configured `.gpu.device_name`,
+  and persists each model's own result to `.models[<alias>].benchmark.vulkan`
+  (`pp_tps`, `tg_tps`, `measured_at`) — never a shared/global value.
+- `check-setup.sh`'s offline inference check and `benchmark.sh` both source
+  `--n-gpu-layers`/`--n-cpu-moe`/`ctx-size` from the same production
+  `presets.ini` rendered via `tools/lib.sh`'s `render_presets_file()` +
+  `presets_value()` (backed by `llmenv presets`) — the exact flags
+  `llm-server` itself uses, not independently re-derived per script.
+- Offline inference's `-n` and `benchmark.sh`'s generation size both come
+  from each model's `client_max_output_tokens`, not a hardcoded constant.
+- `check_ctx_size` (optional, defaults to the model's `ctx_size`) governs
+  offline CLI prompt-processing size and `benchmark.sh`'s `-p`, only. It has
+  no effect on `check-server.sh`'s HTTP checks: OpenAI-compatible chat
+  completions has no per-request context-size parameter, so the server's
+  `ctx-size` is fixed at startup by the preset and cannot be probed per
+  request.
+- `check_timeout_seconds` (optional, per-model) has two independent
+  fallbacks, because the offline CLI path and the HTTP completion path have
+  different cold-load costs: `check-setup.sh`'s offline inference falls
+  back to 140s, `check-server.sh`'s direct and OmniRoute completion loops
+  both fall back to 131s. Both were derived empirically against the
+  largest configured model (`ornith-35b`, full 262144 ctx-size) on the
+  target RX 9070 XT hardware: offline measured 20s, HTTP cold-load measured
+  11s; each fallback is `max(2 × measured, measured + 120)` — a margin
+  formula chosen so a small measurement is not left with too thin a buffer,
+  and a large measurement isn't doubled needlessly past what a real stall
+  needs.
+- Every prerequisite check in `check-setup.sh`/`check-server.sh`/
+  `benchmark.sh` (GPU device resolution, preset render, required preset
+  key, model enumeration) is an explicit nonzero exit on failure — none of
+  them can silently report success after checking zero, or fewer than all,
+  enabled models.
+- Model aliases are untrusted data as far as `yq` is concerned: they are
+  never string-interpolated into a `yq` program, filename, or `mktemp`
+  template — only passed in via `strenv()`/`--arg`, or as base64-encoded
+  JSON records decoded with `jq`.
 - Live Pi and OpenCode checks enter a random systemd user scope through
   `run-agent-bounded`; Bash consumes only the six-field result JSON and never
   treats unproved cleanup as a model result.
