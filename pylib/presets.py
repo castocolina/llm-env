@@ -52,6 +52,8 @@ def render_presets(cfg: dict[str, Any], models_dir: str, device: str) -> str:
             "ctx-size": str(model["ctx_size"]),
             "n-gpu-layers": str(model["n_gpu_layers"]),
         }
+        if model.get("n_cpu_moe"):
+            section["n-cpu-moe"] = str(model["n_cpu_moe"])
         sampling = model.get("sampling", {})
         for config_key, preset_key in SAMPLING_PRESET_KEYS:
             if config_key in sampling:

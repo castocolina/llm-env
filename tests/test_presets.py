@@ -131,6 +131,30 @@ def test_model_section_has_absolute_path_and_settings():
     assert section["n-gpu-layers"] == "99"
 
 
+def test_n_cpu_moe_emitted_when_configured():
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][1]["n_cpu_moe"] = 28  # ornith
+    text = render_presets(cfg, "/models", "Vulkan0")
+    parsed = parse(text)
+    assert parsed["ornith"]["n-cpu-moe"] == "28"
+    assert "n-cpu-moe" not in parsed["gemma4"]
+
+
+def test_n_cpu_moe_omitted_when_not_configured():
+    text = render_presets(CFG, "/models", "Vulkan0")
+    parsed = parse(text)
+    assert "n-cpu-moe" not in parsed["gemma4"]
+    assert "n-cpu-moe" not in parsed["ornith"]
+
+
+def test_n_cpu_moe_omitted_when_zero():
+    cfg = copy.deepcopy(CFG)
+    cfg["models"][1]["n_cpu_moe"] = 0
+    text = render_presets(cfg, "/models", "Vulkan0")
+    parsed = parse(text)
+    assert "n-cpu-moe" not in parsed["ornith"]
+
+
 SAMPLER_KEYS = ("temp", "top-p", "top-k", "repeat-penalty")
 
 
