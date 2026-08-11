@@ -4971,9 +4971,17 @@ def run_check_server(
     completion_responses: dict[str, str] | None = None,
     completion_statuses: dict[str, int] | None = None,
     model_list_body: str = '{"data":[{"id":"gemma4"},{"id":"ornith"}]}',
+    model_yq_exit: int = 0,
+    model_jq_exit: int = 0,
+    models_enabled: bool = True,
     verbose: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
+    real_jq = shutil.which("jq")
+    real_yq = shutil.which("yq")
+    assert real_jq is not None
+    assert real_yq is not None
+    enabled = "true" if models_enabled else "false"
     commands = tmp_path / "bin"
     commands.mkdir()
     calls = tmp_path / "calls"
@@ -4988,18 +4996,21 @@ def run_check_server(
         "  initial_password: omniroute-dashboard-password\n"
         "models:\n"
         "  - alias: gemma4\n"
-        "    enabled: true\n"
+        f"    enabled: {enabled}\n"
+        "    client_max_output_tokens: 2048\n"
         "  - alias: ornith\n"
-        "    enabled: true\n"
+        f"    enabled: {enabled}\n"
+        "    client_max_output_tokens: 8192\n"
+        "    check_timeout_seconds: 600\n"
     )
 
     curl = commands / "curl"
     curl.write_text(
         "#!/usr/bin/bash\n"
-        "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
         "url=\"\"\n"
         "body_file=\"\"\n"
         "data=\"\"\n"
+        "time_limit=\"\"\n"
         "auth_conf=\"\"\n"
         "cookie_write=\"\"\n"
         "cookie_read=\"\"\n"
@@ -5011,9 +5022,13 @@ def run_check_server(
         "    -c) cookie_write=\"$argument\" ;;\n"
         "    -b) cookie_read=\"$argument\" ;;\n"
         "    -d|--data-raw) data=\"$argument\" ;;\n"
+        "    --max-time) time_limit=\"$argument\" ;;\n"
         "  esac\n"
         "  previous=\"$argument\"\n"
         "done\n"
+        "jq -cn --arg argv \"$*\" --arg url \"$url\" --arg timeout \"$time_limit\" \\\n"
+        "    --arg payload \"$data\" \\\n"
+        "    '{argv: $argv, url: $url, timeout: $timeout, payload: $payload}' >> \"$CALLS\"\n"
         "write_response() {\n"
         "  if [ -n \"$body_file\" ]; then printf '%s\\n' \"$1\" > \"$body_file\"; else printf '%s\\n' \"$1\"; fi\n"
         "}\n"
@@ -5064,64 +5079,24 @@ def run_check_server(
     jq = commands / "jq"
     jq.write_text(
         "#!/usr/bin/bash\n"
-        "case \"$1\" in\n"
-        "  .)\n"
-        "    response=\"$(<\"$2\")\"\n"
-        "    case \"$response\" in not-json) printf 'parse error: invalid literal\\n' >&2; exit 4 ;; esac\n"
-        "    ;;\n"
-        "  -n)\n"
-        "    while [ \"$#\" -gt 0 ]; do\n"
-        "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = m ]; then\n"
-        "        printf '{\\\"model\\\":\\\"%s\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"Reply with exactly: ready\\\"}],\\\"max_tokens\\\": 256,\\\"stream\\\":false}\\n' \"${3:-}\"\n"
-        "        exit 0\n"
-        "      fi\n"
-        "      if [ \"$1\" = --arg ] && [ \"${2:-}\" = p ]; then\n"
-        "        printf '{\\\"password\\\":\\\"%s\\\"}\\n' \"${3:-}\"\n"
-        "        exit 0\n"
-        "      fi\n"
-        "      shift\n"
-        "    done\n"
-        "    printf '%s\\n' '{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}'\n"
-        "    ;;\n"
-        "  -r)\n"
-        "    case \"$2\" in\n"
-        "      '[.data[].id] | sort | join(\",\")')\n"
-        "        response=\"$(cat)\"\n"
-        "        case \"$response\" in not-json) printf 'parse error: invalid literal\\n' >&2; exit 4 ;; esac\n"
-        "        printf '%s\\n' 'gemma4,ornith'\n"
-        "        ;;\n"
-        "      '.choices?[0]?.message?.content? // empty')\n"
-        "        response=\"$(cat)\"\n"
-        "        case \"$response\" in *\\\"content\\\":*) ;; *) exit 0 ;; esac\n"
-        "        content=\"${response#*\\\"content\\\":}\"\n"
-        "        content=\"${content#\\\"}\"\n"
-        "        content=\"${content%%\\\"*}\"\n"
-        "        printf '%b\\n' \"$content\"\n"
-        "        ;;\n"
-        "      '.choices?[0]?.message?.reasoning_content? // empty') exit 0 ;;\n"
-        "      *'isActive'*) printf '%s\\n' true ;;\n"
-        "      *) exit 64 ;;\n"
-        "    esac\n"
-        "    ;;\n"
-        "  *) exit 64 ;;\n"
-        "esac\n"
+        "for argument in \"$@\"; do\n"
+        "  if [ \"$argument\" = '.[] | @base64' ]; then\n"
+        "    [ \"$MODEL_JQ_EXIT\" -eq 0 ] || exit \"$MODEL_JQ_EXIT\"\n"
+        "  fi\n"
+        "done\n"
+        "exec \"$REAL_JQ\" \"$@\"\n"
     )
     jq.chmod(jq.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
     yq.write_text(
         "#!/usr/bin/bash\n"
-        "case \"$2\" in\n"
-        "  '.server.port') printf '%s\\n' 8000 ;;\n"
-        "  '.server.api_key') printf '%s\\n' fixture-secret ;;\n"
-        "  '.omniroute.port') printf '%s\\n' 20128 ;;\n"
-        "  '.omniroute.initial_password') printf '%s\\n' omniroute-dashboard-password ;;\n"
-        "  '[.models[] | select(.enabled) | .alias] | sort | join(\",\")')\n"
-        "    printf '%s\\n' 'gemma4,ornith'\n"
-        "    ;;\n"
-        "  '.models[] | select(.enabled) | .alias') printf '%s\\n' gemma4 ornith ;;\n"
-        "  *) exit 64 ;;\n"
-        "esac\n"
+        "for argument in \"$@\"; do\n"
+        "  if [ \"$argument\" = '[.models[] | select(.enabled)]' ]; then\n"
+        "    [ \"$MODEL_YQ_EXIT\" -eq 0 ] || exit \"$MODEL_YQ_EXIT\"\n"
+        "  fi\n"
+        "done\n"
+        "exec \"$REAL_YQ\" \"$@\"\n"
     )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
@@ -5149,11 +5124,15 @@ def run_check_server(
         "GEMMA4_STATUS": str(completion_statuses.get("gemma4", 200)),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
-        "MODEL_LIST_BODY": model_list_body,
+        "MODEL_JQ_EXIT": str(model_jq_exit),
+        "MODEL_LIST_BODY": '{"data":[]}' if not models_enabled else model_list_body,
+        "MODEL_YQ_EXIT": str(model_yq_exit),
         "ORNITH_CURL_EXIT": str(completion_curl_exits.get("ornith", 0)),
         "ORNITH_RESPONSE": ornith_response,
         "ORNITH_STATUS": str(completion_statuses.get("ornith", 200)),
         "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_JQ": real_jq,
+        "REAL_YQ": real_yq,
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-server.sh"],
@@ -5180,7 +5159,8 @@ def test_check_server_requires_normalized_ready_for_every_enabled_model(
     assert "ornith: expected ready" in result.stderr
     # ornith's direct completion already failed, so its OmniRoute completion
     # is skipped rather than re-probed -- one less call than a naive 2+2+1.
-    assert calls.read_text().count("/v1/chat/completions") == 4
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert sum("/v1/chat/completions" in row["url"] for row in parsed) == 4
     assert (
         "Verdict: SKIP identity=omniroute completion model=ornith "
         "reason=server completion model=ornith already failed"
@@ -5197,7 +5177,9 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "max_tokens: 256, stream: false" in (ROOT / "scripts/check-server.sh").read_text()
+    assert "max_tokens: 256, stream: false" not in (
+        ROOT / "scripts/check-server.sh"
+    ).read_text()
 
 
 def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template(
@@ -5214,8 +5196,9 @@ def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template
     assert result.returncode == 0, result.stderr
     assert "Command: curl --silent --show-error" in result.stdout
     assert "Authorization: Bearer fixture-secret" in result.stdout
-    assert '"content":"Reply with exactly: ready"' in result.stdout
-    assert '"max_tokens": 256' in result.stdout
+    assert '"content": "Reply with exactly: ready"' in result.stdout
+    assert '"max_tokens": 2048' in result.stdout
+    assert '"max_tokens": 8192' in result.stdout
     assert "HTTP response:" in result.stdout
     assert "HTTP stderr:" not in result.stdout
     assert "Response parsing stderr:\n  (empty)" not in result.stdout
@@ -5300,7 +5283,7 @@ def test_check_server_reports_invalid_completion_json(tmp_path: pathlib.Path) ->
 
     assert result.returncode != 0
     assert "Verdict: FAIL stage=invalid JSON" in result.stderr
-    assert "Response parsing stderr:\n  parse error: invalid literal" in result.stdout
+    assert "Response parsing stderr:\n  jq: parse error:" in result.stdout
 
 
 def test_check_server_reports_missing_assistant_content(tmp_path: pathlib.Path) -> None:
@@ -5341,7 +5324,79 @@ def test_check_server_reports_malformed_model_listing(tmp_path: pathlib.Path) ->
 
     assert result.returncode != 0
     assert "Verdict: FAIL stage=response parsing identity=server model listing" in result.stderr
-    assert "Response parsing stderr:\n  parse error: invalid literal" in result.stdout
+    assert "Response parsing stderr:\n  jq: parse error:" in result.stdout
+
+
+def test_check_server_keeps_each_models_budget_and_timeout_together(tmp_path):
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    completion_rows = [
+        row
+        for row in parsed
+        if "/v1/chat/completions" in row["url"]
+        and json.loads(row["payload"])["model"] != "x"
+    ]
+    assert len(completion_rows) == 4
+    observed = {
+        (
+            json.loads(row["payload"])["model"],
+            json.loads(row["payload"])["max_tokens"],
+            row["timeout"],
+        )
+        for row in completion_rows
+    }
+    assert observed == {
+        ("gemma4", 2048, "120"),
+        ("llama-cpp/gemma4", 2048, "120"),
+        ("ornith", 8192, "600"),
+        ("llama-cpp/ornith", 8192, "600"),
+    }
+
+
+def test_check_server_keeps_the_invalid_key_probe_at_ten_seconds(tmp_path):
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    invalid = [
+        row
+        for row in parsed
+        if row["payload"] and json.loads(row["payload"]).get("model") == "x"
+    ]
+    assert len(invalid) == 1
+    assert invalid[0]["timeout"] == "10"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"model_yq_exit": 41}, "could not enumerate enabled models"),
+        ({"model_jq_exit": 42}, "could not enumerate enabled models"),
+        ({"models_enabled": False}, "no enabled models were checked"),
+    ],
+)
+def test_check_server_fails_when_no_direct_model_check_can_run(
+    tmp_path, kwargs, message
+):
+    result, calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        **kwargs,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    non_auth_completions = [
+        row
+        for row in parsed
+        if "/v1/chat/completions" in row["url"]
+        and json.loads(row["payload"]).get("model") != "x"
+    ]
+    assert non_auth_completions == []
 
 
 def run_agent_check(

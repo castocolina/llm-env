@@ -6,7 +6,7 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 set +e
 
-require_cmd curl jq yq
+require_cmd base64 curl jq yq
 
 load_server_config
 # shellcheck disable=SC2153 # PORT/API_KEY are set by load_server_config() in ../tools/lib.sh.
@@ -30,7 +30,7 @@ diagnostic_dir="$(prepare_diagnostic_dir server)"
 cleanup() {
     local status=$?
     finish_diagnostic_dir "$diagnostic_dir"
-    rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar"
+    rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar" "${enabled_models_file:-}"
     exit "$status"
 }
 trap cleanup EXIT
@@ -49,6 +49,21 @@ bad()  { log_error "$1"; FAIL=$((FAIL + 1)); }
 # produces two FAIL rows (direct and via OmniRoute) that look like two
 # separate problems, when routing was never the issue.
 declare -A LLM_SERVER_COMPLETION_OK
+
+enabled_models_file="$(mktemp "${diagnostic_dir}/enabled-models.XXXXXX")" \
+    || die "could not create enabled-model diagnostic"
+model_stream_status=0
+(
+    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64'
+) >"$enabled_models_file" || model_stream_status=$?
+
+models_ready=1
+if [ "$model_stream_status" -ne 0 ]; then
+    bad "Verdict: FAIL stage=model enumeration reason=could not enumerate enabled models (exit ${model_stream_status})"
+    models_ready=0
+fi
+checked_models=0
 
 REQUEST_CURL_STATUS=""
 REQUEST_HTTP_STATUS=""
@@ -161,19 +176,23 @@ else
 fi
 
 log_step "Completions"
-while read -r alias; do
-    [ -n "$alias" ] || continue
-    body="$(jq -n --arg m "$alias" \
-        '{model: $m,
-          messages: [{role: "user", content: "Reply with exactly: ready"}],
-          max_tokens: 256, stream: false}')"
+if [ "$models_ready" -eq 1 ]; then
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
+    checked_models=$((checked_models + 1))
+    body="$(jq -n --arg m "$alias" --argjson mt "$max_tokens" \
+        '{model: $m, messages: [{role: "user", content: "Reply with exactly: ready"}], max_tokens: $mt, stream: false}')"
 
     identity="server completion model=${alias}"
     expectation="normalized assistant content: ready"
     request_record "$identity" \
-        "curl --silent --show-error --max-time 120 -H 'Authorization: Bearer ${api_key}' -H 'Content-Type: application/json' --data-raw '${body}' ${base}/v1/chat/completions" \
+        "curl --silent --show-error --max-time ${timeout_seconds} -H 'Authorization: Bearer ${api_key}' -H 'Content-Type: application/json' --data-raw '${body}' ${base}/v1/chat/completions" \
         "$body" "$expectation" -- \
-        curl --silent --show-error --max-time 120 \
+        curl --silent --show-error --max-time "$timeout_seconds" \
         -K "$auth_conf" \
         -H "Content-Type: application/json" \
         --data-raw "$body" "${base}/v1/chat/completions"
@@ -218,7 +237,12 @@ while read -r alias; do
     close_diagnostic_capture 0
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
     LLM_SERVER_COMPLETION_OK["$alias"]=1
-done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
+done < "$enabled_models_file"
+fi
+
+if [ "$models_ready" -eq 1 ] && [ "$checked_models" -eq 0 ]; then
+    bad "Verdict: FAIL stage=model checks reason=no enabled models were checked"
+fi
 
 log_step "OmniRoute login"
 omniroute_login_body="$(jq -n --arg p "$omniroute_password" '{password: $p}')"
@@ -262,8 +286,13 @@ else
 fi
 
 log_step "OmniRoute completions"
-while read -r alias; do
-    [ -n "$alias" ] || continue
+if [ "$models_ready" -eq 1 ] && [ "$checked_models" -gt 0 ]; then
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
     if [ "${LLM_SERVER_COMPLETION_OK[$alias]:-1}" -eq 0 ]; then
         log_warn "Verdict: SKIP identity=omniroute completion model=${alias} reason=server completion model=${alias} already failed; fix that first, OmniRoute proxies to the same model"
         continue
@@ -271,19 +300,17 @@ while read -r alias; do
     # Routing keys on the provider slug ("llama-cpp"), not the connection's
     # own name -- confirmed live via GET /v1/models, which lists synced
     # models as "llama-cpp/<alias>" regardless of the connection's name.
-    body="$(jq -n --arg m "llama-cpp/${alias}" \
-        '{model: $m,
-          messages: [{role: "user", content: "Reply with exactly: ready"}],
-          max_tokens: 256, stream: false}')"
+    body="$(jq -n --arg m "llama-cpp/${alias}" --argjson mt "$max_tokens" \
+        '{model: $m, messages: [{role: "user", content: "Reply with exactly: ready"}], max_tokens: $mt, stream: false}')"
 
     identity="omniroute completion model=${alias}"
     expectation="normalized assistant content: ready"
     # The dashboard password doubles as the bearer token for /v1/* routes,
     # not only for the management API's cookie session -- confirmed live.
     request_record "$identity" \
-        "curl --silent --show-error --max-time 120 -H 'Authorization: Bearer ${omniroute_password}' -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
+        "curl --silent --show-error --max-time ${timeout_seconds} -H 'Authorization: Bearer ${omniroute_password}' -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
         "$body" "$expectation" -- \
-        curl --silent --show-error --max-time 120 \
+        curl --silent --show-error --max-time "$timeout_seconds" \
         -H "Authorization: Bearer ${omniroute_password}" \
         -H "Content-Type: application/json" \
         --data-raw "$body" "${omniroute_base}/v1/chat/completions"
@@ -326,7 +353,8 @@ while read -r alias; do
 
     close_diagnostic_capture 0
     ok "Verdict: PASS identity=${identity} ${alias}: returned ready via OmniRoute"
-done < <(yq -r '.models[] | select(.enabled) | .alias' "$CONFIG_PATH")
+done < "$enabled_models_file"
+fi
 
 echo
 log_step "Results: ${PASS} passed, ${FAIL} failed"
