@@ -101,6 +101,42 @@ def test_makefile_dispatches_relocated_entrypoints() -> None:
     assert "bash scripts/gpu-status.sh" in makefile
 
 
+def test_presets_helpers_read_a_generated_ini(tmp_path: pathlib.Path) -> None:
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\nserver: {host: 0.0.0.0, port: 8000, api_key: k}\n"
+        "gpu: {backend: vulkan, pci_address: '0000:03:00.0', vram_total_mib: 16384, reserve_mode: auto}\n"
+        "runtime: {models_max: 1, parallel_slots: 1, ubatch_size: 512, flash_attn: true, cache_type_k: q5_1, cache_type_v: q5_1}\n"
+        "models:\n"
+        "- {alias: dense, label: Dense, parameters: 1B, quantization: Q4_K_M, enabled: true, file: dense.gguf, url: 'https://example.invalid/d', size_bytes: 1, vram_budget: 50%, ctx_size: 4096, client_max_output_tokens: 2048, n_gpu_layers: 99}\n"
+        "- {alias: moe, label: MoE, parameters: 8B, quantization: Q4_K_M, enabled: true, file: moe.gguf, url: 'https://example.invalid/m', size_bytes: 1, vram_budget: 50%, ctx_size: 8192, client_max_output_tokens: 2048, n_gpu_layers: 40, n_cpu_moe: 12}\n"
+    )
+    output = tmp_path / "presets.ini"
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", "-c",
+            (
+                'source tools/lib.sh; render_presets_file "$1" "$2"; '
+                'presets_value "$2" dense n-gpu-layers; '
+                'presets_value "$2" moe n-gpu-layers; '
+                'presets_value "$2" moe n-cpu-moe; '
+                '(presets_value "$2" dense n-cpu-moe; echo "<empty>")'
+            ),
+            "bash", "Vulkan0", str(output),
+        ],
+        cwd=ROOT,
+        env=os.environ | {
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["99", "40", "12", "<empty>"]
+
+
 def _mock_command(directory: pathlib.Path, name: str) -> None:
     command = directory / name
     command.write_text("#!/usr/bin/bash\nexit 0\n")

@@ -234,6 +234,24 @@ migrate_config_file() {
     fi
 }
 
+render_presets_file() {
+    local device="$1" output="$2"
+    llmenv --config "$CONFIG_PATH" presets \
+        --models-dir "$MODELS_DIR" --device "$device" --output "$output" >/dev/null
+}
+
+presets_value() {
+    local presets_file="$1" alias="$2" key="$3"
+    awk -v section="[${alias}]" -v prefix="${key} = " '
+        $0 == section { in_section = 1; next }
+        /^\[/ { in_section = 0 }
+        in_section && index($0, prefix) == 1 {
+            print substr($0, length(prefix) + 1)
+            exit
+        }
+    ' "$presets_file"
+}
+
 new_api_key() {
     head -c 32 /dev/urandom | base64 | tr -d '/+=\n'
 }
