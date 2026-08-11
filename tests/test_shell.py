@@ -2744,6 +2744,10 @@ def run_check_setup_with_stubs(
     inference_exit: int = 0,
     budget_exit: int = 0,
     resolve_exit: int = 0,
+    empty_resolve: bool = False,
+    presets_exit: int = 0,
+    presets_missing_alias: bool = False,
+    yq_models_json_exit: int = 0,
     render_node: str | None = "renderD128",
     verbose: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
@@ -2772,7 +2776,10 @@ def run_check_setup_with_stubs(
     timeout.write_text(
         "#!/usr/bin/bash\n"
         "printf 'timeout %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "[ \"$1\" = 180 ] || exit 64\n"
+        "case \"$1\" in\n"
+        "    180|300) ;;\n"
+        "    *) exit 64 ;;\n"
+        "esac\n"
         "shift\n"
         "exec \"$@\"\n"
     )
@@ -2787,19 +2794,42 @@ def run_check_setup_with_stubs(
         "  *' detect'*) printf '%s\\n' \"$DETECTED_GPU\" ;;\n"
         "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}'; exit \"$BUDGET_EXIT\" ;;\n"
+        "  *' presets '*)\n"
+        "    for argument in \"$@\"; do\n"
+        "      if [ \"$previous\" = --output ]; then presets_file=\"$argument\"; fi\n"
+        "      previous=\"$argument\"\n"
+        "    done\n"
+        "    printf '%s\\n' '[first]' 'ctx-size = 8192' 'n-gpu-layers = 42' '' > \"$presets_file\"\n"
+        "    if [ \"$PRESETS_MISSING_ALIAS\" != 1 ]; then\n"
+        "      printf '%s\\n' '[second]' 'ctx-size = 4096' 'n-gpu-layers = 17' 'n-cpu-moe = 12' >> \"$presets_file\"\n"
+        "    fi\n"
+        "    exit \"$PRESETS_EXIT\" ;;\n"
         "  *' resolve-device'*)\n"
         "    for argument in \"$@\"; do\n"
         "      if [ \"$previous\" = --listing-file ]; then listing_file=\"$argument\"; fi\n"
         "      previous=\"$argument\"\n"
         "    done\n"
         "    [ \"$(cat \"$listing_file\")\" = 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ] || exit 65\n"
-        "    printf '%s\\n' '{\"device\":\"Vulkan7\"}'; exit \"$RESOLVE_EXIT\" ;;\n"
+        "    if [ \"$EMPTY_RESOLVE\" = 1 ]; then\n"
+        "      printf '%s\\n' '{\"device\":\"\"}'\n"
+        "    else\n"
+        "      printf '%s\\n' '{\"device\":\"Vulkan7\"}'\n"
+        "    fi\n"
+        "    exit \"$RESOLVE_EXIT\" ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
-    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "if [ \"$#\" -eq 4 ] && [ \"$1\" = '-o=json' ] && [ \"$2\" = '-I=0' ] && "
+        "[ \"$3\" = '[.models[] | select(.enabled)]' ] && [ \"$4\" = \"$LLM_ENV_CONFIG\" ]; then\n"
+        "  \"$REAL_YQ\" \"$@\" || exit $?\n"
+        "  exit \"$YQ_MODELS_JSON_EXIT\"\n"
+        "fi\n"
+        "exec \"$REAL_YQ\" \"$@\"\n"
+    )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
     podman = commands / "podman"
@@ -2827,6 +2857,8 @@ def run_check_setup_with_stubs(
         "  - alias: first\n"
         "    enabled: true\n"
         "    file: first.gguf\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 2048\n"
         "    n_gpu_layers: 42\n"
         "  - alias: skipped\n"
         "    enabled: false\n"
@@ -2835,7 +2867,12 @@ def run_check_setup_with_stubs(
         "  - alias: second\n"
         "    enabled: true\n"
         "    file: second.gguf\n"
+        "    ctx_size: 4096\n"
+        "    check_ctx_size: 2048\n"
+        "    client_max_output_tokens: 1024\n"
+        "    check_timeout_seconds: 300\n"
         "    n_gpu_layers: 17\n"
+        "    n_cpu_moe: 12\n"
     )
     models_dir = tmp_path / "models"
     environment = os.environ | {
@@ -2850,6 +2887,10 @@ def run_check_setup_with_stubs(
         "INFERENCE_EXIT": str(inference_exit),
         "BUDGET_EXIT": str(budget_exit),
         "RESOLVE_EXIT": str(resolve_exit),
+        "EMPTY_RESOLVE": "1" if empty_resolve else "0",
+        "PRESETS_EXIT": str(presets_exit),
+        "PRESETS_MISSING_ALIAS": "1" if presets_missing_alias else "0",
+        "YQ_MODELS_JSON_EXIT": str(yq_models_json_exit),
         "DETECTED_GPU": detected_gpu,
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
@@ -2867,7 +2908,7 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
     tmp_path: pathlib.Path,
 ) -> None:
     """Offline setup validation must resolve and smoke-test every enabled model."""
-    result, calls, models_dir = run_check_setup_with_stubs(tmp_path)
+    result, calls, _ = run_check_setup_with_stubs(tmp_path)
 
     assert result.returncode == 0, result.stderr
     recorded = calls.read_text()
@@ -2881,21 +2922,33 @@ def test_check_setup_runs_disposable_inference_for_each_enabled_model(
         "podman run --rm --device /dev/dri "
         "example.invalid/llama:latest --list-devices"
     )
-    first_inference = (
-        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
-        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
-        "--device Vulkan7 --n-gpu-layers 42 --single-turn --no-show-timings "
-        "-p Reply with exactly: ready -n 256"
-    )
-    second_inference = (
-        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
-        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
-        "--device Vulkan7 --n-gpu-layers 17 --single-turn --no-show-timings "
-        "-p Reply with exactly: ready -n 256"
-    )
     assert recorded.count(list_devices) == 1
-    assert recorded.count(f"timeout 180 {first_inference}") == 1
-    assert recorded.count(f"timeout 180 {second_inference}") == 1
+    first_call = next(
+        (
+            line
+            for line in recorded.splitlines()
+            if "podman run" in line
+            and "/models/first.gguf" in line
+            and " cli " in line
+        ),
+        None,
+    )
+    second_call = next(
+        (
+            line
+            for line in recorded.splitlines()
+            if "podman run" in line
+            and "/models/second.gguf" in line
+            and " cli " in line
+        ),
+        None,
+    )
+    assert first_call is not None and first_call.startswith("timeout 180 podman run")
+    assert second_call is not None and second_call.startswith("timeout 300 podman run")
+    assert "--n-gpu-layers 42 --ctx-size 8192" in first_call
+    assert "--n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048" in second_call
+    assert first_call.endswith("-p Reply with exactly: ready -n 2048")
+    assert second_call.endswith("-p Reply with exactly: ready -n 1024")
     assert "/models/skipped.gguf" not in recorded
     inference_calls = [
         line.split()
@@ -3041,32 +3094,55 @@ def test_check_setup_validates_the_rendered_compose_file(tmp_path: pathlib.Path)
     assert f"podman compose -f {compose_file} config" in calls.read_text()
 
 
-@pytest.mark.parametrize(
-    ("budget_exit", "resolve_exit", "reason"),
-    [
-        (19, 0, "VRAM budget check failed"),
-        (0, 23, "GPU device could not be resolved"),
-    ],
-)
-def test_check_setup_skips_each_enabled_inference_after_prerequisite_failure(
+def test_check_setup_skips_each_enabled_inference_after_budget_failure(
     tmp_path: pathlib.Path,
-    budget_exit: int,
-    resolve_exit: int,
-    reason: str,
 ) -> None:
     """Failed inference prerequisites must skip every enabled model independently."""
     result, _, _ = run_check_setup_with_stubs(
         tmp_path,
-        budget_exit=budget_exit,
-        resolve_exit=resolve_exit,
+        budget_exit=19,
     )
 
     assert result.returncode != 0
     assert result.stdout.count("Identity: inference ") == 2
-    assert result.stderr.count(f"Verdict: SKIP reason={reason}") == 2
+    assert result.stderr.count("Verdict: SKIP reason=VRAM budget check failed") == 2
     assert "Verdict: PASS identity=tooling command uv" in result.stdout
     assert "Verdict: PASS identity=GGUF validation" in result.stdout
     assert "Results:" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"resolve_exit": 23}, "GPU device could not be resolved"),
+        ({"empty_resolve": True}, "GPU device resolution returned no device"),
+        ({"presets_exit": 29}, "presets rendering failed"),
+        ({"presets_missing_alias": True}, "missing n-gpu-layers preset for second"),
+    ],
+)
+def test_check_setup_fails_when_inference_prerequisite_is_unavailable(
+    tmp_path: pathlib.Path,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    result, calls, _ = run_check_setup_with_stubs(tmp_path, **kwargs)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Results:" in result.stdout
+    if "presets" in message:
+        recorded = calls.read_text()
+        assert "/models/second.gguf" not in recorded or " cli " not in recorded
+
+
+def test_check_setup_fails_when_model_enumeration_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, _ = run_check_setup_with_stubs(tmp_path, yq_models_json_exit=17)
+
+    assert result.returncode != 0
+    assert "failed to enumerate enabled models" in result.stderr
+    assert " cli " not in calls.read_text()
 
 
 def run_lifecycle_script(
