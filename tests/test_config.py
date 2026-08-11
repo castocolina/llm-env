@@ -724,6 +724,39 @@ def test_validate_config_rejects_invalid_n_cpu_moe(value):
     assert any("n_cpu_moe" in error for error in errors)
 
 
+def test_validate_config_accepts_check_ctx_size_as_positive_int():
+    cfg = make_cfg()
+    cfg["models"][0]["check_ctx_size"] = 8192
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "8192", 1.5])
+def test_validate_config_rejects_invalid_check_ctx_size(value):
+    cfg = make_cfg()
+    cfg["models"][0]["check_ctx_size"] = value
+    assert any("check_ctx_size" in error for error in validate_config(cfg))
+
+
+def test_validate_config_accepts_check_timeout_seconds_as_positive_int():
+    cfg = make_cfg()
+    cfg["models"][0]["check_timeout_seconds"] = 600
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "600", 1.5])
+def test_validate_config_rejects_invalid_check_timeout_seconds(value):
+    cfg = make_cfg()
+    cfg["models"][0]["check_timeout_seconds"] = value
+    assert any("check_timeout_seconds" in error for error in validate_config(cfg))
+
+
+def test_validate_config_omits_check_fields_without_error():
+    cfg = make_cfg()
+    cfg["models"][0].pop("check_ctx_size", None)
+    cfg["models"][0].pop("check_timeout_seconds", None)
+    assert validate_config(cfg) == []
+
+
 def test_migrate_config_adds_default_vram_budget_ceiling():
     cfg = make_cfg()
     del cfg["gpu"]["vram_budget_ceiling_pct"]

@@ -387,6 +387,9 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"model {model_name} n_cpu_moe must be a non-negative integer"
                 )
+        for key in ("check_ctx_size", "check_timeout_seconds"):
+            if key in model and not _positive_int(model[key]):
+                errors.append(f"model {model_name} {key} must be a positive integer")
 
     enabled_count = len(enabled_models(cfg))
     if enabled_count == 0:
