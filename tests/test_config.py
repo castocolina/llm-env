@@ -42,13 +42,6 @@ def make_cfg(**overrides):
             "vram_budget_ceiling_pct": 95,
             "vram_budget_ceiling_mib": 16304,
             "vram_budget_ceiling_floor_pct": 30,
-            "benchmark": {
-                "vulkan": {
-                    "pp_tps": None,
-                    "tg_tps": None,
-                    "measured_at": None,
-                }
-            },
         },
         "runtime": {
             "models_max": 1,
@@ -238,41 +231,22 @@ def test_config_rejects_invalid_sampling_with_actionable_error(sampling, expecte
     assert validate_config(cfg) == [expected]
 
 
-def test_vulkan_only_config_removes_legacy_rocm_benchmark():
-    """Migration must discard obsolete ROCm measurements from existing configs."""
+def test_vulkan_only_config_removes_legacy_shared_benchmark():
+    """The shared slot cannot identify which model produced a measurement."""
     cfg = make_cfg()
-    cfg["gpu"]["benchmark"]["rocm"] = {
-        "pp_tps": 1,
-        "tg_tps": 1,
-        "measured_at": "old",
-    }
-
-    migrate_config = getattr(config_module, "migrate_config", None)
-    assert migrate_config is not None, "configuration migration is missing"
-    migrated = migrate_config(cfg)
-
-    assert set(migrated["gpu"]["benchmark"]) == {"vulkan"}
+    migrated = config_module.migrate_config(cfg)
+    assert "benchmark" not in migrated["gpu"]
 
 
-def test_load_config_migrates_legacy_rocm_benchmark_from_yaml(tmp_path):
-    """Loading a legacy YAML file must discard only its ROCm measurement."""
+def test_load_config_drops_legacy_shared_benchmark_from_yaml(tmp_path):
     path = tmp_path / "models.yml"
     path.write_text(
         "gpu:\n"
         "  benchmark:\n"
-        "    rocm:\n"
-        "      pp_tps: 1\n"
-        "      tg_tps: 1\n"
-        "      measured_at: old\n"
-        "    vulkan:\n"
-        "      pp_tps: 2\n"
-        "      tg_tps: 2\n"
-        "      measured_at: current\n"
+        "    rocm: {pp_tps: 1}\n"
+        "    vulkan: {pp_tps: 2, tg_tps: 2, measured_at: current}\n"
     )
-
-    assert load_config(path)["gpu"]["benchmark"] == {
-        "vulkan": {"pp_tps": 2, "tg_tps": 2, "measured_at": "current"}
-    }
+    assert "benchmark" not in load_config(path)["gpu"]
 
 
 def test_pre_feature_config_migration_is_additive_and_idempotent():
@@ -360,19 +334,12 @@ def test_enabled_models_requires_mapping_records_with_literal_true():
     assert [model["alias"] for model in enabled_models(cfg)] == ["gemma4"]
 
 
-def test_config_save_and_load_migrate_legacy_rocm_benchmarks(tmp_path):
-    """Persisting a legacy config must remove its obsolete benchmark result."""
+def test_config_save_and_load_drop_legacy_shared_benchmark(tmp_path):
     cfg = make_cfg()
-    cfg["gpu"]["benchmark"]["rocm"] = {
-        "pp_tps": 1,
-        "tg_tps": 1,
-        "measured_at": "old",
-    }
-
+    cfg["gpu"]["benchmark"] = {"rocm": {"pp_tps": 1}}
     path = tmp_path / "models.yml"
     save_config(cfg, path)
-
-    assert set(load_config(path)["gpu"]["benchmark"]) == {"vulkan"}
+    assert "benchmark" not in load_config(path)["gpu"]
 
 
 def test_vulkan_only_schema_rejects_rocm_backend():

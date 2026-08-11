@@ -20,11 +20,6 @@ gpu:
   # 0 = no cap; make setup computes and persists the real value
   vram_budget_ceiling_mib: 0
   vram_budget_ceiling_floor_pct: 30
-  benchmark:
-    vulkan:
-      pp_tps: null
-      tg_tps: null
-      measured_at: null
 
 runtime:
   models_max: 1
@@ -52,6 +47,10 @@ omniroute:
   initial_password: ""
 
 models:
+  # Optional per-model check overrides:
+  # check_ctx_size defaults to this model's ctx_size.
+  # check_timeout_seconds defaults to the empirically tuned script baseline.
+  # `make benchmark` creates benchmark.vulkan on each measured model entry.
   - alias: gemma4
     label: Gemma 4 12B Agentic v2
     parameters: 12B

@@ -95,9 +95,7 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     gpu.setdefault("vram_budget_ceiling_pct", 95)
     gpu.setdefault("vram_budget_ceiling_mib", gpu.get("vram_total_mib", 0))
     gpu.setdefault("vram_budget_ceiling_floor_pct", 30)
-    benchmark = gpu.get("benchmark")
-    if isinstance(benchmark, dict):
-        benchmark.pop("rocm", None)
+    gpu.pop("benchmark", None)
     return cfg
 
 
