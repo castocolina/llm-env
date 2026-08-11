@@ -210,8 +210,12 @@ and the problem is specifically in OmniRoute's routing/provider config.
   of routed-expert tensors `--n-cpu-moe` sends to CPU for that model's first
   `n_cpu_moe` transformer blocks (confirmed empirically that `--n-cpu-moe N`
   offloads ascending block indices, not descending). `llmenv budget`
-  cross-checks the largest such requirement across every enabled model
-  (not just the one compute_budget() would rank highest by VRAM cost)
+  cross-checks the sum of the top `runtime.models_max` such requirements,
+  ranked by RAM cost across every enabled model (not just the ones
+  compute_budget() would rank highest by VRAM cost, and not just the single
+  largest — this plan's shipped default keeps `models_max: 1`, where the sum
+  reduces to exactly the largest, but a config with `models_max > 1` sums
+  every concurrently-resident model's requirement)
   against `resources.llm_server.memory_mib`, and reports the same kind of
   explicit, remedied infeasibility as the existing VRAM check — never
   silently corrected. `n_cpu_moe: 0` on a model with no routed experts at
