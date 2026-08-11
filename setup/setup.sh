@@ -80,6 +80,11 @@ log_info "selected ${aliases[*]}"
 
 log_step "Step 4/8  Downloading models"
 mkdir -p "$MODELS_DIR"
+# scripts/prune.sh (make prune) refuses to delete a directory without this
+# marker -- proof it's actually the models directory llm-env created, not
+# an unrelated existing path an operator's LLM_ENV_MODELS_DIR happens to
+# point at.
+touch "${MODELS_DIR}/.llm-env-managed"
 while IFS=$'\t' read -r file url; do
     [ -n "$file" ] || continue
     if [ -f "${MODELS_DIR}/${file}" ]; then

@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status logs validate test clean
+        key-reset show-secrets enable-boot disable-boot status gpu-status logs validate test clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -67,3 +67,6 @@ test:
 
 clean:
 	@bash tools/run-target.sh clean -- bash scripts/clean.sh
+
+prune:
+	@bash tools/run-target.sh prune -- bash scripts/prune.sh

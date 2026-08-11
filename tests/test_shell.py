@@ -602,6 +602,17 @@ def run_setup_with_numbered_selection(
     return result, calls, config
 
 
+def test_setup_creates_the_prune_marker_in_the_models_directory(
+    tmp_path: pathlib.Path,
+) -> None:
+    """scripts/prune.sh (this task) refuses to run without this marker --
+    setup must actually create it during Step 4's download, not just
+    document the convention."""
+    result, _, _ = run_setup_with_numbered_selection(tmp_path, "1\n1\n1\n")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "models" / ".llm-env-managed").exists()
+
+
 def test_setup_gpu_rows_include_measured_used_and_free_vram(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1750,6 +1761,197 @@ def test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid(
     assert yq_value(config, ".gpu.backend") == "cpu"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
     assert "podman pull ghcr.io/ggml-org/llama.cpp:server" in calls.read_text()
+
+
+def test_prune_lists_model_count_and_size_before_confirming(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "yq", "podman", "numfmt"):
+        _mock_command(commands, name)
+    (commands / "numfmt").write_text("#!/usr/bin/bash\necho '3KB'\n")
+
+    home = tmp_path / "home"
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / ".llm-env-managed").touch()  # proves this is llm-env's dir
+    (models_dir / "a.gguf").write_bytes(b"x" * 1000)
+    nested = models_dir / "nested"
+    nested.mkdir()
+    (nested / "b.gguf").write_bytes(b"y" * 1000)
+    (models_dir / ".hidden.gguf").write_bytes(b"z" * 1000)
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_MODELS_DIR": str(models_dir),
+        "LLM_ENV_ASSUME_YES": "0",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/prune.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="no\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    # Counts nested and hidden files too, not just top-level entries, but
+    # never the .llm-env-managed marker itself -- that's bookkeeping, not a
+    # downloaded model.
+    assert "3 downloaded model file(s)" in result.stdout
+    assert (models_dir / "a.gguf").exists()  # aborted -- nothing removed
+    assert (nested / "b.gguf").exists()
+
+
+def test_prune_removes_models_and_runs_clean_after_confirmation(
+    tmp_path: pathlib.Path,
+) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "yq", "numfmt"):
+        _mock_command(commands, name)
+    calls = tmp_path / "calls"
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    compose_file = home / ".config/llm-env/docker-compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {llm-server: {}}\n")
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / ".llm-env-managed").touch()  # proves this is llm-env's dir
+    (models_dir / "a.gguf").write_bytes(b"x" * 1000)
+    nested = models_dir / "nested"
+    nested.mkdir()
+    (nested / "b.gguf").write_bytes(b"y" * 1000)
+    (models_dir / ".hidden.gguf").write_bytes(b"z" * 1000)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_MODELS_DIR": str(models_dir),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/prune.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (models_dir / "a.gguf").exists()
+    assert not nested.exists()  # nested directories are removed too
+    assert not (models_dir / ".hidden.gguf").exists()  # dotfiles are removed too
+    # The marker is removed along with everything else -- `make prune`
+    # removes ALL of $MODELS_DIR's contents. The next `make setup` recreates
+    # it (Step 4), so this is not a re-prune hazard.
+    assert not (models_dir / ".llm-env-managed").exists()
+    assert models_dir.exists()  # directory itself survives, only contents removed
+    assert "podman compose" in calls.read_text()  # clean.sh actually ran, not skipped
+
+
+def test_prune_handles_a_missing_models_dir_without_error(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "yq", "podman", "numfmt"):
+        _mock_command(commands, name)
+
+    home = tmp_path / "home"
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "does-not-exist"),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/prune.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "0 downloaded model file(s)" in result.stdout
+
+
+def test_prune_refuses_to_run_against_the_repository_directory(tmp_path: pathlib.Path) -> None:
+    """LLM_ENV_MODELS_DIR is operator-controlled; a value that resolves to
+    the repository itself (or '/' or $HOME) must be rejected before
+    anything is deleted, not passed straight to `rm -rf`."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "yq", "podman", "numfmt"):
+        _mock_command(commands, name)
+
+    home = tmp_path / "home"
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_MODELS_DIR": str(ROOT),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/prune.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "refusing to prune" in result.stderr
+    assert (ROOT / "scripts" / "prune.sh").exists()  # the repo itself must survive
+
+
+def test_prune_refuses_a_directory_without_the_llm_env_managed_marker(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Path shape alone (not '/', $HOME, or $REPO_DIR, and at least 2 path
+    segments deep) is not proof this is really llm-env's models directory --
+    any pre-existing, unrelated directory at a plausible depth (e.g.
+    /etc/ssh) would otherwise pass every check above and get recursively
+    deleted. Require the marker `make setup` leaves behind in `$MODELS_DIR`
+    the first time it creates/uses it (Step 3 below)."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "yq", "podman", "numfmt"):
+        _mock_command(commands, name)
+
+    home = tmp_path / "home"
+    models_dir = tmp_path / "some" / "unrelated" / "directory"
+    models_dir.mkdir(parents=True)
+    (models_dir / "a.gguf").write_bytes(b"x" * 1000)  # looks like a model, but unmanaged
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_MODELS_DIR": str(models_dir),
+        "LLM_ENV_ASSUME_YES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/prune.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "missing .llm-env-managed marker" in result.stderr
+    assert (models_dir / "a.gguf").exists()  # refused before deleting anything
 
 
 def run_cleanup_with_stubs(
@@ -5725,6 +5927,10 @@ jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assist
 
 def test_make_help_lists_check_with_agents() -> None:
     assert "make check-with-agents" in (SCRIPT_DIR / "help.sh").read_text()
+
+
+def test_make_help_lists_prune() -> None:
+    assert "make prune" in (SCRIPT_DIR / "help.sh").read_text()
 
 
 def test_agent_check_fails_when_no_supported_client_is_installed(
