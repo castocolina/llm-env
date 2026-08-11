@@ -1837,8 +1837,22 @@ def test_gpu_status_assume_yes_never_writes_any_override(tmp_path: pathlib.Path)
     assert not (home / ".config/environment.d/60-llm-env-igpu-default.conf").exists()
 
 
+valid_benchmark_json = (
+    '[{"n_prompt":512,"avg_ts":90.0},{"n_gen":128,"avg_ts":30.0}]'
+)
+
+
 def run_benchmark(
-    tmp_path: pathlib.Path, benchmark_stdout: str, benchmark_stderr: str = ""
+    tmp_path: pathlib.Path,
+    benchmark_stdout: str,
+    benchmark_stderr: str = "",
+    *,
+    resolve_exit: int = 0,
+    empty_resolve: bool = False,
+    presets_exit: int = 0,
+    presets_missing_alias: bool = False,
+    device_name: str = "Benchmark GPU",
+    yq_models_json_exit: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the benchmark with controlled Vulkan streams and record Podman calls."""
     real_yq = shutil.which("yq")
@@ -1853,25 +1867,68 @@ def run_benchmark(
         "gpu:\n"
         "  backend: vulkan\n"
         "  image: ghcr.io/ggml-org/llama.cpp:server-vulkan\n"
-        "  vram_total_mib: 16384\n"
+        f"  device_name: {device_name}\n"
         "  benchmark:\n"
-        "    vulkan:\n"
-        "      pp_tps: null\n"
-        "      tg_tps: null\n"
-        "      measured_at: null\n"
+        "    vulkan: {pp_tps: 1, tg_tps: 1, measured_at: legacy}\n"
         "models:\n"
-        "  - alias: benchmark\n"
+        "  - alias: smallest\n"
         "    enabled: true\n"
-        "    file: benchmark.gguf\n"
+        "    file: smallest.gguf\n"
         "    size_bytes: 1\n"
+        "    ctx_size: 4096\n"
+        "    client_max_output_tokens: 512\n"
+        "  - alias: 'odd/\"alias'\n"
+        "    enabled: true\n"
+        "    file: biggest.gguf\n"
+        "    size_bytes: 2\n"
+        "    ctx_size: 8192\n"
+        "    check_ctx_size: 2048\n"
+        "    client_max_output_tokens: 1024\n"
     )
 
     uv = commands / "uv"
-    uv.write_text("#!/usr/bin/bash\nexit 0\n")
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "    *' migrate-config')\n"
+        "        \"$REAL_YQ\" -i 'del(.gpu.benchmark)' \"$LLM_ENV_CONFIG\"\n"
+        "        printf '%s\\n' '{\"written\":true}'\n"
+        "        exit 0\n"
+        "        ;;\n"
+        "    *' resolve-device'*)\n"
+        "        if [ \"$EMPTY_RESOLVE\" = 1 ]; then\n"
+        "            printf '%s\\n' '{\"device\":\"\"}'\n"
+        "        else\n"
+        "            printf '%s\\n' '{\"device\":\"Vulkan0\"}'\n"
+        "        fi\n"
+        "        exit \"$RESOLVE_EXIT\"\n"
+        "        ;;\n"
+        "    *' presets '*)\n"
+        "        previous=\n"
+        "        for argument in \"$@\"; do\n"
+        "            if [ \"$previous\" = --output ]; then presets_file=\"$argument\"; fi\n"
+        "            previous=\"$argument\"\n"
+        "        done\n"
+        "        printf '%s\\n' '[smallest]' 'ctx-size = 4096' 'n-gpu-layers = 99' '' > \"$presets_file\"\n"
+        "        if [ \"$PRESETS_MISSING_ALIAS\" != 1 ]; then\n"
+        "            printf '%s\\n' '[odd/\"alias]' 'ctx-size = 8192' 'n-gpu-layers = 40' 'n-cpu-moe = 12' >> \"$presets_file\"\n"
+        "        fi\n"
+        "        exit \"$PRESETS_EXIT\"\n"
+        "        ;;\n"
+        "esac\n"
+    )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
     yq = commands / "yq"
-    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "if [ \"$#\" -eq 4 ] && [ \"$1\" = '-o=json' ] && [ \"$2\" = '-I=0' ] && "
+        "[ \"$3\" = '[.models[] | select(.enabled)]' ] && [ \"$4\" = \"$LLM_ENV_CONFIG\" ]; then\n"
+        "  \"$REAL_YQ\" \"$@\" || exit $?\n"
+        "  exit \"$YQ_MODELS_JSON_EXIT\"\n"
+        "fi\n"
+        "exec \"$REAL_YQ\" \"$@\"\n"
+    )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
     podman = commands / "podman"
@@ -1880,9 +1937,9 @@ def run_benchmark(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'help all'*) printf '%s\\n' bench ;;\n"
-        "  *' bench '*) printf '%s' \"$BENCHMARK_STDOUT\"; "
-        "printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
         "  *'--list-devices'*) printf '%s\\n' 'Vulkan0: Benchmark GPU (16384 MiB, 16000 MiB free)' ;;\n"
+        "  *' bench '*' /models/smallest.gguf '*) printf '%s' \"$BENCHMARK_STDOUT\"; printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
+        "  *' bench '*' /models/biggest.gguf '*) printf '%s' \"$BENCHMARK_STDOUT\"; printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
         "esac\n"
     )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
@@ -1896,9 +1953,14 @@ def run_benchmark(
         "REAL_YQ": real_yq,
         "BENCHMARK_STDOUT": benchmark_stdout,
         "BENCHMARK_STDERR": benchmark_stderr,
+        "RESOLVE_EXIT": str(resolve_exit),
+        "EMPTY_RESOLVE": "1" if empty_resolve else "0",
+        "PRESETS_EXIT": str(presets_exit),
+        "PRESETS_MISSING_ALIAS": "1" if presets_missing_alias else "0",
+        "YQ_MODELS_JSON_EXIT": str(yq_models_json_exit),
     }
     result = subprocess.run(
-        ["/usr/bin/bash", "scripts/benchmark.sh"],
+        ["/usr/bin/make", "benchmark"],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -1921,13 +1983,16 @@ def test_benchmark_parses_valid_stdout_despite_vulkan_stderr_warning(
     assert result.returncode == 0, result.stderr
     assert "Benchmark stdout:" in result.stdout
     assert '"avg_ts":123.4' in result.stdout
-    assert 'Parsed metrics:\n  {"pp_tps":123.4,"tg_tps":56.7}' in result.stdout
+    assert result.stdout.count(
+        'Parsed metrics:\n  {"pp_tps":123.4,"tg_tps":56.7}'
+    ) == 2
     assert "Benchmark stderr:\n  WARNING: radv" in result.stdout
     assert "Benchmark parser stderr:" not in result.stdout
     assert yq_value(config, ".gpu.backend") == "vulkan"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
-    assert yq_value(config, ".gpu.benchmark.vulkan.pp_tps") == "123.4"
-    assert yq_value(config, ".gpu.benchmark.vulkan.tg_tps") == "56.7"
+    assert yq_model_benchmark_value(config, "smallest", "pp_tps") == "123.4"
+    assert yq_model_benchmark_value(config, 'odd/"alias', "tg_tps") == "56.7"
+    assert yq_value(config, ".gpu.benchmark") == "null"
     assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()
 
 
@@ -1941,10 +2006,78 @@ def test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid(
     assert "Benchmark stdout:\n  not benchmark JSON" in result.stdout
     assert "Benchmark parser stderr:" in result.stdout
     assert "parse error:" in result.stdout
-    assert "Vulkan benchmark failure: response parsing" in result.stderr
+    assert "Vulkan benchmark failure for smallest: response parsing" in result.stderr
     assert yq_value(config, ".gpu.backend") == "cpu"
     assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
+    assert yq_value(config, ".gpu.benchmark") == "null"
     assert "podman pull ghcr.io/ggml-org/llama.cpp:server" in calls.read_text()
+
+
+def test_benchmark_uses_every_models_device_flags_and_probe_sizes(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, config = run_benchmark(tmp_path, valid_benchmark_json)
+    assert result.returncode == 0, result.stderr
+    rows = [line for line in calls.read_text().splitlines() if " bench " in line]
+    assert any(
+        "/models/smallest.gguf" in row
+        and "--device Vulkan0" in row
+        and "--n-gpu-layers 99" in row
+        and "-p 4096 -n 512" in row
+        for row in rows
+    )
+    assert any(
+        "/models/biggest.gguf" in row
+        and "--device Vulkan0" in row
+        and "--n-gpu-layers 40" in row
+        and "--n-cpu-moe 12" in row
+        and "-p 2048 -n 1024" in row
+        for row in rows
+    )
+    assert yq_model_benchmark_value(config, 'odd/"alias', "pp_tps") == "90.0"
+    assert yq_value(config, ".gpu.benchmark") == "null"
+
+
+def test_make_benchmark_persists_legacy_shared_benchmark_migration(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, config = run_benchmark(tmp_path, valid_benchmark_json)
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".gpu.benchmark") == "null"
+    assert yq_model_benchmark_value(config, "smallest", "pp_tps") == "90.0"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"device_name": ""}, "configured gpu.device_name is empty"),
+        ({"resolve_exit": 31}, "could not resolve configured GPU"),
+        ({"empty_resolve": True}, "GPU resolution returned no device"),
+        ({"presets_exit": 32}, "could not render production presets"),
+        ({"presets_missing_alias": True}, "missing n-gpu-layers preset"),
+    ],
+)
+def test_benchmark_fails_instead_of_skipping_all_models(
+    tmp_path: pathlib.Path, kwargs: dict[str, object], message: str
+) -> None:
+    result, _, config = run_benchmark(tmp_path, valid_benchmark_json, **kwargs)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert yq_value(config, ".gpu.benchmark") == "null"
+
+
+def test_benchmark_fails_when_model_enumeration_fails(tmp_path: pathlib.Path) -> None:
+    """A yq/jq enumeration crash must not let the script report success
+    after benchmarking fewer than every enabled model -- this is what the
+    materialized model_records file (Step 4) and the measured_models ==
+    total_models check (Step 5) exist to catch."""
+    result, calls, config = run_benchmark(
+        tmp_path, valid_benchmark_json, yq_models_json_exit=19
+    )
+    assert result.returncode != 0
+    assert "failed to enumerate enabled models" in result.stderr
+    assert " bench " not in calls.read_text()
+    assert yq_value(config, ".gpu.benchmark") == "null"
 
 
 def test_prune_lists_model_count_and_size_before_confirming(tmp_path: pathlib.Path) -> None:
@@ -4380,6 +4513,27 @@ def yq_value(config: pathlib.Path, expression: str) -> str:
     """Read one scalar from a test configuration with the real yq binary."""
     return subprocess.run(
         [shutil.which("yq") or "yq", "-r", expression, str(config)],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+def yq_model_benchmark_value(
+    config: pathlib.Path, alias: str, metric: str
+) -> str:
+    """Read one model benchmark scalar with query values passed as data."""
+    return subprocess.run(
+        [
+            shutil.which("yq") or "yq",
+            "-r",
+            (
+                "(.models[] | select(.alias == strenv(MODEL_ALIAS)) "
+                "| .benchmark.vulkan[strenv(METRIC)])"
+            ),
+            str(config),
+        ],
+        env=os.environ | {"MODEL_ALIAS": alias, "METRIC": metric},
         text=True,
         capture_output=True,
         check=True,
