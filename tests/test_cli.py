@@ -526,11 +526,20 @@ def test_default_config_uses_128k_q5_1_runtime(tmp_path):
     assert parsed["runtime"]["models_max"] == 1
     assert parsed["runtime"]["cache_type_k"] == "q5_1"
     assert parsed["runtime"]["cache_type_v"] == "q5_1"
-    assert [model["ctx_size"] for model in parsed["models"]] == [131072, 131072]
-    assert [model["client_max_output_tokens"] for model in parsed["models"]] == [
-        8192,
-        8192,
-    ]
+    ctx_size_by_alias = {model["alias"]: model["ctx_size"] for model in parsed["models"]}
+    output_tokens_by_alias = {
+        model["alias"]: model["client_max_output_tokens"] for model in parsed["models"]
+    }
+    assert ctx_size_by_alias == {
+        "gemma4": 131072,
+        "ornith": 262144,
+        "ornith-35b": 262144,
+    }
+    assert output_tokens_by_alias == {
+        "gemma4": 8192,
+        "ornith": 8192,
+        "ornith-35b": 8192,
+    }
 
 
 def test_default_config_uses_agentic_gemma_q4(tmp_path):

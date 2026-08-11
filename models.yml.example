@@ -38,8 +38,10 @@ resources:
   llm_server:
     cpus: 0
     memory_mib: 0
-    memory_ceiling_pct: 46
+    memory_ceiling_pct: 60
     memory_ceiling_floor_pct: 30
+    cpu_ceiling_pct: 60
+    cpu_ceiling_floor_pct: 20
   omniroute:
     cpus: 1
     memory_mib: 1024
@@ -71,7 +73,21 @@ models:
     file: ornith-1.0-9b-Q4_K_M.gguf
     url: https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B-GGUF/resolve/main/ornith-1.0-9b-Q4_K_M.gguf
     size_bytes: 5600000000
-    vram_budget: 40%
-    ctx_size: 131072
+    vram_budget: 55%
+    ctx_size: 262144
     client_max_output_tokens: 8192
     n_gpu_layers: 99
+
+  - alias: ornith-35b
+    label: Ornith 1.0 35B (MoE)
+    parameters: 35B (3B active)
+    quantization: Q4_K_M
+    enabled: false
+    file: ornith-1.0-35b-Q4_K_M.gguf
+    url: https://huggingface.co/ornith-ai/Ornith-1.0-35B-GGUF/resolve/main/ornith-1.0-35b-Q4_K_M.gguf
+    size_bytes: 21155768832
+    vram_budget: 85%
+    ctx_size: 262144
+    client_max_output_tokens: 8192
+    n_gpu_layers: 99
+    n_cpu_moe: 28

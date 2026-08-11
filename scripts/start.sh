@@ -23,11 +23,51 @@ fi
 
 log_step "Checking the VRAM budget"
 if ! budget="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR")"; then
-    echo "$budget" | jq -r '"  short by \(.shortfall_mib) MiB"'
-    echo "$budget" | jq -r '.remedies[] | "    - \(.)"'
-    die "VRAM budget exceeded for models_max=${models_max}; adjust the config and retry"
+    # See setup/setup.sh's identical Step 7 gate for why `.error` is
+    # checked first: an OPERATIONAL failure (`{"error": "..."}`, no
+    # `.remedies`/`.vram_feasible`) piped into `jq -r '.remedies[] | ...'`
+    # would crash this script under `set -euo pipefail` instead of
+    # surfacing the real, more actionable message.
+    if echo "$budget" | jq -e '.error' > /dev/null 2>&1; then
+        die "$(echo "$budget" | jq -r '.error')"
+    fi
+    if [ "$(echo "$budget" | jq -r 'if has("vram_feasible") then .vram_feasible else true end')" = "false" ]; then
+        echo "$budget" | jq -r '"  VRAM short by \(.shortfall_mib) MiB (available \(.available_mib) MiB, required \(.required_mib) MiB)"'
+    fi
+    if [ "$(echo "$budget" | jq -r 'if has("ram_feasible") then .ram_feasible else true end')" = "false" ]; then
+        echo "$budget" | jq -r '"  RAM short by \(.ram_shortfall_mib) MiB (available \(.ram_available_mib) MiB, required \(.ram_required_mib) MiB)"'
+    fi
+    echo "$budget" | jq -r '.remedies // [] | .[] | "    - \(.)"'
+    die "budget exceeded for models_max=${models_max}; adjust the config and retry"
 fi
 echo "$budget" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
+
+log_step "Computing resource limits"
+resources_json="$(mktemp)"
+trap 'rm -f "$resources_json"' EXIT
+if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
+    cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
+    memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
+    omniroute_cpus="$(jq -r '.omniroute.cpus' "$resources_json")"
+    omniroute_memory_mib="$(jq -r '.omniroute.memory_mib' "$resources_json")"
+    CPUS="$cpus" MEMORY_MIB="$memory_mib" \
+      OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
+      yq -i '
+        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber) |
+        .resources.omniroute.cpus = (strenv(OMNIROUTE_CPUS) | tonumber) |
+        .resources.omniroute.memory_mib = (strenv(OMNIROUTE_MEMORY_MIB) | tonumber)
+      ' "$CONFIG_PATH"
+    log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
+else
+    # A host too small to reserve the fixed floors is exactly the host
+    # where an uncapped container is most dangerous -- render_compose()
+    # treats cpus/memory_mib == 0 as "no explicit limit", so proceeding to
+    # render with a stale or absent persisted value here would silently
+    # disable the safety mechanism precisely when it matters most. Fail
+    # loudly instead, exactly like setup/setup.sh's Step 8 already does.
+    die "$(jq -r '.error' "$resources_json")"
+fi
 
 bash "${REPO_DIR}/setup/render-unit.sh"
 

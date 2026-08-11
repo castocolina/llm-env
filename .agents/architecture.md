@@ -195,6 +195,27 @@ and the problem is specifically in OmniRoute's routing/provider config.
   tiny configured percentage can never round the cap down to something
   `pylib/compose.py` treats as "no limit" — computed live by
   `compute_resource_limits()` on every `llmenv resources` call.
+- `resources.llm_server.cpu_ceiling_pct` (default 60%) caps how many host
+  CPU cores `llm-server` can use, the same way `memory_ceiling_pct` caps
+  RAM, floored at `cpu_ceiling_floor_pct` (default 20%) — added because MoE
+  CPU-offload inference genuinely uses multiple cores (measured ~44% of all
+  threads sustained), unlike GPU-resident dense models which barely touch
+  the CPU. Reaches `models.yml` the same way `memory_ceiling_pct` does:
+  `llmenv resources` computes it live, and `make setup` persists the result
+  into `resources.llm_server.cpus`, which `pylib/compose.py` writes into the
+  container's `cpus:` limit.
+- MoE models (`n_cpu_moe` set on a model entry) split their weight cost
+  between VRAM and host RAM: `pylib/gguf.py::moe_expert_offload_mib()`
+  reads the GGUF's own tensor byte offsets to compute exactly how many MiB
+  of routed-expert tensors `--n-cpu-moe` sends to CPU for that model's first
+  `n_cpu_moe` transformer blocks (confirmed empirically that `--n-cpu-moe N`
+  offloads ascending block indices, not descending). `llmenv budget`
+  cross-checks the largest such requirement across every enabled model
+  (not just the one compute_budget() would rank highest by VRAM cost)
+  against `resources.llm_server.memory_mib`, and reports the same kind of
+  explicit, remedied infeasibility as the existing VRAM check — never
+  silently corrected. `n_cpu_moe: 0` on a model with no routed experts at
+  all is still rejected explicitly, not silently ignored.
 - `gpu.vram_budget_ceiling_mib` caps VRAM planning at
   `gpu.vram_budget_ceiling_pct` (default 95%) of the dGPU's total VRAM,
   floored at `vram_budget_ceiling_floor_pct` (default 30%, also of total)

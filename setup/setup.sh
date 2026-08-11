@@ -66,6 +66,12 @@ log_step "Step 3/8  Selecting models"
 if [ -f "$CONFIG_PATH" ]; then
     yq -i 'del(.models[] | select(.alias == "openhermes"))' "$CONFIG_PATH"
 fi
+if [ -f "$CONFIG_PATH" ] && [ -z "$(yq -r '.models[] | select(.alias == "ornith-35b") | .alias' "$CONFIG_PATH")" ]; then
+    TEMPLATE_PATH="${REPO_DIR}/models.yml.example" yq -i \
+      '.models += [load(strenv(TEMPLATE_PATH)).models[] | select(.alias == "ornith-35b")]' \
+      "$CONFIG_PATH"
+    log_info "added ornith-35b to the existing config from the shipped template"
+fi
 models="$(llmenv --config "$CONFIG_PATH" models list)"
 model_count="$(echo "$models" | jq '.models | length')"
 [ "$model_count" -gt 0 ] || die "no models are configured"
@@ -140,9 +146,27 @@ trap 'rm -f "$budget_json"' EXIT
 if llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" > "$budget_json"; then
     jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — fits"' "$budget_json"
 else
-    jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB — SHORT BY \(.shortfall_mib) MiB"' "$budget_json"
-    jq -r '.remedies[] | "    - \(.)"' "$budget_json"
-    log_warn "models_max=$(jq -r .models_max "$budget_json") exceeds the VRAM budget"
+    # cmd_budget can exit nonzero two different ways: an OPERATIONAL error
+    # (e.g. gpu.pci_address unset, or the configured GPU not detected --
+    # llmenv.py's `fail()` helper) whose payload is only `{"error": "..."}`
+    # with no `.remedies`/`.models_max` keys at all, or a genuine budget
+    # INFEASIBILITY (`.vram_feasible`/`.ram_feasible`/`.remedies` present).
+    # Check for `.error` first: under `set -euo pipefail`, piping a bare
+    # `{"error": ...}` payload into `jq -r '.remedies[] | ...'` makes jq
+    # itself fail ("Cannot iterate over null"), which would crash this
+    # script with jq's own cryptic message instead of the actual, much more
+    # actionable error `cmd_budget` already produced.
+    if jq -e '.error' "$budget_json" > /dev/null 2>&1; then
+        die "$(jq -r '.error' "$budget_json")"
+    fi
+    if [ "$(jq -r 'if has("vram_feasible") then .vram_feasible else true end' "$budget_json")" = "false" ]; then
+        jq -r '"  VRAM short by \(.shortfall_mib) MiB (available \(.available_mib) MiB, required \(.required_mib) MiB)"' "$budget_json"
+    fi
+    if [ "$(jq -r 'if has("ram_feasible") then .ram_feasible else true end' "$budget_json")" = "false" ]; then
+        jq -r '"  RAM short by \(.ram_shortfall_mib) MiB (available \(.ram_available_mib) MiB, required \(.ram_required_mib) MiB)"' "$budget_json"
+    fi
+    jq -r '.remedies // [] | .[] | "    - \(.)"' "$budget_json"
+    die "budget infeasible for models_max=$(jq -r '.models_max // "?"' "$budget_json"); adjust the config and retry"
 fi
 
 log_step "Step 8/8  Computing resource limits"

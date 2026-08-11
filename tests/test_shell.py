@@ -602,6 +602,146 @@ def run_setup_with_numbered_selection(
     return result, calls, config
 
 
+def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> None:
+    """Step 7 must stop setup on an infeasible budget, the same way
+    scripts/start.sh already stops `make start` -- a config that reports
+    'available < required' must never reach Step 8 and be reported as
+    'Setup complete'."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("ip", "git", "shellcheck"):
+        _mock_command(commands, name)
+    curl = commands / "curl"
+    curl.write_text("#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n")
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' detect') printf '%s\\n' '{\"gpus\":[{\"card\":\"card0\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' models list') printf '%s\\n' '{\"models\":[{\"alias\":\"gemma4\",\"label\":\"Gemma 4\",\"parameters\":\"12B\",\"quantization\":\"Q4_K_M\",\"size_bytes\":7660000000,\"enabled\":true}]}' ;;\n"
+        "  *' models select '*)\n"
+        "    for arg in \"$@\"; do selected_alias=\"$arg\"; done\n"
+        "    SELECTED_ALIAS=\"$selected_alias\" \"$REAL_YQ\" -i \\\n"
+        "      '.models[] |= (.enabled = (.alias == strenv(SELECTED_ALIAS))) | .runtime.models_max = 1' \\\n"
+        "      \"$CONFIG_PATH_TEST\"\n"
+        "    printf '%s\\n' '{\"models_max\":1}' ;;\n"
+        "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
+        "  *' budget '*)\n"
+        "    printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":12000,\"shortfall_mib\":3000,\"vram_feasible\":false,\"ram_feasible\":true,\"remedies\":[\"reduce ctx_size\"]}'\n"
+        "    exit 1 ;;\n"
+        "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":16384}]}' ;;\n"
+        "  *' resources') printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *'--list-devices'*) printf '%s\\n' 'Vulkan0: Integrated GPU (16384 MiB, 16000 MiB free)' ;; esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+    )
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "CONFIG_PATH_TEST": str(config),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_UV": shutil.which("uv") or "uv",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="1\n1\n1\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "VRAM short by 3000 MiB" in result.stdout
+    assert "reduce ctx_size" in result.stdout
+    assert "Setup complete" not in result.stdout
+    assert not any(
+        call.rstrip().endswith(" resources") for call in calls.read_text().splitlines()
+    )
+
+
+def test_setup_backfills_ornith_35b_into_a_pre_existing_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A config written by `make setup` before ornith-35b existed in the
+    template has no ornith-35b alias at all -- migrate_config() only
+    backfills missing top-level keys, never new model list entries. Step 3
+    ("Selecting models") must add it from the shipped template, the same
+    way it already deletes the legacy 'openhermes' alias, so the model is
+    selectable without the user hand-editing their config."""
+    config_text = (
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models:\n"
+        "  - alias: gemma4\n"
+        "    label: Gemma 4\n"
+        "    parameters: 12B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 7660000000\n"
+        "    enabled: true\n"
+        "    file: gemma4.gguf\n"
+        "    url: https://example.invalid/gemma4.gguf\n"
+        "  - alias: ornith\n"
+        "    label: Ornith\n"
+        "    parameters: 9B\n"
+        "    quantization: Q4_K_M\n"
+        "    size_bytes: 5600000000\n"
+        "    enabled: false\n"
+        "    file: ornith.gguf\n"
+        "    url: https://example.invalid/ornith.gguf\n"
+        "    ctx_size: 4096\n"  # deliberately non-default, to prove it survives untouched
+    )
+    result, _, config = run_setup_with_numbered_selection(
+        tmp_path, "1\n1\n1\n", config_text=config_text
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, '.models[] | select(.alias == "ornith-35b") | .alias') == "ornith-35b"
+    assert yq_value(config, '.models[] | select(.alias == "ornith-35b") | .n_cpu_moe') == "28"
+    # The pre-existing ornith entry's hand-set value must survive untouched
+    # -- this step only ADDS the missing alias, never edits an existing one.
+    assert yq_value(config, '.models[] | select(.alias == "ornith") | .ctx_size') == "4096"
+
+
 def test_setup_creates_the_prune_marker_in_the_models_directory(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -820,7 +960,11 @@ def test_setup_selects_zero_match_vulkan_device_and_persists_config(
         "vram_budget_ceiling_mib": 15565,
     }
     assert persisted["runtime"]["models_max"] == 1
-    assert [model["enabled"] for model in persisted["models"]] == [True, False]
+    assert {model["alias"]: model["enabled"] for model in persisted["models"]} == {
+        "gemma4": True,
+        "ornith": False,
+        "ornith-35b": False,
+    }
 
 
 def test_setup_writes_computed_resource_limits(tmp_path: pathlib.Path) -> None:
@@ -900,7 +1044,11 @@ def test_reverse_setup_selection_drives_client_model_order(
             capture_output=True,
             check=True,
         ).stdout
-    )["models"]] == ["ornith", "gemma4", "old-model"]
+    # setup/setup.sh's Task 7 backfill step adds the missing ornith-35b
+    # alias from the shipped template before model selection ever runs
+    # (VALID_AGENT_SETUP_CONFIG has no ornith-35b entry) -- it lands after
+    # every pre-existing alias, so it's last here too.
+    )["models"]] == ["ornith", "gemma4", "old-model", "ornith-35b"]
 
     result, _, pi_path, settings_path, opencode_paths, state_path = (
         run_setup_local_llm_agents(tmp_path, config_text=config.read_text())
@@ -2896,6 +3044,7 @@ def run_lifecycle_script(
     sampling_temperature: str | None = None,
     env_overrides: dict[str, str] | None = None,
     omniroute_port: int | None = None,
+    resources_failure: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -2991,12 +3140,18 @@ def run_lifecycle_script(
         "exec /usr/bin/chmod \"$@\"\n"
     )
     chmod.chmod(chmod.stat().st_mode | stat.S_IXUSR)
+    resources_case = (
+        "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
+        if resources_failure
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}'"
+    )
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
-        "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000}' ;; esac\n"
+        "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
+        f"case \"$*\" in *' resources') {resources_case} ;; esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     podman = commands / "podman"
@@ -4476,6 +4631,62 @@ def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     assert yq_value(config, ".server.api_key") not in result.stdout
     assert yq_value(config, ".server.api_key") not in result.stderr
     assert "systemctl --user start llm-server.service" in calls.read_text()
+
+
+def test_start_computes_and_persists_resource_limits_before_rendering(
+    tmp_path: pathlib.Path,
+) -> None:
+    """make start (this task) must compute and persist resources.llm_server
+    on every run, not just once at `make setup` -- otherwise a stale value
+    left over from a previous setup (different host, or a config edited by
+    hand) silently reaches pylib/compose.py unchanged."""
+    result, config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh")
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".resources.llm_server.cpus") == "4"
+    assert yq_value(config, ".resources.llm_server.memory_mib") == "8000"
+    recorded = calls.read_text().splitlines()
+    resources_call = next(i for i, call in enumerate(recorded) if call.endswith(" resources"))
+    render_unit_call = next(i for i, call in enumerate(recorded) if "render-unit.sh" in call)
+    assert resources_call < render_unit_call
+
+
+def test_start_overwrites_a_stale_persisted_resource_limit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A config carrying resources.llm_server values computed on different
+    (e.g. bigger) hardware during a past `make setup` must not reach the
+    rendered container unchanged -- start must recompute against THIS
+    host and overwrite them every time."""
+    result, config, _ = run_lifecycle_script(tmp_path, "scripts/start.sh")
+
+    assert result.returncode == 0, result.stderr
+    # The fixture config (run_lifecycle_script) has no resources.llm_server
+    # section at all going in -- migrate_config's defaults (cpus: 0,
+    # memory_mib: 0) stand in for "stale/never computed". After a
+    # successful start, the persisted values must be the freshly computed
+    # ones the resources stub returned, not the migrate_config defaults.
+    assert yq_value(config, ".resources.llm_server.cpus") == "4"
+    assert yq_value(config, ".resources.llm_server.memory_mib") == "8000"
+
+
+def test_start_dies_loudly_when_the_host_is_below_the_fixed_resource_floors(
+    tmp_path: pathlib.Path,
+) -> None:
+    """compute_resource_limits() raises ResourceError when the host can't
+    even reserve the fixed CPU/RAM floors -- previously only `make setup`
+    ever surfaced this (by calling `llmenv resources`); `make start` skipped
+    straight from budget to rendering and could launch an uncapped
+    container on exactly the host where that's most dangerous."""
+    result, _, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", resources_failure=True
+    )
+
+    assert result.returncode != 0
+    assert "host has 3 CPUs; more than 3 are required" in (result.stdout + result.stderr)
+    recorded = calls.read_text()
+    assert "systemctl --user start llm-server.service" not in recorded
+    assert f"bash {ROOT / 'setup/render-unit.sh'}" not in recorded
 
 
 def test_start_rejects_invalid_concurrency_before_key_or_service_output(

@@ -39,22 +39,42 @@ uv run llmenv.py models disable ornith
 uv run llmenv.py models enable openhermes
 ```
 
+Reclaim disk space from downloaded models (they are NOT removed by
+`make clean`) with:
+
+```bash
+make prune
+```
+
 Enabled models are all routable. `runtime.models_max` is a separate residency
 limit; the target configuration keeps one model resident and unloads it before
 loading another alias. This adds model-switch latency but avoids holding both
 models in VRAM.
 
 Clean setup maps `gemma4` to yuxinlu1's Agentic Gemma 4 12B v2 Q4_K_M
-build. Gemma and Ornith each receive one 131,072-token context and request slot
-with Q5_1 K/V caches. Pi and OpenCode advertise up to 8,192 output tokens,
-so reserving the full output allowance leaves a nominal 122,880 tokens for the
-prompt and history. All tokens still share the same slot. Setup reports an
-explicit VRAM-budget failure instead of shrinking context or offloading layers.
+build with a 131,072-token context. Ornith 1.0 9B uses its full native
+262,144-token context (confirmed via its `config.json`'s
+`max_position_embeddings`). Both get one request slot with Q5_1 K/V caches.
+Pi and OpenCode advertise up to 8,192 output tokens, so reserving the full
+output allowance leaves the rest of each model's context for prompt and
+history. All tokens still share the same slot. Setup reports an explicit
+VRAM-budget failure instead of shrinking context or offloading layers.
+
+An optional `ornith-35b` entry adds Ornith 1.0 35B, a mixture-of-experts
+model (35B total / ~3B active parameters per token) too large to fit fully
+in most consumer GPUs' VRAM. It uses llama.cpp's `--n-cpu-moe` flag (set via
+the model's `n_cpu_moe` field) to keep routed-expert weights for its first N
+transformer blocks in host RAM while the rest of the model stays on GPU —
+`pylib/gguf.py` computes exactly how many bytes that is from the GGUF's own
+tensor layout, and `make setup`/`make start` both refuse to start if
+`resources.llm_server.memory_ceiling_pct` isn't high enough to hold it, the
+same way they already refuse an infeasible VRAM budget.
 
 The measured llama.cpp build applies a strict admission rule: post-template
-prompt tokens must be less than `n_ctx`. With one 131,072-token slot, 131,071
-is admitted with `max_tokens: 1`; 131,072 and above are rejected. This
-practical boundary does not change the configured 131,072-token client context.
+prompt tokens must be less than `n_ctx`. With Gemma's 131,072-token slot,
+131,071 is admitted with `max_tokens: 1`; 131,072 and above are rejected.
+Ornith's 262,144-token slot follows the same rule at its own boundary. This
+practical boundary does not change either model's configured client context.
 
 ## Clients
 
@@ -84,3 +104,48 @@ prebuilt image.
 ## Commands
 
 Run `make help`.
+
+## Ornith 35B acceptance check
+
+`ornith-35b` (opt-in, disabled by default) is a mixture-of-experts model too
+large to fit fully in most consumer GPUs' VRAM; it uses `--n-cpu-moe` to keep
+some expert weights in host RAM. Unit tests cover the RAM/VRAM split
+arithmetic but cannot verify the actual container image's flag handling or
+real hybrid CPU/GPU loading, so verify it manually after any change that
+touches MoE offload, the resource ceilings, or the Ornith 35B model entry:
+
+1. Select ONLY `ornith-35b` (`select`, not `enable` — `enable` leaves
+   whatever was previously selected also enabled, and `make setup` defaults
+   to the first enabled model, which can silently re-pick it instead):
+   ```bash
+   uv run llmenv.py --config ~/.config/llm-env/models.yml models select ornith-35b
+   uv run llmenv.py --config ~/.config/llm-env/models.yml models list \
+     | jq -r '.models[] | select(.enabled) | .alias'
+   # must print exactly: ornith-35b
+   ```
+2. `make setup` — must complete without the VRAM/RAM budget gate firing, at
+   the recommended `n_cpu_moe: 28` / `memory_ceiling_pct: 60`.
+3. `make start` — must reach a healthy state (`make check-server` passes).
+4. A throughput spot-check, run directly against the model file the same
+   way `scripts/benchmark.sh` does (there is no standalone `llama-bench`
+   binary, and this does not run against the already-started `llm-server`
+   container):
+   ```bash
+   podman run --rm --device /dev/dri \
+     -v "${LLM_ENV_MODELS_DIR:-${HOME}/llm-workspace/models}:/models:ro,z" \
+     --entrypoint /app/llama \
+     ghcr.io/ggml-org/llama.cpp:server-vulkan \
+     bench -m /models/ornith-1.0-35b-Q4_K_M.gguf -ngl 99 --n-cpu-moe 28 -p 512 -n 128 -d 0,32768 -r 2 -o json
+   ```
+   Compare the `avg_ts` of the `n_prompt > 0` row (pp) and the `n_gen > 0`
+   row (tg) against the baseline recorded in
+   `docs/superpowers/specs/2026-08-10-ornith-35b-moe-incorporation-design.md`
+   (`n_cpu_moe 28`: pp @ depth 0 ≈ 441 tok/s, tg @ depth 0 ≈ 39 tok/s). A
+   large regression indicates the offload split, quantization, or
+   `n_gpu_layers` changed, not just the budgeting arithmetic.
+5. During a generation request against the running server, confirm
+   sustained CPU utilization (`podman stats llm-server`) is in the same
+   ballpark as the design doc's measurement (~43-44% average across host
+   threads) — much higher suggests `cpu_ceiling_pct` isn't actually being
+   applied (compare `podman inspect llm-server`'s `cpus`/`NanoCpus` against
+   `resources.llm_server.cpus` in `models.yml`).
