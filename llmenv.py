@@ -46,7 +46,13 @@ from pylib.config import (
     sync_models_max,
 )
 from pylib.detect import DetectError, detect, host_resources, processes_on_render_node
-from pylib.gguf import GgufError, kv_geometry, read_gguf_header, validate_gguf
+from pylib.gguf import (
+    GgufError,
+    kv_geometry,
+    moe_expert_offload_mib,
+    read_gguf_header,
+    validate_gguf,
+)
 from pylib.omniroute import OmniRouteError, provision
 from pylib.presets import write_presets
 from pylib.resources import ResourceError, compute_resource_limits
@@ -161,11 +167,24 @@ def _model_costs(cfg: dict[str, Any], models_dir: Path) -> list[dict[str, Any]]:
     costs = []
     for model in enabled_models(cfg):
         path = models_dir / model["file"]
-        geometry = kv_geometry(read_gguf_header(path)["metadata"])
+        metadata = read_gguf_header(path)["metadata"]
+        geometry = kv_geometry(metadata)
+        weights_mib = math.ceil(path.stat().st_size / (1024 * 1024))
+        ram_weights_mib = 0
+        n_cpu_moe = model.get("n_cpu_moe")
+        # `is not None`, not truthiness: n_cpu_moe: 0 is a valid, meaningful
+        # config value (explicitly "no CPU offload"), and must still route
+        # through moe_expert_offload_mib so a stray n_cpu_moe on a dense
+        # model (which has no routed experts at all) is still rejected,
+        # rather than silently skipped because 0 is falsy.
+        if n_cpu_moe is not None:
+            ram_weights_mib = moe_expert_offload_mib(path, metadata, n_cpu_moe)
+            weights_mib -= ram_weights_mib
         costs.append(
             {
                 "alias": model["alias"],
-                "weights_mib": math.ceil(path.stat().st_size / (1024 * 1024)),
+                "weights_mib": weights_mib,
+                "ram_weights_mib": ram_weights_mib,
                 **kv_cache_components_mib(
                     geometry,
                     model["ctx_size"],
@@ -213,6 +232,121 @@ def cmd_budget(args: argparse.Namespace) -> int:
     )
     result["compositor_on_this_gpu"] = compositor_used > 0
     result["models_max"] = cfg["runtime"]["models_max"]
+    # compute_budget()'s own feasible/shortfall_mib/remedies describe only
+    # the VRAM check above. Preserve that verdict under its own name before
+    # the RAM cross-check below can flip the combined "feasible" -- a
+    # RAM-only failure must never be reported through the VRAM check's
+    # fields (shortfall_mib/available_mib/required_mib stay VRAM-only, and
+    # would otherwise misleadingly read "short by 0 MiB").
+    result["vram_feasible"] = result["feasible"]
+
+    # The RAM check below must cover every enabled model that could become
+    # concurrently resident, not just compute_budget()'s "resident_models"
+    # (its top models_max models ranked by VRAM cost) -- a model cheap in
+    # VRAM but expensive in CPU-offloaded RAM can lose that ranking to a big
+    # dense model and still be an enabled, selectable model. Rank
+    # `result["models"]` (every enabled model's cost) by ram_weights_mib
+    # instead and sum the top models_max of them: runtime.models_max can
+    # legally be greater than 1 (nothing in the schema forbids it, even
+    # though this plan's Global Constraint keeps the shipped default at 1),
+    # in which case that many models can be concurrently resident and their
+    # RAM needs add up. At models_max == 1 this reduces to exactly the
+    # single largest ram_weights_mib.
+    models_max = cfg["runtime"]["models_max"]
+    ram_ranked = sorted(
+        result.get("models", []),
+        key=lambda model: model.get("ram_weights_mib", 0),
+        reverse=True,
+    )
+    ram_resident = ram_ranked[:models_max]
+    ram_required_mib = sum(model.get("ram_weights_mib", 0) for model in ram_resident)
+    ram_required_aliases = [
+        model["alias"] for model in ram_resident if model.get("ram_weights_mib", 0) > 0
+    ]
+    result["ram_required_mib"] = ram_required_mib
+
+    llm_server_resources = cfg.get("resources", {}).get("llm_server", {})
+    host = host_resources()
+    ram_available_mib = None
+    resource_floor_error = None
+    try:
+        resource_limits = compute_resource_limits(
+            host["cpu_count"],
+            host["memory_total_mib"],
+            llm_server_resources.get("memory_ceiling_pct", 46),
+            llm_server_resources.get("memory_ceiling_floor_pct", 30),
+            llm_server_resources.get("cpu_ceiling_pct", 60),
+            llm_server_resources.get("cpu_ceiling_floor_pct", 20),
+        )
+        ram_available_mib = resource_limits["llm_server"]["memory_mib"]
+    except ResourceError as exc:
+        # `make setup` (Step 3 below) and `make start` (Step 5d below) both
+        # call `llmenv resources` directly and die loudly on this exact
+        # error before ever reaching this command in their normal
+        # pipelines -- but `llmenv budget` is a standalone command a caller
+        # can invoke directly (e.g. a bare CLI check, or a future script
+        # that never calls `resources`). On a host that can't even reserve
+        # the fixed CPU/RAM floors, silently skipping the RAM check here
+        # would report "feasible": true for a host that can never actually
+        # run llm-server at all, which is exactly the kind of "silently
+        # correct an infeasible config" this plan's Global Constraints
+        # forbid. Surface it as its own explicit RAM failure instead.
+        resource_floor_error = str(exc)
+    result["ram_available_mib"] = ram_available_mib
+
+    ram_feasible = True
+    ram_shortfall_mib = None
+    if resource_floor_error is not None:
+        ram_feasible = False
+        result.setdefault("remedies", [])
+        result["remedies"].append(
+            f"host cannot reserve the fixed CPU/RAM floors for llm-server "
+            f"at all: {resource_floor_error}; this is fatal regardless of "
+            "n_cpu_moe or memory_ceiling_pct"
+        )
+    elif ram_required_mib and ram_available_mib is not None and ram_required_mib > ram_available_mib:
+        ram_feasible = False
+        ram_shortfall_mib = ram_required_mib - ram_available_mib
+        result.setdefault("remedies", [])
+        absolute_max_limits = compute_resource_limits(
+            host["cpu_count"],
+            host["memory_total_mib"],
+            memory_ceiling_pct=100,
+            memory_ceiling_floor_pct=llm_server_resources.get("memory_ceiling_floor_pct", 30),
+            cpu_ceiling_pct=llm_server_resources.get("cpu_ceiling_pct", 60),
+            cpu_ceiling_floor_pct=llm_server_resources.get("cpu_ceiling_floor_pct", 20),
+        )
+        absolute_max_mib = absolute_max_limits["llm_server"]["memory_mib"]
+        # Built without ever putting a possessive "'s" directly after a
+        # closing quote mark (i.e. never "'alias''s") -- that construction
+        # reads as a doubled-quote typo. "of model 'alias'" / "of models
+        # 'a', 'b'" instead.
+        models_desc = (
+            f"model '{ram_required_aliases[0]}'"
+            if len(ram_required_aliases) == 1
+            else "models " + ", ".join(f"'{alias}'" for alias in ram_required_aliases)
+        )
+        if ram_required_mib > absolute_max_mib:
+            result["remedies"].append(
+                f"no resources.llm_server.memory_ceiling_pct value can fit "
+                f"the CPU-offloaded MoE experts of {models_desc} on this "
+                f"host ({ram_required_mib} MiB needed, {absolute_max_mib} MiB "
+                "is the most the host can ever provide llm-server after its "
+                "fixed floor and OmniRoute's reservation); reduce "
+                "n_cpu_moe, use a smaller quantization, add RAM, or lower "
+                "runtime.models_max"
+            )
+        else:
+            needed_pct = math.ceil(ram_required_mib / host["memory_total_mib"] * 100)
+            result["remedies"].append(
+                f"resources.llm_server.memory_ceiling_pct is too low for "
+                f"the CPU-offloaded MoE experts of {models_desc} "
+                f"({ram_required_mib} MiB needed, {ram_available_mib} MiB "
+                f"available); raise it to at least {needed_pct}%"
+            )
+    result["ram_shortfall_mib"] = ram_shortfall_mib
+    result["ram_feasible"] = ram_feasible
+    result["feasible"] = result["vram_feasible"] and ram_feasible
     return emit(result, 0 if result["feasible"] else 1)
 
 
@@ -225,6 +359,8 @@ def cmd_resources(args: argparse.Namespace) -> int:
         host["memory_total_mib"],
         llm_server_resources["memory_ceiling_pct"],
         llm_server_resources["memory_ceiling_floor_pct"],
+        llm_server_resources["cpu_ceiling_pct"],
+        llm_server_resources["cpu_ceiling_floor_pct"],
     )
     return emit({"host": host, **limits})
 

@@ -794,11 +794,410 @@ def test_model_costs_round_weights_up_and_report_cache_components(
         {
             "alias": "gemma",
             "weights_mib": 2,
+            "ram_weights_mib": 0,
             "full_kv_mib": 0,
             "swa_kv_mib": 1,
             "kv_mib": 1,
         }
     ]
+
+
+def test_model_costs_splits_weights_for_moe_offload(tmp_path, monkeypatch):
+    import llmenv
+
+    model_path = tmp_path / "moe.gguf"
+    model_path.write_bytes(b"x" * (10 * 1024 * 1024))  # 10 MiB total file
+    cfg = {
+        "runtime": {"ubatch_size": 512, "cache_type_k": "f16", "cache_type_v": "f16"},
+        "models": [
+            {
+                "alias": "moe",
+                "enabled": True,
+                "file": model_path.name,
+                "ctx_size": 4096,
+                "n_cpu_moe": 2,
+            }
+        ],
+    }
+    metadata = {
+        "general.architecture": "qwen35moe",
+        "qwen35moe.block_count": 1,
+        "qwen35moe.expert_count": 8,
+        "qwen35moe.attention.head_count_kv": 1,
+        "qwen35moe.attention.key_length": 1,
+        "qwen35moe.attention.value_length": 1,
+        "qwen35moe.full_attention_interval": 1,
+    }
+    monkeypatch.setattr(llmenv, "read_gguf_header", lambda path: {"metadata": metadata})
+    monkeypatch.setattr(
+        llmenv, "moe_expert_offload_mib", lambda path, metadata, n: 3
+    )
+
+    result = llmenv._model_costs(cfg, tmp_path)
+    assert result[0]["ram_weights_mib"] == 3
+    assert result[0]["weights_mib"] == 10 - 3
+
+
+def test_model_costs_calls_moe_offload_even_when_n_cpu_moe_is_zero(tmp_path, monkeypatch):
+    """A model with n_cpu_moe explicitly set to 0 must still route through
+    moe_expert_offload_mib -- that function validates the model actually has
+    routed experts, which is how a dense model with a stray n_cpu_moe: 0
+    gets caught, rather than silently ignored because 0 is falsy."""
+    import llmenv
+
+    model_path = tmp_path / "moe.gguf"
+    model_path.write_bytes(b"x" * (10 * 1024 * 1024))
+    cfg = {
+        "runtime": {"ubatch_size": 512, "cache_type_k": "f16", "cache_type_v": "f16"},
+        "models": [
+            {
+                "alias": "moe",
+                "enabled": True,
+                "file": model_path.name,
+                "ctx_size": 4096,
+                "n_cpu_moe": 0,
+            }
+        ],
+    }
+    metadata = {
+        "general.architecture": "qwen35moe",
+        "qwen35moe.block_count": 1,
+        "qwen35moe.expert_count": 8,
+        "qwen35moe.attention.head_count_kv": 1,
+        "qwen35moe.attention.key_length": 1,
+        "qwen35moe.attention.value_length": 1,
+        "qwen35moe.full_attention_interval": 1,
+    }
+    monkeypatch.setattr(llmenv, "read_gguf_header", lambda path: {"metadata": metadata})
+    calls = []
+    monkeypatch.setattr(
+        llmenv,
+        "moe_expert_offload_mib",
+        lambda path, metadata, n: calls.append(n) or 0,
+    )
+
+    result = llmenv._model_costs(cfg, tmp_path)
+    assert calls == [0]
+    assert result[0]["ram_weights_mib"] == 0
+
+
+def test_model_costs_rejects_n_cpu_moe_zero_on_a_non_moe_model(tmp_path, monkeypatch):
+    import llmenv
+
+    model_path = tmp_path / "dense.gguf"
+    model_path.write_bytes(b"x" * 1024)
+    cfg = {
+        "runtime": {"ubatch_size": 512, "cache_type_k": "f16", "cache_type_v": "f16"},
+        "models": [
+            {
+                "alias": "dense",
+                "enabled": True,
+                "file": model_path.name,
+                "ctx_size": 4096,
+                "n_cpu_moe": 0,
+            }
+        ],
+    }
+    metadata = {
+        "general.architecture": "llama",
+        "llama.block_count": 1,
+        "llama.attention.head_count_kv": 1,
+        "llama.attention.key_length": 1,
+        "llama.attention.value_length": 1,
+    }
+    monkeypatch.setattr(llmenv, "read_gguf_header", lambda path: {"metadata": metadata})
+
+    with pytest.raises(llmenv.GgufError, match="no routed experts"):
+        llmenv._model_costs(cfg, tmp_path)
+
+
+def test_cmd_budget_reports_infeasible_with_an_achievable_remedy_percentage(
+    tmp_path, monkeypatch, capsys
+):
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["resources"] = {
+        "llm_server": {
+            "memory_ceiling_pct": 10,
+            "memory_ceiling_floor_pct": 10,
+            "cpu_ceiling_pct": 60,
+            "cpu_ceiling_floor_pct": 20,
+        }
+    }
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 24, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda config, path: [
+            {"alias": "a", "weights_mib": 100, "ram_weights_mib": 10000, "kv_mib": 0}
+        ],
+    )
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["feasible"] is False
+    assert output["ram_required_mib"] == 10000
+    assert output["vram_feasible"] is True
+    assert output["ram_feasible"] is False
+    assert output["ram_shortfall_mib"] == 10000 - output["ram_available_mib"]
+    assert any(
+        "raise it to at least 31%" in remedy for remedy in output["remedies"]
+    )
+
+
+def test_cmd_budget_reports_infeasible_and_impossible_when_no_pct_could_ever_fit(
+    tmp_path, monkeypatch, capsys
+):
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["resources"] = {
+        "llm_server": {
+            "memory_ceiling_pct": 10,
+            "memory_ceiling_floor_pct": 10,
+            "cpu_ceiling_pct": 60,
+            "cpu_ceiling_floor_pct": 20,
+        }
+    }
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 24, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda config, path: [
+            {"alias": "a", "weights_mib": 100, "ram_weights_mib": 100000, "kv_mib": 0}
+        ],
+    )
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["feasible"] is False
+    assert output["vram_feasible"] is True
+    assert output["ram_feasible"] is False
+    assert output["ram_required_mib"] == 100000
+    remedy = next(r for r in output["remedies"] if "memory_ceiling_pct" in r and "cpu_ceiling_pct" not in r)
+    assert "%" not in remedy or all(
+        int(token.rstrip("%")) <= 100
+        for token in remedy.split()
+        if token.rstrip("%,.").isdigit() and token.endswith("%")
+    )
+    assert "no resources.llm_server.memory_ceiling_pct value can fit" in remedy
+
+
+def test_cmd_budget_catches_ram_infeasibility_from_a_model_the_vram_budget_would_not_pick(
+    tmp_path, monkeypatch, capsys
+):
+    """resident_models (compute_budget's VRAM-ranked top models_max models)
+    is the wrong set to sum/max RAM need over: a model that's cheap in VRAM
+    (small weights_mib) but expensive in offloaded RAM (large
+    ram_weights_mib) can lose the VRAM ranking to a big dense model yet
+    still be an enabled model a user could select and run. The RAM check
+    must cover every enabled model (compute_budget's full "models" list),
+    not just the VRAM-ranked resident subset."""
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["runtime"]["models_max"] = 1
+    cfg["resources"] = {
+        "llm_server": {
+            "memory_ceiling_pct": 10,
+            "memory_ceiling_floor_pct": 10,
+            "cpu_ceiling_pct": 60,
+            "cpu_ceiling_floor_pct": 20,
+        }
+    }
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 24, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda config, path: [
+            {"alias": "dense", "weights_mib": 1000, "ram_weights_mib": 0, "kv_mib": 100},
+            {"alias": "moe", "weights_mib": 50, "ram_weights_mib": 100000, "kv_mib": 10},
+        ],
+    )
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["feasible"] is False
+    assert output["vram_feasible"] is True
+    assert output["ram_feasible"] is False
+    assert output["ram_required_mib"] == 100000
+    assert any("moe" in remedy for remedy in output["remedies"])
+
+
+def test_cmd_budget_reports_infeasible_when_the_host_cant_reserve_the_fixed_floors(
+    tmp_path, monkeypatch, capsys
+):
+    """A standalone `llmenv budget` call must report failed fixed floors."""
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["runtime"]["models_max"] = 1
+    cfg["resources"] = {"llm_server": {}}
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 3, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda config, path: [
+            {"alias": "dense", "weights_mib": 50, "ram_weights_mib": 0, "kv_mib": 10},
+        ],
+    )
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["feasible"] is False
+    assert output["ram_feasible"] is False
+    assert output["ram_available_mib"] is None
+    assert any(
+        "cannot reserve the fixed" in remedy for remedy in output["remedies"]
+    )
+
+
+def test_cmd_budget_sums_ram_across_concurrently_resident_models(
+    tmp_path, monkeypatch, capsys
+):
+    """Top RAM-ranked models can be concurrently resident and must be summed."""
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg["runtime"]["models_max"] = 2
+    cfg["models"][1]["enabled"] = True
+    cfg["resources"] = {
+        "llm_server": {
+            "memory_ceiling_pct": 10,
+            "memory_ceiling_floor_pct": 10,
+            "cpu_ceiling_pct": 60,
+            "cpu_ceiling_floor_pct": 20,
+        }
+    }
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [
+            {
+                "pci_address": "0000:03:00.0",
+                "render_node": "/dev/dri/renderD129",
+                "vram_total_mib": 16304,
+                "vram_used_mib": 200,
+            }
+        ],
+    }
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "detect", lambda: facts)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 24, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda config, path: [
+            {"alias": "moe-a", "weights_mib": 50, "ram_weights_mib": 2000, "kv_mib": 10},
+            {"alias": "moe-b", "weights_mib": 50, "ram_weights_mib": 2000, "kv_mib": 10},
+        ],
+    )
+
+    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert output["feasible"] is False
+    assert output["ram_feasible"] is False
+    assert output["ram_required_mib"] == 4000
+    assert any(
+        "moe-a" in remedy and "moe-b" in remedy for remedy in output["remedies"]
+    )
+
+
+def test_resources_cpu_ceiling_caps_llm_server_cpus(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    llm_server_resources = parsed.setdefault("resources", {}).setdefault("llm_server", {})
+    llm_server_resources["cpu_ceiling_pct"] = 10
+    llm_server_resources["cpu_ceiling_floor_pct"] = 1
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+
+    result = run("resources", "--config", str(config))
+    payload = json.loads(result.stdout)
+    if result.returncode == 0:
+        host_cpu_count = payload["host"]["cpu_count"]
+        uncapped = host_cpu_count - payload["host_cpu_floor"] - payload["omniroute"]["cpus"]
+        expected_ceiling = max(
+            1, round(host_cpu_count * 1 / 100), round(host_cpu_count * 10 / 100)
+        )
+        expected_cpus = min(uncapped, expected_ceiling)
+        assert payload["llm_server"]["cpus"] == expected_cpus
+        if expected_ceiling < uncapped:
+            assert payload["llm_server"]["cpus"] < uncapped
+    else:
+        assert result.returncode == 1
+        assert "error" in payload
 
 
 def test_cmd_budget_passes_configured_models_max(tmp_path, monkeypatch):
