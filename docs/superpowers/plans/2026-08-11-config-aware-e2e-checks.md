@@ -2,50 +2,53 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `check-setup.sh`, `check-server.sh`, and `benchmark.sh` read every model-specific value (offload split, context size, output-token budget, GPU device, probe sizing) from `models.yml` instead of hardcoding or re-deriving it, so these scripts always validate exactly the configuration that's actually deployed.
+**Goal:** Make `check-setup.sh`, `check-server.sh`, and `benchmark.sh` consume each enabled model's configured offload flags, context/probe size, output-token budget, timeout, and GPU device, and store throughput on the model that produced it.
 
-**Architecture:** Add two optional per-model config fields (`check_ctx_size`, `check_timeout_seconds`) with production-parity defaults. Add a shared `tools/lib.sh` helper pair (`render_presets_file`, `presets_value`) that lets `check-setup.sh` and `benchmark.sh` read the exact `n-gpu-layers`/`n-cpu-moe` flags from `llmenv presets`'s own output — the same source `start.sh` already uses for the real server — instead of re-deriving them. `check-server.sh` reads `client_max_output_tokens` directly from config (a client-side value that was never part of `presets.ini`). Benchmark results move from one shared `gpu.benchmark` slot to per-model `.models[].benchmark.vulkan`, and `benchmark.sh` gains a per-model, device-pinned throughput pass after its existing one-time Vulkan-vs-CPU backend probe.
+**Architecture:** Add two validated optional per-model check fields, retire the shared `gpu.benchmark` record, and render a temporary `presets.ini` through the same `llmenv presets` path used by production startup. Offline inference and benchmarking read `n-gpu-layers`, optional `n-cpu-moe`, and production `ctx-size` from that render; explicit `check_ctx_size` overrides only offline probe sizing. HTTP checks read per-model output budgets and timeouts directly from `models.yml`, while the already-running server supplies its production context window.
 
-**Tech Stack:** Bash (`yq`, `jq`, `awk`, `podman`), Python 3.11+ (`uv run`), pytest. No new dependencies — reuses `llmenv presets`, `llmenv resolve-device`, `llmenv list-devices`, all of which already exist.
+**Tech Stack:** Bash (`yq`, `jq`, `awk`, `base64`, `podman`), Python 3.11+ (`uv run`), pytest. No new package dependency is introduced.
 
 ## Global Constraints
 
-- **No hardcoded values in `.sh`/`.py` scripts for anything that varies per model.** `n_cpu_moe`, `n_gpu_layers`, `ctx_size` (for checks: `check_ctx_size`), `client_max_output_tokens` — all come from `models.yml`, either directly or via an optional override field that defaults to the model's real configured value.
-- **Checks validate exactly the configured production values by default.** The same `ctx_size`/`n_cpu_moe` the real server uses. A check is never silently scaled down. A deviation is only ever an explicit, documented, per-model config override (`check_ctx_size`), never an implicit script shortcut.
-- **Scripts must be agnostic to how many models are enabled** — loop over every enabled model, never assume exactly one.
-- Lazy-load (llama.cpp router mode) + idle-unload stays exactly as-is. No eager-load mode.
-- `make prune` is out of scope.
-- `check-with-agents.sh` is out of scope (its Pi-client failure is an unrelated broken local npm install).
-- `runtime.parallel_slots` stays `1` (existing validated invariant, unaffected by this plan).
-- A script-level default (e.g. the fallback baseline for `check_timeout_seconds` when unset) is allowed — it's the explicitly-permitted "script baseline" from the design's Component 1, not a per-model value.
+- **No hardcoded values in `.sh`/`.py` scripts for anything that varies per model.** `n_cpu_moe`, `n_gpu_layers`, `ctx_size`/`check_ctx_size`, `client_max_output_tokens`, and benchmark prompt/generation sizes come from `models.yml`, directly or through rendered presets.
+- **Checks validate configured production values by default.** `check_ctx_size` is optional and falls back to the model's real `ctx_size`; no script silently scales a model down.
+- **`check_ctx_size` scope reconciliation:** it applies to `check-setup.sh`'s offline `llama cli` invocation and `benchmark.sh`'s prompt-processing size. It does not alter `check-server.sh` requests because OpenAI chat completions has no per-request context-window parameter; that script exercises the server whose startup preset already fixes the model's production `ctx-size`. This narrows Component 4's ambiguous wording explicitly during planning.
+- **Scripts are model-count agnostic.** Iterate every enabled model and keep each model's fields together; do not assume one model or mix values between iterations.
+- A missing configured GPU, failed/empty `resolve-device` result, failed preset render, or missing required preset key is a failed prerequisite. The script must print an explicit failure, skip only commands that cannot run, continue producing diagnostics where possible, and exit nonzero. It must never report success after benchmarking/checking zero models.
+- Model aliases are untrusted data. Pass aliases into `yq` through `strenv()`/`--arg`, never interpolate them into an expression, pathname, or `mktemp` template. Encode complete model records when crossing a shell loop boundary so tabs/newlines cannot mix fields.
+- Lazy-load plus idle-unload remains unchanged. `runtime.parallel_slots` remains `1`; eager load and `make prune` are out of scope.
+- `check-with-agents.sh` is out of scope; its Pi failure is an unrelated broken local install.
+- The script-level `check_timeout_seconds` fallback is permitted by the design and is not a per-model production value. Task 7 measures both the full-context offline path and a real cold-load HTTP path, then sets separate fallbacks to `max(2 × measured ceiling, measured ceiling + 120 seconds)`.
+- `make benchmark` persists `migrate_config_file()` before reading or writing raw YAML, so standalone benchmarking removes the retired `gpu.benchmark` key before per-model results are recorded.
+- Repository gates are mandatory before every commit: after a `.sh` edit run `make validate`; after a `.py` edit run `make validate && make test`. Because Tasks 1-6 edit Python source or Python tests, each includes `make validate && make test` explicitly.
 
 ---
 
 ## File Map
 
-- Modify: `pylib/config.py` — schema validation for `check_ctx_size`/`check_timeout_seconds`; `migrate_config()` drops `gpu.benchmark`.
-- Modify: `tools/lib.sh` — add `render_presets_file()`, `presets_value()`.
-- Modify: `scripts/check-server.sh` — per-model `max_tokens`/timeout in both completion loops.
-- Modify: `scripts/check-setup.sh` — presets-sourced `n-gpu-layers`/`n-cpu-moe`, config-aware `ctx_size`/timeout for the offline inference check.
-- Modify: `scripts/benchmark.sh` — per-model, device-pinned throughput pass after the existing backend probe; per-model result storage.
-- Modify: `models.yml.example` — drop `gpu.benchmark`; document the two new optional fields via a comment.
-- Modify: `tests/test_config.py`, `tests/test_shell.py` — cover all of the above.
-- Modify: `.agents/architecture.md`, `README.md` (if it documents `gpu.benchmark` or the check flow) — reflect the schema move and config-awareness.
+- Modify: `pylib/config.py` — validate optional check fields and drop legacy `gpu.benchmark` during migration.
+- Modify: `tools/lib.sh` — render production presets and read an exact per-alias preset key.
+- Modify: `scripts/check-server.sh` — use each model's output budget and timeout in both completion paths.
+- Modify: `scripts/check-setup.sh` — run every offline inference with presets-derived offload flags, configured context/output size, timeout, and explicit prerequisite failures.
+- Modify: `scripts/benchmark.sh` — measure every enabled model with its configured device, offload flags, and probe sizes; persist results safely per alias.
+- Modify: `models.yml.example` — remove shared benchmark storage and document optional check fields.
+- Modify: `tests/test_config.py`, `tests/test_shell.py` — schema, migration, multi-model, failure-path, and shell-safety coverage.
+- Modify: `.agents/architecture.md`, `README.md` — document the final configuration flow and measured timeout.
 
 ---
 
-### Task 1: Schema — `check_ctx_size` / `check_timeout_seconds` validation
+### Task 1: Validate optional per-model check fields
 
 **Files:**
-- Modify: `pylib/config.py:382-389` (right after the existing `n_cpu_moe` validation block, before `enabled_count = len(enabled_models(cfg))`)
-- Test: `tests/test_config.py` (near the existing `n_cpu_moe` tests at line ~705)
+- Modify: `pylib/config.py:382-389`
+- Test: `tests/test_config.py:705-727`
 
 **Interfaces:**
-- Produces: `validate_config()` now rejects `check_ctx_size`/`check_timeout_seconds` that are present but not a positive int. Both fields remain optional — absent is always valid.
+- Produces: `validate_config()` accepts absent `check_ctx_size`/`check_timeout_seconds` and rejects either field when present unless it is a positive, non-Boolean integer.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add focused schema tests**
 
-Add to `tests/test_config.py`, near the existing `n_cpu_moe` tests (after `test_validate_config_rejects_invalid_n_cpu_moe`, before `def test_migrate_config_adds_default_vram_budget_ceiling`):
+Insert after `test_validate_config_rejects_invalid_n_cpu_moe` in `tests/test_config.py`:
 
 ```python
 def test_validate_config_accepts_check_ctx_size_as_positive_int():
@@ -58,8 +61,7 @@ def test_validate_config_accepts_check_ctx_size_as_positive_int():
 def test_validate_config_rejects_invalid_check_ctx_size(value):
     cfg = make_cfg()
     cfg["models"][0]["check_ctx_size"] = value
-    errors = validate_config(cfg)
-    assert any("check_ctx_size" in error for error in errors)
+    assert any("check_ctx_size" in error for error in validate_config(cfg))
 
 
 def test_validate_config_accepts_check_timeout_seconds_as_positive_int():
@@ -72,39 +74,25 @@ def test_validate_config_accepts_check_timeout_seconds_as_positive_int():
 def test_validate_config_rejects_invalid_check_timeout_seconds(value):
     cfg = make_cfg()
     cfg["models"][0]["check_timeout_seconds"] = value
-    errors = validate_config(cfg)
-    assert any("check_timeout_seconds" in error for error in errors)
+    assert any("check_timeout_seconds" in error for error in validate_config(cfg))
 
 
 def test_validate_config_omits_check_fields_without_error():
-    """Both fields are optional -- absent must never produce a validation error."""
     cfg = make_cfg()
     cfg["models"][0].pop("check_ctx_size", None)
     cfg["models"][0].pop("check_timeout_seconds", None)
     assert validate_config(cfg) == []
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run the red tests and record the accurate baseline**
 
-Run: `uv run pytest tests/test_config.py -k check_ctx_size -v`
-Expected: `test_validate_config_accepts_check_ctx_size_as_positive_int` and the parametrized rejection test FAIL (no validation exists yet, so invalid values pass silently and the "accepts" test also fails only if it happens to already pass — the rejection tests are the ones that must fail here since nothing currently rejects these fields).
+Run: `uv run pytest tests/test_config.py -k "check_ctx_size or check_timeout_seconds" -v`
 
-- [ ] **Step 3: Implement the validation**
+Expected: 13 cases collected. The two acceptance tests and omission test already PASS because unknown optional fields are currently ignored; all 10 invalid-value cases FAIL because validation is absent.
 
-In `pylib/config.py`, immediately after the existing block:
+- [ ] **Step 3: Implement validation**
 
-```python
-        if "n_cpu_moe" in model:
-            n_cpu_moe = model["n_cpu_moe"]
-            if isinstance(n_cpu_moe, bool) or not (
-                isinstance(n_cpu_moe, int) and n_cpu_moe >= 0
-            ):
-                errors.append(
-                    f"model {model_name} n_cpu_moe must be a non-negative integer"
-                )
-```
-
-add:
+Add immediately after the `n_cpu_moe` block in `validate_config()`:
 
 ```python
         for key in ("check_ctx_size", "check_timeout_seconds"):
@@ -112,227 +100,186 @@ add:
                 errors.append(f"model {model_name} {key} must be a positive integer")
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run focused tests and the mandatory Python gate**
 
-Run: `uv run pytest tests/test_config.py -k "check_ctx_size or check_timeout_seconds" -v`
-Expected: PASS, all 5 new tests.
+Run:
+
+```bash
+uv run pytest tests/test_config.py -k "check_ctx_size or check_timeout_seconds" -v
+make validate && make test
+```
+
+Expected: all 13 focused cases pass, then the repository gate passes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add pylib/config.py tests/test_config.py
-git commit -m "feat(config): validate optional check_ctx_size/check_timeout_seconds fields"
+git commit -m "feat(config): validate optional check fields"
 ```
 
 ---
 
-### Task 2: Schema — per-model benchmark storage, drop `gpu.benchmark`
+### Task 2: Retire shared benchmark storage and its old-schema tests
 
 **Files:**
-- Modify: `pylib/config.py:92-101` (`migrate_config()`'s `gpu` handling block)
-- Modify: `models.yml.example:11-27` (drop the `gpu.benchmark` block)
-- Test: `tests/test_config.py` (near existing migration tests)
+- Modify: `pylib/config.py:92-101`
+- Modify: `models.yml.example:11-27,54-93`
+- Modify/Test: `tests/test_config.py:241-275,363-375`
 
 **Interfaces:**
-- Produces: `migrate_config()` no longer emits/preserves `gpu.benchmark`; any pre-existing `gpu.benchmark` key (including the stale `.rocm` sub-key) is dropped entirely on migration. Per-model `benchmark.vulkan.{pp_tps,tg_tps,measured_at}` is not created by migration — it's written only by `benchmark.sh` at runtime (Task 6). No schema validation is added for it (it's generated data, like `gpu.device_name`, not user-authored config), so `validate_config()` is untouched by this task.
+- Produces: `migrate_config()` removes `gpu.benchmark` completely, including a Vulkan-only value. Runtime results are written only to `.models[].benchmark.vulkan` by Task 6.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Rewrite all three existing migration tests that encode the retired schema**
 
-Add to `tests/test_config.py`, near `test_migrate_config_adds_default_vram_budget_ceiling`:
+Replace the tests at current lines 241-275 and 363-375 with:
 
 ```python
-def test_migrate_config_drops_the_legacy_shared_benchmark_key():
-    """gpu.benchmark moved to per-model .models[].benchmark.vulkan (Task 6);
-    migration must retire the old shared key entirely, not just its stale
-    .rocm sub-key."""
+def test_vulkan_only_config_removes_legacy_shared_benchmark():
+    """The shared slot cannot identify which model produced a measurement."""
     cfg = make_cfg()
-    cfg["gpu"]["benchmark"] = {
-        "vulkan": {"pp_tps": 100.0, "tg_tps": 20.0, "measured_at": "2026-01-01T00:00:00"},
-        "rocm": {"pp_tps": 1.0},
-    }
-    migrated = migrate_config(cfg)
+    migrated = config_module.migrate_config(cfg)
     assert "benchmark" not in migrated["gpu"]
+
+
+def test_load_config_drops_legacy_shared_benchmark_from_yaml(tmp_path):
+    path = tmp_path / "models.yml"
+    path.write_text(
+        "gpu:\n"
+        "  benchmark:\n"
+        "    rocm: {pp_tps: 1}\n"
+        "    vulkan: {pp_tps: 2, tg_tps: 2, measured_at: current}\n"
+    )
+    assert "benchmark" not in load_config(path)["gpu"]
+
+
+def test_config_save_and_load_drop_legacy_shared_benchmark(tmp_path):
+    cfg = make_cfg()
+    cfg["gpu"]["benchmark"]["rocm"] = {"pp_tps": 1}
+    path = tmp_path / "models.yml"
+    save_config(cfg, path)
+    assert "benchmark" not in load_config(path)["gpu"]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+These replace, rather than supplement, `test_vulkan_only_config_removes_legacy_rocm_benchmark`, `test_load_config_migrates_legacy_rocm_benchmark_from_yaml`, and `test_config_save_and_load_migrate_legacy_rocm_benchmarks`: those three deliberately assert that `gpu.benchmark.vulkan` survives, which is the old schema this plan retires.
 
-Run: `uv run pytest tests/test_config.py -k drops_the_legacy_shared_benchmark_key -v`
-Expected: FAIL — current code only pops `.rocm`, leaving `gpu.benchmark.vulkan` (and now-empty `gpu.benchmark`) in place, so `"benchmark" not in migrated["gpu"]` is false.
+- [ ] **Step 2: Run the migration tests red**
 
-- [ ] **Step 3: Implement**
+Run: `uv run pytest tests/test_config.py -k "legacy_shared_benchmark" -v`
 
-In `pylib/config.py`, replace:
+Expected: the direct migration and YAML-load tests FAIL because current migration removes only `.rocm`; the save/load case also FAILs for the same reason.
 
-```python
-    benchmark = gpu.get("benchmark")
-    if isinstance(benchmark, dict):
-        benchmark.pop("rocm", None)
-    return cfg
-```
+- [ ] **Step 3: Remove the entire legacy key**
 
-with:
+Replace the final benchmark migration block in `migrate_config()` with:
 
 ```python
     gpu.pop("benchmark", None)
     return cfg
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Update the example schema**
 
-Run: `uv run pytest tests/test_config.py -k drops_the_legacy_shared_benchmark_key -v`
-Expected: PASS. Also run the full config suite to confirm no regression: `uv run pytest tests/test_config.py -v`
-
-- [ ] **Step 5: Update `models.yml.example`**
-
-Remove the `benchmark:` sub-block from the `gpu:` section. Change:
+Delete `models.yml.example:23-27`. Add immediately above the first entry under `models:`:
 
 ```yaml
-gpu:
-  pci_address: ""
-  device_name: ""
-  backend: vulkan
-  image: ghcr.io/ggml-org/llama.cpp:server-vulkan
-  vram_total_mib: 0
-  reserve_mode: auto
-  reserve_floor_mib: 1024
-  vram_budget_ceiling_pct: 95
-  # 0 = no cap; make setup computes and persists the real value
-  vram_budget_ceiling_mib: 0
-  vram_budget_ceiling_floor_pct: 30
-  benchmark:
-    vulkan:
-      pp_tps: null
-      tg_tps: null
-      measured_at: null
+  # Optional per-model check overrides:
+  # check_ctx_size defaults to this model's ctx_size.
+  # check_timeout_seconds defaults to the empirically tuned script baseline.
+  # `make benchmark` creates benchmark.vulkan on each measured model entry.
 ```
 
-to:
+Do not add an empty per-model `benchmark` mapping; generated results remain absent until measured.
 
-```yaml
-gpu:
-  pci_address: ""
-  device_name: ""
-  backend: vulkan
-  image: ghcr.io/ggml-org/llama.cpp:server-vulkan
-  vram_total_mib: 0
-  reserve_mode: auto
-  reserve_floor_mib: 1024
-  vram_budget_ceiling_pct: 95
-  # 0 = no cap; make setup computes and persists the real value
-  vram_budget_ceiling_mib: 0
-  vram_budget_ceiling_floor_pct: 30
-  # Per-model .benchmark.vulkan.{pp_tps,tg_tps,measured_at} is written by
-  # `make benchmark` directly onto each model entry below; it is not
-  # declared here because it doesn't exist until a benchmark has run.
+- [ ] **Step 5: Run migration coverage and the mandatory Python gate**
+
+Run:
+
+```bash
+uv run pytest tests/test_config.py -k "benchmark or migrate" -v
+uv run pytest tests/test_config.py -v
+make validate && make test
 ```
 
-Then, in the `models:` list, add a comment documenting the two new optional per-model fields just above the `ornith-35b` entry (the model most likely to need an override, given its size and `262144` ctx):
-
-```yaml
-  # check_ctx_size (optional, default: this model's own ctx_size) and
-  # check_timeout_seconds (optional, default: a script-level baseline) let
-  # `check-setup`/`check-server`/`benchmark` diverge from full production
-  # parity for a specific model -- e.g. a slower cold-load at full context.
-  # Uncomment/add only when a model actually needs a probe override; do not
-  # add them speculatively.
-  - alias: ornith-35b
-```
+Expected: the rewritten migration tests, the complete config suite, and the full repository gate pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add pylib/config.py tests/test_config.py models.yml.example
-git commit -m "feat(config): migrate gpu.benchmark to per-model storage, drop the shared key"
+git commit -m "feat(config): move benchmark results to model entries"
 ```
 
 ---
 
-### Task 3: Shared presets-reading helpers in `tools/lib.sh`
+### Task 3: Share production preset rendering and lookup
 
 **Files:**
-- Modify: `tools/lib.sh` (add two functions after `migrate_config_file()`, i.e. after line 235)
-- Test: `tests/test_shell.py` (new tests near the top-level shell helper coverage, or a new section — see Step 1)
+- Modify: `tools/lib.sh:229-237`
+- Test: `tests/test_shell.py:82-103`
 
 **Interfaces:**
-- Produces:
-  - `render_presets_file(device, output_path)` — runs `llmenv presets --models-dir "$MODELS_DIR" --device "$device" --output "$output_path"`, returns the command's exit status.
-  - `presets_value(presets_file, alias, key)` — prints the value of `key` (e.g. `n-gpu-layers`, `n-cpu-moe`) inside `presets_file`'s `[alias]` section to stdout, or nothing if the key/section is absent. Never fails the script (pure text lookup).
-- Consumes: `pylib/presets.py::render_presets()`'s exact output format (confirmed by reading the file): one `[*]` globals section, then one `[<alias>]` section per enabled model with `configparser`'s default `key = value` (space-padded `=`) formatting, keys `model`, `ctx-size`, `n-gpu-layers`, and optionally `n-cpu-moe`.
+- Produces: `render_presets_file(device, output_path) -> command status` and `presets_value(presets_file, alias, key) -> value-or-empty`.
+- Consumes: `llmenv presets --models-dir --device --output`, whose generated model sections contain `ctx-size`, `n-gpu-layers`, and optional `n-cpu-moe`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add a round-trip helper test**
 
-Add to `tests/test_shell.py`. Place it near the top of the file, after the imports/fixtures but before the first `def test_` (check existing helper placement — if `tests/test_shell.py` has a "shared helpers" section, put it there; otherwise add right after `test_shell_scripts_use_the_approved_directories`):
+Add after `test_makefile_dispatches_relocated_entrypoints` in `tests/test_shell.py`:
 
 ```python
-def test_presets_value_reads_the_generated_presets_ini(tmp_path: pathlib.Path) -> None:
-    """render_presets_file/presets_value in tools/lib.sh must round-trip
-    exactly what pylib/presets.py writes -- confirmed by generating a real
-    presets.ini via llmenv.py, not a hand-written fixture, so a future
-    change to render_presets()'s format is caught here too."""
+def test_presets_helpers_read_a_generated_ini(tmp_path: pathlib.Path) -> None:
     config = tmp_path / "models.yml"
     config.write_text(
-        "version: 1\n"
-        "server:\n  host: 0.0.0.0\n  port: 8000\n  api_key: k\n"
-        "gpu:\n  backend: vulkan\n  pci_address: '0000:03:00.0'\n"
-        "  vram_total_mib: 16384\n  reserve_mode: auto\n  reserve_floor_mib: 1024\n"
-        "runtime:\n  models_max: 1\n  parallel_slots: 1\n  ubatch_size: 512\n"
-        "  flash_attn: true\n  cache_type_k: q5_1\n  cache_type_v: q5_1\n"
+        "version: 1\nserver: {host: 0.0.0.0, port: 8000, api_key: k}\n"
+        "gpu: {backend: vulkan, pci_address: '0000:03:00.0', vram_total_mib: 16384, reserve_mode: auto}\n"
+        "runtime: {models_max: 1, parallel_slots: 1, ubatch_size: 512, flash_attn: true, cache_type_k: q5_1, cache_type_v: q5_1}\n"
         "models:\n"
-        "  - alias: dense\n"
-        "    label: Dense\n    parameters: 1B\n    quantization: Q4_K_M\n"
-        "    enabled: true\n    file: dense.gguf\n    url: https://example.invalid/d\n"
-        "    size_bytes: 1\n    vram_budget: 50%\n    ctx_size: 4096\n"
-        "    client_max_output_tokens: 2048\n    n_gpu_layers: 99\n"
-        "  - alias: moe\n"
-        "    label: MoE\n    parameters: 8B\n    quantization: Q4_K_M\n"
-        "    enabled: true\n    file: moe.gguf\n    url: https://example.invalid/m\n"
-        "    size_bytes: 1\n    vram_budget: 50%\n    ctx_size: 8192\n"
-        "    client_max_output_tokens: 2048\n    n_gpu_layers: 40\n"
-        "    n_cpu_moe: 12\n"
+        "- {alias: dense, label: Dense, parameters: 1B, quantization: Q4_K_M, enabled: true, file: dense.gguf, url: 'https://example.invalid/d', size_bytes: 1, vram_budget: 50%, ctx_size: 4096, client_max_output_tokens: 2048, n_gpu_layers: 99}\n"
+        "- {alias: moe, label: MoE, parameters: 8B, quantization: Q4_K_M, enabled: true, file: moe.gguf, url: 'https://example.invalid/m', size_bytes: 1, vram_budget: 50%, ctx_size: 8192, client_max_output_tokens: 2048, n_gpu_layers: 40, n_cpu_moe: 12}\n"
     )
-    presets_file = tmp_path / "presets.ini"
+    output = tmp_path / "presets.ini"
     result = subprocess.run(
         [
             "/usr/bin/bash", "-c",
-            'source tools/lib.sh && render_presets_file "$1" "$2" && '
-            'presets_value "$2" dense n-gpu-layers && '
-            'presets_value "$2" moe n-gpu-layers && '
-            'presets_value "$2" moe n-cpu-moe && '
+            'source tools/lib.sh; render_presets_file "$1" "$2"; '
+            'presets_value "$2" dense n-gpu-layers; '
+            'presets_value "$2" moe n-gpu-layers; '
+            'presets_value "$2" moe n-cpu-moe; '
             '(presets_value "$2" dense n-cpu-moe; echo "<empty>")',
-            "bash", "Vulkan0", str(presets_file),
+            "bash", "Vulkan0", str(output),
         ],
         cwd=ROOT,
-        env=os.environ | {"LLM_ENV_CONFIG": str(config), "LLM_ENV_MODELS_DIR": str(tmp_path / "models")},
+        env=os.environ | {
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        },
         text=True,
         capture_output=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["99", "40", "12", "<empty>"]
-    assert "[dense]" in presets_file.read_text()
-    assert "[moe]" in presets_file.read_text()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+This fixture is intentionally complete for `llmenv presets`: `pylib/config.py:16-25,153-402` requires `version`, all four required sections, `gpu.backend`, `gpu.vram_total_mib`, `gpu.reserve_mode`, positive `runtime.models_max`/`parallel_slots`/`ubatch_size` with `parallel_slots: 1`, every key in `REQUIRED_MODEL_KEYS`, at least one enabled model, and `models_max` no greater than the enabled count. The mapping above supplies every one of those fields; optional resource and OmniRoute sections are not required.
 
-Run: `uv run pytest tests/test_shell.py -k presets_value_reads_the_generated_presets_ini -v`
-Expected: FAIL — `render_presets_file: command not found` (function doesn't exist yet).
+- [ ] **Step 2: Run the helper test red**
+
+Run: `uv run pytest tests/test_shell.py -k presets_helpers_read_a_generated_ini -v`
+
+Expected: FAIL with `render_presets_file: command not found`.
 
 - [ ] **Step 3: Implement the helpers**
 
-In `tools/lib.sh`, immediately after `migrate_config_file()` (after line 235, before `new_api_key()`):
+Insert between `migrate_config_file()` and `new_api_key()` in `tools/lib.sh`:
 
 ```bash
 render_presets_file() {
     local device="$1" output="$2"
-    llmenv --config "$CONFIG_PATH" presets --models-dir "$MODELS_DIR" --device "$device" --output "$output" >/dev/null
+    llmenv --config "$CONFIG_PATH" presets \
+        --models-dir "$MODELS_DIR" --device "$device" --output "$output" >/dev/null
 }
 
-# Reads one key's value out of one alias's section in a presets.ini
-# generated by render_presets_file(). Prints nothing (not an error) if the
-# section or key is absent, since n-cpu-moe is legitimately absent for
-# dense models -- callers branch on emptiness, not on this function's exit
-# status.
 presets_value() {
     local presets_file="$1" alias="$2" key="$3"
     awk -v section="[${alias}]" -v prefix="${key} = " '
@@ -346,785 +293,732 @@ presets_value() {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run focused coverage and the mandatory shell/Python-test gate**
 
-Run: `uv run pytest tests/test_shell.py -k presets_value_reads_the_generated_presets_ini -v`
-Expected: PASS.
+Run:
+
+```bash
+uv run pytest tests/test_shell.py -k presets_helpers_read_a_generated_ini -v
+make validate && make test
+```
+
+Expected: PASS. `make validate && make test` satisfies both the `.sh` edit and the `.py` test edit.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add tools/lib.sh tests/test_shell.py
-git commit -m "feat(lib): add render_presets_file/presets_value shared helpers"
+git commit -m "feat(lib): expose production preset values to checks"
 ```
 
 ---
 
-### Task 4: `check-server.sh` — per-model `max_tokens` and timeout
+### Task 4: Make both HTTP completion loops model-aware
 
 **Files:**
-- Modify: `scripts/check-server.sh:163-221` (direct completions loop)
-- Modify: `scripts/check-server.sh:264-329` (OmniRoute completions loop)
-- Test: `tests/test_shell.py` (new tests near any existing `check-server.sh` coverage; if none exists yet, add a new `run_check_server_with_stubs` fixture following the `run_check_setup_with_stubs`/`run_benchmark` pattern already in the file)
+- Modify: `scripts/check-server.sh:163-221,264-329`
+- Modify/Test: `tests/test_shell.py:4930-5305`
 
 **Interfaces:**
-- Consumes: `render_presets_file`/`presets_value` are NOT needed here — `client_max_output_tokens` and `check_timeout_seconds` are check-only/client-side values, read directly via `yq`, exactly like `pylib/presets.py` already excludes `client_max_output_tokens` from `presets.ini` for the same reason.
-- Produces: no new shared interfaces; this task only changes `check-server.sh`'s internal per-alias loop variables from `alias` to `alias, max_tokens, timeout_seconds`.
+- Consumes per enabled model: `.alias`, `.client_max_output_tokens`, and `.check_timeout_seconds // 120`.
+- Does not consume `check_ctx_size`: the HTTP endpoint has no request-level context-size lever, and server startup already applied the production preset.
+- Produces: one validated, materialized file of base64-encoded enabled-model JSON records, reused by both completion loops. Both loops build their body and timeout from the same decoded record; the direct loop increments `checked_models` once per attempted model.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the existing `run_check_server()` fixture instead of adding a parallel fixture**
 
-First, check whether `tests/test_shell.py` already has server-completions coverage:
-
-Run: `grep -n "check-server\|check_server" tests/test_shell.py`
-
-If it returns nothing, add a new fixture and tests near the `run_benchmark`/`run_check_setup_with_stubs` fixtures (same file). Add:
+Keep `run_check_server()` and every test at `tests/test_shell.py:4930-5305`. Add these keyword controls to its declaration:
 
 ```python
-def run_check_server_with_stubs(
-    tmp_path: pathlib.Path,
-    *,
-    client_max_output_tokens: int = 256,
-    check_timeout_seconds: int | None = None,
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
-    """Run check-server.sh's completion loops with a stub curl that echoes
-    back the request body it was sent (via --data-raw), so the test can
-    assert on exactly what max_tokens/timeout the script constructed."""
+    model_yq_exit: int = 0,
+    model_jq_exit: int = 0,
+    models_enabled: bool = True,
+```
+
+Resolve the real JSON/YAML tools at the start of the fixture and fail the test immediately if either is unavailable:
+
+```python
+    real_jq = shutil.which("jq")
     real_yq = shutil.which("yq")
+    assert real_jq is not None
     assert real_yq is not None
+    enabled = "true" if models_enabled else "false"
+```
 
-    commands = tmp_path / "bin"
-    commands.mkdir()
-    calls = tmp_path / "calls"
-    calls.touch()
+Extend the existing config records in place; do not rename `gemma4` or `ornith`, because all of the existing response/error-path controls key on those aliases:
 
-    for name in ("systemctl",):
-        _mock_command(commands, name)
+```python
+        "  - alias: gemma4\n"
+        f"    enabled: {enabled}\n"
+        "    client_max_output_tokens: 2048\n"
+        "  - alias: ornith\n"
+        f"    enabled: {enabled}\n"
+        "    client_max_output_tokens: 8192\n"
+        "    check_timeout_seconds: 600\n"
+```
 
-    yq = commands / "yq"
-    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
-    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+Replace the hand-written request-construction branch in the fixture's `jq` stub (which currently emits `max_tokens: 256`) with a transparent real-tool wrapper. Replace the fixture's `yq` stub with a real-tool wrapper that can fail only the new enabled-model materialization query:
 
-    curl = commands / "curl"
-    curl.write_text(
+```python
+    jq.write_text(
         "#!/usr/bin/bash\n"
-        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "out=''; code=200; time_limit=''\n"
-        "args=(\"$@\")\n"
-        "for i in \"${!args[@]}\"; do\n"
-        "  case \"${args[$i]}\" in\n"
-        "    -o) out=\"${args[$((i+1))]}\" ;;\n"
-        "    --max-time) time_limit=\"${args[$((i+1))]}\" ;;\n"
-        "    --data-raw) printf '%s\\n' \"${args[$((i+1))]}\" >> \"$CALLS.bodies\" ;;\n"
-        "  esac\n"
+        "for argument in \"$@\"; do\n"
+        "  if [ \"$argument\" = '.[] | @base64' ]; then\n"
+        "    [ \"$MODEL_JQ_EXIT\" -eq 0 ] || exit \"$MODEL_JQ_EXIT\"\n"
+        "  fi\n"
         "done\n"
-        "case \"$*\" in\n"
-        "  *'/health'*) printf '' > \"$out\" ;;\n"
-        "  *'/v1/models'*) printf '{\"data\":[{\"id\":\"only\"}]}' > \"$out\" ;;\n"
-        "  *'/v1/chat/completions'*) printf '{\"choices\":[{\"message\":{\"content\":\"ready\"}}]}' > \"$out\" ;;\n"
-        "  *'/api/auth/login'*) code=401 ;;\n"
-        "esac\n"
-        "printf '%s' \"$code\"\n"
+        "exec \"$REAL_JQ\" \"$@\"\n"
     )
-    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
 
-    jq_path = shutil.which("jq")
-    assert jq_path is not None
+    yq.write_text(
+        "#!/usr/bin/bash\n"
+        "for argument in \"$@\"; do\n"
+        "  if [ \"$argument\" = '[.models[] | select(.enabled)]' ]; then\n"
+        "    [ \"$MODEL_YQ_EXIT\" -eq 0 ] || exit \"$MODEL_YQ_EXIT\"\n"
+        "  fi\n"
+        "done\n"
+        "exec \"$REAL_YQ\" \"$@\"\n"
+    )
+```
 
-    config = tmp_path / "models.yml"
-    check_timeout_line = (
-        f"    check_timeout_seconds: {check_timeout_seconds}\n"
-        if check_timeout_seconds is not None else ""
-    )
-    config.write_text(
-        "server:\n  port: 8000\n  api_key: k\n  host: 0.0.0.0\n"
-        "omniroute:\n  port: 20128\n  initial_password: p\n"
-        "models:\n"
-        "  - alias: only\n"
-        "    enabled: true\n"
-        f"    client_max_output_tokens: {client_max_output_tokens}\n"
-        f"{check_timeout_line}"
-    )
-    environment = os.environ | {
-        "CALLS": str(calls),
-        "HOME": str(tmp_path / "home"),
-        "LLM_ENV_CONFIG": str(config),
-        "PATH": f"{commands}:{pathlib.Path(jq_path).parent}:/usr/bin:/bin",
+Retain the existing `curl` response selection and all curl-failure/status/body controls. Add `time_limit=""` beside `url`, `body_file`, and `data`, and add this branch to the existing `case "${previous:-}"` block:
+
+```bash
+    --max-time) time_limit="$argument" ;;
+```
+
+Then replace the initial `printf '%s\n' "$*"` with this one-line JSON record after the argument loop. This preserves `calls.read_text().count("/v1/chat/completions")` while making multiline `jq -n` payloads parseable:
+
+```bash
+jq -cn --arg argv "$*" --arg url "$url" --arg timeout "$time_limit" \
+    --arg payload "$data" \
+    '{argv: $argv, url: $url, timeout: $timeout, payload: $payload}' >> "$CALLS"
+```
+
+Add these environment entries:
+
+```python
+        "MODEL_JQ_EXIT": str(model_jq_exit),
+        "MODEL_YQ_EXIT": str(model_yq_exit),
+        "REAL_JQ": real_jq,
         "REAL_YQ": real_yq,
-    }
-    result = subprocess.run(
-        ["/usr/bin/bash", "scripts/check-server.sh"],
-        cwd=ROOT,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
+```
+
+Set the existing environment entry exactly as follows so the zero-model test reaches the completion prerequisite without failing earlier on a deliberate listing mismatch:
+
+```python
+        "MODEL_LIST_BODY": '{"data":[]}' if not models_enabled else model_list_body,
+```
+
+- [ ] **Step 2: Adapt every existing assertion and add isolation/zero-work tests**
+
+Keep all existing tests for normalized mismatch, successful normalization, verbose diagnostics, concise output, continuing after a model failure, curl failure, non-2xx, invalid JSON, missing content, scalar responses, and malformed model listing. Make only these old-value assertion changes:
+
+```python
+# test_check_server_accepts_normalized_ready_for_every_enabled_model
+assert result.returncode == 0, result.stderr
+assert "max_tokens: 256, stream: false" not in (
+    ROOT / "scripts/check-server.sh"
+).read_text()
+
+# test_check_server_prints_a_copy_pasteable_request_response_and_curl_template
+assert '"max_tokens": 2048' in result.stdout
+assert '"max_tokens": 8192' in result.stdout
+
+# test_check_server_reports_invalid_completion_json and
+# test_check_server_reports_malformed_model_listing
+assert "Response parsing stderr:\n  parse error:" in result.stdout
+```
+
+For those last two tests, replace the old lowercase full phrase `parse error: invalid literal` rather than adding a second assertion: the real `jq` wrapper includes line/column detail and may capitalize `Invalid`, while `parse error:` is the stable diagnostic contract. All other assertions in the block remain unchanged.
+
+Add the model-isolation and producer/zero-count coverage onto the same fixture:
+
+```python
+def test_check_server_keeps_each_models_budget_and_timeout_together(tmp_path):
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}
     )
-    return result, calls
-
-
-def test_check_server_uses_the_models_own_client_max_output_tokens(tmp_path: pathlib.Path) -> None:
-    """A model with an 8192 output budget must not be probed with the old
-    hardcoded 256 -- that was the exact bug that produced a false FAIL
-    against Ornith's reasoning traces."""
-    result, calls = run_check_server_with_stubs(tmp_path, client_max_output_tokens=8192)
-
-    bodies = (tmp_path / "calls.bodies").read_text()
-    assert '"max_tokens":8192' in bodies or '"max_tokens": 8192' in bodies
-    assert '"max_tokens":256' not in bodies and '"max_tokens": 256' not in bodies
     assert result.returncode == 0, result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    completion_rows = [
+        row for row in parsed
+        if "/v1/chat/completions" in row["url"]
+        and json.loads(row["payload"])["model"] != "x"
+    ]
+    assert len(completion_rows) == 4
+    observed = {
+        (json.loads(row["payload"])["model"], json.loads(row["payload"])["max_tokens"], row["timeout"])
+        for row in completion_rows
+    }
+    assert observed == {
+        ("gemma4", 2048, "120"),
+        ("llama-cpp/gemma4", 2048, "120"),
+        ("ornith", 8192, "600"),
+        ("llama-cpp/ornith", 8192, "600"),
+    }
 
 
-def test_check_server_uses_check_timeout_seconds_override(tmp_path: pathlib.Path) -> None:
-    result, calls = run_check_server_with_stubs(tmp_path, check_timeout_seconds=600)
+def test_check_server_keeps_the_invalid_key_probe_at_ten_seconds(tmp_path):
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    invalid = [
+        row for row in parsed
+        if row["payload"] and json.loads(row["payload"]).get("model") == "x"
+    ]
+    assert len(invalid) == 1
+    assert invalid[0]["timeout"] == "10"
 
-    recorded = calls.read_text()
-    completion_calls = [line for line in recorded.splitlines() if "/v1/chat/completions" in line]
-    assert completion_calls, recorded
-    assert all("--max-time 600" in line for line in completion_calls)
 
-
-def test_check_server_defaults_timeout_when_unset(tmp_path: pathlib.Path) -> None:
-    result, calls = run_check_server_with_stubs(tmp_path)
-
-    recorded = calls.read_text()
-    completion_calls = [line for line in recorded.splitlines() if "/v1/chat/completions" in line]
-    assert completion_calls, recorded
-    assert all("--max-time 120" in line for line in completion_calls)
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"model_yq_exit": 41}, "could not enumerate enabled models"),
+        ({"model_jq_exit": 42}, "could not enumerate enabled models"),
+        ({"models_enabled": False}, "no enabled models were checked"),
+    ],
+)
+def test_check_server_fails_when_no_direct_model_check_can_run(
+    tmp_path, kwargs, message
+):
+    result, calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        **kwargs,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    non_auth_completions = [
+        row for row in parsed
+        if "/v1/chat/completions" in row["url"]
+        and json.loads(row["payload"]).get("model") != "x"
+    ]
+    assert non_auth_completions == []
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run the adapted server block red**
 
 Run: `uv run pytest tests/test_shell.py -k check_server -v`
-Expected: `test_check_server_uses_the_models_own_client_max_output_tokens` FAILs (body still contains `"max_tokens":256`); the override test fails to find `--max-time 600`.
 
-- [ ] **Step 3: Implement — direct completions loop**
+Expected: the existing error-path tests still run coherently; the success/isolation assertions FAIL on hardcoded `256`/`120`, and the producer/zero-count cases FAIL because the script can currently fall through without a direct model check.
 
-In `scripts/check-server.sh`, replace lines 163-221 (`log_step "Completions"` through the `done < <(yq ...)` closing the direct loop) with:
+- [ ] **Step 4: Materialize and validate enabled models before either loop**
 
-```bash
-log_step "Completions"
-while IFS=$'\t' read -r alias max_tokens timeout_seconds; do
-    [ -n "$alias" ] || continue
-    body="$(jq -n --arg m "$alias" --argjson mt "$max_tokens" \
-        '{model: $m,
-          messages: [{role: "user", content: "Reply with exactly: ready"}],
-          max_tokens: $mt, stream: false}')"
-
-    identity="server completion model=${alias}"
-    expectation="normalized assistant content: ready"
-    request_record "$identity" \
-        "curl --silent --show-error --max-time ${timeout_seconds} -H 'Authorization: Bearer ${api_key}' -H 'Content-Type: application/json' --data-raw '${body}' ${base}/v1/chat/completions" \
-        "$body" "$expectation" -- \
-        curl --silent --show-error --max-time "$timeout_seconds" \
-        -K "$auth_conf" \
-        -H "Content-Type: application/json" \
-        --data-raw "$body" "${base}/v1/chat/completions"
-
-    content=""
-    normalized=""
-    failure_stage=""
-    failure_detail=""
-    completion_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
-    if [ "$REQUEST_CURL_STATUS" -ne 0 ]; then
-        failure_stage="curl failure"
-        failure_detail="exit=${REQUEST_CURL_STATUS}"
-    elif [[ ! "$REQUEST_HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
-        failure_stage="HTTP response"
-        failure_detail="status=${REQUEST_HTTP_STATUS}"
-    elif ! jq . "$REQUEST_BODY_FILE" >/dev/null 2>"$completion_parse_stderr"; then
-        failure_stage="invalid JSON"
-    else
-        content="$(jq -r '.choices?[0]?.message?.content? // empty' \
-            < "$REQUEST_BODY_FILE" 2>>"$completion_parse_stderr")"
-        normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
-            sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
-        if [ -z "$content" ]; then
-            failure_stage="missing assistant content"
-        elif [ "$normalized" != ready ]; then
-            failure_stage="normalized-value mismatch"
-            failure_detail="${alias}: expected ready, got $(printf '%.80s' "$content")"
-        fi
-    fi
-
-    log_block "Assistant content" "$content"
-    log_block "Normalized content" "$normalized"
-    log_nonempty_block "Response parsing stderr" "$(<"$completion_parse_stderr")"
-    log_block "Expectation" "$REQUEST_EXPECTATION"
-    if [ -n "$failure_stage" ]; then
-        close_diagnostic_capture 1
-        bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
-        LLM_SERVER_COMPLETION_OK["$alias"]=0
-        continue
-    fi
-
-    close_diagnostic_capture 0
-    ok "Verdict: PASS identity=${identity} ${alias}: returned ready"
-    LLM_SERVER_COMPLETION_OK["$alias"]=1
-done < <(yq -r '.models[] | select(.enabled) | [.alias, .client_max_output_tokens, (.check_timeout_seconds // 120)] | @tsv' "$CONFIG_PATH")
-```
-
-(Only the loop driver, the `body=` construction, and the `curl --max-time` line/display string actually changed; the rest is reproduced verbatim so the replacement is unambiguous.)
-
-- [ ] **Step 4: Implement — OmniRoute completions loop**
-
-In `scripts/check-server.sh`, replace lines 264-329 (`log_step "OmniRoute completions"` through its closing `done < <(yq ...)`) with:
+Add `base64` to `require_cmd curl jq yq`. After `ok()`/`bad()` and `LLM_SERVER_COMPLETION_OK` are declared (so `bad` is callable and `diagnostic_dir` already exists), materialize the producer pipeline into an alias-independent diagnostic file and capture its status under the script's existing `set -uo pipefail`/`set +e` mode:
 
 ```bash
-log_step "OmniRoute completions"
-while IFS=$'\t' read -r alias max_tokens timeout_seconds; do
-    [ -n "$alias" ] || continue
-    if [ "${LLM_SERVER_COMPLETION_OK[$alias]:-1}" -eq 0 ]; then
-        log_warn "Verdict: SKIP identity=omniroute completion model=${alias} reason=server completion model=${alias} already failed; fix that first, OmniRoute proxies to the same model"
-        continue
-    fi
-    # Routing keys on the provider slug ("llama-cpp"), not the connection's
-    # own name -- confirmed live via GET /v1/models, which lists synced
-    # models as "llama-cpp/<alias>" regardless of the connection's name.
-    body="$(jq -n --arg m "llama-cpp/${alias}" --argjson mt "$max_tokens" \
-        '{model: $m,
-          messages: [{role: "user", content: "Reply with exactly: ready"}],
-          max_tokens: $mt, stream: false}')"
+enabled_models_file="$(mktemp "${diagnostic_dir}/enabled-models.XXXXXX")" \
+    || die "could not create enabled-model diagnostic"
+model_stream_status=0
+(
+    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64'
+) >"$enabled_models_file" || model_stream_status=$?
 
-    identity="omniroute completion model=${alias}"
-    expectation="normalized assistant content: ready"
-    # The dashboard password doubles as the bearer token for /v1/* routes,
-    # not only for the management API's cookie session -- confirmed live.
-    request_record "$identity" \
-        "curl --silent --show-error --max-time ${timeout_seconds} -H 'Authorization: Bearer ${omniroute_password}' -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
-        "$body" "$expectation" -- \
-        curl --silent --show-error --max-time "$timeout_seconds" \
-        -H "Authorization: Bearer ${omniroute_password}" \
-        -H "Content-Type: application/json" \
-        --data-raw "$body" "${omniroute_base}/v1/chat/completions"
-
-    content=""
-    normalized=""
-    failure_stage=""
-    failure_detail=""
-    omniroute_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
-    if [ "$REQUEST_CURL_STATUS" -ne 0 ]; then
-        failure_stage="curl failure"
-        failure_detail="exit=${REQUEST_CURL_STATUS}"
-    elif [[ ! "$REQUEST_HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
-        failure_stage="HTTP response"
-        failure_detail="status=${REQUEST_HTTP_STATUS}"
-    elif ! jq . "$REQUEST_BODY_FILE" >/dev/null 2>"$omniroute_parse_stderr"; then
-        failure_stage="invalid JSON"
-    else
-        content="$(jq -r '.choices?[0]?.message?.content? // empty' \
-            < "$REQUEST_BODY_FILE" 2>>"$omniroute_parse_stderr")"
-        normalized="$(printf '%s' "$content" | tr '[:upper:]' '[:lower:]' | \
-            sed -E 's/^[[:space:][:punct:]]+//; s/[[:space:][:punct:]]+$//')"
-        if [ -z "$content" ]; then
-            failure_stage="missing assistant content"
-        elif [ "$normalized" != ready ]; then
-            failure_stage="normalized-value mismatch"
-            failure_detail="${alias}: expected ready, got $(printf '%.80s' "$content")"
-        fi
-    fi
-
-    log_block "Assistant content" "$content"
-    log_block "Normalized content" "$normalized"
-    log_nonempty_block "Response parsing stderr" "$(<"$omniroute_parse_stderr")"
-    log_block "Expectation" "$REQUEST_EXPECTATION"
-    if [ -n "$failure_stage" ]; then
-        close_diagnostic_capture 1
-        bad "Verdict: FAIL stage=${failure_stage} identity=${identity} ${failure_detail}"
-        continue
-    fi
-
-    close_diagnostic_capture 0
-    ok "Verdict: PASS identity=${identity} ${alias}: returned ready via OmniRoute"
-done < <(yq -r '.models[] | select(.enabled) | [.alias, .client_max_output_tokens, (.check_timeout_seconds // 120)] | @tsv' "$CONFIG_PATH")
+models_ready=1
+if [ "$model_stream_status" -ne 0 ]; then
+    bad "Verdict: FAIL stage=model enumeration reason=could not enumerate enabled models (exit ${model_stream_status})"
+    models_ready=0
+fi
+checked_models=0
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+Guard the direct loop with an `if`. Decode records from the validated file, increment `checked_models` immediately before the direct `request_record`, and read the per-model fields together:
 
-Run: `uv run pytest tests/test_shell.py -k check_server -v`
-Expected: PASS, all 3 new tests.
+```bash
+if [ "$models_ready" -eq 1 ]; then
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
+    checked_models=$((checked_models + 1))
+```
 
-- [ ] **Step 6: Commit**
+Keep the current direct request/response handling immediately after that exact prefix, then replace the loop's process-substitution terminator with:
+
+```bash
+done < "$enabled_models_file"
+fi
+
+if [ "$models_ready" -eq 1 ] && [ "$checked_models" -eq 0 ]; then
+    bad "Verdict: FAIL stage=model checks reason=no enabled models were checked"
+fi
+```
+
+Do not use process substitution for this producer: its exit code would not control the loop. Replace the OmniRoute loop's alias-only header and process-substitution terminator with this exact guarded record decoder around its current request/response body:
+
+```bash
+if [ "$models_ready" -eq 1 ] && [ "$checked_models" -gt 0 ]; then
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    max_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 120' <<<"$model_json")"
+```
+
+Keep the current `LLM_SERVER_COMPLETION_OK` skip and OmniRoute request/response handling after that prefix, then close the guarded loop with:
+
+```bash
+done < "$enabled_models_file"
+fi
+```
+
+Extend `cleanup()` with `rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar" "${enabled_models_file:-}"` so a pre-assignment failure remains safe under `set -u`.
+
+- [ ] **Step 5: Build request bodies and timeouts from decoded values**
+
+In the direct loop use:
+
+```bash
+body="$(jq -n --arg m "$alias" --argjson mt "$max_tokens" \
+    '{model: $m, messages: [{role: "user", content: "Reply with exactly: ready"}], max_tokens: $mt, stream: false}')"
+```
+
+In the OmniRoute loop use `--arg m "llama-cpp/${alias}"` with the same `--argjson mt` expression. Replace both completion `--max-time 120` values, including their diagnostic strings, with `"$timeout_seconds"`. Leave health, invalid-key, model-listing, login, and provider probes at 10 seconds.
+
+- [ ] **Step 6: Run focused coverage and the mandatory shell/Python-test gate**
+
+Run:
+
+```bash
+uv run pytest tests/test_shell.py -k check_server -v
+make validate && make test
+```
+
+Expected: all pre-existing curl-failure/non-2xx/invalid-JSON/missing-content/scalar/malformed-listing paths remain covered and pass; both aliases pass through both completion paths with their own values; the invalid-key probe stays at 10 seconds; a failed producer and zero enabled models both exit nonzero; the full gate passes.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/check-server.sh tests/test_shell.py
-git commit -m "fix(check-server): read max_tokens/timeout per model instead of hardcoding 256/120"
+git commit -m "fix(check-server): use per-model completion budgets and timeouts"
 ```
 
 ---
 
-### Task 5: `check-setup.sh` — presets-sourced offload flags + config-aware ctx/timeout
+### Task 5: Run offline inference with exact model configuration
 
 **Files:**
-- Modify: `scripts/check-setup.sh:83-201`
-- Test: `tests/test_shell.py:2702-2874` (extend `run_check_setup_with_stubs` and its consuming tests)
+- Modify: `scripts/check-setup.sh:83-108,173-201`
+- Modify/Test: `tests/test_shell.py:2702-3036`
 
 **Interfaces:**
-- Consumes: `render_presets_file(device, output)`, `presets_value(file, alias, key)` from Task 3.
-- Produces: `inference_command(file, device, layers, n_cpu_moe, ctx_size, timeout_seconds)` (signature changed from the old 3-arg form) and `record_inferences(device, skip_reason, presets_file)` (3rd positional argument added).
+- Consumes: Task 3's `render_presets_file(device, output)` and `presets_value(file, alias, key)`.
+- Consumes per model: file, optional `check_ctx_size`, `client_max_output_tokens`, and `check_timeout_seconds // 180`; when the override is absent, context comes from the rendered preset's `ctx-size`.
+- Produces: `inference_command(file, device, n_gpu_layers, n_cpu_moe, ctx_size, max_output_tokens, timeout_seconds)` and `record_inferences(device, skip_reason="", presets_file="")`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the existing fixture with two distinct configured models**
 
-Extend `run_check_setup_with_stubs` in `tests/test_shell.py` so its `uv` stub also answers `presets` calls, and its config includes `check_ctx_size`/`n_cpu_moe`/`check_timeout_seconds` on one model. Replace the `uv` stub body (lines 2746-2763) with:
+Add `presets_exit: int = 0` and `presets_missing_alias: bool = False` keyword parameters to `run_check_setup_with_stubs`. Change its timeout stub so both fixture timeouts execute:
 
-```python
-    uv = commands / "uv"
-    uv.write_text(
-        "#!/usr/bin/bash\n"
-        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in\n"
-        "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
-        "  *' detect'*) printf '%s\\n' \"$DETECTED_GPU\" ;;\n"
-        "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
-        "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}'; exit \"$BUDGET_EXIT\" ;;\n"
-        "  *' resolve-device'*)\n"
-        "    for argument in \"$@\"; do\n"
-        "      if [ \"$previous\" = --listing-file ]; then listing_file=\"$argument\"; fi\n"
-        "      previous=\"$argument\"\n"
-        "    done\n"
-        "    [ \"$(cat \"$listing_file\")\" = 'Vulkan7: Selected Radeon (16384 MiB, 16000 MiB free)' ] || exit 65\n"
-        "    printf '%s\\n' '{\"device\":\"Vulkan7\"}'; exit \"$RESOLVE_EXIT\" ;;\n"
-        "  *' presets '*)\n"
-        "    for argument in \"$@\"; do\n"
-        "      if [ \"$previous\" = --output ]; then output=\"$argument\"; fi\n"
-        "      previous=\"$argument\"\n"
-        "    done\n"
-        "    printf '%s\\n' \\\n"
-        "      '[first]' 'ctx-size = 8192' 'n-gpu-layers = 42' '' \\\n"
-        "      '[second]' 'ctx-size = 4096' 'n-gpu-layers = 17' 'n-cpu-moe = 12' \\\n"
-        "      > \"$output\"\n"
-        "    exit \"$PRESETS_EXIT\" ;;\n"
-        "esac\n"
-    )
-    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+```bash
+case "$1" in
+    180|300) ;;
+    *) exit 64 ;;
+esac
+shift
+exec "$@"
 ```
 
-Add `"PRESETS_EXIT": str(presets_exit),` to the `environment` dict, and add a `presets_exit: int = 0` keyword parameter to `run_check_setup_with_stubs`'s signature.
+Make the `uv` stub's `presets` case write:
 
-Change the config written in the same fixture (around line 2790-2803) to:
+```ini
+[first]
+ctx-size = 8192
+n-gpu-layers = 42
 
-```python
-    config = tmp_path / "models.yml"
-    config.write_text(
-        "server:\n"
-        f"  api_key: {api_key}\n"
-        "gpu:\n"
-        "  image: example.invalid/llama:latest\n"
-        "  pci_address: 0000:03:00.0\n"
-        "  device_name: Selected Radeon\n"
-        "runtime:\n"
-        "  models_max: 2\n"
-        "models:\n"
-        "  - alias: first\n"
-        "    enabled: true\n"
-        "    file: first.gguf\n"
-        "    n_gpu_layers: 42\n"
-        "    ctx_size: 8192\n"
-        "  - alias: skipped\n"
-        "    enabled: false\n"
-        "    file: skipped.gguf\n"
-        "    n_gpu_layers: 99\n"
-        "  - alias: second\n"
-        "    enabled: true\n"
-        "    file: second.gguf\n"
-        "    n_gpu_layers: 17\n"
-        "    ctx_size: 4096\n"
-        "    check_ctx_size: 2048\n"
-        "    check_timeout_seconds: 300\n"
-        "    n_cpu_moe: 12\n"
-    )
+[second]
+ctx-size = 4096
+n-gpu-layers = 17
+n-cpu-moe = 12
 ```
 
-Then replace `test_check_setup_runs_disposable_inference_for_each_enabled_model`'s body (the assertions) with:
+When `PRESETS_MISSING_ALIAS=1`, omit `[second]`; always exit `$PRESETS_EXIT`. Update the enabled model configs to include:
 
-```python
-def test_check_setup_runs_disposable_inference_for_each_enabled_model(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Offline setup validation must resolve and smoke-test every enabled
-    model using presets.ini's own n-gpu-layers/n-cpu-moe (Task 3's shared
-    source of truth) and each model's check_ctx_size/check_timeout_seconds
-    (falling back to ctx_size/180s)."""
-    result, calls, models_dir = run_check_setup_with_stubs(tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    recorded = calls.read_text()
-    check_setup = (ROOT / "scripts/check-setup.sh").read_text()
-    assert 'uv run "${REPO_DIR}/llmenv.py" resolve-device' in check_setup
-    assert (
-        f"uv run {ROOT / 'llmenv.py'} resolve-device --device-name Selected Radeon "
-        "--listing-file "
-    ) in recorded
-    list_devices = (
-        "podman run --rm --device /dev/dri "
-        "example.invalid/llama:latest --list-devices"
-    )
-    # "first" has no check_ctx_size override (falls back to its real
-    # ctx_size 8192) and no check_timeout_seconds override (falls back to
-    # the script's 180s baseline), and presets.ini has no n-cpu-moe for it
-    # (dense model) -- so no --n-cpu-moe flag appears.
-    first_inference = (
-        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
-        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/first.gguf "
-        "--device Vulkan7 --n-gpu-layers 42 --ctx-size 8192 --single-turn --no-show-timings "
-        "-p Reply with exactly: ready -n 256"
-    )
-    # "second" has an explicit check_ctx_size=2048 override, an explicit
-    # check_timeout_seconds=300 override, and presets.ini reports
-    # n-cpu-moe=12 for it (MoE model) -- all three must appear.
-    second_inference = (
-        f"podman run --rm --device /dev/dri -v {models_dir}:/models:ro,z "
-        "--entrypoint /app/llama example.invalid/llama:latest cli -m /models/second.gguf "
-        "--device Vulkan7 --n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048 "
-        "--single-turn --no-show-timings -p Reply with exactly: ready -n 256"
-    )
-    assert recorded.count(list_devices) == 1
-    assert recorded.count(f"timeout 180 {first_inference}") == 1
-    assert recorded.count(f"timeout 300 {second_inference}") == 1
-    assert "/models/skipped.gguf" not in recorded
-    inference_calls = [
-        line.split()
-        for line in recorded.splitlines()
-        if line.startswith("podman run") and " cli " in line
-    ]
-    assert len(inference_calls) == 2
-    for arguments in inference_calls:
-        assert "--publish" not in arguments
-        assert "-p" not in arguments[: arguments.index("example.invalid/llama:latest")]
-    assert "podman exec" not in recorded
+```yaml
+  - alias: first
+    enabled: true
+    file: first.gguf
+    ctx_size: 8192
+    client_max_output_tokens: 2048
+    n_gpu_layers: 42
+  - alias: second
+    enabled: true
+    file: second.gguf
+    ctx_size: 4096
+    check_ctx_size: 2048
+    client_max_output_tokens: 1024
+    check_timeout_seconds: 300
+    n_gpu_layers: 17
+    n_cpu_moe: 12
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Replace the happy-path assertions and add prerequisite failures**
 
-Run: `uv run pytest tests/test_shell.py -k test_check_setup_runs_disposable_inference_for_each_enabled_model -v`
-Expected: FAIL — current script never calls `presets`, never adds `--n-cpu-moe`/`--ctx-size`, and hardcodes `timeout 180` for every model regardless of `check_timeout_seconds`.
+The happy path must assert these exact command fragments once each:
 
-- [ ] **Step 3: Implement**
+```python
+assert recorded.count("timeout 180 podman run") == 1
+assert recorded.count("timeout 300 podman run") == 1
+assert "--n-gpu-layers 42 --ctx-size 8192" in recorded
+assert "--n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048" in recorded
+assert "-p Reply with exactly: ready -n 2048" in recorded
+assert "-p Reply with exactly: ready -n 1024" in recorded
+```
 
-In `scripts/check-setup.sh`, replace the `inference_command()` function (lines 83-87) with:
+The `-n` assertions retire the hardcoded offline `-n 256`: each model now uses `client_max_output_tokens`.
+
+Add explicit tests:
+
+```python
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"resolve_exit": 23}, "GPU device could not be resolved"),
+        ({"presets_exit": 29}, "presets rendering failed"),
+        ({"presets_missing_alias": True}, "missing n-gpu-layers preset for second"),
+    ],
+)
+def test_check_setup_fails_when_inference_prerequisite_is_unavailable(tmp_path, kwargs, message):
+    result, calls, _ = run_check_setup_with_stubs(tmp_path, **kwargs)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Results:" in result.stdout
+    if "presets" in message:
+        assert "/models/second.gguf" not in calls.read_text() or " cli " not in calls.read_text()
+```
+
+Keep the existing budget failure test. Add an `empty_resolve` fixture option that returns status 0 with `{"device":""}`, and add it as a fourth parameter expecting `GPU device resolution returned no device`. This distinguishes command failure from a successful but unusable result.
+
+- [ ] **Step 3: Expand command construction**
+
+Add `base64` to the `for cmd in uv jq yq podman systemctl curl` tooling loop before changing `record_inferences()`.
+
+Replace `inference_command()` with:
 
 ```bash
 inference_command() {
-    local file="$1" device="$2" layers="$3" n_cpu_moe="$4" ctx_size="$5" timeout_seconds="$6"
-    local moe_part=""
+    local file="$1" device="$2" layers="$3" n_cpu_moe="$4"
+    local ctx_size="$5" max_output_tokens="$6" timeout_seconds="$7" moe_part=""
     [ -n "$n_cpu_moe" ] && moe_part="--n-cpu-moe ${n_cpu_moe} "
-    printf 'timeout %q podman run --rm --device /dev/dri -v %q:/models:ro,z --entrypoint /app/llama %q cli -m %q --device %q --n-gpu-layers %q %s--ctx-size %q --single-turn --no-show-timings -p %q -n 256' \
-        "$timeout_seconds" "$MODELS_DIR" "$image" "/models/${file}" "$device" "$layers" "$moe_part" "$ctx_size" "Reply with exactly: ready"
+    printf 'timeout %q podman run --rm --device /dev/dri -v %q:/models:ro,z --entrypoint /app/llama %q cli -m %q --device %q --n-gpu-layers %q %s--ctx-size %q --single-turn --no-show-timings -p %q -n %q' \
+        "$timeout_seconds" "$MODELS_DIR" "$image" "/models/${file}" "$device" \
+        "$layers" "$moe_part" "$ctx_size" "Reply with exactly: ready" "$max_output_tokens"
 }
 ```
 
-Replace `record_inferences()` (lines 89-108) with:
+Replace the declaration of `record_inferences()` before adding the loop. Bind all three parameters locally so `presets_file` never relies on Bash's dynamic/global scope:
 
 ```bash
 record_inferences() {
     local device="$1" skip_reason="${2:-}" presets_file="${3:-}"
-    local alias file ctx_size timeout_seconds layers n_cpu_moe command_text moe_args
-
-    log_step "Offline inference"
-    while IFS=$'\t' read -r alias file ctx_size timeout_seconds; do
-        layers=""
-        n_cpu_moe=""
-        if [ -n "$presets_file" ]; then
-            layers="$(presets_value "$presets_file" "$alias" "n-gpu-layers")"
-            n_cpu_moe="$(presets_value "$presets_file" "$alias" "n-cpu-moe")"
-        fi
-        if [ -z "$layers" ]; then
-            layers="$(yq -r --arg a "$alias" '.models[] | select(.alias == $a) | .n_gpu_layers' "$CONFIG_PATH")"
-        fi
-        command_text="$(inference_command "$file" "$device" "$layers" "$n_cpu_moe" "$ctx_size" "$timeout_seconds")"
-        if [ -n "$skip_reason" ]; then
-            record_inference_skip "$alias" "$command_text" "$skip_reason"
-        else
-            moe_args=()
-            [ -n "$n_cpu_moe" ] && moe_args=(--n-cpu-moe "$n_cpu_moe")
-            record_command "inference ${alias}" "$command_text" "Reply with exactly: ready" \
-                "normalized assistant content: ready" "ready" 1 "Inference stdout" "Inference stderr" \
-                timeout "$timeout_seconds" podman run --rm --device /dev/dri \
-                -v "${MODELS_DIR}:/models:ro,z" \
-                --entrypoint /app/llama "$image" cli \
-                -m "/models/${file}" --device "$device" \
-                --n-gpu-layers "$layers" "${moe_args[@]}" --ctx-size "$ctx_size" \
-                --single-turn --no-show-timings \
-                -p "Reply with exactly: ready" -n 256 || true
-        fi
-    done < <(yq -r '.models[] | select(.enabled) | [.alias, .file, (.check_ctx_size // .ctx_size), (.check_timeout_seconds // 180)] | @tsv' "$CONFIG_PATH")
-}
+    local alias file model_b64 model_json check_ctx_override max_output_tokens
+    local timeout_seconds n_gpu_layers n_cpu_moe preset_ctx_size missing_key
+    local ctx_size command_text
 ```
 
-Replace the VRAM-budget block that calls `record_inferences` (lines 173-201) with:
+Then decode one complete base64 model record and read all related values from that object:
 
 ```bash
-log_step "VRAM budget"
-record_command "VRAM budget" \
-    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} budget --models-dir ${MODELS_DIR}" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR"
-budget_status=$?
-if [ "$budget_status" -ne 0 ]; then
-    record_inferences "" "VRAM budget check failed" ""
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    file="$(jq -r '.file' <<<"$model_json")"
+    check_ctx_override="$(jq -r '.check_ctx_size // empty' <<<"$model_json")"
+    max_output_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    timeout_seconds="$(jq -r '.check_timeout_seconds // 180' <<<"$model_json")"
+    if [ -n "$skip_reason" ]; then
+        record_inference_skip "$alias" "not run: inference prerequisite unavailable" "$skip_reason"
+        continue
+    fi
+    n_gpu_layers="$(presets_value "$presets_file" "$alias" "n-gpu-layers")"
+    n_cpu_moe="$(presets_value "$presets_file" "$alias" "n-cpu-moe")"
+    preset_ctx_size="$(presets_value "$presets_file" "$alias" "ctx-size")"
+```
+
+Absence of `n-cpu-moe` is valid, but both `n-gpu-layers` and `ctx-size` are required production preset keys:
+
+```bash
+if [ -z "$n_gpu_layers" ] || [ -z "$preset_ctx_size" ]; then
+    missing_key="n-gpu-layers"
+    [ -n "$n_gpu_layers" ] && missing_key="ctx-size"
+    command_text="not run: missing ${missing_key} preset for ${alias}"
+    log_error "missing ${missing_key} preset for ${alias}"
+    FAIL=$((FAIL + 1))
+    record_inference_skip "$alias" "$command_text" "missing required production preset"
+    continue
+fi
+ctx_size="${check_ctx_override:-$preset_ctx_size}"
+```
+
+Pass every value to the real command, then close the loop with the encoded-record producer. Do not fall back to raw `.n_gpu_layers`; rendered presets are the production source of truth.
+
+```bash
+moe_args=()
+[ -n "$n_cpu_moe" ] && moe_args=(--n-cpu-moe "$n_cpu_moe")
+command_text="$(inference_command "$file" "$device" "$n_gpu_layers" "$n_cpu_moe" \
+    "$ctx_size" "$max_output_tokens" "$timeout_seconds")"
+record_command "inference ${alias}" "$command_text" "Reply with exactly: ready" \
+    "normalized assistant content: ready" "ready" 1 "Inference stdout" "Inference stderr" \
+    timeout "$timeout_seconds" podman run --rm --device /dev/dri \
+    -v "${MODELS_DIR}:/models:ro,z" --entrypoint /app/llama "$image" cli \
+    -m "/models/${file}" --device "$device" --n-gpu-layers "$n_gpu_layers" \
+    "${moe_args[@]}" --ctx-size "$ctx_size" --single-turn --no-show-timings \
+    -p "Reply with exactly: ready" -n "$max_output_tokens" || true
+done < <(
+    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64'
+)
+```
+
+- [ ] **Step 4: Make every prerequisite outcome explicit without relying on shell aborts**
+
+Use status capture around preset rendering and safe JSON extraction:
+
+```bash
+presets_status=0
+render_presets_file "$device" "$presets_file" || presets_status=$?
+if [ "$presets_status" -ne 0 ]; then
+    log_error "presets rendering failed for ${device} (exit ${presets_status})"
+    FAIL=$((FAIL + 1))
+    record_inferences "$device" "presets rendering failed" ""
 else
-    device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || true)"
-    record_command "GPU device listing" \
-        "podman run --rm --device /dev/dri ${image} --list-devices" "" \
-        "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        podman run --rm --device /dev/dri "$image" --list-devices
-    listing_status=$?
-    listing_file="$record_stdout_file"
-    record_command "GPU device resolution" \
-        "uv run ${REPO_DIR}/llmenv.py resolve-device --device-name ${device_name} --listing-file ${listing_file}" \
-        "device name: ${device_name}" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" --listing-file "$listing_file"
-    resolve_status=$?
-    resolved="$(<"$record_stdout_file")"
-    device="$(jq -r '.device // empty' <<<"$resolved")"
-    if [ "$listing_status" -eq 0 ] && [ "$resolve_status" -eq 0 ] && [ -n "$device" ]; then
-        presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")"
-        if render_presets_file "$device" "$presets_file"; then
-            record_inferences "$device" "" "$presets_file"
-        else
-            record_inferences "$device" "presets rendering failed" ""
-        fi
+    record_inferences "$device" "" "$presets_file"
+fi
+```
+
+After the existing recorded resolution command:
+
+```bash
+device=""
+if [ "$resolve_status" -eq 0 ]; then
+    device="$(jq -r '.device // empty' < "$record_stdout_file" 2>/dev/null || true)"
+fi
+if [ "$resolve_status" -ne 0 ]; then
+    record_inferences "" "GPU device could not be resolved" ""
+elif [ -z "$device" ]; then
+    log_error "GPU device resolution returned no device"
+    FAIL=$((FAIL + 1))
+    record_inferences "" "GPU device resolution returned no device" ""
+else
+    presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")" \
+        || die "could not create presets diagnostic"
+    presets_status=0
+    render_presets_file "$device" "$presets_file" || presets_status=$?
+    if [ "$presets_status" -ne 0 ]; then
+        log_error "presets rendering failed for ${device} (exit ${presets_status})"
+        FAIL=$((FAIL + 1))
+        record_inferences "$device" "presets rendering failed" ""
     else
-        record_inferences "" "GPU device could not be resolved" ""
+        record_inferences "$device" "" "$presets_file"
     fi
 fi
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+Preserve `record_command`'s existing failure count for a nonzero `resolve-device`; do not increment it twice.
 
-Run: `uv run pytest tests/test_shell.py -k check_setup -v`
-Expected: PASS on all `check-setup` tests, including `test_check_setup_never_requires_the_rocm_kernel_device`, `test_check_setup_prints_complete_static_and_inference_records`, `test_check_setup_prints_concise_pass_rows_by_default`, `test_check_setup_skips_unresolved_gpu_render_node_without_parsed_result`, `test_check_setup_accepts_ready_after_visible_reasoning`, `test_check_setup_ignores_llama_exit_footer_after_ready`. If any of these hardcode the old 3-field TSV/command shape, update them the same way as Step 1 (add `ctx_size`/`check_ctx_size`/`check_timeout_seconds` to their fixture configs and expected command strings) before re-running.
+- [ ] **Step 5: Run focused coverage and the mandatory shell/Python-test gate**
 
-- [ ] **Step 5: Commit**
+Run:
+
+```bash
+uv run pytest tests/test_shell.py -k check_setup -v
+make validate && make test
+```
+
+Expected: both enabled models use their own timeout/context/output/offload values; the 300-second stub executes; render failure, nonzero resolution, empty resolution, and missing preset section all exit nonzero with diagnostics; the full gate passes.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/check-setup.sh tests/test_shell.py
-git commit -m "fix(check-setup): source n-cpu-moe/n-gpu-layers from presets.ini, ctx/timeout from config"
+git commit -m "fix(check-setup): exercise each model's production flags"
 ```
 
 ---
 
-### Task 6: `benchmark.sh` — per-model, device-pinned throughput
+### Task 6: Benchmark every model safely with production flags
 
 **Files:**
-- Modify: `scripts/benchmark.sh` (full rewrite of the post-probe section, lines 57-115)
-- Test: `tests/test_shell.py:1804-1911` (extend `run_benchmark` and its consuming tests)
+- Modify: `scripts/benchmark.sh:10-115`
+- Modify/Test: `tests/test_shell.py:1804-1917`
 
 **Interfaces:**
-- Consumes: `render_presets_file`, `presets_value` (Task 3); `llmenv resolve-device`/`list-devices` (existing, same pattern `check-setup.sh` already uses).
-- Produces: no new shared interfaces. Writes results to `.models[<alias>].benchmark.vulkan.{pp_tps,tg_tps,measured_at}` per enabled model instead of the retired `.gpu.benchmark.vulkan`.
+- Consumes: `migrate_config_file()` before any raw `yq` read; configured `.gpu.device_name`; Task 3 preset helpers; per-model `file`, optional `check_ctx_size`, and `client_max_output_tokens`. An absent check override uses the rendered preset's production `ctx-size`.
+- Maps preset `n-gpu-layers` to `--n-gpu-layers`, optional `n-cpu-moe` to `--n-cpu-moe`, check context to llama-bench prompt-processing `-p`, and output budget to generation `-n`.
+- Produces `.models[] | select(.alias == strenv(MODEL_ALIAS)) | .benchmark.vulkan` with numeric `pp_tps`/`tg_tps` and string `measured_at`.
 
-**Design note carried into this task:** `benchmark.sh` has two genuinely different jobs that must not be conflated: (1) a one-time Vulkan-vs-CPU backend probe + `gpu.device_name` resolution, using one representative (smallest) model purely to answer "does Vulkan work on this hardware" — this stays as today, since it's a hardware capability check, not a throughput measurement of the deployed config; (2) a per-model, production-config-matching throughput measurement, which is the part that must become model-aware and device-pinned. Task 6 adds (2) after (1) succeeds, without changing (1)'s existing behavior or its `gpu.backend`/`gpu.image`/`gpu.device_name` side effects.
+- [ ] **Step 1: Replace the benchmark fixture with two configured models and controllable failures**
 
-- [ ] **Step 1: Write the failing tests**
+Give `run_benchmark` keyword parameters `resolve_exit=0`, `empty_resolve=False`, `presets_exit=0`, `presets_missing_alias=False`, and `device_name="Benchmark GPU"`. Configure:
 
-Extend `run_benchmark` in `tests/test_shell.py` (lines 1804-1872): add a second enabled model to the config, make the `uv` stub answer `resolve-device` and `presets`, and let the `podman` stub answer per-model `bench` calls with per-model JSON via an env var keyed by model filename. Replace the fixture with:
-
-```python
-def run_benchmark(
-    tmp_path: pathlib.Path,
-    probe_stdout: str,
-    probe_stderr: str = "",
-    *,
-    resolve_exit: int = 0,
-    model_bench_stdout: dict[str, str] | None = None,
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
-    """Run the benchmark with controlled Vulkan streams and record Podman calls.
-
-    model_bench_stdout maps a model's .gguf filename to the JSON its
-    per-model bench call should return; the probe (smallest model) always
-    uses probe_stdout/probe_stderr regardless of this map.
-    """
-    real_yq = shutil.which("yq")
-    assert real_yq is not None
-    model_bench_stdout = model_bench_stdout or {}
-
-    commands = tmp_path / "bin"
-    commands.mkdir()
-    calls = tmp_path / "calls"
-    calls.touch()
-    config = tmp_path / "models.yml"
-    config.write_text(
-        "gpu:\n"
-        "  backend: vulkan\n"
-        "  image: ghcr.io/ggml-org/llama.cpp:server-vulkan\n"
-        "  pci_address: '0000:03:00.0'\n"
-        "  vram_total_mib: 16384\n"
-        "models:\n"
-        "  - alias: smallest\n"
-        "    enabled: true\n"
-        "    file: smallest.gguf\n"
-        "    size_bytes: 1\n"
-        "  - alias: biggest\n"
-        "    enabled: true\n"
-        "    file: biggest.gguf\n"
-        "    size_bytes: 2\n"
-    )
-
-    uv = commands / "uv"
-    uv.write_text(
-        "#!/usr/bin/bash\n"
-        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in\n"
-        "  *' resolve-device'*) printf '%s\\n' '{\"device\":\"Vulkan0\"}'; exit \"$RESOLVE_EXIT\" ;;\n"
-        "  *' presets '*)\n"
-        "    for argument in \"$@\"; do\n"
-        "      if [ \"$previous\" = --output ]; then output=\"$argument\"; fi\n"
-        "      previous=\"$argument\"\n"
-        "    done\n"
-        "    printf '%s\\n' \\\n"
-        "      '[smallest]' 'n-gpu-layers = 99' '' \\\n"
-        "      '[biggest]' 'n-gpu-layers = 40' 'n-cpu-moe = 12' \\\n"
-        "      > \"$output\" ;;\n"
-        "esac\n"
-    )
-    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
-
-    yq = commands / "yq"
-    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
-    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
-
-    bench_map_file = tmp_path / "bench_map.env"
-    bench_map_file.write_text(
-        "\n".join(f"{name}={json}" for name, json in model_bench_stdout.items())
-    )
-
-    podman = commands / "podman"
-    podman.write_text(
-        "#!/usr/bin/bash\n"
-        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in\n"
-        "  *'help all'*) printf '%s\\n' bench ;;\n"
-        "  *'/models/smallest.gguf'*' bench '*|*' bench '*'-m /models/smallest.gguf'*)\n"
-        "    printf '%s' \"$PROBE_STDOUT\"; printf '%s' \"$PROBE_STDERR\" >&2 ;;\n"
-        "  *' bench '*'/models/biggest.gguf'*)\n"
-        "    line=\"$(grep '^biggest\\.gguf=' \"$BENCH_MAP_FILE\" || true)\"\n"
-        "    printf '%s' \"${line#*=}\" ;;\n"
-        "  *'--list-devices'*) printf '%s\\n' 'Vulkan0: Benchmark GPU (16384 MiB, 16000 MiB free)' ;;\n"
-        "esac\n"
-    )
-    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
-
-    environment = os.environ | {
-        "CALLS": str(calls),
-        "HOME": str(tmp_path / "home"),
-        "LLM_ENV_CONFIG": str(config),
-        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
-        "PATH": f"{commands}:/usr/bin:/bin",
-        "REAL_YQ": real_yq,
-        "PROBE_STDOUT": probe_stdout,
-        "PROBE_STDERR": probe_stderr,
-        "RESOLVE_EXIT": str(resolve_exit),
-        "BENCH_MAP_FILE": str(bench_map_file),
-    }
-    result = subprocess.run(
-        ["/usr/bin/bash", "scripts/benchmark.sh"],
-        cwd=ROOT,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result, calls, config
+```yaml
+gpu:
+  backend: vulkan
+  image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+  device_name: Benchmark GPU
+  benchmark:
+    vulkan: {pp_tps: 1, tg_tps: 1, measured_at: legacy}
+models:
+  - alias: smallest
+    enabled: true
+    file: smallest.gguf
+    size_bytes: 1
+    ctx_size: 4096
+    client_max_output_tokens: 512
+  - alias: odd/"alias
+    enabled: true
+    file: biggest.gguf
+    size_bytes: 2
+    ctx_size: 8192
+    check_ctx_size: 2048
+    client_max_output_tokens: 1024
 ```
 
-Then replace the two existing consuming tests' bodies to match the renamed "probe" terminology and add the new per-model coverage:
+The `uv` stub must persist the same legacy-key deletion proved by Task 2 when called with `migrate-config`, return `{"device":"Vulkan0"}` for `resolve-device` (or the controlled nonzero/empty result), and render presets. Add the real `yq` path to the fixture environment as `REAL_YQ`, then place this branch before the controlled resolve/presets branches:
+
+```bash
+case "$*" in
+    *' migrate-config')
+        "$REAL_YQ" -i 'del(.gpu.benchmark)' "$LLM_ENV_CONFIG"
+        printf '%s\n' '{"written":true}'
+        exit 0
+        ;;
+esac
+```
+
+The rendered preset body is:
+
+```ini
+[smallest]
+ctx-size = 4096
+n-gpu-layers = 99
+
+[odd/"alias]
+ctx-size = 8192
+n-gpu-layers = 40
+n-cpu-moe = 12
+```
+
+Use alias-independent benchmark outputs from the Podman stub keyed by model filename. Do not embed the odd alias in any fixture pathname.
+
+- [ ] **Step 2: Adapt the existing success test and add production-parity, migration, and failure tests**
+
+Keep `test_benchmark_parses_valid_stdout_despite_vulkan_stderr_warning` at `tests/test_shell.py:1876-1901`; adapt its storage assertions to the two model entries while preserving its stdout, parsed-metrics, Vulkan-warning, parser-diagnostic, backend/image, and no-CPU-pull coverage:
 
 ```python
-def test_benchmark_parses_valid_probe_stdout_despite_vulkan_stderr_warning(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Vulkan warnings must not corrupt an otherwise valid probe JSON."""
-    result, calls, config = run_benchmark(
-        tmp_path,
-        '[{"n_prompt":512,"avg_ts":123.4},{"n_gen":128,"avg_ts":56.7}]',
-        "WARNING: radv is not a conformant Vulkan implementation\n",
-        model_bench_stdout={
-            "biggest.gguf": '[{"n_prompt":512,"avg_ts":90.0},{"n_gen":128,"avg_ts":30.0}]',
-        },
-    )
+assert result.returncode == 0, result.stderr
+assert "Benchmark stdout:" in result.stdout
+assert '"avg_ts":123.4' in result.stdout
+assert result.stdout.count(
+    'Parsed metrics:\n  {"pp_tps":123.4,"tg_tps":56.7}'
+) == 2
+assert "Benchmark stderr:\n  WARNING: radv" in result.stdout
+assert "Benchmark parser stderr:" not in result.stdout
+assert yq_value(config, ".gpu.backend") == "vulkan"
+assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
+assert yq_value(
+    config,
+    '(.models[] | select(.alias == "smallest") | .benchmark.vulkan.pp_tps)',
+) == "123.4"
+assert yq_value(
+    config,
+    '(.models[] | select(.alias == "odd/\\\"alias") | .benchmark.vulkan.tg_tps)',
+) == "56.7"
+assert yq_value(config, ".gpu.benchmark") == "null"
+assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()
+```
 
+Keep `test_benchmark_configures_cpu_but_fails_when_vulkan_stdout_is_invalid` at `tests/test_shell.py:1904-1917`. Preserve its invalid-JSON diagnostics, CPU backend/image, and CPU-pull assertions; add `assert yq_value(config, ".gpu.benchmark") == "null"` because persisted migration happens before the failed Vulkan probe.
+
+Add:
+
+```python
+def test_benchmark_uses_every_models_device_flags_and_probe_sizes(tmp_path):
+    result, calls, config = run_benchmark(tmp_path, valid_benchmark_json)
     assert result.returncode == 0, result.stderr
-    assert "Probe stdout:" in result.stdout
-    assert '"avg_ts":123.4' in result.stdout
-    assert "Probe stderr:\n  WARNING: radv" in result.stdout
-    assert yq_value(config, ".gpu.backend") == "vulkan"
-    assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
-    assert "podman pull ghcr.io/ggml-org/llama.cpp:server" not in calls.read_text()
+    rows = [line for line in calls.read_text().splitlines() if " bench " in line]
+    assert any("/models/smallest.gguf" in row and "--device Vulkan0" in row and "--n-gpu-layers 99" in row and "-p 4096 -n 512" in row for row in rows)
+    assert any("/models/biggest.gguf" in row and "--device Vulkan0" in row and "--n-gpu-layers 40" in row and "--n-cpu-moe 12" in row and "-p 2048 -n 1024" in row for row in rows)
+    assert yq_value(config, '(.models[] | select(.alias == "odd/\\\"alias") | .benchmark.vulkan.pp_tps)') == "90"
+    assert yq_value(config, ".gpu.benchmark") == "null"
 
 
-def test_benchmark_configures_cpu_but_fails_when_probe_stdout_is_invalid(
-    tmp_path: pathlib.Path,
-) -> None:
-    """An invalid Vulkan probe response must configure CPU and fail the benchmark."""
-    result, calls, config = run_benchmark(tmp_path, "not benchmark JSON\n")
+def test_make_benchmark_persists_legacy_shared_benchmark_migration(tmp_path):
+    result, _, config = run_benchmark(tmp_path, valid_benchmark_json)
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".gpu.benchmark") == "null"
+    assert yq_value(
+        config,
+        '(.models[] | select(.alias == "smallest") | .benchmark.vulkan.pp_tps)',
+    ) == "90"
 
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"device_name": ""}, "configured gpu.device_name is empty"),
+        ({"resolve_exit": 31}, "could not resolve configured GPU"),
+        ({"empty_resolve": True}, "GPU resolution returned no device"),
+        ({"presets_exit": 32}, "could not render production presets"),
+        ({"presets_missing_alias": True}, "missing n-gpu-layers preset"),
+    ],
+)
+def test_benchmark_fails_instead_of_skipping_all_models(tmp_path, kwargs, message):
+    result, _, config = run_benchmark(tmp_path, valid_benchmark_json, **kwargs)
     assert result.returncode != 0
-    assert "Probe stdout:\n  not benchmark JSON" in result.stdout
-    assert "Probe parser stderr:" in result.stdout
-    assert "parse error:" in result.stdout
-    assert "Vulkan probe failure: response parsing" in result.stderr
-    assert yq_value(config, ".gpu.backend") == "cpu"
-    assert yq_value(config, ".gpu.image") == "ghcr.io/ggml-org/llama.cpp:server"
-    assert "podman pull ghcr.io/ggml-org/llama.cpp:server" in calls.read_text()
-
-
-def test_benchmark_measures_every_enabled_model_pinned_to_the_resolved_device(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Every enabled model gets its own device-pinned, n-cpu-moe-aware
-    throughput measurement, written to its own .models[].benchmark.vulkan
-    -- this is the direct fix for the real acceptance-run bug where a
-    single un-pinned bench call auto-spread across both GPUs."""
-    result, calls, config = run_benchmark(
-        tmp_path,
-        '[{"n_prompt":512,"avg_ts":123.4},{"n_gen":128,"avg_ts":56.7}]',
-        model_bench_stdout={
-            "biggest.gguf": '[{"n_prompt":512,"avg_ts":90.0},{"n_gen":128,"avg_ts":30.0}]',
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    recorded = calls.read_text()
-    assert "uv run" in recorded and "resolve-device" in recorded
-    biggest_call = [
-        line for line in recorded.splitlines()
-        if line.startswith("podman run") and "/models/biggest.gguf" in line and " bench " in line
-    ]
-    assert len(biggest_call) == 1, recorded
-    assert "--device Vulkan0" in biggest_call[0]
-    assert "--n-cpu-moe 12" in biggest_call[0]
-    assert yq_value(config, '(.models[] | select(.alias == "biggest") | .benchmark.vulkan.pp_tps)') == "90"
-    assert yq_value(config, '(.models[] | select(.alias == "biggest") | .benchmark.vulkan.tg_tps)') == "30"
-    assert yq_value(config, '(.models[] | select(.alias == "biggest") | .benchmark.vulkan.measured_at)') != "null"
-    assert yq_value(config, '(.models[] | select(.alias == "smallest") | .benchmark.vulkan.pp_tps)') == "123.4"
+    assert message in result.stderr
     assert yq_value(config, ".gpu.benchmark") == "null"
 ```
 
-(`yq_value` is the existing helper already used throughout `test_shell.py` for reading back config values — confirm its exact call signature with `grep -n "^def yq_value" tests/test_shell.py` before using it; adapt the calls above to match if it takes the config path first or as a keyword.)
+Define `valid_benchmark_json` at module scope as `'[{"n_prompt":512,"avg_ts":90.0},{"n_gen":128,"avg_ts":30.0}]'`. Have `run_benchmark()` invoke `["/usr/bin/make", "benchmark"]`, not `scripts/benchmark.sh` directly, so the migration test exercises the public entrypoint named in the design.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Resolve the configured GPU before rendering presets**
 
-Run: `uv run pytest tests/test_shell.py -k benchmark -v`
-Expected: the two renamed tests FAIL (old code still writes "Benchmark stdout:"/"Vulkan benchmark failure" text, not "Probe..."); the new per-model test FAILs (`biggest_call` is empty — today's script never benches the second model).
-
-- [ ] **Step 3: Implement**
-
-Replace `scripts/benchmark.sh` in full with:
+Replace VRAM-based name inference with the same configured-name path as `check-setup.sh`:
 
 ```bash
-#!/usr/bin/env bash
-# benchmark.sh — probe Vulkan-vs-CPU once, then measure every enabled
-# model's own throughput pinned to the resolved GPU device.
-set -euo pipefail
-# shellcheck disable=SC1091 # Resolved from this script at runtime.
-# shellcheck source=../tools/lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
+require_cmd uv jq yq podman awk base64
+migrate_config_file || die "configuration migration failed"
+diagnostic_dir="$(prepare_diagnostic_dir benchmark)"
+trap 'status=$?; finish_diagnostic_dir "$diagnostic_dir"; exit "$status"' EXIT
 
-require_cmd uv jq yq podman awk
+device_name="$(yq -r '.gpu.device_name // ""' "$CONFIG_PATH")"
+[ -n "$device_name" ] || die "configured gpu.device_name is empty"
 
-probe_model="$(yq -r '[.models[] | select(.enabled)] | sort_by(.size_bytes) | .[0].file' "$CONFIG_PATH")"
-[ -n "$probe_model" ] && [ "$probe_model" != "null" ] || die "no enabled models to benchmark"
+listing_file="$(mktemp "${diagnostic_dir}/device-listing.XXXXXX")"
+podman run --rm --device /dev/dri --entrypoint /app/llama-server \
+    "$VULKAN_IMAGE" --list-devices >"$listing_file" 2>/dev/null \
+    || die "could not list Vulkan devices"
 
+resolve_status=0
+resolved_json="$(llmenv resolve-device --device-name "$device_name" --listing-file "$listing_file")" \
+    || resolve_status=$?
+[ "$resolve_status" -eq 0 ] || die "could not resolve configured GPU ${device_name} (exit ${resolve_status})"
+device="$(jq -r '.device // empty' <<<"$resolved_json" 2>/dev/null || true)"
+[ -n "$device" ] || die "GPU resolution returned no device for ${device_name}"
+
+presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")"
+presets_status=0
+render_presets_file "$device" "$presets_file" || presets_status=$?
+[ "$presets_status" -eq 0 ] \
+    || die "could not render production presets for ${device} (exit ${presets_status})"
+```
+
+Capturing status outside an `if` avoids `set -euo pipefail` aborting before the planned diagnostic branches.
+
+- [ ] **Step 4: Define the parser and run one production-matching benchmark per encoded model record**
+
+Move the existing validated `jq` expression out of `run_vulkan_bench()` into this exact helper before the per-model loop. It writes parser diagnostics to its second path and prints one compact metrics object on success:
+
+```bash
 parse_bench_json() {
     local stdout_file="$1" parser_stderr_file="$2"
     jq -ce '
@@ -1134,216 +1028,287 @@ parse_bench_json() {
         | {pp_tps: .[0], tg_tps: .[1]}
     ' "$stdout_file" 2>"$parser_stderr_file"
 }
-
-run_vulkan_probe() {
-    local stdout_file="$1" stderr_file="$2" parser_stderr_file="$3" status result
-
-    log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} bench -m /models/${probe_model} -p 512 -n 128 -r 2 -o json"
-    if podman run --rm --device /dev/dri \
-        -v "${MODELS_DIR}:/models:ro,z" \
-        --entrypoint /app/llama \
-        "$VULKAN_IMAGE" bench -m "/models/${probe_model}" -p 512 -n 128 -r 2 -o json \
-        >"$stdout_file" 2>"$stderr_file"; then
-        status=0
-    else
-        status=$?
-    fi
-    log_block "Probe stdout" "$(<"$stdout_file")"
-    log_nonempty_block "Probe stderr" "$(<"$stderr_file")"
-    log_block "Exit status" "$status"
-    if [ "$status" -ne 0 ]; then
-        log_nonempty_block "Probe parser stderr" "$(<"$parser_stderr_file")"
-        log_error "Vulkan probe failure: command exit ${status}"
-        return 1
-    fi
-    if ! result="$(parse_bench_json "$stdout_file" "$parser_stderr_file")"; then
-        log_nonempty_block "Probe parser stderr" "$(<"$parser_stderr_file")"
-        log_error "Vulkan probe failure: response parsing"
-        return 1
-    fi
-    log_nonempty_block "Probe parser stderr" "$(<"$parser_stderr_file")"
-    log_block "Parsed metrics" "$result"
-    PROBE_RESULT="$result"
-}
-
-log_step "Vulkan probe"
-log_info "probe model: ${probe_model}"
-diagnostic_dir="$(prepare_diagnostic_dir benchmark)"
-trap 'status=$?; finish_diagnostic_dir "$diagnostic_dir"; exit "$status"' EXIT
-vulkan_stdout="$(mktemp "${diagnostic_dir}/vulkan-probe-stdout.XXXXXX")" \
-    || die "could not create Vulkan probe stdout diagnostic"
-vulkan_stderr="$(mktemp "${diagnostic_dir}/vulkan-probe-stderr.XXXXXX")" \
-    || die "could not create Vulkan probe stderr diagnostic"
-vulkan_parser_stderr="$(mktemp "${diagnostic_dir}/vulkan-probe-parser-stderr.XXXXXX")" \
-    || die "could not create Vulkan probe parser diagnostic"
-
-winner_backend="cpu"
-winner_image="$CPU_IMAGE"
-PROBE_RESULT=""
-probe_status=1
-if run_vulkan_probe "$vulkan_stdout" "$vulkan_stderr" "$vulkan_parser_stderr" && [ -n "$PROBE_RESULT" ]; then
-    winner_backend="vulkan"
-    winner_image="$VULKAN_IMAGE"
-    probe_status=0
-    log_info "Vulkan: $(jq -r '.pp_tps' <<<"$PROBE_RESULT") tok/s prompt, $(jq -r '.tg_tps' <<<"$PROBE_RESULT") tok/s generation (probe model)"
-else
-    log_warn "Vulkan probe failed; falling back to CPU. Expect very slow inference."
-    podman pull "$winner_image" >/dev/null || die "cannot pull the CPU image"
-fi
-
-log_step "Resolving the GPU device name"
-listing_file="$(mktemp)"
-podman run --rm --device /dev/dri --entrypoint /app/llama-server \
-    "$winner_image" --list-devices >"$listing_file" 2>/dev/null || true
-log_info "device listing:"
-sed 's/^/    /' "$listing_file" || true
-
-vram="$(yq -r '.gpu.vram_total_mib' "$CONFIG_PATH")"
-device_name="$(awk -v want="$vram" '
-    match($0, /^[[:space:]]*[^:]+:[[:space:]]+/) {
-        rest = substr($0, RLENGTH + 1)
-        if (match(rest, /[[:space:]]+\([0-9]+[[:space:]]*MiB/)) {
-            name = substr(rest, 1, RSTART - 1)
-            mib  = rest
-            sub(/^.*\(/, "", mib); sub(/[[:space:]]*MiB.*$/, "", mib)
-            if (mib + 0 == want + 0) { print name; exit }
-        }
-    }' "$listing_file")"
-
-if [ -n "$device_name" ]; then
-    yq -i ".gpu.device_name = \"${device_name}\"" "$CONFIG_PATH"
-    log_info "device name recorded: ${device_name} (pci $(yq -r '.gpu.pci_address' "$CONFIG_PATH"))"
-else
-    log_warn "could not match a device with ${vram} MiB; start.sh will offload to all devices"
-fi
-
-yq -i ".gpu.backend = \"${winner_backend}\"" "$CONFIG_PATH"
-yq -i ".gpu.image = \"${winner_image}\"" "$CONFIG_PATH"
-log_info "backend set to ${winner_backend} (${winner_image})"
-
-per_model_status=0
-if [ "$winner_backend" = vulkan ] && [ -n "$device_name" ]; then
-    log_step "Resolving Vulkan device index"
-    device="$(uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" --listing-file "$listing_file" | jq -r '.device // empty')"
-    if [ -z "$device" ]; then
-        log_warn "could not resolve a Vulkan device index for ${device_name}; skipping per-model benchmarks"
-    else
-        presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")"
-        if render_presets_file "$device" "$presets_file"; then
-            log_step "Per-model Vulkan benchmark"
-            while IFS=$'\t' read -r alias file; do
-                [ -n "$alias" ] || continue
-                n_cpu_moe="$(presets_value "$presets_file" "$alias" "n-cpu-moe")"
-                moe_args=()
-                [ -n "$n_cpu_moe" ] && moe_args=(--n-cpu-moe "$n_cpu_moe")
-
-                model_stdout="$(mktemp "${diagnostic_dir}/${alias}-bench-stdout.XXXXXX")"
-                model_stderr="$(mktemp "${diagnostic_dir}/${alias}-bench-stderr.XXXXXX")"
-                model_parser_stderr="$(mktemp "${diagnostic_dir}/${alias}-bench-parser-stderr.XXXXXX")"
-
-                log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} bench -m /models/${file} --device ${device} ${moe_args[*]} -p 512 -n 128 -r 2 -o json"
-                if podman run --rm --device /dev/dri \
-                    -v "${MODELS_DIR}:/models:ro,z" \
-                    --entrypoint /app/llama \
-                    "$VULKAN_IMAGE" bench -m "/models/${file}" --device "$device" "${moe_args[@]}" \
-                    -p 512 -n 128 -r 2 -o json \
-                    >"$model_stdout" 2>"$model_stderr"; then
-                    model_status=0
-                else
-                    model_status=$?
-                fi
-                log_block "Benchmark stdout" "$(<"$model_stdout")"
-                log_nonempty_block "Benchmark stderr" "$(<"$model_stderr")"
-                log_block "Exit status" "$model_status"
-                if [ "$model_status" -ne 0 ]; then
-                    log_error "Vulkan benchmark failure for ${alias}: command exit ${model_status}"
-                    per_model_status=1
-                    continue
-                fi
-                if ! model_result="$(parse_bench_json "$model_stdout" "$model_parser_stderr")"; then
-                    log_nonempty_block "Benchmark parser stderr" "$(<"$model_parser_stderr")"
-                    log_error "Vulkan benchmark failure for ${alias}: response parsing"
-                    per_model_status=1
-                    continue
-                fi
-                pp="$(jq -er '.pp_tps' <<<"$model_result")"
-                tg="$(jq -er '.tg_tps' <<<"$model_result")"
-                yq -i "(.models[] | select(.alias == \"${alias}\") | .benchmark.vulkan.pp_tps) = ${pp}" "$CONFIG_PATH"
-                yq -i "(.models[] | select(.alias == \"${alias}\") | .benchmark.vulkan.tg_tps) = ${tg}" "$CONFIG_PATH"
-                yq -i "(.models[] | select(.alias == \"${alias}\") | .benchmark.vulkan.measured_at) = \"$(date -Iseconds)\"" "$CONFIG_PATH"
-                log_info "${alias}: ${pp} tok/s prompt, ${tg} tok/s generation"
-            done < <(yq -r '.models[] | select(.enabled) | [.alias, .file] | @tsv' "$CONFIG_PATH")
-        else
-            log_warn "could not render presets.ini for device ${device}; skipping per-model benchmarks"
-        fi
-        rm -f "$presets_file"
-    fi
-fi
-rm -f "$listing_file"
-
-exit_status="$probe_status"
-[ "$per_model_status" -eq 0 ] || exit_status=1
-exit "$exit_status"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `uv run pytest tests/test_shell.py -k benchmark -v`
-Expected: PASS, all 3 tests (2 renamed + 1 new).
-
-- [ ] **Step 5: Update the Makefile help text if it names the old behavior**
-
-Run: `grep -n "benchmark" Makefile scripts/help.sh`
-
-If `scripts/help.sh` or the Makefile's own comments describe `benchmark` as testing "the smallest model" or similar single-model language, update that line to reflect the new per-model behavior. `test_make_help_describes_a_vulkan_only_benchmark` (existing, `tests/test_shell.py:2626`) must still pass unmodified — read it first (`sed -n '2626,2650p' tests/test_shell.py`) to confirm the exact substring it checks for isn't being changed, and only touch adjacent unrelated text.
-
-- [ ] **Step 6: Commit**
+Decode records with this exact boundary-safe loop. For each model, read the two preset offload values and fail that model explicitly if `n-gpu-layers` is empty:
 
 ```bash
-git add scripts/benchmark.sh tests/test_shell.py Makefile scripts/help.sh
-git commit -m "feat(benchmark): measure every enabled model, pinned to the resolved GPU device"
+per_model_status=0
+measured_models=0
+vulkan_probe_complete=0
+while IFS= read -r model_b64; do
+    [ -n "$model_b64" ] || continue
+    model_json="$(printf '%s' "$model_b64" | base64 --decode)"
+    alias="$(jq -r '.alias' <<<"$model_json")"
+    file="$(jq -r '.file' <<<"$model_json")"
+    check_ctx_override="$(jq -r '.check_ctx_size // empty' <<<"$model_json")"
+    max_output_tokens="$(jq -r '.client_max_output_tokens' <<<"$model_json")"
+    n_gpu_layers="$(presets_value "$presets_file" "$alias" "n-gpu-layers")"
+    n_cpu_moe="$(presets_value "$presets_file" "$alias" "n-cpu-moe")"
+    preset_ctx_size="$(presets_value "$presets_file" "$alias" "ctx-size")"
+    if [ -z "$n_gpu_layers" ] || [ -z "$preset_ctx_size" ]; then
+        missing_key="n-gpu-layers"
+        [ -n "$n_gpu_layers" ] && missing_key="ctx-size"
+        log_error "missing ${missing_key} preset for ${alias}"
+        per_model_status=1
+        continue
+    fi
+    check_ctx_size="${check_ctx_override:-$preset_ctx_size}"
+```
+
+Construct the command in that loop:
+
+```bash
+bench_args=(
+    bench -m "/models/${file}" --device "$device"
+    --n-gpu-layers "$n_gpu_layers"
+)
+[ -n "$n_cpu_moe" ] && bench_args+=(--n-cpu-moe "$n_cpu_moe")
+bench_args+=(-p "$check_ctx_size" -n "$max_output_tokens" -r 2 -o json)
+```
+
+Create diagnostics only with alias-independent templates:
+
+```bash
+model_stdout="$(mktemp "${diagnostic_dir}/model-bench-stdout.XXXXXX")"
+model_stderr="$(mktemp "${diagnostic_dir}/model-bench-stderr.XXXXXX")"
+model_parser_stderr="$(mktemp "${diagnostic_dir}/model-bench-parser-stderr.XXXXXX")"
+```
+
+Run and parse the command with explicit status capture; do not allow `set -e` to bypass diagnostics:
+
+```bash
+log_command "podman run --rm --device /dev/dri -v ${MODELS_DIR}:/models:ro,z --entrypoint /app/llama ${VULKAN_IMAGE} ${bench_args[*]}"
+model_status=0
+podman run --rm --device /dev/dri \
+    -v "${MODELS_DIR}:/models:ro,z" --entrypoint /app/llama \
+    "$VULKAN_IMAGE" "${bench_args[@]}" >"$model_stdout" 2>"$model_stderr" \
+    || model_status=$?
+log_block "Benchmark stdout" "$(<"$model_stdout")"
+log_nonempty_block "Benchmark stderr" "$(<"$model_stderr")"
+log_block "Exit status" "$model_status"
+if [ "$model_status" -ne 0 ]; then
+    log_error "Vulkan benchmark failure for ${alias}: command exit ${model_status}"
+    per_model_status=1
+    continue
+fi
+model_result=""
+if ! model_result="$(parse_bench_json "$model_stdout" "$model_parser_stderr")"; then
+    log_nonempty_block "Benchmark parser stderr" "$(<"$model_parser_stderr")"
+    log_error "Vulkan benchmark failure for ${alias}: response parsing"
+    per_model_status=1
+    continue
+fi
+log_nonempty_block "Benchmark parser stderr" "$(<"$model_parser_stderr")"
+log_block "Parsed metrics" "$model_result"
+pp="$(jq -er '.pp_tps' <<<"$model_result")"
+tg="$(jq -er '.tg_tps' <<<"$model_result")"
+```
+
+- [ ] **Step 5: Persist a result without interpolating aliases into `yq` source**
+
+Use one atomic expression with aliases and values passed as data:
+
+```bash
+measured_at="$(date -Iseconds)"
+MODEL_ALIAS="$alias" PP_TPS="$pp" TG_TPS="$tg" MEASURED_AT="$measured_at" \
+    yq -i '
+        (.models[] | select(.alias == strenv(MODEL_ALIAS)) | .benchmark.vulkan) = {
+            "pp_tps": env(PP_TPS),
+            "tg_tps": env(TG_TPS),
+            "measured_at": strenv(MEASURED_AT)
+        }
+    ' "$CONFIG_PATH"
+measured_models=$((measured_models + 1))
+done < <(
+    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64'
+)
+```
+
+Never place `$alias` in a yq program or filename. At the end:
+
+```bash
+[ "$measured_models" -gt 0 ] || die "no enabled model benchmark completed successfully"
+[ "$per_model_status" -eq 0 ] || exit 1
+```
+
+- [ ] **Step 6: Preserve Vulkan-to-CPU fallback semantics**
+
+Treat the first configured, device-pinned model command as both the Vulkan capability probe and its per-model measurement; do not run a separate fixed `-p 512 -n 128` command. Initialize `vulkan_probe_complete=0` before the model loop and add these helpers:
+
+```bash
+record_backend() {
+    local backend="$1" image="$2"
+    WINNER_BACKEND="$backend" WINNER_IMAGE="$image" \
+        yq -i '.gpu.backend = strenv(WINNER_BACKEND) | .gpu.image = strenv(WINNER_IMAGE)' "$CONFIG_PATH"
+}
+
+fall_back_to_cpu() {
+    record_backend cpu "$CPU_IMAGE"
+    podman pull "$CPU_IMAGE" >/dev/null || die "cannot pull the CPU image"
+}
+```
+
+In both the nonzero-command and parse-failure branches from Step 4, before the ordinary `per_model_status=1; continue`, use:
+
+```bash
+if [ "$vulkan_probe_complete" -eq 0 ]; then
+    fall_back_to_cpu
+    exit 1
+fi
+```
+
+Immediately after the first successful parse and before persistence, use:
+
+```bash
+if [ "$vulkan_probe_complete" -eq 0 ]; then
+    record_backend vulkan "$VULKAN_IMAGE"
+    vulkan_probe_complete=1
+fi
+```
+
+This keeps the existing CPU fallback for an unsuccessful Vulkan probe, removes hardcoded probe sizes, and avoids measuring the first model twice. A missing preset or device is a configuration prerequisite failure, not evidence that Vulkan itself failed, so those branches exit nonzero without rewriting the backend to CPU.
+
+- [ ] **Step 7: Run focused coverage and the mandatory shell/Python-test gate**
+
+Run:
+
+```bash
+uv run pytest tests/test_shell.py -k benchmark -v
+make validate && make test
+```
+
+Expected: both models are measured with `--n-gpu-layers`; the MoE model also has `--n-cpu-moe`; prompt/generation sizes come from config; the odd alias persists safely; every prerequisite failure exits nonzero; CPU fallback remains covered; the full gate passes.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add scripts/benchmark.sh tests/test_shell.py
+git commit -m "feat(benchmark): measure configured models on the configured GPU"
 ```
 
 ---
 
-### Task 7: Empirical timeout tuning + acceptance re-run + docs
+### Task 7: Tune timeout on hardware, run acceptance, and document the flow
 
 **Files:**
-- Modify: `models.yml.example` (possibly add `check_timeout_seconds` to `ornith-35b` if cold-load measurement warrants it)
-- Modify: `.agents/architecture.md` and/or `README.md` (wherever `gpu.benchmark`, the check scripts, or their flag derivation is documented — locate with `grep -rn "gpu.benchmark\|n_cpu_moe" .agents/architecture.md README.md` first)
-- No code changes beyond what Tasks 1-6 already made; this task is measurement + config/doc updates + a real hardware re-run.
+- Modify: `scripts/check-setup.sh:83-108`
+- Modify: `scripts/check-server.sh:163-221,264-329`
+- Modify/Test: `tests/test_shell.py:2702-3036,4930-5305`
+- Modify: `.agents/architecture.md:9-24,147-179`
+- Modify: `README.md:128-143`
 
-**Interfaces:** None (this task consumes everything built in Tasks 1-6; it produces no new interface).
+**Interfaces:**
+- Consumes all Tasks 1-6; produces separate empirically justified offline and HTTP fallback baselines. The largest configured model defines the shared defaults, so no Ornith-only example override is added.
 
-- [ ] **Step 1: Run the full unit/shell test suite once, end to end**
+- [ ] **Step 1: Run the full automated gate before hardware work**
 
-Run: `uv run pytest tests/ -v`
-Expected: PASS, 0 failures. This is the gate before touching real hardware.
+Run: `make validate && make test`
 
-- [ ] **Step 2: Measure real cold-load time for the largest model**
+Expected: PASS with zero failures.
 
-On the real hardware host (AMD RX 9070 XT, per this plan's originating acceptance run), with `ornith-35b` enabled at its full `ctx_size: 262144` and configured `n_cpu_moe: 28`, time the exact command `check-setup.sh` now builds for it end-to-end:
+- [ ] **Step 2: Snapshot live state and select Ornith temporarily**
+
+Use a fixed, visible backup path so restoration does not depend on shell-local variables. Refuse to overwrite a leftover backup from an interrupted run:
 
 ```bash
-time timeout 600 podman run --rm --device /dev/dri \
-  -v "${LLM_ENV_MODELS_DIR}:/models:ro,z" \
-  --entrypoint /app/llama "$(yq -r '.gpu.image' ~/.config/llm-env/models.yml)" cli \
-  -m /models/ornith-1.0-35b-Q4_K_M.gguf --device Vulkan0 \
-  --n-gpu-layers 99 --n-cpu-moe 28 --ctx-size 262144 \
-  --single-turn --no-show-timings -p "Reply with exactly: ready" -n 256
+live_config="$HOME/.config/llm-env/models.yml"
+acceptance_backup="/tmp/llm-env-models.yml.before-config-aware-acceptance"
+active_state="/tmp/llm-env-service-state.before-config-aware-acceptance"
+test ! -e "$acceptance_backup"
+test ! -e "$active_state"
+install -m 600 "$live_config" "$acceptance_backup"
+if systemctl --user is-active --quiet llm-server.service; then
+    printf '%s\n' active > "$active_state"
+else
+    printf '%s\n' inactive > "$active_state"
+fi
+MODEL_ALIAS=ornith-35b yq -i '
+    with(.models[]; .enabled = (.alias == strenv(MODEL_ALIAS))) |
+    .runtime.models_max = 1 |
+    (.models[] | select(.alias == strenv(MODEL_ALIAS)) | .check_timeout_seconds) = 1800
+' "$live_config"
+yq -e '
+    (.runtime.models_max == 1) and
+    ([.models[] | select(.enabled) | .alias] == ["ornith-35b"]) and
+    (.models[] | select(.alias == "ornith-35b") |
+        .ctx_size == 262144 and
+        .client_max_output_tokens == 8192 and
+        .n_gpu_layers == 99 and
+        .n_cpu_moe == 28 and
+        .check_timeout_seconds == 1800)
+' "$live_config"
 ```
 
-(Substitute the real resolved `--device` value from `make check-setup`'s own "GPU device resolution" diagnostic if it differs from `Vulkan0`.) Record the wall-clock time.
+The temporary 1800-second per-model override prevents the old fallback from truncating the measurement. Step 8 restores the complete prior YAML, including enabled models, backend, image, and device name, and restores the service's original active/inactive state. Run Step 8 even if any acceptance command fails.
 
-- [ ] **Step 3: Set the scripts' default timeout baseline from the measurement**
+- [ ] **Step 3: Measure the full-context offline check path**
 
-If the measured cold-load time (with a safety margin — double it, or add at least 120s, whichever is larger) exceeds the current script defaults (`180` in `check-setup.sh`'s `record_inferences` TSV query, `120` in both of `check-server.sh`'s TSV queries), update those two literal fallback defaults in the already-modified code from Tasks 4 and 5 to the new baseline. These are the one place per script where a literal number is allowed by this plan's Global Constraints (the explicitly-permitted script-level baseline). If the measurement is within the existing defaults, leave them unchanged and note the measurement in the commit message instead.
+Run:
 
-- [ ] **Step 4: Decide whether `ornith-35b` needs an explicit override**
+```bash
+/usr/bin/time -f '%e' -o /tmp/llm-env-check-setup-seconds \
+    env LLM_ENV_CHECK_VERBOSE=1 make check-setup
+awk '{ seconds = int($1); if ($1 > seconds) seconds++; print seconds }' \
+    /tmp/llm-env-check-setup-seconds
+```
 
-If, even after Step 3's baseline update, `ornith-35b` specifically still needs more headroom than every other model (e.g. because its cold-load is an outlier, not representative of the general baseline), add `check_timeout_seconds: <value>` to its entry in `models.yml.example` (and to the live `~/.config/llm-env/models.yml` used for the acceptance re-run in Step 5) rather than inflating the shared script baseline for every model. Otherwise, skip this step — the tuned baseline from Step 3 already covers it.
+Expected: `check-setup` passes and its diagnostic command shows `--n-gpu-layers 99 --n-cpu-moe 28 --ctx-size 262144 -n 8192` on one resolved Vulkan device.
 
-- [ ] **Step 5: Re-run the full acceptance chain against real hardware**
+- [ ] **Step 4: Measure the real cold-load HTTP path**
+
+Restart the router so its lazy-loaded model begins unloaded, then time the actual HTTP check. Its first direct completion request is the cold-load request; the later OmniRoute request remains part of the end-to-end script measurement:
+
+```bash
+make start
+/usr/bin/time -f '%e' -o /tmp/llm-env-check-server-seconds \
+    env LLM_ENV_CHECK_VERBOSE=1 make check-server
+awk '{ seconds = int($1); if ($1 > seconds) seconds++; print seconds }' \
+    /tmp/llm-env-check-server-seconds
+```
+
+Expected: `check-server` passes; the direct and OmniRoute bodies both contain `max_tokens: 8192`, and the timed run includes a real cold model load through `/v1/chat/completions`.
+
+- [ ] **Step 5: Calculate and apply both timeout baselines, including their tests**
+
+Calculate each path independently. For each fallback, use the larger of twice the measured ceiling and the measured ceiling plus 120 seconds:
+
+```bash
+offline_measured="$(awk '{ n = int($1); if ($1 > n) n++; print n }' /tmp/llm-env-check-setup-seconds)"
+server_measured="$(awk '{ n = int($1); if ($1 > n) n++; print n }' /tmp/llm-env-check-server-seconds)"
+offline_baseline="$((offline_measured * 2))"
+[ "$offline_baseline" -ge "$((offline_measured + 120))" ] || \
+    offline_baseline="$((offline_measured + 120))"
+server_baseline="$((server_measured * 2))"
+[ "$server_baseline" -ge "$((server_measured + 120))" ] || \
+    server_baseline="$((server_measured + 120))"
+printf 'offline measured=%s baseline=%s\nserver measured=%s baseline=%s\n' \
+    "$offline_measured" "$offline_baseline" "$server_measured" "$server_baseline"
+```
+
+Always replace the offline `.check_timeout_seconds // 180` fallback with the printed numeric `offline_baseline`, and replace the HTTP `.check_timeout_seconds // 120` fallback used by both completion paths with the printed numeric `server_baseline`. Do not keep an older default merely because it is larger, and do not add `check_timeout_seconds` to `models.yml.example`: the measurements use the largest configured model and therefore define the shared defaults directly.
+
+Update the fallback-sensitive tests in the same edit:
+
+- In `run_check_setup_with_stubs`, make the timeout stub accept the printed `offline_baseline` and `300`, and replace `assert recorded.count("timeout 180 podman run") == 1` with the printed offline value.
+- In `run_check_server`, keep Ornith's explicit `600`; update the expected timeout for both `gemma4` and `llama-cpp/gemma4` from `"120"` to the printed `server_baseline`.
+- Search the affected block with `rg -n '180|120|check_timeout_seconds' tests/test_shell.py scripts/check-setup.sh scripts/check-server.sh` and update only fallback-sensitive occurrences; health, authentication, listing, login, and provider requests remain fixed at 10 seconds.
+
+Remove the temporary live override so the acceptance run exercises the new fallbacks:
+
+```bash
+MODEL_ALIAS=ornith-35b yq -i \
+    'del(.models[] | select(.alias == strenv(MODEL_ALIAS)) | .check_timeout_seconds)' \
+    "$HOME/.config/llm-env/models.yml"
+make validate && make test
+```
+
+Expected: the mandatory `.sh`/`.py` gate passes with the measured fallback literals and their paired assertions in sync.
+
+- [ ] **Step 6: Re-run real hardware acceptance**
+
+Run:
 
 ```bash
 make setup
@@ -1356,32 +1321,63 @@ make benchmark
 make check-with-agents
 ```
 
-with `ornith-35b` as the enabled model. Confirm:
-- `check-setup`'s offline inference check now runs with `--n-cpu-moe 28 --ctx-size 262144` (visible in its diagnostic output with `LLM_ENV_CHECK_VERBOSE=1` if needed) — i.e., it is now actually exercising the `n_cpu_moe: 28` profile the earlier acceptance run silently skipped.
-- `check-server`'s completion probe no longer hardcodes `max_tokens: 256` — confirm via its diagnostic output that the request body's `max_tokens` matches `client_max_output_tokens` (8192).
-- `benchmark`'s per-model bench call for `ornith-35b` is pinned to a single `--device` and includes `--n-cpu-moe 28` — confirm via its diagnostic output there is exactly one Vulkan device listed in the bench command's own stderr (no more "Found 2 Vulkan devices" auto-spread), and that `.models[] | select(.alias == "ornith-35b") | .benchmark.vulkan` in `~/.config/llm-env/models.yml` is populated.
-- All `make` targets exit 0 except any pre-existing, out-of-scope failure (the Pi CLI's broken local install, confirmed unrelated in the original research).
+Confirm from verbose diagnostics/config:
 
-If anything fails, treat it as a new bug: capture the diagnostic output (`LLM_ENV_KEEP_CHECK_ARTIFACTS=1`), fix the specific script involved (revisit the relevant Task 3-6), and re-run this step — do not proceed to Step 6 with a red acceptance run.
+- `check-setup`: `--n-gpu-layers 99 --n-cpu-moe 28 --ctx-size 262144 -n 8192` and the measured timeout.
+- `check-server`: both direct and OmniRoute bodies use `max_tokens: 8192`; there is intentionally no HTTP context-size field.
+- `benchmark`: one resolved `--device`, `--n-gpu-layers 99`, `--n-cpu-moe 28`, `-p 262144`, `-n 8192`, and populated `.models[] | select(.alias == "ornith-35b") | .benchmark.vulkan`.
+- All in-scope targets exit zero. Record the known Pi CLI failure from `check-with-agents` separately; it remains out of scope and must not mask the other results.
 
-- [ ] **Step 6: Update documentation**
+- [ ] **Step 7: Update architecture and README documentation**
 
-In `.agents/architecture.md` and/or `README.md` wherever `gpu.benchmark` or the check scripts' flag derivation is described, update the text to describe: (a) per-model `benchmark.vulkan` storage instead of the shared `gpu.benchmark` key, (b) `check-setup.sh`/`benchmark.sh` reading `n-gpu-layers`/`n-cpu-moe` from `llmenv presets`'s own output rather than re-deriving them, (c) the two new optional per-model fields `check_ctx_size`/`check_timeout_seconds` and their production-parity defaults. Keep edits scoped to the sections that already discuss this flow — do not add new unrelated sections.
+Document all of the following in the existing benchmark/check sections:
 
-- [ ] **Step 7: Commit**
+- shared `gpu.benchmark` is retired; results live under each model's `benchmark.vulkan`;
+- offline check and benchmark offload flags come from the production preset render;
+- offline `-n` and benchmark generation size come from `client_max_output_tokens`;
+- `check_ctx_size` defaults to `ctx_size` and applies only to offline CLI/benchmark sizing, because HTTP chat completions has no per-request context-size control;
+- separate offline and HTTP `check_timeout_seconds` fallback values, their measured cold-path durations, and the exact margin formula from Step 5;
+- prerequisite failures are nonzero, and aliases are passed to `yq` as data.
+
+- [ ] **Step 8: Restore the complete live configuration and prior service state**
+
+Run these commands whether acceptance passed or failed:
 
 ```bash
-git add models.yml.example .agents/architecture.md README.md scripts/check-setup.sh scripts/check-server.sh
-git commit -m "docs+tune: set check timeout baseline from measured ornith-35b cold-load, document per-model benchmark storage"
+live_config="$HOME/.config/llm-env/models.yml"
+acceptance_backup="/tmp/llm-env-models.yml.before-config-aware-acceptance"
+active_state="/tmp/llm-env-service-state.before-config-aware-acceptance"
+test -f "$acceptance_backup"
+test -f "$active_state"
+install -m 600 "$acceptance_backup" "$live_config"
+if [ "$(<"$active_state")" = active ]; then
+    make restart
+else
+    make stop
+fi
+rm -f "$acceptance_backup" "$active_state"
 ```
 
-(Omit any path from the `git add` that Step 3/4/6 didn't actually touch.)
+Expected: the previously enabled model set, `gpu.backend`, `gpu.image`, `gpu.device_name`, and every other live setting exactly match the saved file; the service is active only if it was active before Step 2.
+
+- [ ] **Step 9: Run the final gate and commit**
+
+Run: `make validate && make test`
+
+Expected: PASS. This is mandatory because Task 7 edits `.sh` files and their Python tests.
+
+```bash
+git add .agents/architecture.md README.md scripts/check-setup.sh scripts/check-server.sh tests/test_shell.py
+git commit -m "docs+tune: record config-aware check timeout and benchmark flow"
+```
 
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** All 7 design components are covered — Component 1 (Task 1), Component 2 (Task 3), Component 3 (Task 4), Component 4 (Tasks 4 & 5), Component 5 (Task 6), Component 6 (Task 2), Component 7 (Task 7).
-- **Placeholder scan:** No TBD/TODO markers; every step includes literal code, exact commands, or a fully specified manual verification procedure (Task 7, which is inherently a real-hardware measurement step that cannot be scripted in advance).
-- **Type consistency:** `inference_command()`'s signature (`file, device, layers, n_cpu_moe, ctx_size, timeout_seconds`) and `record_inferences()`'s signature (`device, skip_reason, presets_file`) are used identically at both their definition (Task 5, Step 3) and call sites (Task 5, Step 3's VRAM-budget block). `render_presets_file(device, output)` and `presets_value(file, alias, key)` (Task 3) are called with matching argument order and count in both Task 5 and Task 6.
-- **Ordering dependency:** Task 3 (shared `tools/lib.sh` helpers) must land before Tasks 5 and 6, which consume it — reflected in file/task ordering above. Tasks 1 and 2 (schema) have no code dependency on Task 3 and can run first or in parallel with it.
+- **Spec coverage:** Component 1 is Task 1; Component 2 is Task 3; Component 3 is Task 4; reconciled Component 4 is Tasks 4-5 plus the explicit HTTP rationale in Global Constraints; Component 5 is Task 6; Component 6 is Task 2; Component 7 is Task 7.
+- **Review coverage:** Task 3's helper fixture now satisfies every `require_valid_config()` requirement, including `gpu.reserve_mode`. Task 4 extends the real `run_check_server()` fixture and preserves every existing success/failure test while adding per-model isolation, yq/jq producer-failure, zero-model, and 10-second auth-probe coverage. Task 5 binds all three `record_inferences()` parameters locally. Task 6 defines `parse_bench_json()`, adapts the existing successful/invalid benchmark tests, and persists legacy-key migration before standalone `make benchmark` writes. Task 7 measures both cold paths, updates fallback-sensitive tests, runs the full gate, and restores live config/service state.
+- **Repository gates:** Tasks 1-6 explicitly run `make validate && make test` after their `.py`/`.sh` edits. Task 7 runs `make validate && make test` both immediately after fallback/test edits and again before commit.
+- **Placeholder scan:** No TBD/TODO/future implementation markers or undefined helper references remain. Empirical values are generated by exact commands and have exact replacement sites.
+- **Interface consistency:** `render_presets_file(device, output)` and `presets_value(file, alias, key)` have identical signatures in Tasks 3, 5, and 6. `record_inferences()` binds `device`, `skip_reason`, and `presets_file`; offline inference carries seven arguments consistently. Both HTTP loops decode the same materialized model-record shape, and `parse_bench_json(stdout_file, parser_stderr_file)` matches every call site.
+- **Task right-sizing:** Each task owns one independently reviewable behavior and its red/green cycle. Shared helpers land before their two consumers; empirical tuning follows all automated behavior.
