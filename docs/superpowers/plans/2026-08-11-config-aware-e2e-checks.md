@@ -661,15 +661,23 @@ When `PRESETS_MISSING_ALIAS=1`, omit `[second]`; always exit `$PRESETS_EXIT`. Up
 
 - [ ] **Step 2: Replace the happy-path assertions and add prerequisite failures**
 
-The happy path must assert these exact command fragments once each:
+The happy path must scope its timeout assertion to each model's own command line, not to a global substring count — a global `recorded.count("timeout 300 podman run") == 1` would break the moment the empirically-tuned baseline (Task 7) happens to equal the second model's explicit `300`-second override, since both models' commands would then legitimately contain the string `"timeout 300 podman run"` and the count would be 2, not 1, for a correct run:
 
 ```python
-assert recorded.count("timeout 180 podman run") == 1
-assert recorded.count("timeout 300 podman run") == 1
-assert "--n-gpu-layers 42 --ctx-size 8192" in recorded
-assert "--n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048" in recorded
-assert "-p Reply with exactly: ready -n 2048" in recorded
-assert "-p Reply with exactly: ready -n 1024" in recorded
+first_call = next(
+    (line for line in recorded.splitlines() if "podman run" in line and "/models/first.gguf" in line and " cli " in line),
+    None,
+)
+second_call = next(
+    (line for line in recorded.splitlines() if "podman run" in line and "/models/second.gguf" in line and " cli " in line),
+    None,
+)
+assert first_call is not None and first_call.startswith("timeout 180 podman run")
+assert second_call is not None and second_call.startswith("timeout 300 podman run")
+assert "--n-gpu-layers 42 --ctx-size 8192" in first_call
+assert "--n-gpu-layers 17 --n-cpu-moe 12 --ctx-size 2048" in second_call
+assert first_call.endswith("-p Reply with exactly: ready -n 2048")
+assert second_call.endswith("-p Reply with exactly: ready -n 1024")
 ```
 
 The `-n` assertions retire the hardcoded offline `-n 256`: each model now uses `client_max_output_tokens`.
@@ -695,6 +703,18 @@ def test_check_setup_fails_when_inference_prerequisite_is_unavailable(tmp_path, 
 ```
 
 Keep the existing budget failure test. Add an `empty_resolve` fixture option that returns status 0 with `{"device":""}`, and add it as a fourth parameter expecting `GPU device resolution returned no device`. This distinguishes command failure from a successful but unusable result.
+
+Add a producer-failure test proving the enumeration fix actually matters — a broken `yq` must not let the script report success after checking zero models:
+
+```python
+def test_check_setup_fails_when_model_enumeration_fails(tmp_path):
+    result, calls, _ = run_check_setup_with_stubs(tmp_path, yq_models_json_exit=17)
+    assert result.returncode != 0
+    assert "failed to enumerate enabled models" in result.stderr
+    assert " cli " not in calls.read_text()
+```
+
+Add a `yq_models_json_exit: int = 0` keyword parameter to `run_check_setup_with_stubs`; make the fixture's `yq` stub exit with that status specifically for the `-o=json -I=0 '[.models[] | select(.enabled)]'` invocation (matched by its exact arguments, not by a blanket `case "$*"` on `-o=json` alone, so the fixture's other `yq` calls are unaffected).
 
 - [ ] **Step 3: Expand command construction**
 
@@ -758,7 +778,7 @@ fi
 ctx_size="${check_ctx_override:-$preset_ctx_size}"
 ```
 
-Pass every value to the real command, then close the loop with the encoded-record producer. Do not fall back to raw `.n_gpu_layers`; rendered presets are the production source of truth.
+Pass every value to the real command, then close the loop. Do not fall back to raw `.n_gpu_layers`; rendered presets are the production source of truth.
 
 ```bash
 moe_args=()
@@ -772,10 +792,25 @@ record_command "inference ${alias}" "$command_text" "Reply with exactly: ready" 
     -m "/models/${file}" --device "$device" --n-gpu-layers "$n_gpu_layers" \
     "${moe_args[@]}" --ctx-size "$ctx_size" --single-turn --no-show-timings \
     -p "Reply with exactly: ready" -n "$max_output_tokens" || true
-done < <(
-    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
-        jq -r '.[] | @base64'
-)
+done < "$model_records"
+```
+
+The producer feeding this loop must not be a bare `done < <(...)` process substitution: under that form, neither `set -uo pipefail` nor anything else makes the `while` loop's own exit status reflect a `yq`/`jq` failure, so a producer crash silently checks zero (or fewer than all) enabled models while the script still reports success. Materialize the producer's output to a file and check its own exit status *before* the loop starts, immediately after the local variable declarations at the top of `record_inferences()`:
+
+```bash
+model_records="$(mktemp "${diagnostic_dir}/inference-model-records.XXXXXX")" \
+    || die "could not create model records file"
+if ! yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64' > "$model_records"; then
+    log_error "failed to enumerate enabled models for offline inference"
+    FAIL=$((FAIL + 1))
+    return 1
+fi
+if [ ! -s "$model_records" ]; then
+    log_error "no enabled models to check"
+    FAIL=$((FAIL + 1))
+    return 1
+fi
 ```
 
 - [ ] **Step 4: Make every prerequisite outcome explicit without relying on shell aborts**
@@ -976,7 +1011,23 @@ def test_benchmark_fails_instead_of_skipping_all_models(tmp_path, kwargs, messag
     assert result.returncode != 0
     assert message in result.stderr
     assert yq_value(config, ".gpu.benchmark") == "null"
+
+
+def test_benchmark_fails_when_model_enumeration_fails(tmp_path):
+    """A yq/jq enumeration crash must not let the script report success
+    after benchmarking fewer than every enabled model -- this is what the
+    materialized model_records file (Step 4) and the measured_models ==
+    total_models check (Step 5) exist to catch."""
+    result, calls, config = run_benchmark(
+        tmp_path, valid_benchmark_json, yq_models_json_exit=19
+    )
+    assert result.returncode != 0
+    assert "failed to enumerate enabled models" in result.stderr
+    assert " bench " not in calls.read_text()
+    assert yq_value(config, ".gpu.benchmark") == "null"
 ```
+
+Add a `yq_models_json_exit: int = 0` keyword parameter to `run_benchmark`, mirroring Task 5's fixture change: the fixture's `yq` stub exits with that status specifically for the `-o=json -I=0 '[.models[] | select(.enabled)]'` invocation, matched by its exact arguments so the fixture's other `yq` calls (backend/image writes, migration) are unaffected.
 
 Define `valid_benchmark_json` at module scope as `'[{"n_prompt":512,"avg_ts":90.0},{"n_gen":128,"avg_ts":30.0}]'`. Have `run_benchmark()` invoke `["/usr/bin/make", "benchmark"]`, not `scripts/benchmark.sh` directly, so the migration test exercises the public entrypoint named in the design.
 
@@ -1028,6 +1079,17 @@ parse_bench_json() {
         | {pp_tps: .[0], tg_tps: .[1]}
     ' "$stdout_file" 2>"$parser_stderr_file"
 }
+```
+
+Materialize the enumeration into a file and check the producer's own exit status before looping — the same fix Task 5 applies to `check-setup.sh`, and for the same reason: a bare `done < <(yq | jq ...)` process substitution does not let `set -euo pipefail` (or anything else) fail the loop when the producer crashes partway through, so a `yq`/`jq` failure after emitting some records would silently benchmark only the models emitted before the crash while `measured_models` (Step 5) still ends up `> 0` and the script reports success:
+
+```bash
+model_records="$(mktemp "${diagnostic_dir}/benchmark-model-records.XXXXXX")"
+if ! yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
+        jq -r '.[] | @base64' > "$model_records"; then
+    die "failed to enumerate enabled models for benchmarking"
+fi
+[ -s "$model_records" ] || die "no enabled models to benchmark"
 ```
 
 Decode records with this exact boundary-safe loop. For each model, read the two preset offload values and fail that model explicitly if `n-gpu-layers` is empty:
@@ -1120,16 +1182,18 @@ MODEL_ALIAS="$alias" PP_TPS="$pp" TG_TPS="$tg" MEASURED_AT="$measured_at" \
         }
     ' "$CONFIG_PATH"
 measured_models=$((measured_models + 1))
-done < <(
-    yq -o=json -I=0 '[.models[] | select(.enabled)]' "$CONFIG_PATH" |
-        jq -r '.[] | @base64'
-)
+done < "$model_records"
 ```
 
-Never place `$alias` in a yq program or filename. At the end:
+Never place `$alias` in a yq program or filename. At the end, require every enumerated model to have been measured — not merely "at least one" — so a partial-producer-crash scenario (caught upstream by Step 4's materialization) can never combine with a later per-model failure to look like a clean run:
 
 ```bash
+total_models="$(wc -l < "$model_records")"
 [ "$measured_models" -gt 0 ] || die "no enabled model benchmark completed successfully"
+if [ "$measured_models" -ne "$total_models" ]; then
+    log_error "measured ${measured_models} of ${total_models} enabled models"
+    per_model_status=1
+fi
 [ "$per_model_status" -eq 0 ] || exit 1
 ```
 
@@ -1291,7 +1355,7 @@ Always replace the offline `.check_timeout_seconds // 180` fallback with the pri
 
 Update the fallback-sensitive tests in the same edit:
 
-- In `run_check_setup_with_stubs`, make the timeout stub accept the printed `offline_baseline` and `300`, and replace `assert recorded.count("timeout 180 podman run") == 1` with the printed offline value.
+- In `run_check_setup_with_stubs`, make the timeout stub accept the printed `offline_baseline` and `300`, and update Task 5's `first_call`/`second_call` assertions so `first_call.startswith("timeout 180 podman run")` becomes `first_call.startswith(f"timeout {offline_baseline} podman run")` — keep the per-model-scoped form (not a global `recorded.count(...)`), since `offline_baseline` and the second model's explicit `300` can coincide.
 - In `run_check_server`, keep Ornith's explicit `600`; update the expected timeout for both `gemma4` and `llama-cpp/gemma4` from `"120"` to the printed `server_baseline`.
 - Search the affected block with `rg -n '180|120|check_timeout_seconds' tests/test_shell.py scripts/check-setup.sh scripts/check-server.sh` and update only fallback-sensitive occurrences; health, authentication, listing, login, and provider requests remain fixed at 10 seconds.
 
@@ -1376,7 +1440,7 @@ git commit -m "docs+tune: record config-aware check timeout and benchmark flow"
 ## Self-Review Notes
 
 - **Spec coverage:** Component 1 is Task 1; Component 2 is Task 3; Component 3 is Task 4; reconciled Component 4 is Tasks 4-5 plus the explicit HTTP rationale in Global Constraints; Component 5 is Task 6; Component 6 is Task 2; Component 7 is Task 7.
-- **Review coverage:** Task 3's helper fixture now satisfies every `require_valid_config()` requirement, including `gpu.reserve_mode`. Task 4 extends the real `run_check_server()` fixture and preserves every existing success/failure test while adding per-model isolation, yq/jq producer-failure, zero-model, and 10-second auth-probe coverage. Task 5 binds all three `record_inferences()` parameters locally. Task 6 defines `parse_bench_json()`, adapts the existing successful/invalid benchmark tests, and persists legacy-key migration before standalone `make benchmark` writes. Task 7 measures both cold paths, updates fallback-sensitive tests, runs the full gate, and restores live config/service state.
+- **Review coverage:** Task 3's helper fixture now satisfies every `require_valid_config()` requirement, including `gpu.reserve_mode`. Task 4 extends the real `run_check_server()` fixture and preserves every existing success/failure test while adding per-model isolation, yq/jq producer-failure, zero-model, and 10-second auth-probe coverage. Task 5 binds all three `record_inferences()` parameters locally, materializes its model enumeration to a file with an explicit producer-failure check (rather than an unchecked `done < <(...)` process substitution) so a `yq`/`jq` crash can never look like a zero-model clean run, and scopes its timeout assertions per-model instead of by global string count so a coincidental baseline/override collision can't produce a false failure. Task 6 defines `parse_bench_json()`, adapts the existing successful/invalid benchmark tests, persists legacy-key migration before standalone `make benchmark` writes, applies the same materialized-enumeration fix as Task 5, and requires `measured_models == total_models` (not merely `> 0`) so a mid-enumeration producer crash can't masquerade as a complete run. Task 7 measures both cold paths, updates fallback-sensitive tests (including the per-model-scoped assertions from Task 5), runs the full gate, and restores live config/service state.
 - **Repository gates:** Tasks 1-6 explicitly run `make validate && make test` after their `.py`/`.sh` edits. Task 7 runs `make validate && make test` both immediately after fallback/test edits and again before commit.
 - **Placeholder scan:** No TBD/TODO/future implementation markers or undefined helper references remain. Empirical values are generated by exact commands and have exact replacement sites.
 - **Interface consistency:** `render_presets_file(device, output)` and `presets_value(file, alias, key)` have identical signatures in Tasks 3, 5, and 6. `record_inferences()` binds `device`, `skip_reason`, and `presets_file`; offline inference carries seven arguments consistently. Both HTTP loops decode the same materialized model-record shape, and `parse_bench_json(stdout_file, parser_stderr_file)` matches every call site.
