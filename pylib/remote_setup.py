@@ -343,6 +343,30 @@ def write_cached_key(cache_path: Path, key_id: str, key_value: str) -> None:
 _key_issuance_lock = threading.Lock()
 
 
+def _extract_keys(payload: Any) -> list[Any]:
+    """Tolerate either shape GET /api/keys might return, mirroring
+    pylib.omniroute._extract_providers: a bare list, or a dict nesting the
+    list under a plausible key. An unrecognized shape MUST raise rather
+    than degrade to `[]` -- a silent empty listing would make the cached
+    key look permanently revoked and mint a brand new OmniRoute API key on
+    every single /config request, forever, with no error anywhere."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("keys", "apiKeys", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    # Describe only the type/shape, never the payload itself -- it may
+    # carry key material, and this message reaches stderr/the container log.
+    shape = (
+        f"dict with keys {sorted(payload.keys())!r}"
+        if isinstance(payload, dict)
+        else type(payload).__name__
+    )
+    raise OmniRouteError(f"unexpected API key listing shape: {shape}")
+
+
 def ensure_api_key(
     base_url: str,
     dashboard_password: str,
@@ -358,7 +382,7 @@ def ensure_api_key(
         cached = read_cached_key(cache_path)
         if cached is not None:
             listing = _request("GET", f"{base_url}/api/keys", session_token)
-            keys = listing.get("keys", []) if isinstance(listing, dict) else []
+            keys = _extract_keys(listing)
             if any(isinstance(k, dict) and k.get("id") == cached["id"] for k in keys):
                 return cached["key"]
         created = _request(
@@ -412,6 +436,21 @@ def render_setup_script(host: str) -> str:
 
 
 class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
+    # socketserver.BaseRequestHandler honors a `timeout` attribute by
+    # calling self.connection.settimeout(self.timeout) before handle():
+    # without it a LAN client that opens a connection and never sends a
+    # request line pins one server thread forever. The design accepted LAN
+    # exposure, not unbounded resource consumption.
+    timeout = 10
+
+    # log_message() is not told the status it is reporting, so remember
+    # what send_response() last emitted and gate the log on that.
+    _last_status: int | None = None
+
+    def send_response(self, code, message=None):
+        self._last_status = code
+        super().send_response(code, message)
+
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -491,7 +530,23 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         self._write_json(200, response)
 
     def log_message(self, format_string, *args):
-        pass
+        """Log only what an operator would need to see in
+        `podman logs remote-setup`: failed master-key attempts (401),
+        OmniRoute outages (502), misconfiguration (503) and internal
+        errors (500). Successful 200s on a low-traffic installer endpoint
+        are pure noise, so they stay quiet. Same message shape as the base
+        class -- the status gate is the only change."""
+        status = self._last_status
+        if status is not None and 200 <= status < 300:
+            return
+        super().log_message(format_string, *args)
+
+    def log_error(self, format_string, *args):
+        """Always logged, never gated: log_error() fires for problems the
+        base class handles before any send_response() ran (a timed-out or
+        malformed request line), so self._last_status would still hold the
+        PREVIOUS request's status on a kept-alive connection."""
+        http.server.BaseHTTPRequestHandler.log_message(self, format_string, *args)
 
 
 def main() -> None:

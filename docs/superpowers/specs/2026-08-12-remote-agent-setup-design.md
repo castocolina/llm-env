@@ -91,7 +91,7 @@ matching `omniroute`'s own unconditional inclusion. It degrades safely (see
 
 ## The `.env` file and secret flow
 
-`.env` (repo root, already gitignored via the existing `.gitignore` entry)
+`.env` (repo root, gitignored via the `.env` entry in `.gitignore`)
 holds exactly one line:
 
 ```

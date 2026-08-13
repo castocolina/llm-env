@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.remote_setup as remote_setup_module
+from pylib.omniroute import OmniRouteError
 from pylib.remote_setup import (
     RemoteSetupHandler,
     build_config_response,
@@ -696,3 +697,107 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     finally:
         fake_omniroute.shutdown()
         fake_thread.join()
+
+
+class _BareListKeysHandler(_FakeOmniRouteHandler):
+    """GET /api/keys answers with a BARE LIST instead of {"keys": [...]}.
+
+    Which of the two shapes the live OmniRoute build actually returns was
+    never confirmed against a running instance, and guessing wrong used to
+    be silent: the old `listing.get("keys", [])` fallback turned a bare
+    list into an empty listing, so the cached key never looked "still
+    present" and a fresh OmniRoute API key was minted on every /config.
+    """
+
+    def do_GET(self):
+        if self.path == "/api/keys":
+            self._reply([{"id": "key-id", "keyPreview": "abcd"}])
+
+
+class _MalformedKeysHandler(_FakeOmniRouteHandler):
+    """GET /api/keys answers with a shape nothing can be read out of."""
+
+    def do_GET(self):
+        if self.path == "/api/keys":
+            self._reply({"unexpected": "shape"})
+
+
+def test_ensure_api_key_reuses_the_cached_key_from_a_dict_listing(tmp_path):
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        cache_path = tmp_path / "api-key.json"
+        write_cached_key(cache_path, "key-id", "sk-cached-value")
+
+        assert (
+            remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+            == "sk-cached-value"
+        )
+        assert _FakeOmniRouteHandler.keys_created == 0
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_ensure_api_key_reuses_the_cached_key_from_a_bare_list_listing(tmp_path):
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_BareListKeysHandler)
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        cache_path = tmp_path / "api-key.json"
+        write_cached_key(cache_path, "key-id", "sk-cached-value")
+
+        assert (
+            remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+            == "sk-cached-value"
+        )
+        assert _FakeOmniRouteHandler.keys_created == 0
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_ensure_api_key_raises_instead_of_minting_on_an_unrecognized_listing(tmp_path):
+    # Failing loud beats silently creating a new key on every request and
+    # piling up orphaned keys in OmniRoute's dashboard.
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_MalformedKeysHandler)
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        cache_path = tmp_path / "api-key.json"
+        write_cached_key(cache_path, "key-id", "sk-cached-value")
+
+        with pytest.raises(OmniRouteError) as excinfo:
+            remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+
+        assert "unexpected API key listing shape" in str(excinfo.value)
+        assert _FakeOmniRouteHandler.keys_created == 0
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_handler_sets_a_socket_timeout():
+    # Without it, a client that connects and never sends a request line
+    # pins a server thread indefinitely on a LAN-exposed service.
+    assert RemoteSetupHandler.timeout == 10
+
+
+def test_handler_logs_a_non_2xx_response_but_stays_quiet_on_200(capsys, monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/setup.sh")
+        assert conn.getresponse().status == 200
+        assert capsys.readouterr().err == ""
+
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/nope")
+        assert conn.getresponse().status == 404
+    finally:
+        server.shutdown()
+        thread.join()
+    assert '"GET /nope HTTP/1.1" 404' in capsys.readouterr().err

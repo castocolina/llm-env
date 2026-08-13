@@ -5316,6 +5316,15 @@ def test_show_secrets_prints_the_master_key(tmp_path):
     assert "master-test" in result.stdout
 
 
+def test_repo_gitignores_the_secret_bearing_files() -> None:
+    """`.env` holds OMNI_ROUTER_MASTER_KEY (which mints OmniRoute API keys)
+    and `models.yml` holds the server API key / dashboard password -- a
+    routine `git add -A` after setup must never be able to commit either."""
+    entries = (ROOT / ".gitignore").read_text(encoding="utf-8").split()
+    assert "models.yml" in entries
+    assert ".env" in entries
+
+
 def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Path) -> None:
     """Boot setup must create a private key without starting or budget-checking."""
     result, config, calls = run_lifecycle_script(
