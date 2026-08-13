@@ -2363,6 +2363,88 @@ def test_cleanup_removes_the_configured_gpu_image_not_a_hardcoded_one(
     assert "example.invalid/custom-build:pinned" in calls.read_text()
 
 
+def test_cleanup_removes_the_configured_remote_setup_image(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    calls = tmp_path / "calls"
+    podman = commands / "podman"
+    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "remote_setup:\n  image: example.invalid/custom-remote-setup:pinned\n  port: 20130\n"
+    )
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_ASSUME_YES": "1",
+        "LLM_ENV_REMOVE_IMAGES": "1",
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "example.invalid/custom-remote-setup:pinned" in calls.read_text()
+
+
+def test_cleanup_banner_mentions_remote_setup_data(tmp_path: pathlib.Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    _mock_command(commands, "systemctl")
+    _mock_command(commands, "podman")
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("version: 1\n")
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_ASSUME_YES": "1",
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "REAL_YQ": real_yq,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "remote-setup-data" in result.stdout
+
+
 def test_cleanup_falls_back_to_default_images_without_a_config(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -4886,7 +4968,13 @@ def test_diagnostic_helper_discards_unreadable_regular_files_without_path_leaks(
 
 
 def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
-    """Starting an unconfigured server must persist a secret without printing it."""
+    """Starting an unconfigured server must persist a secret with restrictive
+    file permissions. setup/network.sh's post-start banner intentionally
+    prints the generated key (and the OmniRoute dashboard password) to
+    stdout for the operator running `make start` interactively -- see
+    scripts/show-secrets.sh's header comment for why these are no longer
+    treated as localhost-only secrets -- so this test only asserts the
+    persisted-file protection, not stdout silence."""
     result, config, calls = run_lifecycle_script(
         tmp_path, "scripts/start.sh", api_key="", config_mode=0o644
     )
@@ -4894,7 +4982,6 @@ def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key")
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert yq_value(config, ".server.api_key") not in result.stdout
     assert yq_value(config, ".server.api_key") not in result.stderr
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
@@ -5152,6 +5239,31 @@ def test_show_secrets_fails_without_a_config(tmp_path: pathlib.Path) -> None:
 
     assert result.returncode != 0
     assert "no config at" in result.stderr
+
+
+def test_show_secrets_prints_the_master_key(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    config = home / ".config" / "llm-env" / "models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "server:\n  api_key: sk-test\n"
+        "omniroute:\n  initial_password: dash-test\n",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("OMNI_ROUTER_MASTER_KEY=master-test\n", encoding="utf-8")
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/show-secrets.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {"HOME": str(home), "LLM_ENV_CONFIG": str(config), "LLM_ENV_ENV_FILE": str(env_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "master-test" in result.stdout
 
 
 def test_enable_boot_prepares_a_secure_key_without_starting(tmp_path: pathlib.Path) -> None:
@@ -8854,3 +8966,68 @@ def test_dev_setup_runs_uv_sync(tmp_path: pathlib.Path) -> None:
 def test_makefile_dev_setup_chains_after_prerequisites() -> None:
     makefile = (ROOT / "Makefile").read_text()
     assert "dev-setup: prerequisites\n\t@bash tools/run-target.sh dev-setup -- bash setup/dev-setup.sh" in makefile
+
+
+def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
+    tmp_path: pathlib.Path,
+) -> None:
+    real_yq = shutil.which("yq")
+    real_jq = shutil.which("jq")
+    real_ip = shutil.which("ip")
+    assert real_yq is not None
+    assert real_jq is not None
+    assert real_ip is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+        stub = commands / name
+        stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
+        stub.chmod(0o755)
+    firewall_cmd = commands / "firewall-cmd"
+    firewall_cmd.write_text("#!/usr/bin/bash\nexit 1\n")
+    firewall_cmd.chmod(0o755)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "  mdns_name: llm\n"
+        "  api_key: fixture-api-key\n"
+        "omniroute:\n"
+        "  port: 20128\n"
+        "  initial_password: fixture-omniroute-password\n"
+        "remote_setup:\n"
+        "  port: 20130\n"
+        "models:\n"
+        "  - alias: a\n"
+        "    enabled: true\n"
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/network.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert (
+        "firewalld rules for OmniRoute (port 20128/tcp) and the remote-setup "
+        "installer (port 20130/tcp) are not opened automatically" in combined
+    )
+    assert "sudo firewall-cmd --permanent --add-port=20128/tcp --add-port=20130/tcp" in combined
+    assert "the OmniRoute container only binds 127.0.0.1" not in combined
+    assert "curl http://" in result.stdout
+    assert ":20130/setup.sh | bash" in result.stdout

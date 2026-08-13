@@ -17,12 +17,14 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
 | `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
 | `pylib/omniroute.py` | Idempotent OmniRoute provider-connection provisioning via its admin API |
+| `pylib/remote_setup.py` | HTTP server for the master-key-gated remote-machine installer (`/setup.sh`, `/config`) |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
 | `pylib/agent_runner.py` | Bounded live-agent scopes, stream capture, and cleanup proof |
 | `pylib/config.py` | Schema, enable/disable, `models_max` validation and clamping |
+| `pylib/dotenv.py` | Minimal `.env`-style `KEY=VALUE` file reader (no `python-dotenv` dependency) |
 | `pylib/gguf.py` | GGUF header parsing, KV geometry |
 | `pylib/detect.py` | GPU and compositor detection from sysfs |
 | `pylib/budget.py` | VRAM arithmetic and remedies |
@@ -72,22 +74,55 @@ curl -c /tmp/omni-cookies -X POST -H "Content-Type: application/json" \
 curl -b /tmp/omni-cookies http://127.0.0.1:20128/api/providers
 ```
 
+A third compose service, `remote-setup`, serves a one-command installer
+for configuring Pi/OpenCode on another machine on the LAN against
+OmniRoute: `curl http://<host>:<remote_setup.port>/setup.sh | bash`. It
+runs `pylib/remote_setup.py` (stdlib-only, reuses `pylib/omniroute.py`'s
+session-login helpers) under a stock `python:3.13-alpine` image with the
+whole `pylib/` directory bind-mounted read-only -- no custom image build.
+Exactly two public HTTP routes. `GET /setup.sh` is public and needs no
+secret -- the actual credential gate is `/config`; `setup/update-opencode-
+config.mjs` is bind-mounted into the container alongside `pylib/` and its
+content is read and embedded directly into `/setup.sh`'s response via a
+bash heredoc, never served as its own route, so the design's two-endpoint
+contract holds and the remote script never needs a second HTTP
+round-trip. `GET /config` requires
+`Authorization: Bearer <OMNI_ROUTER_MASTER_KEY>` (a value the operator
+sets in this repo's gitignored `.env`, never in `models.yml`) and, once
+authorized, hands back a *scoped* OmniRoute API key from `POST
+/api/keys` -- never the dashboard password (`POST /api/keys`-issued keys
+are accepted by `/v1/chat/completions` but rejected by `/api/providers`,
+verified live). Because OmniRoute never re-reveals a created key's raw
+value after the fact, that key is cached in the `remote-setup-data`
+volume (`/app/data/api-key.json`) and reused on subsequent `/config`
+calls rather than minting a new one every time -- self-healing if the
+cached key was later revoked from the dashboard (checked against
+`GET /api/keys` on every call). This also means OmniRoute's own port
+binding changed from `127.0.0.1` to `0.0.0.0` -- it is now genuinely
+LAN-reachable, not just printed as if it were (see
+`docs/superpowers/specs/2026-08-12-remote-agent-setup-design.md`).
+
 ### Topology and what survives a restart
 
 ```
                  podman-compose default network (compose project network)
-                 ┌──────────────────────────────────────────────────┐
-                 │                                                  │
- host:8000 ─────▶│  llm-server  ◀───DNS "llm-server"────  omniroute │◀──── host:127.0.0.1:20128
- (LLAMA_ARG_PORT) │  (llama.cpp)                          (router)  │      (dashboard + /v1/*)
-                 │      ▲                                    ▲     │
-                 └──────┼────────────────────────────────────┼─────┘
-                        │                                    │
-              bind mount (ro)                        named volume
-       ~/llm-workspace/models  :/models              omniroute-data:/app/data
-       ~/.config/llm-env/presets.ini                 (dashboard password, provider
-       (host directories -- not podman-managed)        connections, everything you
-                                                        configure in the dashboard)
+                 ┌────────────────────────────────────────────────────────────────────┐
+                 │                                                                    │
+ host:8000 ─────▶│  llm-server  ◀──DNS "llm-server"──  omniroute  ◀─DNS "omniroute"──  remote-setup │
+ (LLAMA_ARG_PORT) │  (llama.cpp)                        (router)                       (installer)   │
+                 │      ▲                                    ▲                              ▲        │
+                 └──────┼────────────────────────────────────┼──────────────────────────────┼────────┘
+                        │                                    │                              │
+              bind mount (ro)                        named volume                    bind mount (ro):
+       ~/llm-workspace/models  :/models              omniroute-data:/app/data         pylib/, setup/update-
+       ~/.config/llm-env/presets.ini                 (dashboard password, provider    opencode-config.mjs
+       (host directories -- not podman-managed)        connections, everything you    named volume:
+                                                        configure in the dashboard)    remote-setup-data:/app/data
+                                                                                        (cached scoped API key)
+
+ omniroute is also published at host:0.0.0.0:20128 (dashboard + /v1/*), and
+ remote-setup at host:0.0.0.0:20130 (/setup.sh, /config) -- both genuinely
+ LAN-reachable now, not loopback-only.
 ```
 
 See `docker-compose.yml.example` for the full annotated compose shape this
@@ -96,20 +131,22 @@ reference; the real file is generated, see below).
 
 **What survives what:**
 
-| Event | `llm-server`/`omniroute` containers | `omniroute-data` volume | bind-mounted models/presets |
-| --- | --- | --- | --- |
-| `podman kill`/crash, then `restart:` policy relaunches | recreated | untouched | untouched (host files) |
-| `make stop` / `systemctl --user stop llm-server.service` (`podman compose down`, no `-v`) | removed, volume detached | **kept** | untouched |
-| `make start` (`podman compose up -d` again) | recreated | reattached, same data | untouched |
-| host reboot (`start_at_boot` unit, or manual `make start` after) | recreated | **kept** | untouched |
-| `make clean` (`podman compose down -v`) | removed | **destroyed** — explicitly warned before confirming | untouched (models are never deleted) |
+| Event | `llm-server`/`omniroute`/`remote-setup` containers | `omniroute-data` volume | `remote-setup-data` volume | bind-mounted models/presets |
+| --- | --- | --- | --- | --- |
+| `podman kill`/crash, then `restart:` policy relaunches | recreated | untouched | untouched | untouched (host files) |
+| `make stop` / `systemctl --user stop llm-server.service` (`podman compose down`, no `-v`) | removed, volumes detached | **kept** | **kept** | untouched |
+| `make start` (`podman compose up -d` again) | recreated | reattached, same data | reattached, same data | untouched |
+| host reboot (`start_at_boot` unit, or manual `make start` after) | recreated | **kept** | **kept** | untouched |
+| `make clean` (`podman compose down -v`) | removed | **destroyed** — explicitly warned before confirming | **destroyed** — explicitly warned before confirming | untouched (models are never deleted) |
 
 In short: anything you configure by hand in the OmniRoute dashboard (extra
-provider connections, settings) lives in the `omniroute-data` named volume
-and survives every normal lifecycle operation — stopping, starting,
-rebooting the host, or the container crashing and being restarted. It is
-only lost if you run `make clean`, or manually `podman volume rm
-omniroute-data` / `podman compose down -v`.
+provider connections, settings) lives in the `omniroute-data` named volume,
+and the cached scoped API key `remote-setup` hands to remote machines lives
+in the `remote-setup-data` named volume — both survive every normal
+lifecycle operation — stopping, starting, rebooting the host, or a
+container crashing and being restarted. Either is only lost if you run
+`make clean`, or manually `podman volume rm omniroute-data
+remote-setup-data` / `podman compose down -v`.
 
 To provision more than the one `llm-env-local` connection this repo sets up
 automatically, either add it by hand in the dashboard (persists in the

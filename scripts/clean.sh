@@ -31,9 +31,21 @@ else
     images_to_remove="${images_to_remove}, and the configured omniroute.image if present"
 fi
 
+configured_remote_setup_image=""
+if [ -f "$CONFIG_PATH" ]; then
+    configured_remote_setup_image="$(yq -r '.remote_setup.image // ""' "$CONFIG_PATH")" \
+        || die "could not read remote_setup.image from ${CONFIG_PATH}; config may be corrupt"
+fi
+if [ -n "$configured_remote_setup_image" ] && [ "$configured_remote_setup_image" != null ]; then
+    images_to_remove="${images_to_remove}, ${configured_remote_setup_image}"
+else
+    configured_remote_setup_image=""
+    images_to_remove="${images_to_remove}, and the configured remote_setup.image if present"
+fi
+
 echo "This removes:"
 echo "  compose stack   ${COMPOSE_FILE}"
-echo "  compose volumes (including omniroute-data; OmniRoute's stored connections/password)"
+echo "  compose volumes (including omniroute-data and remote-setup-data; OmniRoute's stored connections/password and the cached remote-setup API key)"
 echo "  unit            ${WRAPPER_UNIT_PATH}"
 echo "  config          ${CONFIG_PATH}"
 echo "  images          ${images_to_remove}"
@@ -60,5 +72,8 @@ else
 fi
 if [ -n "$configured_omniroute_image" ]; then
     podman rmi -f "$configured_omniroute_image" 2>/dev/null || true
+fi
+if [ -n "$configured_remote_setup_image" ]; then
+    podman rmi -f "$configured_remote_setup_image" 2>/dev/null || true
 fi
 log_info "cleanup complete"

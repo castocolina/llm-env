@@ -46,7 +46,7 @@ services:
     image: docker.io/diegosouzapw/omniroute:latest
     container_name: omniroute
     ports:
-    - 127.0.0.1:20128:20128
+    - 0.0.0.0:20128:20128
     volumes:
     # Named volume, podman-managed: OmniRoute's own SQLite/db state
     # (dashboard password, provider connections, anything you configure by
@@ -79,5 +79,51 @@ services:
     restart: unless-stopped
     cpus: 1
     mem_limit: 1024m
+  remote-setup:
+    image: docker.io/library/python:3.13-alpine
+    container_name: remote-setup
+    working_dir: /app
+    volumes:
+    # Bind mounts, read-only: this repo's own pylib/ and the single
+    # update-opencode-config.mjs file the generated /setup.sh embeds --
+    # see pylib/remote_setup.py's render_setup_script(). Same "no host
+    # content lost on container recreation" property as llm-server's
+    # bind mounts above.
+    - /home/YOU/llm-env/pylib:/app/pylib:ro,z
+    - /home/YOU/llm-env/setup/update-opencode-config.mjs:/app/setup/update-opencode-config.mjs:ro,z
+    # Named volume, podman-managed: the cached scoped OmniRoute API key
+    # (/app/data/api-key.json). Survives container kill, `podman compose
+    # down` (no -v), and host reboot the same way omniroute-data does --
+    # only destroyed by `podman compose down -v` or `make clean` (which
+    # warns you first; see scripts/clean.sh).
+    - remote-setup-data:/app/data
+    ports:
+    - 0.0.0.0:20130:20130
+    command:
+    - python3
+    - -m
+    - pylib.remote_setup
+    environment:
+      OMNI_ROUTER_MASTER_KEY: ''
+      REMOTE_SETUP_PORT: '20130'
+      OMNIROUTE_INTERNAL_URL: http://omniroute:20128
+      OMNIROUTE_PORT: '20128'
+      OMNIROUTE_DASHBOARD_PASSWORD: ''
+      MODELS_JSON: '[]'
+    depends_on:
+      omniroute:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:20130/setup.sh', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 volumes:
   omniroute-data: {}
+  remote-setup-data: {}
