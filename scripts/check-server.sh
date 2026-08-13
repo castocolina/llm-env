@@ -30,7 +30,8 @@ diagnostic_dir="$(prepare_diagnostic_dir server)"
 cleanup() {
     local status=$?
     finish_diagnostic_dir "$diagnostic_dir"
-    rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar" "${enabled_models_file:-}"
+    rm -f "$auth_conf" "$bad_conf" "$omniroute_cookie_jar" \
+        "${omniroute_auth_conf:-}" "${enabled_models_file:-}"
     exit "$status"
 }
 trap cleanup EXIT
@@ -285,8 +286,37 @@ else
     fi
 fi
 
+log_step "OmniRoute API key"
+# The compose file sets REQUIRE_API_KEY=true on the omniroute service (it is
+# published on 0.0.0.0 for LAN clients), so /v1/* now validates the bearer
+# against OmniRoute's issued-key table. The dashboard password is NOT such a
+# key: it only ever "worked" because REQUIRE_API_KEY=false made OmniRoute
+# treat any unrecognized bearer as anonymous. Mint/reuse the cached scoped key
+# through `llmenv omniroute issue-key` -- the same helper the local agent setup
+# uses, so repeated runs reuse one key instead of littering the dashboard.
+omniroute_api_key=""
+omniroute_key_stderr="$(mktemp "${diagnostic_dir}/omniroute-key.XXXXXX")"
+if omniroute_key_json="$(llmenv --config "$CONFIG_PATH" omniroute issue-key \
+        2>"$omniroute_key_stderr")"; then
+    omniroute_api_key="$(printf '%s' "$omniroute_key_json" | jq -r '.api_key // empty' 2>/dev/null)"
+fi
+log_nonempty_block "Key issuance stderr" "$(<"$omniroute_key_stderr")"
+if [ -z "$omniroute_api_key" ]; then
+    bad "Verdict: FAIL stage=api key issuance reason=could not mint an OmniRoute API key; /v1/* requires one"
+else
+    ok "Verdict: PASS identity=omniroute api key scoped client key issued"
+    # Passed via a mode-0600 curl config file, never -H on the command line:
+    # a bearer token in argv is readable by every local user through
+    # /proc/<pid>/cmdline for as long as curl runs.
+    omniroute_auth_conf="$(mktemp)"
+    chmod 600 "$omniroute_auth_conf"
+    printf 'header = "Authorization: Bearer %s"\n' "$omniroute_api_key" >"$omniroute_auth_conf"
+fi
+
 log_step "OmniRoute completions"
-if [ "$models_ready" -eq 1 ] && [ "$checked_models" -gt 0 ]; then
+if [ -z "$omniroute_api_key" ]; then
+    log_warn "Verdict: SKIP identity=omniroute completions reason=no OmniRoute API key available"
+elif [ "$models_ready" -eq 1 ] && [ "$checked_models" -gt 0 ]; then
 while IFS= read -r model_b64; do
     [ -n "$model_b64" ] || continue
     model_json="$(printf '%s' "$model_b64" | base64 --decode)"
@@ -305,13 +335,11 @@ while IFS= read -r model_b64; do
 
     identity="omniroute completion model=${alias}"
     expectation="normalized assistant content: ready"
-    # The dashboard password doubles as the bearer token for /v1/* routes,
-    # not only for the management API's cookie session -- confirmed live.
     request_record "$identity" \
-        "curl --silent --show-error --max-time ${timeout_seconds} -H 'Authorization: Bearer ${omniroute_password}' -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
+        "curl --silent --show-error --max-time ${timeout_seconds} -K <omniroute api key config> -H 'Content-Type: application/json' --data-raw '${body}' ${omniroute_base}/v1/chat/completions" \
         "$body" "$expectation" -- \
         curl --silent --show-error --max-time "$timeout_seconds" \
-        -H "Authorization: Bearer ${omniroute_password}" \
+        -K "$omniroute_auth_conf" \
         -H "Content-Type: application/json" \
         --data-raw "$body" "${omniroute_base}/v1/chat/completions"
 

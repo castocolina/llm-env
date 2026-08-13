@@ -140,6 +140,15 @@ def test_omniroute_service_sets_its_environment():
     assert env["INITIAL_PASSWORD"] == "test-password"
 
 
+def test_omniroute_service_requires_an_api_key_on_its_client_api():
+    """The service is published on 0.0.0.0 for LAN clients, so OmniRoute's
+    default anonymous /v1/* access must be turned off -- otherwise the
+    scoped keys remote-setup hands out are decorative."""
+    _, document = compose_dict()
+    env = document["services"]["omniroute"]["environment"]
+    assert env["REQUIRE_API_KEY"] == "true"
+
+
 def test_omniroute_service_healthcheck_runs_the_bundled_script():
     _, document = compose_dict()
     healthcheck = document["services"]["omniroute"]["healthcheck"]

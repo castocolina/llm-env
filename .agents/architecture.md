@@ -179,9 +179,19 @@ by hand (`Add Connection` on a provider's page, e.g.
   `POST /api/providers` (`201 Created`) and even passes the separate
   `POST /api/providers/validate` syntax check, but is never persisted —
   `GET /api/providers` afterward shows no URL at all.
-- `/v1/*` inference routes (`/v1/chat/completions`, `/v1/models`) accept
-  the same dashboard password as a plain `Authorization: Bearer <password>`
-  header — no separate API key needs to be minted via `POST /api/keys`.
+- `/v1/*` inference routes (`/v1/chat/completions`, `/v1/models`) are
+  governed by OmniRoute's `REQUIRE_API_KEY` feature flag, which this repo
+  now sets to `true` in the compose file (the service is published on
+  `0.0.0.0` for LAN clients). With the flag **off** — OmniRoute's own
+  default — `/v1/*` is effectively unauthenticated: a request with no
+  bearer is allowed, and a request with an *unrecognized* bearer silently
+  degrades to anonymous rather than being rejected. That is the only
+  reason the dashboard password appeared to "work" as a `/v1/*` bearer.
+  With the flag **on**, the bearer is validated against OmniRoute's
+  issued-key table, so only a key minted via `POST /api/keys` is accepted;
+  the dashboard password is rejected with `401 Invalid API key`. Every
+  `/v1/*` client here — Pi, OpenCode, the remote installer and
+  `check-server.sh` — therefore uses a scoped issued key.
 - Routing keys on the **provider slug** (e.g. `llama-cpp`), not the
   connection's own `name`. A request for model `llm-env-local/<alias>`
   404s with `model_not_found`; the correct model ID is
@@ -198,7 +208,11 @@ FAIL points at one layer, not several:
    `llm-server` directly (bypassing OmniRoute), per enabled model alias.
 3. **OmniRoute login**, **OmniRoute providers** — if login fails,
    "OmniRoute providers" is reported as a skip, not re-attempted.
-4. **OmniRoute completions** — per alias, but only for aliases whose
+4. **OmniRoute API key** — mints/reuses the scoped `llm-env-local-agents`
+   key via `llmenv omniroute issue-key`, because `REQUIRE_API_KEY=true`
+   makes an issued key mandatory on `/v1/*`. If issuance fails, step 5 is
+   skipped rather than probed with an unusable credential.
+5. **OmniRoute completions** — per alias, but only for aliases whose
    direct **Completions** check (step 2) already passed. If a model's
    direct completion already failed, the OmniRoute completion for that
    same alias is a `SKIP`, not a second, redundant `FAIL` — OmniRoute

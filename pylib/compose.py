@@ -92,6 +92,17 @@ def render_compose(
         "environment": {
             "PORT": str(omniroute_port),
             "OMNIROUTE_ALLOW_PRIVATE_PROVIDER_URLS": "true",
+            # OmniRoute defaults REQUIRE_API_KEY to "false", which makes its
+            # /v1/* client API anonymous-by-default: an unauthenticated
+            # request is allowed, AND a request carrying an *invalid* bearer
+            # silently degrades to anonymous instead of being rejected
+            # (OmniRoute's own src/server/authz/policies/clientApi.ts). Since
+            # this service publishes on 0.0.0.0 so LAN machines can reach it,
+            # leaving the default would let any host on the network call
+            # /v1/chat/completions with no credential at all -- and would make
+            # the scoped API keys handed out by remote-setup /config
+            # unrevokable in practice. Enforce real key validation instead.
+            "REQUIRE_API_KEY": "true",
             "INITIAL_PASSWORD": _dollar_escape(omniroute_cfg.get("initial_password", "")),
         },
         "healthcheck": {

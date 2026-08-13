@@ -5376,6 +5376,8 @@ def run_check_server(
     model_jq_exit: int = 0,
     models_enabled: bool = True,
     verbose: bool = False,
+    omniroute_api_key: str = "sk-fixture-omniroute-scoped-key",
+    omniroute_issue_key_exit: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
     real_jq = shutil.which("jq")
@@ -5451,6 +5453,10 @@ def run_check_server(
         "    fi\n"
         "    ;;\n"
         "  http://127.0.0.1:20128/v1/chat/completions)\n"
+        # REQUIRE_API_KEY=true: only an issued scoped key is accepted here.
+        "    if [ -z \"$auth_conf\" ] || [[ \"$(<\"$auth_conf\")\" != *\"$OMNIROUTE_API_KEY\"* ]]; then\n"
+        "      write_response '{\"error\":\"Invalid API key\"}'; printf '401'; exit 0\n"
+        "    fi\n"
         "    case \"$data\" in\n"
         "      *gemma4*|*ornith*)\n"
         "        write_response '{\"choices\":[{\"message\":{\"content\":\"ready\"}}]}'\n"
@@ -5501,6 +5507,26 @@ def run_check_server(
     )
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
+    # tools/lib.sh's llmenv() shells out to `uv run llmenv.py ...`; the
+    # OmniRoute completions probe uses it to mint/reuse the scoped API key
+    # that REQUIRE_API_KEY=true makes mandatory on /v1/*.
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf '%s\\n' \"uv $*\" >> \"$CALLS_PLAIN\"\n"
+        "case \"$*\" in\n"
+        "  *'omniroute issue-key'*)\n"
+        "    [ \"$OMNIROUTE_ISSUE_KEY_EXIT\" -eq 0 ] || {\n"
+        "      printf 'could not reach OmniRoute\\n' >&2\n"
+        "      exit \"$OMNIROUTE_ISSUE_KEY_EXIT\"\n"
+        "    }\n"
+        "    printf '{\"api_key\": \"%s\"}\\n' \"$OMNIROUTE_API_KEY\"\n"
+        "    ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
     completion_responses = completion_responses or {}
     completion_statuses = completion_statuses or {}
     completion_curl_exits = completion_curl_exits or {}
@@ -5518,8 +5544,13 @@ def run_check_server(
             separators=(",", ":"),
         ),
     )
+    plain_calls = tmp_path / "calls-plain"
+    plain_calls.touch()
     environment = os.environ | {
         "CALLS": str(calls),
+        "CALLS_PLAIN": str(plain_calls),
+        "OMNIROUTE_API_KEY": omniroute_api_key,
+        "OMNIROUTE_ISSUE_KEY_EXIT": str(omniroute_issue_key_exit),
         "GEMMA4_CURL_EXIT": str(completion_curl_exits.get("gemma4", 0)),
         "GEMMA4_RESPONSE": gemma4_response,
         "GEMMA4_STATUS": str(completion_statuses.get("gemma4", 200)),
@@ -5581,6 +5612,49 @@ def test_check_server_accepts_normalized_ready_for_every_enabled_model(
     assert "max_tokens: 256, stream: false" not in (
         ROOT / "scripts/check-server.sh"
     ).read_text()
+
+
+def test_check_server_probes_omniroute_with_an_issued_scoped_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With REQUIRE_API_KEY=true OmniRoute's /v1/* validates the bearer
+    against its issued-key table, so the dashboard password is no longer a
+    usable token -- the probe must mint/reuse a scoped key instead, and must
+    never put either secret on curl's command line."""
+    result, calls = run_check_server(tmp_path, {"gemma4": "ready", "ornith": "ready"})
+
+    assert result.returncode == 0, result.stderr
+    assert "Verdict: PASS identity=omniroute api key" in result.stdout
+    assert "Verdict: PASS identity=omniroute completion model=gemma4" in result.stdout
+    plain = (tmp_path / "calls-plain").read_text()
+    assert "omniroute issue-key" in plain
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    omniroute_calls = [
+        row for row in parsed if row["url"] == "http://127.0.0.1:20128/v1/chat/completions"
+    ]
+    assert omniroute_calls
+    for row in omniroute_calls:
+        assert "omniroute-dashboard-password" not in row["argv"]
+        assert "sk-fixture-omniroute-scoped-key" not in row["argv"]
+        assert "-K" in row["argv"]
+
+
+def test_check_server_skips_omniroute_completions_without_an_api_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failed key issuance must fail loudly and skip the completions rather
+    than silently probe /v1/* with no usable credential."""
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}, omniroute_issue_key_exit=1
+    )
+
+    assert result.returncode != 0
+    assert "Verdict: FAIL stage=api key issuance" in result.stderr
+    assert "reason=no OmniRoute API key available" in result.stderr
+    parsed = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert not [
+        row for row in parsed if row["url"] == "http://127.0.0.1:20128/v1/chat/completions"
+    ]
 
 
 def test_check_server_prints_a_copy_pasteable_request_response_and_curl_template(
