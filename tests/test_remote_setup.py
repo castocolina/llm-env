@@ -133,6 +133,41 @@ def test_validate_host_header_rejects_shell_metacharacters():
     assert validate_host_header("evil; rm -rf /:20130") is False
 
 
+def test_validate_host_header_rejects_a_bare_unbracketed_ipv6_authority():
+    """"::1:20130" passes a character-class filter but is not an authority:
+    host_without_port() used to reduce it to "" and /config would then hand
+    back "http://:20128"."""
+    assert validate_host_header("::1:20130") is False
+    assert validate_host_header("fe80::1") is False
+    assert host_without_port("::1:20130") == ""
+
+
+def test_validate_host_header_rejects_trailing_garbage_after_the_bracket():
+    assert validate_host_header("[::1]junk:20130") is False
+    assert validate_host_header("[::1]:20130junk") is False
+    assert validate_host_header("[::1") is False
+
+
+def test_validate_host_header_rejects_a_non_numeric_or_out_of_range_port():
+    assert validate_host_header("example.com:abc") is False
+    assert validate_host_header("example.com:0") is False
+    assert validate_host_header("example.com:65536") is False
+    assert validate_host_header("example.com:") is False
+    assert validate_host_header("example.com:65535") is True
+
+
+def test_validate_host_header_rejects_an_empty_host_with_a_port():
+    assert validate_host_header(":20130") is False
+
+
+def test_host_without_port_round_trips_a_validated_bracketed_ipv6_literal():
+    for header in ("[::1]:20130", "[::1]", "[2001:db8::1]:20128"):
+        assert validate_host_header(header) is True
+    assert host_without_port("[::1]:20130") == "[::1]"
+    assert host_without_port("[::1]") == "[::1]"
+    assert host_without_port("[2001:db8::1]:20128") == "[2001:db8::1]"
+
+
 def test_build_config_response_shape():
     response = build_config_response(
         host="192.0.2.1",
@@ -594,6 +629,109 @@ def test_ensure_api_key_concurrent_calls_create_only_one_key(tmp_path, monkeypat
         assert len(results) == 8
         assert all(value == "sk-live-value" for value in results)
         assert _FakeOmniRouteHandler.keys_created == 1
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+class _SlowLoginOmniRouteHandler(_FakeOmniRouteHandler):
+    """Widens the cold-cache race window so two overlapping callers would
+    reliably both mint a key if issuance were not serialized."""
+
+    def do_POST(self):
+        if self.path == "/api/auth/login":
+            time.sleep(0.3)
+        super().do_POST()
+
+
+_CONCURRENT_ISSUE_KEY_CHILD = """
+import pathlib, sys, time
+sys.path.insert(0, sys.argv[1])
+import pylib.remote_setup as remote_setup
+
+base_url, cache_path, ready, go = sys.argv[2], pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[5])
+ready.write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 30
+while not go.exists():
+    if time.monotonic() > deadline:
+        raise SystemExit("timed out waiting for the start gate")
+    time.sleep(0.005)
+print(remote_setup.ensure_api_key(base_url, "dashboard-pw", cache_path))
+"""
+
+
+def test_ensure_api_key_serializes_across_separate_processes(tmp_path):
+    """`llmenv omniroute issue-key` calls ensure_api_key() from its own
+    process, so a threading.Lock cannot serialize it against the HTTP
+    server (or against a second CLI invocation). Two genuinely separate
+    processes hitting a cold cache must still produce exactly one
+    POST /api/keys, and both must return the key that ends up cached."""
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_SlowLoginOmniRouteHandler)
+    children = []
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        cache_path = tmp_path / "api-key.json"
+        gate = tmp_path / "go"
+        script = tmp_path / "child.py"
+        script.write_text(_CONCURRENT_ISSUE_KEY_CHILD, encoding="utf-8")
+
+        ready_files = [tmp_path / f"ready-{index}" for index in range(2)]
+        for ready in ready_files:
+            children.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(script),
+                        str(REPO_ROOT),
+                        base_url,
+                        str(cache_path),
+                        str(ready),
+                        str(gate),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+        deadline = time.monotonic() + 30
+        while not all(ready.exists() for ready in ready_files):
+            assert time.monotonic() < deadline, "children never became ready"
+            time.sleep(0.01)
+        gate.write_text("go", encoding="utf-8")
+
+        outputs = []
+        for child in children:
+            stdout, stderr = child.communicate(timeout=60)
+            assert child.returncode == 0, stderr
+            outputs.append(stdout.strip())
+
+        assert outputs == ["sk-live-value", "sk-live-value"]
+        assert _FakeOmniRouteHandler.keys_created == 1
+        assert read_cached_key(cache_path) == {"id": "key-id", "key": "sk-live-value"}
+    finally:
+        for child in children:
+            if child.poll() is None:  # pragma: no cover - failure path only
+                child.kill()
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_ensure_api_key_does_not_lock_the_replaceable_cache_inode(tmp_path):
+    """write_cached_key() publishes the cache with os.replace(), so a lock
+    taken on the cache file itself would guard a stale inode. The lock must
+    be a stable sibling file."""
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        cache_path = tmp_path / "api-key.json"
+        remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+
+        lock_path = cache_path.with_name(cache_path.name + ".lock")
+        assert lock_path.exists()
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
     finally:
         fake_omniroute.shutdown()
         fake_thread.join()

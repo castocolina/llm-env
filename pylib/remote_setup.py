@@ -13,6 +13,8 @@ modules ship together in the same read-only pylib/ bind mount.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hmac
 import http.server
 import json
@@ -35,12 +37,25 @@ CACHE_PATH = Path("/app/data/api-key.json")
 # response via a bash heredoc instead of serving it as its own route.
 UPDATE_OPENCODE_CONFIG_PATH = Path("/app/setup/update-opencode-config.mjs")
 
-# Authority characters valid in an HTTP Host header we're willing to
-# interpolate into a generated shell script or a JSON response: DNS
-# labels, dots, a port-separator colon, and the brackets a literal IPv6
-# address uses. Rejects anything else (backticks, `$`, `;`, spaces, ...)
-# so a hostile Host header can't inject shell/JSON content.
-_HOST_HEADER_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
+# An HTTP Host header is an *authority*, and we interpolate it into a
+# generated shell script and a JSON response -- so it is parsed, not just
+# character-filtered. A character-class-only check ("are all these bytes
+# harmless?") accepts strings that are not authorities at all, e.g. the
+# unbracketed "::1:20130", which host_without_port() below would then
+# reduce to the empty string and yield a nonsense "http://:20128".
+#
+# Exactly two forms are accepted, each with an optional ":<port>":
+#   - a bracketed IPv6 literal: "[::1]", "[::1]:20130"
+#   - a bare hostname / IPv4:   "llm.local", "192.168.1.5:20128"
+# Everything else is rejected: bare (unbracketed) IPv6, trailing garbage
+# after "]", an empty host, a non-numeric or out-of-range port, and any
+# shell/JSON metacharacter (backticks, `$`, `;`, spaces, ...).
+_BRACKETED_IPV6_AUTHORITY_RE = re.compile(
+    # Hex groups, colons and the dots of an IPv4-mapped tail, plus RFC 6874's
+    # percent-encoded zone id ("%25eth0").
+    r"^(\[[0-9A-Fa-f:.]+(?:%25[A-Za-z0-9._~-]+)?\])(?::(\d{1,5}))?$"
+)
+_HOST_AUTHORITY_RE = re.compile(r"^([A-Za-z0-9.-]+)(?::(\d{1,5}))?$")
 
 # render_setup_script() builds the final script via plain string
 # replacement (not str.format()) specifically so the embedded
@@ -394,13 +409,44 @@ def write_cached_key(cache_path: Path, key_id: str, key_value: str) -> None:
         raise
 
 
-# Guards the read-check-create-write sequence in ensure_api_key() below.
-# ThreadingHTTPServer dispatches each request on its own thread, so two
-# /config requests arriving close together (e.g. two remote machines
-# curling /setup.sh | bash at nearly the same time on a cold cache) could
-# otherwise both observe "no cached key" and each mint a new OmniRoute
-# API key.
+# Guards the read-check-create-write sequence in ensure_api_key() below
+# against concurrent THREADS. ThreadingHTTPServer dispatches each request
+# on its own thread, so two /config requests arriving close together (e.g.
+# two remote machines curling /setup.sh | bash at nearly the same time on
+# a cold cache) could otherwise both observe "no cached key" and each mint
+# a new OmniRoute API key.
+#
+# This is not sufficient on its own: ensure_api_key() is also called from
+# entirely separate PROCESSES (`llmenv omniroute issue-key`), which share
+# no Python objects. _cache_file_lock() below adds the cross-process half.
+# Both are kept, because neither subsumes the other -- fcntl.flock() locks
+# are held per open file description, so two threads in one process each
+# opening the lock file get independent descriptions and do NOT block each
+# other (and if they shared one descriptor, the second flock() would
+# succeed immediately by upgrading the lock the process already holds).
 _key_issuance_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _cache_file_lock(cache_path: Path):
+    """Serialize key issuance across processes with an exclusive
+    fcntl.flock() on a stable sibling lock file.
+
+    The lock lives beside the cache, never ON it: write_cached_key()
+    publishes the cache with os.replace(), so the cache path's inode
+    changes and a lock taken on the old inode would guard nothing.
+    """
+    lock_path = cache_path.with_name(cache_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _extract_keys(payload: Any) -> list[Any]:
@@ -437,7 +483,7 @@ def ensure_api_key(
     different key_name/cache_path -- "llm-env-local-agents" -- so a local
     key is never confused with the shared remote-installer key in
     OmniRoute's own dashboard listing)."""
-    with _key_issuance_lock:
+    with _key_issuance_lock, _cache_file_lock(cache_path):
         session_token = _login(base_url, dashboard_password)
         cached = read_cached_key(cache_path)
         if cached is not None:
@@ -458,25 +504,42 @@ def ensure_api_key(
         return created["key"]
 
 
+def parse_host_header(host_header: str) -> tuple[str, str | None] | None:
+    """Parse an HTTP Host header into (host, port), or None if it is not a
+    well-formed authority. `host` keeps the brackets of an IPv6 literal --
+    they are required when it is put back into a URL. See the module-level
+    regex comment for the exact grammar accepted."""
+    if not host_header:
+        return None
+    match = _BRACKETED_IPV6_AUTHORITY_RE.match(
+        host_header
+    ) or _HOST_AUTHORITY_RE.match(host_header)
+    if match is None:
+        return None
+    host, port = match.group(1), match.group(2)
+    if port is not None and not 1 <= int(port) <= 65535:
+        return None
+    return host, port
+
+
 def host_without_port(host_header: str) -> str:
     """Strip a trailing :port. A bracketed IPv6 literal (e.g. "[::1]:20130")
-    has colons INSIDE the brackets that must survive -- only a colon after
-    the closing bracket (or, for a bare non-bracketed host, the first
-    colon) separates the port."""
-    if host_header.startswith("["):
-        end = host_header.find("]")
-        if end != -1:
-            return host_header[: end + 1]
-        return host_header
-    return host_header.split(":")[0]
+    has colons INSIDE the brackets that must survive, so this delegates to
+    the same parse validate_host_header() uses rather than guessing with
+    split(":"). Callers must have validated the header first; an
+    unparseable value returns "" instead of a plausible-looking wrong
+    answer."""
+    parsed = parse_host_header(host_header)
+    return parsed[0] if parsed is not None else ""
 
 
 def validate_host_header(host_header: str) -> bool:
     """Reject a Host header before it's interpolated into either the
     generated shell script or the JSON /config response -- an attacker
     who controls the Host header (trivial over plain HTTP) could
-    otherwise inject shell syntax into /setup.sh's output."""
-    return bool(host_header) and bool(_HOST_HEADER_RE.match(host_header))
+    otherwise inject shell syntax into /setup.sh's output, or a malformed
+    authority could produce a broken base URL in /config."""
+    return parse_host_header(host_header) is not None
 
 
 def build_config_response(

@@ -66,7 +66,8 @@ systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
 rm -f "$WRAPPER_UNIT_PATH"
 systemctl --user daemon-reload
 rm -f "$CONFIG_PATH" "$COMPOSE_FILE" "${HOME}/.config/llm-env/presets.ini" \
-    "$(dirname "$CONFIG_PATH")/omniroute-api-key.json"
+    "$(dirname "$CONFIG_PATH")/omniroute-api-key.json" \
+    "$(dirname "$CONFIG_PATH")/omniroute-api-key.json.lock"
 if [ -n "$configured_image" ]; then
     podman rmi -f "$configured_image" 2>/dev/null || true
 else
