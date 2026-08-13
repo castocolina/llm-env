@@ -1,3 +1,4 @@
+import os
 import stat
 import sys
 from pathlib import Path
@@ -214,6 +215,73 @@ def test_write_compose_sets_restrictive_file_mode(tmp_path):
         CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
     )
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_write_compose_is_never_briefly_world_readable(tmp_path, monkeypatch):
+    """The rendered file carries the master key, the dashboard password and
+    the server API key. Under a 022 umask a plain write-then-chmod leaves it
+    0644 for an instant; assert the content only ever exists behind 0600 by
+    inspecting the source file at the moment it is published."""
+    target = tmp_path / "docker-compose.yml"
+    observed = {}
+    real_replace = os.replace
+
+    def spy_replace(src, dst, *args, **kwargs):
+        observed["mode"] = stat.S_IMODE(os.stat(src).st_mode)
+        observed["content"] = Path(src).read_text(encoding="utf-8")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    # A fully permissive umask makes the "briefly 0644" bug reproducible:
+    # with write-then-chmod the file would be created 0666 here.
+    previous_umask = os.umask(0)
+    try:
+        write_compose(
+            CFG,
+            models_dir="/models",
+            presets_path="/presets.ini",
+            repo_root="/repo",
+            omni_router_master_key="test-master-key",
+            path=target,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert observed["mode"] == 0o600
+    assert "test-master-key" in observed["content"]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_write_compose_failure_leaves_the_existing_file_intact(tmp_path, monkeypatch):
+    """A crash mid-publish must not truncate or clobber a valid compose file,
+    and must not leave a temp file behind."""
+    target = tmp_path / "docker-compose.yml"
+    write_compose(
+        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+    )
+    original = target.read_text(encoding="utf-8")
+
+    def boom(src, dst, *args, **kwargs):
+        raise OSError("simulated failure while publishing")
+
+    monkeypatch.setattr(os, "replace", boom)
+    try:
+        write_compose(
+            CFG,
+            models_dir="/other",
+            presets_path="/presets.ini",
+            repo_root="/repo",
+            path=target,
+        )
+    except OSError:
+        pass
+    else:  # pragma: no cover - the monkeypatched replace always raises
+        raise AssertionError("write_compose swallowed the failure")
+
+    assert target.read_text(encoding="utf-8") == original
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "docker-compose.yml"]
+    assert leftovers == []
 
 
 def test_remote_setup_service_uses_configured_image_and_port():

@@ -9,6 +9,8 @@ presets.ini via configparser.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -206,16 +208,37 @@ def write_compose(
     omni_router_master_key: str = "",
     path: Path,
 ) -> None:
+    """Publish the compose document atomically and never world-readable.
+
+    The rendered YAML carries OMNI_ROUTER_MASTER_KEY, the OmniRoute
+    dashboard password and the llm-server API key, so it must never exist
+    on disk with a permissive mode -- not even for the instant between
+    `write_text()` and a follow-up `chmod()` under the usual 022 umask.
+    Write into a private temp file in the destination directory, chmod it
+    to 0600 *before* any secret reaches it, fsync it, then os.replace()
+    it into place: a reader (podman-compose mid-read) sees either the
+    complete old file or the complete new one, never a truncated mix, and
+    a failure anywhere leaves any pre-existing file untouched.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        render_compose(
-            cfg,
-            models_dir=models_dir,
-            presets_path=presets_path,
-            repo_root=repo_root,
-            omni_router_master_key=omni_router_master_key,
-        ),
-        encoding="utf-8",
+    content = render_compose(
+        cfg,
+        models_dir=models_dir,
+        presets_path=presets_path,
+        repo_root=repo_root,
+        omni_router_master_key=omni_router_master_key,
     )
-    path.chmod(0o600)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".docker-compose.", suffix=".tmp"
+    )
+    try:
+        os.chmod(tmp_name, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
