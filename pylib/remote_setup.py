@@ -119,6 +119,16 @@ api_key_file="${workdir}/api-key"
 printf '%s' "$api_key" >"$api_key_file"
 chmod 600 "$api_key_file"
 
+# Every jq invocation below reads its JSON inputs from files (--rawfile /
+# --slurpfile), never from `--argjson "$..."`: a command-line argument is
+# readable by any other local user through /proc/<pid>/cmdline for as long
+# as jq runs, and the provider documents built here embed the scoped API
+# key. `umask 077` at the top of the script means each of these files is
+# created private; the explicit chmod is belt-and-braces.
+models_file="${workdir}/models.json"
+printf '%s' "$models_json" >"$models_file"
+chmod 600 "$models_file"
+
 pi_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 pi_path="${pi_dir}/models.json"
 pi_settings_path="${pi_dir}/settings.json"
@@ -207,51 +217,101 @@ fi
 # routes on the provider slug, not the connection's own name (confirmed
 # live; see scripts/check-server.sh's own OmniRoute completion check,
 # which uses the identical "llama-cpp/${alias}" convention).
-pi_provider_json="$(jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
-    --argjson models "$models_json" \
+pi_provider_file="${workdir}/pi-provider.json"
+jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
+    --slurpfile models "$models_file" \
     '{baseUrl: $base_url, api: "openai-completions", apiKey: ($api_key | rtrimstr("\n")),
       compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
-      models: [$models[] | {id: "llama-cpp/\(.alias)", contextWindow: .ctx_size, maxTokens: .client_max_output_tokens}]}')"
+      models: [$models[0][] | {id: "llama-cpp/\(.alias)", contextWindow: .ctx_size, maxTokens: .client_max_output_tokens}]}' \
+    >"$pi_provider_file" || {
+    echo "remote-setup: could not build the Pi provider" >&2
+    exit 1
+}
+chmod 600 "$pi_provider_file"
 
+# Same safety bar setup/setup-local-llm-agents.sh applies to the local
+# machine's own files: an existing target must be a REGULAR file (reading a
+# FIFO with jq would block this installer forever, and a directory produces
+# an unhelpful error), and it must hold exactly ONE well-formed JSON object
+# with an object-shaped `.providers`. Plain `jq` happily reads two
+# concatenated JSON documents and writes two transformed documents back
+# out, which would leave an equally malformed configuration behind.
 pi_source="$pi_path"
-if [ ! -e "$pi_path" ]; then
+if [ -e "$pi_path" ]; then
+    [ -f "$pi_path" ] || {
+        echo "remote-setup: Pi configuration is not a regular file: ${pi_path}" >&2
+        exit 1
+    }
+    jq -e -s '
+        if length != 1 or (.[0] | type) != "object" then false
+        else ((.[0].providers // {}) | type) == "object"
+        end
+    ' "$pi_path" >/dev/null 2>&1 || {
+        echo "remote-setup: Pi configuration must contain exactly one JSON object with object providers: ${pi_path}" >&2
+        exit 1
+    }
+else
     printf '{}\n' >"${workdir}/empty-pi.json"
     pi_source="${workdir}/empty-pi.json"
 fi
 pi_staged="$(mktemp "${pi_dir}/.models.json.XXXXXX")"
 chmod 600 "$pi_staged"
 staged_files+=("$pi_staged")
-jq --argjson provider "$pi_provider_json" \
-   '.providers = ((.providers // {}) + {"local-llm-env": $provider})' \
-   "$pi_source" >"$pi_staged" || {
+jq -s '
+  if length != 2 then error("Pi configuration must contain one JSON object")
+  elif (.[0] | type) != "object" then error("Pi configuration must be an object")
+  elif (.[1] | type) != "object" then error("Pi provider must be an object")
+  else
+    .[0] as $config | .[1] as $provider |
+    ($config.providers // {}) as $providers |
+    if ($providers | type) != "object" then error("Pi providers must be an object") else
+      $config | .providers = ($providers + {"local-llm-env": $provider})
+    end
+  end
+' "$pi_source" "$pi_provider_file" >"$pi_staged" || {
     echo "remote-setup: could not update Pi configuration" >&2
     exit 1
 }
 
 pi_settings_source="$pi_settings_path"
-if [ ! -e "$pi_settings_path" ]; then
+if [ -e "$pi_settings_path" ]; then
+    [ -f "$pi_settings_path" ] || {
+        echo "remote-setup: Pi settings are not a regular file: ${pi_settings_path}" >&2
+        exit 1
+    }
+    jq -e -s 'length == 1 and (.[0] | type) == "object"' \
+        "$pi_settings_path" >/dev/null 2>&1 || {
+        echo "remote-setup: Pi settings must contain exactly one JSON object: ${pi_settings_path}" >&2
+        exit 1
+    }
+else
     printf '{}\n' >"${workdir}/empty-pi-settings.json"
     pi_settings_source="${workdir}/empty-pi-settings.json"
 fi
 pi_settings_staged="$(mktemp "${pi_dir}/.settings.json.XXXXXX")"
 chmod 600 "$pi_settings_staged"
 staged_files+=("$pi_settings_staged")
-jq --argjson models "$models_json" \
-   '.enabledModels = [$models[] | "local-llm-env/llama-cpp/\(.alias)"]' \
-   "$pi_settings_source" >"$pi_settings_staged" || {
+jq --slurpfile models "$models_file" '
+    if type != "object" then error("Pi settings must be an object") else
+      .enabledModels = [$models[0][] | "local-llm-env/llama-cpp/\(.alias)"]
+    end
+' "$pi_settings_source" >"$pi_settings_staged" || {
     echo "remote-setup: could not update Pi settings" >&2
     exit 1
 }
 
-opencode_provider_json="$(jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
-    --argjson models "$models_json" \
+provider_file="${workdir}/opencode-provider.json"
+jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
+    --slurpfile models "$models_file" \
     '{npm: "@ai-sdk/openai-compatible", name: "local-llm-env",
       options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
-      models: (reduce $models[] as $model ({};
+      models: (reduce $models[0][] as $model ({};
           .["llama-cpp/\($model.alias)"] = {name: $model.alias,
-              limit: {context: $model.ctx_size, output: $model.client_max_output_tokens}}))}')"
-provider_file="${workdir}/opencode-provider.json"
-printf '%s' "$opencode_provider_json" >"$provider_file"
+              limit: {context: $model.ctx_size, output: $model.client_max_output_tokens}}))}' \
+    >"$provider_file" || {
+    echo "remote-setup: could not build the OpenCode provider" >&2
+    exit 1
+}
 chmod 600 "$provider_file"
 
 opencode_staged=()
@@ -286,7 +346,7 @@ echo "Pi configured: ${pi_path}"
 for opencode_target in "${opencode_targets[@]}"; do
     echo "OpenCode configured: ${opencode_target}"
 done
-echo "Done. Model(s): $(printf '%s' "$models_json" | jq -r '[.[].alias] | join(", ")')"
+echo "Done. Model(s): $(jq -r '[.[].alias] | join(", ")' "$models_file")"
 '''
 
 

@@ -3,9 +3,13 @@ import http.server
 import json
 import os
 import pty
+import select
 import shutil
+import stat
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -622,12 +626,10 @@ def test_ensure_api_key_reissues_after_dashboard_revocation(tmp_path, monkeypatc
         fake_thread.join()
 
 
-def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monkeypatch):
-    """Runs the ACTUAL generated /setup.sh via bash, in an isolated $HOME,
-    typing the master key into a pty -- the tests above only inspect the
-    script's text or drive the handler in-process; this is the one test
-    that proves the script is genuinely executable end to end, including
-    its /dev/tty prompt, its jq transforms, and its OpenCode update."""
+def _run_generated_setup_sh(tmp_path, monkeypatch, prepare_home=None, timeout=60.0):
+    """Fetch the real /setup.sh from a live RemoteSetupHandler (backed by a
+    fake OmniRoute) and execute it with bash in an isolated $HOME, typing
+    the master key into a pty. Returns (exit_code, output, home_dir)."""
     for cmd in ("bash", "curl", "jq", "node"):
         if shutil.which(cmd) is None:
             pytest.skip(f"{cmd} not available on this host")
@@ -636,8 +638,7 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
     try:
         fake_port = fake_omniroute.server_address[1]
-        cache_path = tmp_path / "api-key.json"
-        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
         _use_real_opencode_updater(monkeypatch)
         monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-master-key")
         monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
@@ -659,6 +660,8 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
 
             home_dir = tmp_path / "home"
             home_dir.mkdir()
+            if prepare_home is not None:
+                prepare_home(home_dir)
             child_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home_dir)}
 
             pid, master_fd = pty.fork()
@@ -666,8 +669,22 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
                 os.execvpe("bash", ["bash", str(script_path)], child_env)
 
             os.write(master_fd, b"test-master-key\n")
+            # A regression that makes the installer *hang* (jq reading a
+            # FIFO) must surface as a test failure, not a stuck suite.
             output = b""
+            deadline = time.monotonic() + timeout
             while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    os.kill(pid, 9)
+                    os.waitpid(pid, 0)
+                    raise AssertionError(
+                        "the generated setup.sh hung; output so far: "
+                        + output.decode(errors="replace")
+                    )
+                readable, _, _ = select.select([master_fd], [], [], remaining)
+                if not readable:
+                    continue
                 try:
                     chunk = os.read(master_fd, 4096)
                 except OSError:
@@ -676,27 +693,173 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
                     break
                 output += chunk
             _, status = os.waitpid(pid, 0)
-            exit_code = os.WEXITSTATUS(status)
-            assert exit_code == 0, output.decode(errors="replace")
-
-            pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
-            assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "llama-cpp/a"
-            pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
-            assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
-
-            opencode_config = json.loads(
-                (home_dir / ".config" / "opencode" / "opencode.jsonc").read_text()
-            )
-            assert "llama-cpp/a" in opencode_config["provider"]["local-llm-env"]["models"]
-
-            pi_models_path = home_dir / ".pi" / "agent" / "models.json"
-            assert (pi_models_path.stat().st_mode & 0o777) == 0o600
+            return os.WEXITSTATUS(status), output.decode(errors="replace"), home_dir
         finally:
             server.shutdown()
             thread.join()
     finally:
         fake_omniroute.shutdown()
         fake_thread.join()
+
+
+def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monkeypatch):
+    """Runs the ACTUAL generated /setup.sh via bash, in an isolated $HOME,
+    typing the master key into a pty -- the tests above only inspect the
+    script's text or drive the handler in-process; this is the one test
+    that proves the script is genuinely executable end to end, including
+    its /dev/tty prompt, its jq transforms, and its OpenCode update."""
+    exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
+    assert exit_code == 0, output
+
+    pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
+    assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "llama-cpp/a"
+    pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
+    assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
+
+    opencode_config = json.loads(
+        (home_dir / ".config" / "opencode" / "opencode.jsonc").read_text()
+    )
+    assert "llama-cpp/a" in opencode_config["provider"]["local-llm-env"]["models"]
+
+    pi_models_path = home_dir / ".pi" / "agent" / "models.json"
+    assert (pi_models_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
+    tmp_path, monkeypatch
+):
+    """The scoped key ends up inside the Pi/OpenCode provider documents. Any
+    `--argjson` carrying one of those documents would put the key in
+    /proc/<pid>/cmdline for every other local user to read while jq runs.
+
+    Asserted by static inspection of the rendered script rather than by
+    sampling `ps` during execution: the jq invocations complete in
+    milliseconds, so a sampler races the very window it is meant to observe
+    and would pass by luck on a fast machine. The script's own text is the
+    thing under test, and it is fully deterministic -- if no `--argjson`
+    survives at all, no argument can carry the key."""
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("llm.local:20130")
+
+    code_lines = [
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    ]
+    assert not [line for line in code_lines if "--argjson" in line]
+    # The key only ever reaches jq through file-backed options.
+    assert '--rawfile api_key "$api_key_file"' in script
+    assert '--slurpfile models "$models_file"' in script
+    assert '"$pi_provider_file"' in script
+
+    # ...and the end-to-end run confirms the key still lands in the configs.
+    exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
+    assert exit_code == 0, output
+    pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
+    assert pi_models["providers"]["local-llm-env"]["apiKey"] == "sk-live-value"
+    assert "sk-live-value" not in output
+
+
+def test_setup_sh_merges_into_a_well_formed_existing_pi_configuration(
+    tmp_path, monkeypatch
+):
+    """An existing, valid Pi config must be preserved, not replaced."""
+
+    def prepare(home_dir):
+        pi_dir = home_dir / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "models.json").write_text(
+            json.dumps({"keepMe": 1, "providers": {"other": {"baseUrl": "http://x"}}}),
+            encoding="utf-8",
+        )
+        (pi_dir / "settings.json").write_text(
+            json.dumps({"theme": "dark"}), encoding="utf-8"
+        )
+
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare
+    )
+
+    assert exit_code == 0, output
+    pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
+    assert pi_models["keepMe"] == 1
+    assert "other" in pi_models["providers"]
+    assert "local-llm-env" in pi_models["providers"]
+    pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
+    assert pi_settings["theme"] == "dark"
+    assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
+
+
+@pytest.mark.parametrize("target", ["models.json", "settings.json"])
+def test_setup_sh_rejects_a_non_regular_pi_target_instead_of_hanging(
+    tmp_path, monkeypatch, target
+):
+    """A FIFO in place of a Pi config would block jq forever. The installer
+    must refuse it with a clear message instead."""
+
+    def prepare(home_dir):
+        pi_dir = home_dir / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        os.mkfifo(pi_dir / target)
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare, timeout=30.0
+    )
+
+    assert exit_code == 1, output
+    assert "not a regular file" in output
+
+
+@pytest.mark.parametrize("target", ["models.json", "settings.json"])
+def test_setup_sh_rejects_a_directory_in_place_of_a_pi_file(
+    tmp_path, monkeypatch, target
+):
+    def prepare(home_dir):
+        (home_dir / ".pi" / "agent" / target).mkdir(parents=True)
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare, timeout=30.0
+    )
+
+    assert exit_code == 1, output
+    assert "not a regular file" in output
+
+
+@pytest.mark.parametrize("target", ["models.json", "settings.json"])
+def test_setup_sh_rejects_a_multi_document_existing_pi_file(
+    tmp_path, monkeypatch, target
+):
+    """Plain jq reads two concatenated JSON documents and writes two
+    transformed documents back out -- silently producing an equally
+    malformed staged file. Reject the input instead."""
+
+    def prepare(home_dir):
+        pi_dir = home_dir / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / target).write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8")
+
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare, timeout=30.0
+    )
+
+    assert exit_code == 1, output
+    assert "exactly one JSON object" in output
+    # The malformed file is left exactly as it was -- nothing was staged in.
+    assert (home_dir / ".pi" / "agent" / target).read_text() == '{"a": 1}\n{"b": 2}\n'
+
+
+def test_setup_sh_rejects_an_existing_pi_config_with_a_non_object_providers(
+    tmp_path, monkeypatch
+):
+    def prepare(home_dir):
+        pi_dir = home_dir / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "models.json").write_text('{"providers": []}', encoding="utf-8")
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare, timeout=30.0
+    )
+
+    assert exit_code == 1, output
+    assert "object providers" in output
 
 
 class _BareListKeysHandler(_FakeOmniRouteHandler):
