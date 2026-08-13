@@ -36,6 +36,8 @@ SAMPLING_FIELDS = frozenset(
 
 DEFAULT_OMNIROUTE_IMAGE = "docker.io/diegosouzapw/omniroute:latest"
 DEFAULT_OMNIROUTE_PORT = 20128
+DEFAULT_REMOTE_SETUP_IMAGE = "docker.io/library/python:3.13-alpine"
+DEFAULT_REMOTE_SETUP_PORT = 20130
 
 
 class ConfigError(Exception):
@@ -88,6 +90,11 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         omniroute.setdefault("image", DEFAULT_OMNIROUTE_IMAGE)
         omniroute.setdefault("port", DEFAULT_OMNIROUTE_PORT)
         omniroute.setdefault("initial_password", "")
+
+    remote_setup = cfg.setdefault("remote_setup", {})
+    if isinstance(remote_setup, dict):
+        remote_setup.setdefault("image", DEFAULT_REMOTE_SETUP_IMAGE)
+        remote_setup.setdefault("port", DEFAULT_REMOTE_SETUP_PORT)
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -295,6 +302,17 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 errors.append("omniroute.port must be a positive integer")
             if not isinstance(omniroute.get("initial_password", ""), str):
                 errors.append("omniroute.initial_password must be a string")
+
+    if "remote_setup" in cfg:
+        remote_setup = cfg["remote_setup"]
+        if not isinstance(remote_setup, dict):
+            errors.append("section remote_setup must be a mapping")
+        else:
+            rs_image = remote_setup.get("image")
+            if not (isinstance(rs_image, str) and rs_image.strip()):
+                errors.append("remote_setup.image must be a non-empty string")
+            if not _positive_int(remote_setup.get("port")):
+                errors.append("remote_setup.port must be a positive integer")
 
     models = cfg["models"]
     if not isinstance(models, list) or not models:

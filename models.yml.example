@@ -46,6 +46,10 @@ omniroute:
   port: 20128
   initial_password: ""
 
+remote_setup:
+  image: docker.io/library/python:3.13-alpine
+  port: 20130
+
 models:
   # Optional per-model check overrides:
   # check_ctx_size defaults to this model's ctx_size.

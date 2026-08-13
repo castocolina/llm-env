@@ -67,6 +67,10 @@ def make_cfg(**overrides):
             "port": 20128,
             "initial_password": "test-password",
         },
+        "remote_setup": {
+            "image": "docker.io/library/python:3.13-alpine",
+            "port": 20130,
+        },
         "models": [
             {
                 "alias": "gemma4",
@@ -929,3 +933,52 @@ def test_config_rejects_invalid_resources_omniroute_values(omniroute_resources):
     )
     errors = validate_config(cfg)
     assert any("resources.omniroute" in error for error in errors)
+
+
+def test_migrate_config_adds_default_remote_setup_section():
+    cfg = make_cfg()
+    cfg.pop("remote_setup", None)
+    migrated = migrate_config(cfg)
+    assert migrated["remote_setup"] == {
+        "image": "docker.io/library/python:3.13-alpine",
+        "port": 20130,
+    }
+
+
+def test_migrate_config_preserves_existing_remote_setup_values():
+    cfg = make_cfg(remote_setup={"image": "custom/image:tag", "port": 30000})
+    migrated = migrate_config(cfg)
+    assert migrated["remote_setup"] == {"image": "custom/image:tag", "port": 30000}
+
+
+def test_config_accepts_valid_remote_setup_section():
+    cfg = make_cfg(remote_setup={"image": "docker.io/library/python:3.13-alpine", "port": 20130})
+    assert validate_config(cfg) == []
+
+
+def test_config_without_remote_setup_key_has_no_errors():
+    cfg = make_cfg()
+    cfg.pop("remote_setup", None)
+    assert validate_config(cfg) == []
+
+
+def test_config_rejects_non_mapping_remote_setup_section():
+    cfg = make_cfg(remote_setup=[])
+    errors = validate_config(cfg)
+    assert any(error == "section remote_setup must be a mapping" for error in errors)
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        ("image", "", "remote_setup.image must be a non-empty string"),
+        ("image", 5, "remote_setup.image must be a non-empty string"),
+        ("port", 0, "remote_setup.port must be a positive integer"),
+        ("port", "20130", "remote_setup.port must be a positive integer"),
+    ],
+)
+def test_config_rejects_invalid_remote_setup_values(field, value, expected_error):
+    remote_setup = {"image": "docker.io/library/python:3.13-alpine", "port": 20130}
+    remote_setup[field] = value
+    cfg = make_cfg(remote_setup=remote_setup)
+    assert expected_error in validate_config(cfg)
