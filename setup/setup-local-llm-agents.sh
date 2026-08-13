@@ -10,17 +10,20 @@ require_cmd uv curl jq yq node cmp
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 migrate_config_file || die "configuration migration failed"
 
-port="$(yq -r '.server.port // ""' "$CONFIG_PATH")"
-api_key="$(yq -r '.server.api_key // ""' "$CONFIG_PATH")"
+omniroute_port="$(yq -r '.omniroute.port // ""' "$CONFIG_PATH")"
+[ -n "$omniroute_port" ] || die "omniroute.port is not set; run 'make setup' first"
+key_response="$(llmenv omniroute issue-key --config "$CONFIG_PATH")" \
+    || die "could not obtain an OmniRoute API key; run 'make start' first"
+api_key="$(jq -r '.api_key // ""' <<<"$key_response")"
+[ -n "$api_key" ] || die "OmniRoute did not return a usable API key"
 models_json="$(yq -o=json '[.models[] | select(.enabled) | {
     "alias": .alias,
     "ctx_size": .ctx_size,
     "client_max_output_tokens": .client_max_output_tokens
 }]' "$CONFIG_PATH")"
 
-jq -ne --arg port "$port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
-    || die "server port must be an integer from 1 to 65535"
-[ -n "$api_key" ] || die "server API key is empty; run 'make start' first"
+jq -ne --arg port "$omniroute_port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
+    || die "omniroute port must be an integer from 1 to 65535"
 jq -e '
     type == "array" and length > 0 and
     ([.[].alias] | length == (unique | length)) and
@@ -32,7 +35,7 @@ jq -e '
 ' <<<"$models_json" >/dev/null \
     || die "enabled model records require unique aliases and valid context/output limits"
 
-base_url="http://127.0.0.1:${port}/v1"
+base_url="http://127.0.0.1:${omniroute_port}/v1"
 
 workdir="$(mktemp -d)" || die "could not create private configuration workspace"
 chmod 700 "$workdir" || {
@@ -52,6 +55,10 @@ printf '%s' "$api_key" >"$api_key_file" || die "could not write private API key"
 chmod 600 "$api_key_file" || die "could not secure private API key"
 printf '%s\n' "$models_json" >"$models_file" || die "could not write enabled models"
 chmod 600 "$models_file" || die "could not secure enabled models"
+models_state_file="${workdir}/models-state.json"
+jq '[.[] | .alias = "llama-cpp/\(.alias)"]' "$models_file" >"$models_state_file" \
+    || die "could not build prefixed model ids for OpenCode model state"
+chmod 600 "$models_state_file" || die "could not secure prefixed model ids"
 
 jq -n \
     --arg base_url "$base_url" \
@@ -63,7 +70,7 @@ jq -n \
         apiKey: ($api_key | rtrimstr("\n")),
         compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
         models: [$models[] | {
-            id: .alias,
+            id: "llama-cpp/\(.alias)",
             contextWindow: .ctx_size,
             maxTokens: .client_max_output_tokens
         }]
@@ -79,7 +86,7 @@ jq -n \
         name: "local-llm-env",
         options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
         models: (reduce $models[] as $model ({};
-            .[$model.alias] = {
+            .["llama-cpp/\($model.alias)"] = {
                 name: $model.alias,
                 limit: {
                     context: $model.ctx_size,
@@ -130,7 +137,7 @@ stage_pi_settings() {
     local source="$1" models="$2" staged="$3"
     jq --slurpfile models "$models" '
         if type != "object" then error("Pi settings must be an object") else
-          .enabledModels = [$models[0][] | "local-llm-env/\(.alias)"]
+          .enabledModels = [$models[0][] | "local-llm-env/llama-cpp/\(.alias)"]
         end
     ' "$source" >"$staged"
 }
@@ -258,7 +265,8 @@ node "${REPO_DIR}/setup/update-opencode-config.mjs" \
     --validate-model-state "$opencode_state_source" \
     || die "incompatible OpenCode model state: ${opencode_state_source}"
 
-curl -fsS --max-time 5 -o /dev/null "${base_url%/v1}/health" \
+server_port="$(yq -r '.server.port // ""' "$CONFIG_PATH")"
+curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:${server_port}/health" \
     || die "local server is not healthy; run 'make start' and retry"
 
 if [ ! -e "$pi_path" ]; then
@@ -306,11 +314,11 @@ done
 prepare_staged_file "$opencode_state_dir" "model.json"
 opencode_state_staged="$STAGED_FILE"
 node "${REPO_DIR}/setup/update-opencode-config.mjs" \
-    --update-model-state "$opencode_state_source" "$models_file" "$opencode_state_staged" \
+    --update-model-state "$opencode_state_source" "$models_state_file" "$opencode_state_staged" \
     || die "could not update OpenCode model state"
 state_check="${workdir}/checked-opencode-model.json"
 node "${REPO_DIR}/setup/update-opencode-config.mjs" \
-    --update-model-state "$opencode_state_staged" "$models_file" "$state_check" \
+    --update-model-state "$opencode_state_staged" "$models_state_file" "$state_check" \
     || die "could not validate staged OpenCode model state"
 cmp -s "$opencode_state_staged" "$state_check" \
     || die "staged OpenCode model state is not idempotent"

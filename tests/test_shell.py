@@ -27,6 +27,9 @@ server:
   api_key: fixture-local-api-key
   mdns_name: llm
   sleep_idle_seconds: 300
+omniroute:
+  port: 20128
+  initial_password: fixture-dashboard-password
 gpu:
   pci_address: 0000:03:00.0
   device_name: Test GPU
@@ -1092,18 +1095,21 @@ def test_reverse_setup_selection_drives_client_model_order(
 
     assert result.returncode == 0, result.stderr
     pi_provider = json.loads(pi_path.read_text())["providers"]["local-llm-env"]
-    assert [model["id"] for model in pi_provider["models"]] == ["ornith", "gemma4"]
+    assert [model["id"] for model in pi_provider["models"]] == [
+        "llama-cpp/ornith",
+        "llama-cpp/gemma4",
+    ]
     assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "local-llm-env/ornith",
-        "local-llm-env/gemma4",
+        "local-llm-env/llama-cpp/ornith",
+        "local-llm-env/llama-cpp/gemma4",
     ]
     opencode_provider = json.loads(opencode_paths[2].read_text())["provider"][
         "local-llm-env"
     ]
-    assert list(opencode_provider["models"]) == ["ornith", "gemma4"]
+    assert list(opencode_provider["models"]) == ["llama-cpp/ornith", "llama-cpp/gemma4"]
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "ornith"},
-        {"providerID": "local-llm-env", "modelID": "gemma4"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
     ]
 
 
@@ -2443,6 +2449,42 @@ def test_cleanup_banner_mentions_remote_setup_data(tmp_path: pathlib.Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert "remote-setup-data" in result.stdout
+
+
+def test_cleanup_removes_the_local_omniroute_api_key_cache(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    config = home / ".config" / "llm-env" / "models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("gpu:\n  image: i\n", encoding="utf-8")
+    cache = config.parent / "omniroute-api-key.json"
+    cache.write_text('{"id": "x", "key": "y"}\n', encoding="utf-8")
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    real_yq = shutil.which("yq") or "yq"
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(0o755)
+    for name in ("podman", "systemctl"):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(0o755)
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/clean.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_ASSUME_YES": "1",
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "REAL_YQ": real_yq,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not cache.exists()
 
 
 def test_cleanup_falls_back_to_default_images_without_a_config(
@@ -3841,6 +3883,7 @@ def run_setup_local_llm_agents(
     opencode_jsonc_text: str | None = None,
     opencode_state_text: str | None = None,
     opencode_version: str = "1.18.10",
+    omniroute_api_key: str = "fixture-omniroute-api-key",
     debug_state_dir: pathlib.Path | None = None,
     fail_move_number: int | None = None,
     health_exit: int = 0,
@@ -3924,6 +3967,18 @@ def run_setup_local_llm_agents(
         "exec /usr/bin/mv \"$@\"\n"
     )
     mv.chmod(0o755)
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *'omniroute issue-key'*) printf '{\"api_key\": \"%s\"}\\n' \"$OMNIROUTE_API_KEY\" ;;\n"
+        "  *) exec \"$REAL_UV\" \"$@\" ;;\n"
+        "esac\n"
+    )
+    uv.chmod(0o755)
     if failing_command is not None:
         command = commands / failing_command
         command.write_text("#!/usr/bin/bash\nexit 70\n")
@@ -3940,8 +3995,10 @@ def run_setup_local_llm_agents(
             "HOME": str(home),
             "LLM_ENV_CONFIG": str(config),
             "MOVE_COUNTER": str(move_counter),
+            "OMNIROUTE_API_KEY": omniroute_api_key,
             "OPENCODE_VERSION": opencode_version,
             "PI_CODING_AGENT_DIR": str(pi_path.parent),
+            "REAL_UV": real_uv,
             "REAL_YQ": shutil.which("yq") or "yq",
             "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_STATE_HOME": str(home / ".local/state"),
@@ -3963,14 +4020,14 @@ def test_setup_creates_missing_opencode_state_only_for_compatible_1_18_10(
     assert json.loads(state_path.read_text()) == {
         "recent": [],
         "favorite": [
-            {"providerID": "local-llm-env", "modelID": "gemma4"},
-            {"providerID": "local-llm-env", "modelID": "ornith"},
+            {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
+            {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
         ],
         "variant": {},
     }
     assert "close Pi and OpenCode" in result.stdout + result.stderr
     assert "restart Pi and OpenCode" in result.stdout
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("version", ["1.18.9", "1.19.0", "invalid"])
@@ -3986,7 +4043,7 @@ def test_setup_rejects_missing_state_for_unsupported_opencode(
     assert not opencode_paths[0].parent.exists()
     assert not state_path.parent.exists()
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_rejects_debug_state_path_mismatch_before_staging(
@@ -4017,8 +4074,8 @@ def test_setup_existing_state_does_not_require_version_or_path_compatibility(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "gemma4"},
-        {"providerID": "local-llm-env", "modelID": "ornith"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
     ]
 
 
@@ -4039,7 +4096,7 @@ def test_setup_rejects_malformed_opencode_state_before_health(
     assert state_path.read_text() == malformed_state
     assert not pi_path.parent.exists()
     assert not opencode_paths[0].parent.exists()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_stages_every_target_before_first_replacement(
@@ -4084,7 +4141,7 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
 
     assert failed.returncode != 0
     assert "rerun make setup-local-llm-agents" in failed.stderr
-    assert "fixture-local-api-key" not in failed.stdout + failed.stderr
+    assert "fixture-omniroute-api-key" not in failed.stdout + failed.stderr
 
     repaired, _, _, settings_path, _, state_path = run_setup_local_llm_agents(
         tmp_path, **kwargs
@@ -4092,12 +4149,12 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
 
     assert repaired.returncode == 0, repaired.stderr
     assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "local-llm-env/gemma4",
-        "local-llm-env/ornith",
+        "local-llm-env/llama-cpp/gemma4",
+        "local-llm-env/llama-cpp/ornith",
     ]
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "gemma4"},
-        {"providerID": "local-llm-env", "modelID": "ornith"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
+        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
     ]
 
 
@@ -4113,16 +4170,16 @@ def test_setup_local_llm_agents_creates_private_provider_files(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(pi_path.read_text())["providers"]["local-llm-env"] == {
-        "baseUrl": "http://127.0.0.1:18123/v1",
+        "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
-        "apiKey": "fixture-local-api-key",
+        "apiKey": "fixture-omniroute-api-key",
         "compat": {
             "supportsDeveloperRole": False,
             "supportsReasoningEffort": False,
         },
         "models": [
-            {"id": "gemma4", "contextWindow": 131072, "maxTokens": 8192},
-            {"id": "ornith", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
         ],
     }
     assert not config_json.exists()
@@ -4131,15 +4188,15 @@ def test_setup_local_llm_agents_creates_private_provider_files(
         "npm": "@ai-sdk/openai-compatible",
         "name": "local-llm-env",
         "options": {
-            "baseURL": "http://127.0.0.1:18123/v1",
-            "apiKey": "fixture-local-api-key",
+            "baseURL": "http://127.0.0.1:20128/v1",
+            "apiKey": "fixture-omniroute-api-key",
         },
         "models": {
-            "gemma4": {
+            "llama-cpp/gemma4": {
                 "name": "gemma4",
                 "limit": {"context": 131072, "output": 8192},
             },
-            "ornith": {
+            "llama-cpp/ornith": {
                 "name": "ornith",
                 "limit": {"context": 131072, "output": 8192},
             },
@@ -4159,7 +4216,7 @@ def test_setup_local_llm_agents_creates_private_provider_files(
         if call.startswith("mktemp ") and ".XXXXXX" in call
     )
     assert health_index < first_target_stage
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_secures_existing_client_directories_and_files(
@@ -4203,11 +4260,11 @@ def test_setup_local_llm_agents_updates_every_global_file_that_defines_the_provi
         parsed = json.loads(re.sub(r"(?m)^\s*//[^\n]*", "", text))
         provider = parsed["provider"]["local-llm-env"]
         assert provider["models"] == {
-            "gemma4": {
+            "llama-cpp/gemma4": {
                 "name": "gemma4",
                 "limit": {"context": 131072, "output": 8192},
             },
-            "ornith": {
+            "llama-cpp/ornith": {
                 "name": "ornith",
                 "limit": {"context": 131072, "output": 8192},
             },
@@ -4270,7 +4327,7 @@ def test_setup_local_llm_agents_rejects_concatenated_pi_json_without_replacement
     assert pi_path.read_text() == original_pi
     assert not opencode_paths[0].parent.exists()
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_rejects_non_object_pi_providers_before_creating_opencode_directory(
@@ -4286,7 +4343,7 @@ def test_setup_local_llm_agents_rejects_non_object_pi_providers_before_creating_
     assert pi_path.read_text() == original_pi
     assert not opencode_paths[0].parent.exists()
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_rejects_duplicate_opencode_provider_before_creating_pi_directory(
@@ -4304,7 +4361,7 @@ def test_setup_local_llm_agents_rejects_duplicate_opencode_provider_before_creat
     assert not pi_path.parent.exists()
     assert opencode_paths[2].read_text() == duplicate_provider
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("invalid_whitespace", ["\v", "\N{NO-BREAK SPACE}"])
@@ -4341,7 +4398,7 @@ def test_setup_local_llm_agents_rejects_each_invalid_global_before_creating_pi_d
     assert not pi_path.parent.exists()
     assert opencode_paths[bad_global_index].read_text() == bad_text
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
@@ -4363,16 +4420,16 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
         "baseUrl": "https://example.invalid/v1"
     }
     assert updated["providers"]["local-llm-env"] == {
-        "baseUrl": "http://127.0.0.1:18123/v1",
+        "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
-        "apiKey": "fixture-local-api-key",
+        "apiKey": "fixture-omniroute-api-key",
         "compat": {
             "supportsDeveloperRole": False,
             "supportsReasoningEffort": False,
         },
         "models": [
-            {"id": "gemma4", "contextWindow": 131072, "maxTokens": 8192},
-            {"id": "ornith", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
         ],
     }
 
@@ -4391,8 +4448,8 @@ def test_setup_local_llm_agents_sets_exact_pi_cycle(
     assert result.returncode == 0, result.stderr
     settings = json.loads(settings_path.read_text())
     assert settings["enabledModels"] == [
-        "local-llm-env/gemma4",
-        "local-llm-env/ornith",
+        "local-llm-env/llama-cpp/gemma4",
+        "local-llm-env/llama-cpp/ornith",
     ]
     if settings_text and "theme" in settings_text:
         assert settings["theme"] == "dark"
@@ -4438,7 +4495,7 @@ def test_setup_local_llm_agents_rejects_invalid_pi_settings_without_replacement(
     assert settings_path.read_text() == settings_text
     assert opencode_paths[0].read_text() == original_opencode
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -4468,7 +4525,7 @@ def test_setup_local_llm_agents_rejects_invalid_model_records_before_health(
     assert not pi_path.parent.exists()
     assert not settings_path.exists()
     assert not opencode_paths[0].parent.exists()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_migrates_missing_output_limit_before_replacement(
@@ -4490,13 +4547,6 @@ def test_setup_local_llm_agents_migrates_missing_output_limit_before_replacement
 @pytest.mark.parametrize(
     ("config_text", "health_exit", "pi_text"),
     [
-        (
-            VALID_AGENT_SETUP_CONFIG.replace(
-                "api_key: fixture-local-api-key", "api_key: ''"
-            ),
-            0,
-            None,
-        ),
         (VALID_AGENT_SETUP_CONFIG.replace("port: 18123", "port: 0"), 0, None),
         (
             VALID_AGENT_SETUP_CONFIG.replace("enabled: true", "enabled: false"),
@@ -4527,7 +4577,7 @@ def test_setup_local_llm_agents_rejects_invalid_inputs_without_replacing_files(
     assert pi_path.read_text() == original_pi
     assert opencode_paths[0].read_text() == original_opencode
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("failing_command", ("mktemp", "chmod"))
@@ -4548,7 +4598,7 @@ def test_setup_local_llm_agents_staging_failures_leave_existing_files_unchanged(
     assert not settings_path.exists()
     assert opencode_paths[0].read_text() == original_opencode
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_does_not_create_client_directories_when_mkdir_fails(
@@ -4562,7 +4612,7 @@ def test_setup_local_llm_agents_does_not_create_client_directories_when_mkdir_fa
     assert not pi_path.parent.exists()
     assert not opencode_paths[0].parent.exists()
     assert "mv " not in calls.read_text()
-    assert "fixture-local-api-key" not in result.stdout + result.stderr
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_stages_each_replacement_with_its_target(

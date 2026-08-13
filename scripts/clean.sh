@@ -48,6 +48,7 @@ echo "  compose stack   ${COMPOSE_FILE}"
 echo "  compose volumes (including omniroute-data and remote-setup-data; OmniRoute's stored connections/password and the cached remote-setup API key)"
 echo "  unit            ${WRAPPER_UNIT_PATH}"
 echo "  config          ${CONFIG_PATH}"
+echo "  local OmniRoute API key cache  $(dirname "$CONFIG_PATH")/omniroute-api-key.json"
 echo "  images          ${images_to_remove}"
 echo "Downloaded models in ${MODELS_DIR} are KEPT."
 if [ "${LLM_ENV_ASSUME_YES:-0}" = "1" ]; then
@@ -64,7 +65,8 @@ systemctl --user stop "${UNIT_NAME}.service" 2>/dev/null || true
 systemctl --user disable "${UNIT_NAME}.service" 2>/dev/null || true
 rm -f "$WRAPPER_UNIT_PATH"
 systemctl --user daemon-reload
-rm -f "$CONFIG_PATH" "$COMPOSE_FILE" "${HOME}/.config/llm-env/presets.ini"
+rm -f "$CONFIG_PATH" "$COMPOSE_FILE" "${HOME}/.config/llm-env/presets.ini" \
+    "$(dirname "$CONFIG_PATH")/omniroute-api-key.json"
 if [ -n "$configured_image" ]; then
     podman rmi -f "$configured_image" 2>/dev/null || true
 else

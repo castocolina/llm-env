@@ -101,6 +101,12 @@ cached key was later revoked from the dashboard (checked against
 binding changed from `127.0.0.1` to `0.0.0.0` -- it is now genuinely
 LAN-reachable, not just printed as if it were (see
 `docs/superpowers/specs/2026-08-12-remote-agent-setup-design.md`).
+The local machine's own clients take the identical path: `make
+setup-local-llm-agents` now points Pi/OpenCode at OmniRoute (model ids
+prefixed `llama-cpp/`) with a scoped key obtained through `llmenv
+omniroute issue-key` -- a distinct `llm-env-local-agents` key cached at
+`<config-dir>/omniroute-api-key.json` (removed by `make clean`), never
+the dashboard password and never the raw `server.api_key`.
 
 ### Topology and what survives a restart
 
