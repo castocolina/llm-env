@@ -1477,6 +1477,38 @@ def test_omniroute_provision_fails_cleanly_without_a_dashboard_password(tmp_path
     assert "initial_password" in json.loads(result.stdout)["error"]
 
 
+def test_omniroute_issue_key_prints_the_key(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    config = _write_omniroute_test_config(
+        tmp_path, omniroute_port=20128, initial_password="dash-pw"
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "ensure_api_key",
+        lambda base_url, dashboard_password, cache_path, key_name: (
+            "sk-local" if (base_url, dashboard_password, key_name)
+            == ("http://127.0.0.1:20128", "dash-pw", "llm-env-local-agents")
+            else "wrong-args"
+        ),
+    )
+    rc = llmenv.main(["omniroute", "issue-key", "--config", str(config)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"api_key": "sk-local"}
+
+
+def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
+    import llmenv
+
+    # A schema-valid config with omniroute.initial_password left blank --
+    # exercises cmd_omniroute's own "not configured" guard, the same case
+    # test_omniroute_provision_fails_cleanly_without_a_dashboard_password
+    # already covers for the "provision" action.
+    config = _write_omniroute_test_config(tmp_path, omniroute_port=20128, initial_password='""')
+    rc = llmenv.main(["omniroute", "issue-key", "--config", str(config)])
+    assert rc != 0
+
+
 def test_render_compose_writes_a_compose_file(tmp_path):
     config = write_test_config(tmp_path)
     output = tmp_path / "docker-compose.yml"

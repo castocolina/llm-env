@@ -56,6 +56,7 @@ from pylib.gguf import (
 )
 from pylib.omniroute import OmniRouteError, provision
 from pylib.presets import write_presets
+from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
 from pylib.transcript import classify_transcript
 
@@ -377,8 +378,17 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
             "'make start' after 'make setup' to generate them"
         )
     base_url = f"http://127.0.0.1:{port}"
-    result = provision(base_url, initial_password, cfg["server"]["port"], cfg["server"]["api_key"])
-    return emit(result)
+    if args.action == "provision":
+        result = provision(
+            base_url, initial_password, cfg["server"]["port"], cfg["server"]["api_key"]
+        )
+        return emit(result)
+    # args.action == "issue-key"
+    cache_path = Path(args.config).parent / "omniroute-api-key.json"
+    api_key = ensure_api_key(
+        base_url, initial_password, cache_path, key_name="llm-env-local-agents"
+    )
+    return emit({"api_key": api_key})
 
 
 def cmd_presets(args: argparse.Namespace) -> int:
@@ -518,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     omniroute_parser = sub.add_parser("omniroute")
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
-    omniroute_parser.add_argument("action", choices=["provision"])
+    omniroute_parser.add_argument("action", choices=["provision", "issue-key"])
     omniroute_parser.set_defaults(func=cmd_omniroute)
 
     presets = sub.add_parser("presets")
