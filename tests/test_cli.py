@@ -1485,9 +1485,49 @@ def test_render_compose_writes_a_compose_file(tmp_path):
         "render-compose",
         "--models-dir", "/models",
         "--presets-path", "/presets.ini",
+        "--repo-root", str(tmp_path),
         "--output", str(output),
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["written"] == str(output)
     assert output.exists()
     assert "llm-server" in output.read_text()
+
+
+def test_render_compose_reads_the_master_key_from_env_file(tmp_path):
+    config = write_test_config(tmp_path)
+    output = tmp_path / "docker-compose.yml"
+    env_file = tmp_path / ".env"
+    env_file.write_text("OMNI_ROUTER_MASTER_KEY=test-master-key-from-env\n")
+    result = run(
+        "--config", str(config),
+        "render-compose",
+        "--models-dir", "/models",
+        "--presets-path", "/presets.ini",
+        "--repo-root", str(tmp_path),
+        "--env-file", str(env_file),
+        "--output", str(output),
+    )
+    assert result.returncode == 0, result.stderr
+    document = yaml.safe_load(output.read_text())
+    env = document["services"]["remote-setup"]["environment"]
+    assert env["OMNI_ROUTER_MASTER_KEY"] == "test-master-key-from-env"
+
+
+def test_render_compose_defaults_to_empty_master_key_when_env_file_missing(tmp_path):
+    config = write_test_config(tmp_path)
+    output = tmp_path / "docker-compose.yml"
+    missing_env_file = tmp_path / "does-not-exist.env"
+    result = run(
+        "--config", str(config),
+        "render-compose",
+        "--models-dir", "/models",
+        "--presets-path", "/presets.ini",
+        "--repo-root", str(tmp_path),
+        "--env-file", str(missing_env_file),
+        "--output", str(output),
+    )
+    assert result.returncode == 0, result.stderr
+    document = yaml.safe_load(output.read_text())
+    env = document["services"]["remote-setup"]["environment"]
+    assert env["OMNI_ROUTER_MASTER_KEY"] == ""

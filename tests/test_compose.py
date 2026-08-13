@@ -31,11 +31,20 @@ CFG = {
         "port": 20128,
         "initial_password": "test-password",
     },
+    "remote_setup": {
+        "image": "docker.io/library/python:3.13-alpine",
+        "port": 20130,
+    },
 }
 
 
 def compose_dict(cfg=CFG):
-    text = render_compose(cfg, models_dir="/home/user/llm-workspace/models", presets_path="/home/user/.config/llm-env/presets.ini")
+    text = render_compose(
+        cfg,
+        models_dir="/home/user/llm-workspace/models",
+        presets_path="/home/user/.config/llm-env/presets.ini",
+        repo_root="/home/user/llm-env",
+    )
     return text, yaml.safe_load(text)
 
 
@@ -114,13 +123,13 @@ def test_omniroute_service_uses_configured_image_and_port():
     _, document = compose_dict()
     omniroute = document["services"]["omniroute"]
     assert omniroute["image"] == "docker.io/diegosouzapw/omniroute:latest"
-    assert omniroute["ports"] == ["127.0.0.1:20128:20128"]
+    assert omniroute["ports"] == ["0.0.0.0:20128:20128"]
 
 
 def test_omniroute_service_mounts_a_named_data_volume():
     _, document = compose_dict()
     assert document["services"]["omniroute"]["volumes"] == ["omniroute-data:/app/data"]
-    assert document["volumes"] == {"omniroute-data": {}}
+    assert document["volumes"]["omniroute-data"] == {}
 
 
 def test_omniroute_service_sets_its_environment():
@@ -183,12 +192,99 @@ def test_dollar_signs_in_secrets_are_escaped_against_compose_interpolation():
 
 def test_write_compose_creates_parent_directories(tmp_path):
     target = tmp_path / "nested" / "docker-compose.yml"
-    write_compose(CFG, models_dir="/models", presets_path="/presets.ini", path=target)
+    write_compose(
+        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+    )
     assert target.exists()
     assert "llm-server" in yaml.safe_load(target.read_text())["services"]
 
 
 def test_write_compose_sets_restrictive_file_mode(tmp_path):
     target = tmp_path / "docker-compose.yml"
-    write_compose(CFG, models_dir="/models", presets_path="/presets.ini", path=target)
+    write_compose(
+        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+    )
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_remote_setup_service_uses_configured_image_and_port():
+    _, document = compose_dict()
+    remote_setup = document["services"]["remote-setup"]
+    assert remote_setup["image"] == "docker.io/library/python:3.13-alpine"
+    assert remote_setup["ports"] == ["0.0.0.0:20130:20130"]
+
+
+def test_remote_setup_service_mounts_pylib_and_a_named_data_volume():
+    _, document = compose_dict()
+    volumes = document["services"]["remote-setup"]["volumes"]
+    assert "/home/user/llm-env/pylib:/app/pylib:ro,z" in volumes
+    assert (
+        "/home/user/llm-env/setup/update-opencode-config.mjs"
+        ":/app/setup/update-opencode-config.mjs:ro,z" in volumes
+    )
+    assert "remote-setup-data:/app/data" in volumes
+    assert document["volumes"]["remote-setup-data"] == {}
+
+
+def test_remote_setup_service_command_runs_the_module():
+    _, document = compose_dict()
+    assert document["services"]["remote-setup"]["command"] == [
+        "python3", "-m", "pylib.remote_setup",
+    ]
+
+
+def test_remote_setup_service_working_dir_is_app():
+    _, document = compose_dict()
+    assert document["services"]["remote-setup"]["working_dir"] == "/app"
+
+
+def test_remote_setup_environment_carries_omniroute_and_master_key():
+    text = render_compose(
+        CFG,
+        models_dir="/models",
+        presets_path="/presets.ini",
+        repo_root="/repo",
+        omni_router_master_key="test-master-key",
+    )
+    document = yaml.safe_load(text)
+    env = document["services"]["remote-setup"]["environment"]
+    assert env["OMNI_ROUTER_MASTER_KEY"] == "test-master-key"
+    assert env["REMOTE_SETUP_PORT"] == "20130"
+    assert env["OMNIROUTE_INTERNAL_URL"] == "http://omniroute:20128"
+    assert env["OMNIROUTE_PORT"] == "20128"
+    assert env["OMNIROUTE_DASHBOARD_PASSWORD"] == "test-password"
+
+
+def test_remote_setup_environment_defaults_master_key_to_empty_string():
+    _, document = compose_dict()
+    assert document["services"]["remote-setup"]["environment"]["OMNI_ROUTER_MASTER_KEY"] == ""
+
+
+def test_remote_setup_models_json_lists_only_enabled_models_alias_ctx_and_output_tokens():
+    cfg = {
+        **CFG,
+        "models": [
+            {"alias": "a", "enabled": True, "ctx_size": 8192, "client_max_output_tokens": 4096},
+            {"alias": "b", "enabled": False, "ctx_size": 8192, "client_max_output_tokens": 4096},
+        ],
+    }
+    _, document = compose_dict(cfg)
+    import json as _json
+    models_json = _json.loads(document["services"]["remote-setup"]["environment"]["MODELS_JSON"])
+    assert models_json == [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]
+
+
+def test_remote_setup_service_depends_on_omniroute_healthy():
+    _, document = compose_dict()
+    assert document["services"]["remote-setup"]["depends_on"] == {
+        "omniroute": {"condition": "service_healthy"},
+    }
+
+
+def test_remote_setup_service_has_a_healthcheck():
+    _, document = compose_dict()
+    healthcheck = document["services"]["remote-setup"]["healthcheck"]
+    test = healthcheck["test"]
+    assert test[:3] == ["CMD", "python3", "-c"]
+    assert "/setup.sh" in test[3]
+    assert "127.0.0.1:20130" in test[3]

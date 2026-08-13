@@ -46,6 +46,7 @@ from pylib.config import (
     sync_models_max,
 )
 from pylib.detect import DetectError, detect, host_resources, processes_on_render_node
+from pylib.dotenv import read_env_file
 from pylib.gguf import (
     GgufError,
     kv_geometry,
@@ -388,10 +389,13 @@ def cmd_presets(args: argparse.Namespace) -> int:
 
 def cmd_render_compose(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
+    env_vars = read_env_file(Path(args.env_file)) if args.env_file else {}
     write_compose(
         cfg,
         models_dir=args.models_dir,
         presets_path=args.presets_path,
+        repo_root=args.repo_root,
+        omni_router_master_key=env_vars.get("OMNI_ROUTER_MASTER_KEY", ""),
         path=Path(args.output),
     )
     return emit({"written": str(args.output)})
@@ -528,6 +532,8 @@ def build_parser() -> argparse.ArgumentParser:
     render_compose.add_argument("--config", default=argparse.SUPPRESS)
     render_compose.add_argument("--models-dir", required=True)
     render_compose.add_argument("--presets-path", required=True)
+    render_compose.add_argument("--repo-root", required=True)
+    render_compose.add_argument("--env-file", default=None)
     render_compose.add_argument("--output", required=True)
     render_compose.set_defaults(func=cmd_render_compose)
 

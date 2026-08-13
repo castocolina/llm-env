@@ -8,6 +8,7 @@ presets.ini via configparser.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,14 @@ def _dollar_escape(value: str) -> str:
     return value.replace("$", "$$")
 
 
-def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -> str:
+def render_compose(
+    cfg: dict[str, Any],
+    *,
+    models_dir: str,
+    presets_path: str,
+    repo_root: str,
+    omni_router_master_key: str = "",
+) -> str:
     server = cfg["server"]
     gpu = cfg["gpu"]
     runtime = cfg["runtime"]
@@ -79,7 +87,7 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
             omniroute_cfg.get("image", "docker.io/diegosouzapw/omniroute:latest")
         ),
         "container_name": "omniroute",
-        "ports": [f"127.0.0.1:{omniroute_port}:{omniroute_port}"],
+        "ports": [f"0.0.0.0:{omniroute_port}:{omniroute_port}"],
         "volumes": ["omniroute-data:/app/data"],
         "environment": {
             "PORT": str(omniroute_port),
@@ -104,9 +112,74 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
     if omniroute_memory_mib:
         omniroute_service["mem_limit"] = f"{omniroute_memory_mib}m"
 
+    remote_setup_cfg = cfg.get("remote_setup", {})
+    remote_setup_port = remote_setup_cfg.get("port", 20130)
+    enabled_models = [
+        {
+            "alias": model["alias"],
+            "ctx_size": model["ctx_size"],
+            "client_max_output_tokens": model["client_max_output_tokens"],
+        }
+        for model in cfg.get("models", [])
+        if model.get("enabled")
+    ]
+    remote_setup_service: dict[str, Any] = {
+        "image": _dollar_escape(
+            remote_setup_cfg.get("image", "docker.io/library/python:3.13-alpine")
+        ),
+        "container_name": "remote-setup",
+        "working_dir": "/app",
+        "volumes": [
+            f"{_dollar_escape(repo_root)}/pylib:/app/pylib:ro,z",
+            # update-opencode-config.mjs is NOT served over HTTP (the design
+            # defines exactly two public routes, /setup.sh and /config) --
+            # it's mounted here so pylib/remote_setup.py can read its
+            # content at script-render time and embed it verbatim into the
+            # generated /setup.sh response via a bash heredoc. Mounted
+            # explicitly since only pylib/ is otherwise in view.
+            f"{_dollar_escape(repo_root)}/setup/update-opencode-config.mjs:/app/setup/update-opencode-config.mjs:ro,z",
+            "remote-setup-data:/app/data",
+        ],
+        "ports": [f"0.0.0.0:{remote_setup_port}:{remote_setup_port}"],
+        "command": ["python3", "-m", "pylib.remote_setup"],
+        "environment": {
+            "OMNI_ROUTER_MASTER_KEY": _dollar_escape(omni_router_master_key),
+            "REMOTE_SETUP_PORT": str(remote_setup_port),
+            "OMNIROUTE_INTERNAL_URL": f"http://omniroute:{omniroute_port}",
+            "OMNIROUTE_PORT": str(omniroute_port),
+            "OMNIROUTE_DASHBOARD_PASSWORD": _dollar_escape(
+                omniroute_cfg.get("initial_password", "")
+            ),
+            "MODELS_JSON": _dollar_escape(json.dumps(enabled_models)),
+        },
+        "depends_on": {"omniroute": {"condition": "service_healthy"}},
+        "restart": "unless-stopped",
+        "healthcheck": {
+            "test": [
+                "CMD",
+                "python3",
+                "-c",
+                (
+                    "import urllib.request,sys; "
+                    "urllib.request.urlopen("
+                    f"'http://127.0.0.1:{remote_setup_port}/setup.sh', timeout=3"
+                    ")"
+                ),
+            ],
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 5,
+            "start_period": "10s",
+        },
+    }
+
     document = {
-        "services": {"llm-server": service, "omniroute": omniroute_service},
-        "volumes": {"omniroute-data": {}},
+        "services": {
+            "llm-server": service,
+            "omniroute": omniroute_service,
+            "remote-setup": remote_setup_service,
+        },
+        "volumes": {"omniroute-data": {}, "remote-setup-data": {}},
     }
     return HEADER_COMMENT + yaml.safe_dump(
         document, sort_keys=False, default_flow_style=False
@@ -114,12 +187,24 @@ def render_compose(cfg: dict[str, Any], *, models_dir: str, presets_path: str) -
 
 
 def write_compose(
-    cfg: dict[str, Any], *, models_dir: str, presets_path: str, path: Path
+    cfg: dict[str, Any],
+    *,
+    models_dir: str,
+    presets_path: str,
+    repo_root: str,
+    omni_router_master_key: str = "",
+    path: Path,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        render_compose(cfg, models_dir=models_dir, presets_path=presets_path),
+        render_compose(
+            cfg,
+            models_dir=models_dir,
+            presets_path=presets_path,
+            repo_root=repo_root,
+            omni_router_master_key=omni_router_master_key,
+        ),
         encoding="utf-8",
     )
     path.chmod(0o600)

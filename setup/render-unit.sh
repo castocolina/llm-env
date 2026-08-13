@@ -50,7 +50,9 @@ fi
 
 log_step "Rendering the compose file"
 llmenv --config "$CONFIG_PATH" render-compose \
-    --models-dir "$MODELS_DIR" --presets-path "$presets_path" --output "$COMPOSE_FILE" >/dev/null
+    --models-dir "$MODELS_DIR" --presets-path "$presets_path" \
+    --repo-root "$REPO_DIR" --env-file "${REPO_DIR}/.env" \
+    --output "$COMPOSE_FILE" >/dev/null
 log_info "wrote ${COMPOSE_FILE}"
 
 # Kept alongside the repo (gitignored) so the rendered compose file can be
