@@ -1,0 +1,698 @@
+import http.client
+import http.server
+import json
+import os
+import pty
+import shutil
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pylib.remote_setup as remote_setup_module
+from pylib.remote_setup import (
+    RemoteSetupHandler,
+    build_config_response,
+    host_without_port,
+    master_key_matches,
+    parse_bearer_token,
+    read_cached_key,
+    render_setup_script,
+    validate_host_header,
+    write_cached_key,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _use_real_opencode_updater(monkeypatch):
+    """render_setup_script() reads UPDATE_OPENCODE_CONFIG_PATH from disk to
+    embed it into the generated script. In the running container that path
+    is /app/setup/update-opencode-config.mjs (see pylib/compose.py's
+    remote-setup volume mount); on the test host it's this repo's real
+    setup/update-opencode-config.mjs -- point the module at it so tests
+    exercise the real embed rather than a container path that doesn't
+    exist outside the container.
+    """
+    monkeypatch.setattr(
+        remote_setup_module,
+        "UPDATE_OPENCODE_CONFIG_PATH",
+        REPO_ROOT / "setup" / "update-opencode-config.mjs",
+    )
+
+
+def test_parse_bearer_token_extracts_the_token():
+    assert parse_bearer_token("Bearer abc123") == "abc123"
+
+
+def test_parse_bearer_token_returns_none_for_missing_header():
+    assert parse_bearer_token(None) is None
+
+
+def test_parse_bearer_token_returns_none_for_non_bearer_scheme():
+    assert parse_bearer_token("Basic abc123") is None
+
+
+def test_parse_bearer_token_returns_none_for_empty_token():
+    assert parse_bearer_token("Bearer ") is None
+
+
+def test_master_key_matches_true_for_equal_strings():
+    assert master_key_matches("secret", "secret") is True
+
+
+def test_master_key_matches_false_for_different_strings():
+    assert master_key_matches("wrong", "secret") is False
+
+
+def test_read_cached_key_returns_none_when_file_missing(tmp_path):
+    assert read_cached_key(tmp_path / "missing.json") is None
+
+
+def test_read_cached_key_returns_none_for_malformed_json(tmp_path):
+    cache = tmp_path / "cache.json"
+    cache.write_text("not json")
+    assert read_cached_key(cache) is None
+
+
+def test_read_cached_key_returns_none_when_fields_missing(tmp_path):
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"id": "abc"}))
+    assert read_cached_key(cache) is None
+
+
+def test_write_then_read_cached_key_round_trips(tmp_path):
+    cache = tmp_path / "nested" / "cache.json"
+    write_cached_key(cache, "key-id", "sk-value")
+    assert read_cached_key(cache) == {"id": "key-id", "key": "sk-value"}
+
+
+def test_host_without_port_strips_a_trailing_port():
+    assert host_without_port("192.0.2.1:20130") == "192.0.2.1"
+
+
+def test_host_without_port_leaves_a_bare_host_unchanged():
+    assert host_without_port("192.0.2.1") == "192.0.2.1"
+
+
+def test_host_without_port_handles_a_bracketed_ipv6_literal_with_port():
+    assert host_without_port("[::1]:20130") == "[::1]"
+
+
+def test_host_without_port_handles_a_bracketed_ipv6_literal_without_port():
+    assert host_without_port("[::1]") == "[::1]"
+
+
+def test_validate_host_header_accepts_a_hostname_with_port():
+    assert validate_host_header("192.0.2.1:20130") is True
+
+
+def test_validate_host_header_accepts_a_bracketed_ipv6_literal():
+    assert validate_host_header("[::1]:20130") is True
+
+
+def test_validate_host_header_accepts_an_mdns_name():
+    assert validate_host_header("my-host.local:20130") is True
+
+
+def test_validate_host_header_rejects_an_empty_header():
+    assert validate_host_header("") is False
+
+
+def test_validate_host_header_rejects_shell_metacharacters():
+    assert validate_host_header("evil`touch pwned`:20130") is False
+    assert validate_host_header("evil$(touch pwned):20130") is False
+    assert validate_host_header("evil; rm -rf /:20130") is False
+
+
+def test_build_config_response_shape():
+    response = build_config_response(
+        host="192.0.2.1",
+        omniroute_port="20128",
+        api_key="sk-test",
+        models=[{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}],
+    )
+    assert response == {
+        "omniroute_base_url": "http://192.0.2.1:20128",
+        "api_key": "sk-test",
+        "models": [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}],
+    }
+
+
+def test_render_setup_script_embeds_the_host(monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert 'LLM_ENV_HOST="192.0.2.1:20130"' in script
+    assert script.startswith("#!/usr/bin/env bash")
+
+
+def test_render_setup_script_prompts_for_the_master_key_from_the_tty(monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert "OMNI_ROUTER_MASTER_KEY:" in script
+    assert "read -r -s -p" in script
+    # Under `curl ... | bash`, stdin is the script pipe, not the terminal --
+    # reading from /dev/tty explicitly is required for the prompt to
+    # actually reach the user instead of silently reading EOF.
+    assert "/dev/tty" in script
+
+
+def test_render_setup_script_does_not_use_curl_dash_f(monkeypatch):
+    # -f (--fail) swallows the response body on a non-2xx status, which is
+    # exactly the body the script needs to read `.error` from. Match only
+    # curl invocations -- the template's own `rm -f --` / `mv -f --` lines
+    # (unrelated uses of -f) legitimately contain " -f " as a substring,
+    # so a blanket substring check would false-positive on those.
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    for line in script.splitlines():
+        if line.strip().startswith("curl"):
+            assert " -f" not in line, line
+    assert "curl -fsS" not in script
+
+
+def test_render_setup_script_captures_the_http_status_and_checks_it(monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert "%{http_code}" in script
+    assert 'if [ "$http_status" != "200" ]' in script
+
+
+def test_render_setup_script_never_passes_the_master_key_as_a_curl_argument(monkeypatch):
+    # A bearer token passed via `curl -H "Authorization: Bearer $x"` is
+    # visible to every other local user on the remote machine through
+    # `ps`/`/proc/<pid>/cmdline` for as long as curl runs -- the script
+    # must instead use a private, mode-0600 curl config file passed via
+    # -K, mirroring scripts/check-server.sh's own auth_conf pattern.
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert '-H "Authorization: Bearer' not in script
+    assert 'header = "Authorization: Bearer %s"' in script
+    assert "-K \"$auth_conf\"" in script
+    assert 'chmod 600 "$auth_conf"' in script
+
+
+def test_render_setup_script_sends_omniroute_routed_model_ids(monkeypatch):
+    # Requests going TO OmniRoute must use "llama-cpp/<alias>", matching
+    # this repo's own established, live-verified routing convention (see
+    # scripts/check-server.sh's OmniRoute completion check).
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert 'id: "llama-cpp/\\(.alias)"' in script
+    assert '.["llama-cpp/\\($model.alias)"]' in script
+
+
+def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert "<<'OPENCODE_UPDATER_EOF'" in script
+    assert "OPENCODE_UPDATER_EOF" in script
+    # A real function from setup/update-opencode-config.mjs, proving the
+    # file's actual content was embedded rather than a second HTTP fetch.
+    assert "function replaceProvider(text, provider)" in script
+    assert "http://${LLM_ENV_HOST}/update-opencode-config.mjs" not in script
+
+
+def test_render_setup_script_uses_staged_files_with_restrictive_permissions(monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert "chmod 700 \"$workdir\"" in script
+    assert "chmod 600" in script
+    assert "trap cleanup EXIT" in script
+
+
+def test_render_setup_script_detects_an_existing_opencode_candidate_file(monkeypatch):
+    # Mirrors setup-local-llm-agents.sh's own opencode_candidates detection
+    # (setup/setup-local-llm-agents.sh:149-231): every candidate already
+    # containing the "local-llm-env" provider is targeted; only when none
+    # do does it fall back to the highest-priority *existing* file
+    # (reverse order: opencode.jsonc, then opencode.json, then
+    # config.json), and only when none exist at all does it default to
+    # creating opencode.jsonc fresh.
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert (
+        'opencode_candidates=(\n'
+        '    "${opencode_dir}/config.json"\n'
+        '    "${opencode_dir}/opencode.json"\n'
+        '    "${opencode_dir}/opencode.jsonc"\n'
+        ')'
+    ) in script
+    assert 'node "$updater" --contains-provider "$candidate"' in script
+    assert 'for candidate in "${opencode_candidates[2]}" "${opencode_candidates[1]}" "${opencode_candidates[0]}"; do' in script
+    assert 'opencode_targets+=("${opencode_candidates[2]}")' in script
+
+
+def test_render_setup_script_validates_opencode_candidates_are_regular_files_and_checks_status(
+    monkeypatch,
+):
+    # Full fidelity to setup/setup-local-llm-agents.sh:193-211: a
+    # candidate that exists but isn't a regular file must die loud (not
+    # be silently skipped), and the updater's exit status must be
+    # discriminated 0 (contains)/1 (does not contain)/anything else
+    # (real validation error) rather than treating every non-zero exit as
+    # "does not contain".
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    assert '[ -f "$candidate" ] ||' in script
+    assert 'contains_status=0' in script
+    assert 'contains_status=$?' in script
+    assert 'case "$contains_status" in' in script
+
+
+def test_render_setup_script_stages_pi_and_opencode_before_moving_either_into_place(monkeypatch):
+    # A failure partway through building the targets (Pi's models.json,
+    # Pi's settings.json, every detected/created OpenCode config) must
+    # never leave some of them updated and others untouched -- so every
+    # staging step (the jq/node calls that write into the *_staged temp
+    # files) must appear in the script BEFORE the first `mv -f --` that
+    # moves any of them into place.
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    last_staging_step = script.index(
+        'node "$updater" --replace-provider "$opencode_source" "$provider_file" "$staged"'
+    )
+    first_move = script.index('mv -f -- "$pi_staged" "$pi_path"')
+    assert last_staging_step < first_move
+    assert script.index('mv -f -- "$pi_settings_staged" "$pi_settings_path"') > first_move
+    assert script.index(
+        'mv -f -- "${opencode_staged[$index]}" "${opencode_targets[$index]}"'
+    ) > first_move
+
+
+class _FakeOmniRouteHandler(http.server.BaseHTTPRequestHandler):
+    """Stands in for OmniRoute's admin API during the integration test."""
+
+    keys_created = 0
+    last_key_name = None
+
+    def _reply(self, payload, status=200, set_cookie=None):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        if self.path == "/api/auth/login":
+            self._reply({"success": True}, set_cookie="auth_token=tok; Path=/; HttpOnly")
+        elif self.path == "/api/keys":
+            _FakeOmniRouteHandler.keys_created += 1
+            _FakeOmniRouteHandler.last_key_name = body.get("name")
+            self._reply({"id": "key-id", "key": "sk-live-value", "name": body.get("name")}, 201)
+
+    def do_GET(self):
+        if self.path == "/api/keys":
+            self._reply({"keys": [{"id": "key-id", "keyPreview": "abcd"}]})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def _start_server(handler_class):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_setup_sh_is_served_without_auth_and_embeds_the_request_host(tmp_path, monkeypatch):
+    _use_real_opencode_updater(monkeypatch)
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("MODELS_JSON", "[]")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/setup.sh")
+        response = conn.getresponse()
+        body = response.read().decode("utf-8")
+        assert response.status == 200
+        assert f'LLM_ENV_HOST="127.0.0.1:{port}"' in body
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_setup_sh_rejects_an_invalid_host_header(monkeypatch):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("MODELS_JSON", "[]")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.putrequest("GET", "/setup.sh", skip_host=True)
+        conn.putheader("Host", "evil`touch pwned`")
+        conn.endheaders()
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 400
+        assert "error" in payload
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/update-opencode-config.mjs", "/nonexistent", "/setup", "/config.json"],
+)
+def test_unknown_paths_404(path, monkeypatch):
+    # Exactly two public routes exist -- /setup.sh and /config. In
+    # particular, /update-opencode-config.mjs is deliberately NOT a route
+    # (its content is embedded into /setup.sh's response via heredoc
+    # instead, see render_setup_script()) -- a client trying to fetch it
+    # directly must get a plain 404, not a 200 or a 500.
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("MODELS_JSON", "[]")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", path)
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 404
+        assert "error" in payload
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_config_rejects_an_invalid_host_header(monkeypatch):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.putrequest("GET", "/config", skip_host=True)
+        conn.putheader("Host", "evil$(id)")
+        conn.putheader("Authorization", "Bearer test-key")
+        conn.endheaders()
+        response = conn.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 400
+        assert "error" in payload
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_config_rejects_missing_bearer_token(monkeypatch):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/config")
+        response = conn.getresponse()
+        assert response.status == 401
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_config_rejects_wrong_bearer_token(monkeypatch):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/config", headers={"Authorization": "Bearer wrong"})
+        response = conn.getresponse()
+        assert response.status == 401
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_config_returns_503_when_master_key_unset(monkeypatch):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/config", headers={"Authorization": "Bearer anything"})
+        response = conn.getresponse()
+        assert response.status == 503
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_ensure_api_key_uses_the_given_key_name(tmp_path, monkeypatch):
+    # Task 5 (setup-local-llm-agents.sh -> OmniRoute) reuses ensure_api_key
+    # with a distinct key_name ("llm-env-local-agents") so a locally-issued
+    # key never shows up in OmniRoute's dashboard under the shared
+    # remote-installer key's name ("llm-env-remote-agents").
+    _FakeOmniRouteHandler.keys_created = 0
+    _FakeOmniRouteHandler.last_key_name = None
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        key = remote_setup_module.ensure_api_key(
+            f"http://127.0.0.1:{fake_port}",
+            "dashboard-pw",
+            cache_path,
+            key_name="llm-env-local-agents",
+        )
+        assert key == "sk-live-value"
+        assert _FakeOmniRouteHandler.last_key_name == "llm-env-local-agents"
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypatch):
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+        monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+        monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+        monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+        monkeypatch.setenv(
+            "MODELS_JSON",
+            json.dumps([{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]),
+        )
+
+        server, thread = _start_server(RemoteSetupHandler)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request(
+                "GET", "/config", headers={"Authorization": "Bearer test-key"}
+            )
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            assert response.status == 200
+            assert payload["api_key"] == "sk-live-value"
+            assert payload["omniroute_base_url"] == "http://127.0.0.1:20128"
+            assert payload["models"] == [
+                {"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
+            ]
+            assert _FakeOmniRouteHandler.keys_created == 1
+
+            # Second call reuses the cached key -- no new key created.
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request(
+                "GET", "/config", headers={"Authorization": "Bearer test-key"}
+            )
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            assert payload["api_key"] == "sk-live-value"
+            assert _FakeOmniRouteHandler.keys_created == 1
+        finally:
+            server.shutdown()
+            thread.join()
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_config_returns_json_500_for_an_unexpected_error(tmp_path, monkeypatch):
+    # A malformed MODELS_JSON env var isn't an OmniRouteError -- it's a
+    # plain JSONDecodeError raised deep inside _handle_config, after
+    # ensure_api_key() has already succeeded. The handler must still
+    # produce a JSON 500, not crash the request thread / hang the socket.
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+        monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+        monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+        monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+        monkeypatch.setenv("MODELS_JSON", "not valid json")
+
+        server, thread = _start_server(RemoteSetupHandler)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request(
+                "GET", "/config", headers={"Authorization": "Bearer test-key"}
+            )
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            assert response.status == 500
+            assert "error" in payload
+        finally:
+            server.shutdown()
+            thread.join()
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_ensure_api_key_concurrent_calls_create_only_one_key(tmp_path, monkeypatch):
+    # Two /config requests arriving close together on a cold cache must
+    # not each mint their own OmniRoute API key -- ensure_api_key()'s
+    # module-level lock serializes the read-check-create-write sequence.
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        base_url = f"http://127.0.0.1:{fake_port}"
+        cache_path = tmp_path / "api-key.json"
+
+        results = []
+        errors = []
+
+        def _call():
+            try:
+                results.append(
+                    remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+                )
+            except Exception as exc:  # noqa: BLE001 -- pragma: no cover, failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_call) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert not errors
+        assert len(results) == 8
+        assert all(value == "sk-live-value" for value in results)
+        assert _FakeOmniRouteHandler.keys_created == 1
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_ensure_api_key_reissues_after_dashboard_revocation(tmp_path, monkeypatch):
+    # _FakeOmniRouteHandler.do_GET always lists exactly one key, "key-id"
+    # (see its fixed do_GET body above) -- a cache seeded with a DIFFERENT
+    # id therefore can never appear in that listing, which is exactly what
+    # a dashboard-side revocation of the previously cached key looks like
+    # from ensure_api_key()'s point of view: cache present, but the id it
+    # names is gone from GET /api/keys. ensure_api_key() must not blindly
+    # trust the cache file -- it must notice the id is missing, mint a
+    # replacement, and overwrite the cache with the new value.
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        base_url = f"http://127.0.0.1:{fake_port}"
+        cache_path = tmp_path / "api-key.json"
+        write_cached_key(cache_path, "revoked-key-id", "sk-old-revoked-value")
+
+        result = remote_setup_module.ensure_api_key(base_url, "dashboard-pw", cache_path)
+
+        assert result == "sk-live-value"
+        assert _FakeOmniRouteHandler.keys_created == 1
+        assert read_cached_key(cache_path) == {"id": "key-id", "key": "sk-live-value"}
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monkeypatch):
+    """Runs the ACTUAL generated /setup.sh via bash, in an isolated $HOME,
+    typing the master key into a pty -- the tests above only inspect the
+    script's text or drive the handler in-process; this is the one test
+    that proves the script is genuinely executable end to end, including
+    its /dev/tty prompt, its jq transforms, and its OpenCode update."""
+    for cmd in ("bash", "curl", "jq", "node"):
+        if shutil.which(cmd) is None:
+            pytest.skip(f"{cmd} not available on this host")
+
+    _FakeOmniRouteHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        _use_real_opencode_updater(monkeypatch)
+        monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-master-key")
+        monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+        monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+        monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+        monkeypatch.setenv(
+            "MODELS_JSON",
+            json.dumps([{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]),
+        )
+
+        server, thread = _start_server(RemoteSetupHandler)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("GET", "/setup.sh")
+            script_body = conn.getresponse().read()
+            script_path = tmp_path / "setup.sh"
+            script_path.write_bytes(script_body)
+
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            child_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home_dir)}
+
+            pid, master_fd = pty.fork()
+            if pid == 0:
+                os.execvpe("bash", ["bash", str(script_path)], child_env)
+
+            os.write(master_fd, b"test-master-key\n")
+            output = b""
+            while True:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+            _, status = os.waitpid(pid, 0)
+            exit_code = os.WEXITSTATUS(status)
+            assert exit_code == 0, output.decode(errors="replace")
+
+            pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
+            assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "llama-cpp/a"
+            pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
+            assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
+
+            opencode_config = json.loads(
+                (home_dir / ".config" / "opencode" / "opencode.jsonc").read_text()
+            )
+            assert "llama-cpp/a" in opencode_config["provider"]["local-llm-env"]["models"]
+
+            pi_models_path = home_dir / ".pi" / "agent" / "models.json"
+            assert (pi_models_path.stat().st_mode & 0o777) == 0o600
+        finally:
+            server.shutdown()
+            thread.join()
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
