@@ -7,3 +7,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 systemctl --user status "${UNIT_NAME}.service" --no-pager || true
 podman compose -f "$COMPOSE_FILE" ps || true
+
+if [ -f "$CONFIG_PATH" ]; then
+    bash "$(dirname "${BASH_SOURCE[0]}")/print-endpoints.sh"
+else
+    log_info "no config at ${CONFIG_PATH} yet; run 'make setup' first"
+fi

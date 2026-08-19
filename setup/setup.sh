@@ -33,7 +33,20 @@ else
 fi
 migrate_config_file || die "configuration migration failed"
 
+# Seed the prompt's default from the config's own persisted state (set by a
+# prior run of this script), not just LLM_ENV_NO_GPU -- otherwise a routine
+# re-run of `make setup` on a host that already disabled llm-server silently
+# re-answers "Y", flips llm_server.enabled back to true, and Step 2 then dies
+# with "no VRAM-backed GPUs detected" on a GPU-less host, with the config
+# already corrupted before that failure. An explicit LLM_ENV_NO_GPU=1 still
+# wins over persisted state: the user explicitly asked for no-GPU this run.
 gpu_default="Y"
+# Direct read + string comparison, not `.llm_server.enabled // true` --
+# yq/jq's `//` alternative operator treats a real `false` value as falsy
+# too, so `.llm_server.enabled // "unset"` would collapse an explicit
+# `false` back down to "unset" and this bug would still be live.
+persisted_llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH" 2>/dev/null)"
+[ "$persisted_llm_server_enabled" = "false" ] && gpu_default="n"
 [ "$NO_GPU" = "1" ] && gpu_default="n"
 gpu_answer="$(ask "¿Habilitar inferencia local con GPU (llm-server)? [Y/n]: " "$gpu_default")"
 case "$gpu_answer" in

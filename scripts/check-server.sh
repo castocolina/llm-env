@@ -331,6 +331,8 @@ fi
 log_step "OmniRoute completions"
 if [ -z "$omniroute_api_key" ]; then
     log_warn "Verdict: SKIP identity=omniroute completions reason=no OmniRoute API key available"
+elif [ "$llm_server_enabled" = "false" ]; then
+    log_warn "Verdict: SKIP identity=omniroute completions reason=llm-server is disabled; configure a remote provider and re-run"
 elif [ "$models_ready" -eq 1 ] && [ "$checked_models" -gt 0 ]; then
 while IFS= read -r model_b64; do
     [ -n "$model_b64" ] || continue

@@ -772,6 +772,74 @@ def test_setup_defaults_to_gpu_enabled_when_no_gpu_env_unset(tmp_path: pathlib.P
     assert yq_value(config, ".llm_server.enabled") == "true"
 
 
+def test_setup_rerun_keeps_llm_server_disabled_without_no_gpu_override(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression guard: a GPU-less host that already ran setup once with
+    llm-server disabled must not have it silently re-enabled by a routine
+    `make setup` re-run (e.g. LLM_ENV_ASSUME_YES=1, or pressing Enter) that
+    doesn't set LLM_ENV_NO_GPU. The persisted `llm_server.enabled: false`
+    must seed the prompt's default, not just the env var."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("ip", "git", "shellcheck", "curl", "podman"):
+        _mock_command(commands, name)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' resources') printf '%s\\n' "
+        "'{\"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}, "
+        "\"llm_server\": {\"cpus\": 0, \"memory_mib\": 0}}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "llm_server:\n"
+        "  enabled: false\n"
+        "models: []\n"
+    )
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "CONFIG_PATH_TEST": str(config),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_ASSUME_YES": "1",
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_UV": shutil.which("uv") or "uv",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".llm_server.enabled") == "false"
+    recorded = calls.read_text() if calls.exists() else ""
+    assert "detect" not in recorded
+
+
 def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> None:
     """Step 7 must stop setup on an infeasible budget, the same way
     scripts/start.sh already stops `make start` -- a config that reports
@@ -6202,6 +6270,13 @@ def test_check_server_skips_direct_llm_server_checks_when_disabled(
     assert "Verdict: PASS identity=omniroute dashboard login" in result.stdout
     assert "Verdict: PASS identity=omniroute provider listing" in result.stdout
     assert "Verdict: PASS identity=omniroute api key" in result.stdout
+    # Regression guard: an OmniRoute API key IS present (the normal case) and
+    # models_ready is 0 solely because llm-server is disabled -- this must
+    # report a SKIP verdict, not silently print only the section header.
+    assert (
+        "Verdict: SKIP identity=omniroute completions "
+        "reason=llm-server is disabled" in result.stderr
+    )
     assert "Results:" in result.stdout
 
 
@@ -9677,6 +9752,78 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     assert "sudo firewall-cmd --permanent --add-port=20128/tcp --add-port=20130/tcp" in combined
 
     # Verify that print-endpoints.sh output is present
+    assert "curl http://" in result.stdout
+    assert ":20130/setup.sh | bash" in result.stdout
+
+
+def test_print_endpoints_omits_the_llm_server_section_when_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When llm_server.enabled is false there is no llm-server service to
+    advertise -- print-endpoints.sh (shared by network.sh and status.sh)
+    must not print an "llm-server" section, an empty "Models:" list, or the
+    mDNS-resolution warning that only makes sense alongside it. OmniRoute
+    and remote-setup sections must still print normally."""
+    real_yq = shutil.which("yq")
+    real_jq = shutil.which("jq")
+    real_ip = shutil.which("ip")
+    assert real_yq is not None
+    assert real_jq is not None
+    assert real_ip is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+        stub = commands / name
+        stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
+        stub.chmod(0o755)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "  mdns_name: llm\n"
+        "  api_key: fixture-api-key\n"
+        "llm_server:\n"
+        "  enabled: false\n"
+        "omniroute:\n"
+        "  port: 20128\n"
+        "  initial_password: fixture-omniroute-password\n"
+        "remote_setup:\n"
+        "  port: 20130\n"
+        "models:\n"
+        "  - alias: a\n"
+        "    enabled: true\n"
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/print-endpoints.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert "llm-server" not in combined
+    assert "fixture-api-key" not in combined
+    assert "Models:" not in combined
+    assert (
+        "some browsers (e.g. Firefox with DNS-over-HTTPS on) fail to resolve"
+        not in combined
+    )
+    assert "OmniRoute" in result.stdout
+    assert "fixture-omniroute-password" in result.stdout
     assert "curl http://" in result.stdout
     assert ":20130/setup.sh | bash" in result.stdout
 
