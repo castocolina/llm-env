@@ -2788,6 +2788,7 @@ def test_disable_boot_removes_install_section_from_the_wrapper_unit(
 
 def run_render_unit_with_legacy_rocm_config(
     tmp_path: pathlib.Path,
+    llm_server_enabled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Render a manually retained legacy backend config in an isolated home."""
     real_yq = shutil.which("yq")
@@ -2805,6 +2806,8 @@ def run_render_unit_with_legacy_rocm_config(
         "  api_key: key\n"
         "  sleep_idle_seconds: 300\n"
         "  start_at_boot: false\n"
+        "llm_server:\n"
+        f"  enabled: {'true' if llm_server_enabled else 'false'}\n"
         "gpu:\n"
         # validate_config() only accepts vulkan/cpu (pylib/config.py:31); this
         # fixture predates ROCm removal but must still pass real validation
@@ -2890,6 +2893,44 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
     assert "llm-server" in compose_file.read_text()
     assert "ExecStart=podman compose -f docker-compose.yml up -d" in wrapper_unit.read_text()
     assert "ExecStop=podman compose -f docker-compose.yml down" in wrapper_unit.read_text()
+
+
+def test_render_unit_no_gpu_skips_device_resolution_and_presets(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, wrapper_unit = run_render_unit_with_legacy_rocm_config(
+        tmp_path, llm_server_enabled=False
+    )
+    compose_file = wrapper_unit.parent.parent.parent / "llm-env/docker-compose.yml"
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert compose_file.exists()
+    assert "llm-server" not in yaml.safe_load(compose_file.read_text())["services"]
+    presets_path = tmp_path / "home" / ".config/llm-env/presets.ini"
+    assert not presets_path.exists()
+
+
+def test_render_unit_no_gpu_still_writes_the_wrapper_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, wrapper_unit = run_render_unit_with_legacy_rocm_config(
+        tmp_path, llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert wrapper_unit.exists()
+    assert "ExecStart=podman compose" in wrapper_unit.read_text()
+
+
+def test_render_unit_no_gpu_skips_mdns_unit_generation(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, wrapper_unit = run_render_unit_with_legacy_rocm_config(
+        tmp_path, llm_server_enabled=False
+    )
+    mdns_unit = wrapper_unit.parent / "llm-server-mdns.service"
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not mdns_unit.exists()
 
 
 def test_render_unit_copies_presets_ini_to_the_inspect_dir(

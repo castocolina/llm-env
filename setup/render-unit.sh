@@ -16,36 +16,51 @@ device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH")"
 load_server_config
 # shellcheck disable=SC2153 # PORT is set by load_server_config() in ../tools/lib.sh.
 port="$PORT"
-models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
 
-[ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
+# migrate_config_file (above) always normalizes llm_server.enabled to a
+# concrete boolean, so this reads it directly -- `// true` would be wrong
+# here: jq/yq's `//` treats `false` itself as falsy and would silently
+# coerce a disabled config back to enabled.
+llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
 
-log_step "Resolving the GPU device"
-device="all"
-if [ "$backend" != "cpu" ] && [ -n "$device_name" ] && [ "$device_name" != "null" ]; then
-    listing_file="$(mktemp)"
-    podman run --rm --device /dev/dri --entrypoint /app/llama-server \
-        "$image" --list-devices >"$listing_file" 2>/dev/null || true
-    if resolved="$(llmenv resolve-device --device-name "$device_name" \
-                   --listing-file "$listing_file")"; then
-        device="$(echo "$resolved" | jq -r '.device')"
-        log_info "pinned to ${device} (${device_name})"
-    else
-        log_warn "could not resolve ${device_name}; offloading to all devices"
+presets_path=""
+if [ "$llm_server_enabled" = "true" ]; then
+    models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
+
+    [ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
+
+    log_step "Resolving the GPU device"
+    device="all"
+    if [ "$backend" != "cpu" ] && [ -n "$device_name" ] && [ "$device_name" != "null" ]; then
+        listing_file="$(mktemp)"
+        podman run --rm --device /dev/dri --entrypoint /app/llama-server \
+            "$image" --list-devices >"$listing_file" 2>/dev/null || true
+        if resolved="$(llmenv resolve-device --device-name "$device_name" \
+                       --listing-file "$listing_file")"; then
+            device="$(echo "$resolved" | jq -r '.device')"
+            log_info "pinned to ${device} (${device_name})"
+        else
+            log_warn "could not resolve ${device_name}; offloading to all devices"
+        fi
+        rm -f "$listing_file"
     fi
-    rm -f "$listing_file"
-fi
 
-log_step "Generating presets.ini"
-presets_path="${HOME}/.config/llm-env/presets.ini"
-llmenv --config "$CONFIG_PATH" presets \
-    --models-dir /models --device "$device" --output "$presets_path" >/dev/null
-log_info "wrote ${presets_path}"
+    log_step "Generating presets.ini"
+    presets_path="${HOME}/.config/llm-env/presets.ini"
+    llmenv --config "$CONFIG_PATH" presets \
+        --models-dir /models --device "$device" --output "$presets_path" >/dev/null
+    log_info "wrote ${presets_path}"
 
-if [ -f "$presets_path" ]; then
-    mkdir -p "$COMPOSE_INSPECT_DIR"
-    cp "$presets_path" "${COMPOSE_INSPECT_DIR}/presets.ini"
-    log_info "wrote ${COMPOSE_INSPECT_DIR}/presets.ini (inspection copy)"
+    if [ -f "$presets_path" ]; then
+        mkdir -p "$COMPOSE_INSPECT_DIR"
+        cp "$presets_path" "${COMPOSE_INSPECT_DIR}/presets.ini"
+        log_info "wrote ${COMPOSE_INSPECT_DIR}/presets.ini (inspection copy)"
+    fi
+else
+    log_step "Resolving the GPU device"
+    log_info "skipped (llm-server disabled)"
+    log_step "Generating presets.ini"
+    log_info "skipped (llm-server disabled)"
 fi
 
 log_step "Rendering the compose file"
@@ -91,7 +106,7 @@ fi
 
 mdns_unit="${HOME}/.config/systemd/user/${UNIT_NAME}-mdns.service"
 mdns_wants=""
-if command -v avahi-publish >/dev/null 2>&1; then
+if [ "$llm_server_enabled" = "true" ] && command -v avahi-publish >/dev/null 2>&1; then
     mkdir -p "$(dirname "$mdns_unit")"
     mdns_name="$(yq -r '.server.mdns_name' "$CONFIG_PATH")"
     curl_path="$(command -v curl)"
