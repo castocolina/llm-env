@@ -1563,3 +1563,18 @@ def test_render_compose_defaults_to_empty_master_key_when_env_file_missing(tmp_p
     document = yaml.safe_load(output.read_text())
     env = document["services"]["remote-setup"]["environment"]
     assert env["OMNI_ROUTER_MASTER_KEY"] == ""
+
+
+def test_resources_zeroes_llm_server_when_disabled(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed["llm_server"] = {"enabled": False}
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+
+    result = run("resources", "--config", str(config))
+    payload = json.loads(result.stdout)
+    if result.returncode == 0:
+        assert payload["llm_server"] == {"cpus": 0, "memory_mib": 0}
+    else:
+        assert result.returncode == 1
+        assert "error" in payload

@@ -356,6 +356,7 @@ def cmd_resources(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     host = host_resources()
     llm_server_resources = cfg["resources"]["llm_server"]
+    llm_server_enabled = cfg.get("llm_server", {}).get("enabled", True)
     limits = compute_resource_limits(
         host["cpu_count"],
         host["memory_total_mib"],
@@ -363,6 +364,7 @@ def cmd_resources(args: argparse.Namespace) -> int:
         llm_server_resources["memory_ceiling_floor_pct"],
         llm_server_resources["cpu_ceiling_pct"],
         llm_server_resources["cpu_ceiling_floor_pct"],
+        llm_server_enabled=llm_server_enabled,
     )
     return emit({"host": host, **limits})
 
