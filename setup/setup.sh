@@ -6,6 +6,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 ASSUME_YES="${LLM_ENV_ASSUME_YES:-0}"
+NO_GPU="${LLM_ENV_NO_GPU:-0}"
 
 bash "${REPO_DIR}/setup/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"
 
@@ -31,6 +32,19 @@ else
     log_info "created ${CONFIG_PATH} from template"
 fi
 migrate_config_file || die "configuration migration failed"
+
+gpu_default="Y"
+[ "$NO_GPU" = "1" ] && gpu_default="n"
+gpu_answer="$(ask "¿Habilitar inferencia local con GPU (llm-server)? [Y/n]: " "$gpu_default")"
+case "$gpu_answer" in
+    [nN]*) llm_server_enabled=false ;;
+    *) llm_server_enabled=true ;;
+esac
+LLM_SERVER_ENABLED="$llm_server_enabled" yq -i \
+    '.llm_server.enabled = (strenv(LLM_SERVER_ENABLED) == "true")' "$CONFIG_PATH"
+log_info "llm-server (local GPU inference): ${llm_server_enabled}"
+
+if [ "$llm_server_enabled" = "true" ]; then
 
 log_step "Step 2/8  Detecting GPUs"
 facts="$(llmenv detect)"
@@ -169,26 +183,40 @@ else
     die "budget infeasible for models_max=$(jq -r '.models_max // "?"' "$budget_json"); adjust the config and retry"
 fi
 
+else
+    log_step "Step 2/8  Detecting GPUs"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 3/8  Selecting models"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 4/8  Downloading models"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 5/8  Validating model files"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 6/8  Preparing Vulkan"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 7/8  Checking the VRAM budget"; log_info "(skipped -- llm-server disabled)"
+fi
+
 log_step "Step 8/8  Computing resource limits"
 resources_json="$(mktemp)"
 # Replaces the Step 7/7 trap above with one that cleans up both temp
 # files — a second `trap … EXIT` overwrites rather than adds to the first.
-trap 'rm -f "$budget_json" "$resources_json"' EXIT
+# budget_json is only set when llm_server_enabled=true (Step 7 ran); default
+# it to empty here so this doesn't fail under `set -u` when disabled.
+trap 'rm -f "${budget_json:-}" "$resources_json"' EXIT
 if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
-    cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
-    memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
     omniroute_cpus="$(jq -r '.omniroute.cpus' "$resources_json")"
     omniroute_memory_mib="$(jq -r '.omniroute.memory_mib' "$resources_json")"
-    CPUS="$cpus" MEMORY_MIB="$memory_mib" \
-      OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
+    OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
       yq -i '
-        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
-        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber) |
         .resources.omniroute.cpus = (strenv(OMNIROUTE_CPUS) | tonumber) |
         .resources.omniroute.memory_mib = (strenv(OMNIROUTE_MEMORY_MIB) | tonumber)
       ' "$CONFIG_PATH"
-    log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
     log_info "reserved ${omniroute_cpus} CPUs, ${omniroute_memory_mib} MiB RAM for omniroute"
+    if [ "$llm_server_enabled" = "true" ]; then
+        cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
+        memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
+        CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
+            .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+            .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
+          ' "$CONFIG_PATH"
+        log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
+    fi
 else
     # A host too small to reserve the fixed floors is exactly the host where
     # an uncapped container is most dangerous — render_compose() treats

@@ -633,12 +633,112 @@ def run_setup_with_numbered_selection(
         ["/usr/bin/bash", "setup/setup.sh"],
         cwd=ROOT,
         env=environment,
-        input=selection,
+        # A leading blank line answers Step 1's "enable llm-server?" prompt
+        # with its default (Y), so every pre-existing `selection` string
+        # keeps driving Steps 2-8's prompts exactly as before.
+        input="\n" + selection,
         text=True,
         capture_output=True,
         check=False,
     )
     return result, calls, config
+
+
+def run_setup_no_gpu(
+    tmp_path: pathlib.Path,
+    *,
+    no_gpu_env: str = "1",
+    config_text: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run setup with LLM_ENV_NO_GPU set, stubbing only what Steps 1 and 8 need
+    -- Steps 2-7 must be skipped entirely, so no GPU/model/Vulkan stubs exist."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    for name in ("ip", "git", "shellcheck", "curl", "podman"):
+        _mock_command(commands, name)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' resources') printf '%s\\n' "
+        "'{\"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}, "
+        "\"llm_server\": {\"cpus\": 0, \"memory_mib\": 0}}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        config_text
+        or (
+            "gpu: {}\n"
+            "runtime:\n"
+            "  models_max: 0\n"
+            "models: []\n"
+        )
+    )
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "CONFIG_PATH_TEST": str(config),
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "LLM_ENV_NO_GPU": no_gpu_env,
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "REAL_UV": shutil.which("uv") or "uv",
+        "REAL_YQ": real_yq,
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/setup.sh"],
+        cwd=ROOT,
+        env=environment,
+        input="\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls, config
+
+
+def test_setup_persists_llm_server_disabled_via_env_var(tmp_path: pathlib.Path) -> None:
+    result, _calls, config = run_setup_no_gpu(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".llm_server.enabled") == "false"
+
+
+def test_setup_no_gpu_skips_gpu_model_and_vulkan_steps(tmp_path: pathlib.Path) -> None:
+    result, calls, _config = run_setup_no_gpu(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text() if calls.exists() else ""
+    assert "detect" not in recorded
+    assert "--list-devices" not in recorded
+    assert "(skipped -- llm-server disabled)" in result.stdout
+
+
+def test_setup_no_gpu_still_reserves_omniroute_resources(tmp_path: pathlib.Path) -> None:
+    result, _calls, config = run_setup_no_gpu(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".resources.omniroute.cpus") == "1"
+    assert yq_value(config, ".resources.omniroute.memory_mib") == "1024"
+
+
+def test_setup_defaults_to_gpu_enabled_when_no_gpu_env_unset(tmp_path: pathlib.Path) -> None:
+    # Steps 2-7 are not stubbed here (this helper only stubs what the
+    # no-GPU path needs) so setup is expected to fail once it reaches GPU
+    # detection -- what matters is that Step 1 already persisted the
+    # enabled decision before that happens.
+    result, _calls, config = run_setup_no_gpu(tmp_path, no_gpu_env="0")
+    assert yq_value(config, ".llm_server.enabled") == "true"
 
 
 def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> None:
