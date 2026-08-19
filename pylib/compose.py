@@ -116,10 +116,11 @@ def render_compose(
             "start_period": "15s",
         },
         "stop_grace_period": "40s",
+        "depends_on": {"llm-server": {"condition": "service_healthy"}},
         "restart": "unless-stopped",
     }
-    if llm_server_enabled:
-        omniroute_service["depends_on"] = {"llm-server": {"condition": "service_healthy"}}
+    if not llm_server_enabled:
+        del omniroute_service["depends_on"]
     omniroute_cpus = omniroute_resources.get("cpus")
     if omniroute_cpus:
         omniroute_service["cpus"] = omniroute_cpus

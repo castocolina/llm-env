@@ -399,3 +399,15 @@ def test_remote_setup_depends_on_omniroute_unaffected_by_llm_server_disabled():
     assert document["services"]["remote-setup"]["depends_on"] == {
         "omniroute": {"condition": "service_healthy"}
     }
+
+
+def test_omniroute_depends_on_key_ordering_preserved_when_enabled():
+    """Regression test: depends_on must appear between stop_grace_period and
+    restart in the rendered YAML (yaml.safe_dump preserves dict insertion order).
+    When enabled, the output must be byte-identical to before this feature."""
+    _, document = compose_dict()
+    omniroute_keys = list(document["services"]["omniroute"].keys())
+    stop_grace_period_idx = omniroute_keys.index("stop_grace_period")
+    depends_on_idx = omniroute_keys.index("depends_on")
+    restart_idx = omniroute_keys.index("restart")
+    assert stop_grace_period_idx < depends_on_idx < restart_idx
