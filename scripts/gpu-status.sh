@@ -24,6 +24,12 @@ require_cmd yq jq
 # diagnostic disagreeing about whether a cap exists.
 migrate_config_file || die "configuration migration failed"
 
+llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
+if [ "$llm_server_enabled" != "true" ]; then
+    log_info "llm-server is disabled (llm_server.enabled: false); no GPU is in use"
+    exit 0
+fi
+
 pci="$(yq -r '.gpu.pci_address // ""' "$CONFIG_PATH")"
 [ -n "$pci" ] && [ "$pci" != null ] || die "gpu.pci_address is not set; run 'make setup' first"
 

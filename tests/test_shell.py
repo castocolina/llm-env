@@ -1230,6 +1230,20 @@ def run_gpu_status_with_stubs(
     uv.write_text(
         "#!/usr/bin/bash\n"
         "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        "import yaml\n"
+        "cfg_path = '$LLM_ENV_CONFIG'\n"
+        "with open(cfg_path) as f:\n"
+        "    cfg = yaml.safe_load(f) or {}\n"
+        "if 'llm_server' not in cfg or cfg['llm_server'] is None:\n"
+        "    cfg['llm_server'] = {}\n"
+        "if 'enabled' not in cfg['llm_server']:\n"
+        "    cfg['llm_server']['enabled'] = True\n"
+        "with open(cfg_path, 'w') as f:\n"
+        "    yaml.dump(cfg, f)\n"
+        "PYEOF\n"
+        "    printf '{\"written\":true,\"path\":\"%s\"}\\n' \"$LLM_ENV_CONFIG\" ;;\n"
         "  *' detect')\n"
         "    printf '%s\\n' '{\"gpus\":["
         "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
@@ -1317,7 +1331,19 @@ def test_gpu_status_migrates_the_config_before_reading_the_ceiling(tmp_path: pat
         "#!/usr/bin/bash\n"
         "case \"$*\" in\n"
         "  *' migrate-config')\n"
-        "    yq -i '.gpu.vram_budget_ceiling_mib = 15565' \"$LLM_ENV_CONFIG\"\n"
+        "    python3 << PYEOF\n"
+        "import yaml\n"
+        "cfg_path = '$LLM_ENV_CONFIG'\n"
+        "with open(cfg_path) as f:\n"
+        "    cfg = yaml.safe_load(f) or {}\n"
+        "cfg.setdefault('gpu', {}).setdefault('vram_budget_ceiling_mib', 15565)\n"
+        "if 'llm_server' not in cfg or cfg['llm_server'] is None:\n"
+        "    cfg['llm_server'] = {}\n"
+        "if 'enabled' not in cfg['llm_server']:\n"
+        "    cfg['llm_server']['enabled'] = True\n"
+        "with open(cfg_path, 'w') as f:\n"
+        "    yaml.dump(cfg, f)\n"
+        "PYEOF\n"
         "    printf '{\"written\":true,\"path\":\"%s\"}\\n' \"$LLM_ENV_CONFIG\" ;;\n"
         "  *' detect')\n"
         "    printf '%s\\n' '{\"gpus\":["
@@ -1449,11 +1475,19 @@ def test_gpu_status_requires_a_configured_gpu(tmp_path: pathlib.Path) -> None:
     assert "gpu.pci_address is not set" in result.stderr
 
 
+def test_gpu_status_exits_cleanly_when_llm_server_disabled(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(
+        tmp_path, config_text="llm_server:\n  enabled: false\ngpu: {}\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "llm-server is disabled" in result.stdout
+
+
 def test_gpu_status_dies_clearly_when_detect_fails(tmp_path: pathlib.Path) -> None:
     commands = tmp_path / "bin"
     commands.mkdir()
     uv = commands / "uv"
-    uv.write_text("#!/usr/bin/bash\ncase \"$*\" in\n  *' detect') exit 1 ;;\nesac\n")
+    uv.write_text("#!/usr/bin/bash\ncase \"$*\" in\n  *' migrate-config') python3 << PYEOF\nimport yaml\ncfg_path = '$LLM_ENV_CONFIG'\nwith open(cfg_path) as f:\n    cfg = yaml.safe_load(f) or {}\nif 'llm_server' not in cfg or cfg['llm_server'] is None:\n    cfg['llm_server'] = {}\nif 'enabled' not in cfg['llm_server']:\n    cfg['llm_server']['enabled'] = True\nwith open(cfg_path, 'w') as f:\n    yaml.dump(cfg, f)\nPYEOF\n    printf '{\"written\":true}\\n' ;;\n  *' detect') exit 1 ;;\nesac\n")
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     real_yq = shutil.which("yq")
     assert real_yq is not None
@@ -1494,6 +1528,19 @@ def test_gpu_status_shows_headroom_even_when_budget_is_infeasible(tmp_path: path
     uv.write_text(
         "#!/usr/bin/bash\n"
         "case \"$*\" in\n"
+        "  *' migrate-config') python3 << PYEOF\n"
+        "import yaml\n"
+        "cfg_path = '$LLM_ENV_CONFIG'\n"
+        "with open(cfg_path) as f:\n"
+        "    cfg = yaml.safe_load(f) or {}\n"
+        "if 'llm_server' not in cfg or cfg['llm_server'] is None:\n"
+        "    cfg['llm_server'] = {}\n"
+        "if 'enabled' not in cfg['llm_server']:\n"
+        "    cfg['llm_server']['enabled'] = True\n"
+        "with open(cfg_path, 'w') as f:\n"
+        "    yaml.dump(cfg, f)\n"
+        "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
         "  *' detect')\n"
         "    printf '%s\\n' '{\"gpus\":["
         "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
@@ -1545,6 +1592,19 @@ def test_gpu_status_shows_headroom_unavailable_on_a_budget_error(tmp_path: pathl
     uv.write_text(
         "#!/usr/bin/bash\n"
         "case \"$*\" in\n"
+        "  *' migrate-config') python3 << PYEOF\n"
+        "import yaml\n"
+        "cfg_path = '$LLM_ENV_CONFIG'\n"
+        "with open(cfg_path) as f:\n"
+        "    cfg = yaml.safe_load(f) or {}\n"
+        "if 'llm_server' not in cfg or cfg['llm_server'] is None:\n"
+        "    cfg['llm_server'] = {}\n"
+        "if 'enabled' not in cfg['llm_server']:\n"
+        "    cfg['llm_server']['enabled'] = True\n"
+        "with open(cfg_path, 'w') as f:\n"
+        "    yaml.dump(cfg, f)\n"
+        "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
         "  *' detect')\n"
         "    printf '%s\\n' '{\"gpus\":["
         "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
@@ -1825,6 +1885,19 @@ def test_gpu_status_warns_and_skips_migration_with_no_alternate_gpu(tmp_path: pa
     uv.write_text(
         "#!/usr/bin/bash\n"
         "case \"$*\" in\n"
+        "  *' migrate-config') python3 << PYEOF\n"
+        "import yaml\n"
+        "cfg_path = '$LLM_ENV_CONFIG'\n"
+        "with open(cfg_path) as f:\n"
+        "    cfg = yaml.safe_load(f) or {}\n"
+        "if 'llm_server' not in cfg or cfg['llm_server'] is None:\n"
+        "    cfg['llm_server'] = {}\n"
+        "if 'enabled' not in cfg['llm_server']:\n"
+        "    cfg['llm_server']['enabled'] = True\n"
+        "with open(cfg_path, 'w') as f:\n"
+        "    yaml.dump(cfg, f)\n"
+        "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
         "  *' detect') printf '%s\\n' '{\"gpus\":["
         "{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16384,"
         "\"vram_used_mib\":2048,\"render_node\":\"renderD128\",\"connected_outputs\":[]}]}' ;;\n"
