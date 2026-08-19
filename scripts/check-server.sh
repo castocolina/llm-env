@@ -250,13 +250,13 @@ fi
 
 else
     log_step "Health"
-    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_warn "Verdict: SKIP identity=server health reason=llm-server is disabled"
     log_step "Authentication"
-    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_warn "Verdict: SKIP identity=server invalid-key probe reason=llm-server is disabled"
     log_step "Model listing"
-    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_warn "Verdict: SKIP identity=server model listing reason=llm-server is disabled"
     log_step "Completions"
-    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_warn "Verdict: SKIP identity=server completions reason=llm-server is disabled"
     models_ready=0
 fi
 

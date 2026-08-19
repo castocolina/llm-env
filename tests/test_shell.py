@@ -6179,7 +6179,22 @@ def test_check_server_skips_direct_llm_server_checks_when_disabled(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 4
+    assert (
+        "Verdict: SKIP identity=server health reason=llm-server is disabled"
+        in result.stderr
+    )
+    assert (
+        "Verdict: SKIP identity=server invalid-key probe "
+        "reason=llm-server is disabled" in result.stderr
+    )
+    assert (
+        "Verdict: SKIP identity=server model listing reason=llm-server is disabled"
+        in result.stderr
+    )
+    assert (
+        "Verdict: SKIP identity=server completions reason=llm-server is disabled"
+        in result.stderr
+    )
     recorded = calls.read_text()
     assert "/health" not in recorded
     assert "/v1/models" not in recorded
