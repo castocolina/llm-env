@@ -96,6 +96,10 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         remote_setup.setdefault("image", DEFAULT_REMOTE_SETUP_IMAGE)
         remote_setup.setdefault("port", DEFAULT_REMOTE_SETUP_PORT)
 
+    llm_server = cfg.setdefault("llm_server", {})
+    if isinstance(llm_server, dict):
+        llm_server.setdefault("enabled", True)
+
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
         return cfg
@@ -314,6 +318,18 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             if not _positive_int(remote_setup.get("port")):
                 errors.append("remote_setup.port must be a positive integer")
 
+    llm_server_enabled = True
+    if "llm_server" in cfg:
+        llm_server = cfg["llm_server"]
+        if not isinstance(llm_server, dict):
+            errors.append("section llm_server must be a mapping")
+        else:
+            if "enabled" in llm_server:
+                if not isinstance(llm_server["enabled"], bool):
+                    errors.append("llm_server.enabled must be a Boolean")
+                else:
+                    llm_server_enabled = llm_server["enabled"]
+
     models = cfg["models"]
     if not isinstance(models, list) or not models:
         errors.append("models must be a non-empty list")
@@ -408,12 +424,13 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 errors.append(f"model {model_name} {key} must be a positive integer")
 
     enabled_count = len(enabled_models(cfg))
-    if enabled_count == 0:
-        errors.append("at least one model must be enabled")
-    if _positive_int(runtime.get("models_max")) and runtime["models_max"] > enabled_count:
-        errors.append(
-            f"runtime.models_max must not exceed enabled model count ({enabled_count})"
-        )
+    if llm_server_enabled:
+        if enabled_count == 0:
+            errors.append("at least one model must be enabled")
+        if _positive_int(runtime.get("models_max")) and runtime["models_max"] > enabled_count:
+            errors.append(
+                f"runtime.models_max must not exceed enabled model count ({enabled_count})"
+            )
 
     return errors
 

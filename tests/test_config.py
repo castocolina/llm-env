@@ -507,8 +507,9 @@ def test_empty_selection_and_final_disable_are_atomic():
 
 def test_save_then_load_roundtrip(tmp_path):
     path = tmp_path / "models.yml"
-    save_config(make_cfg(), path)
-    assert load_config(path) == make_cfg()
+    cfg = make_cfg()
+    save_config(cfg, path)
+    assert load_config(path) == migrate_config(copy.deepcopy(cfg))
 
 
 def test_sampling_survives_save_load_roundtrip(tmp_path):
@@ -982,3 +983,54 @@ def test_config_rejects_invalid_remote_setup_values(field, value, expected_error
     remote_setup[field] = value
     cfg = make_cfg(remote_setup=remote_setup)
     assert expected_error in validate_config(cfg)
+
+
+def test_migrate_config_adds_default_llm_server_section():
+    cfg = make_cfg()
+    migrated = migrate_config(cfg)
+    assert migrated["llm_server"] == {"enabled": True}
+
+
+def test_migrate_config_preserves_existing_llm_server_enabled_value():
+    cfg = make_cfg(llm_server={"enabled": False})
+    migrated = migrate_config(cfg)
+    assert migrated["llm_server"]["enabled"] is False
+
+
+def test_config_accepts_valid_llm_server_section():
+    cfg = make_cfg(llm_server={"enabled": False})
+    assert validate_config(cfg) == []
+
+
+def test_config_without_llm_server_key_has_no_errors():
+    cfg = make_cfg()
+    assert "llm_server" not in cfg
+    assert validate_config(cfg) == []
+
+
+def test_config_rejects_non_mapping_llm_server_section():
+    cfg = make_cfg(llm_server=[])
+    errors = validate_config(cfg)
+    assert any(error == "section llm_server must be a mapping" for error in errors)
+
+
+def test_config_rejects_non_boolean_llm_server_enabled():
+    cfg = make_cfg(llm_server={"enabled": "false"})
+    errors = validate_config(cfg)
+    assert "llm_server.enabled must be a Boolean" in errors
+
+
+def test_config_rejects_zero_enabled_models_only_when_llm_server_enabled():
+    """Disabling llm_server relaxes the 'at least one model enabled' rule --
+    see the pre-existing enabled-count test for the llm_server-enabled case
+    this must NOT regress."""
+    cfg = make_cfg(llm_server={"enabled": False})
+    for model in cfg["models"]:
+        model["enabled"] = False
+    assert validate_config(cfg) == []
+
+
+def test_config_relaxes_models_max_bound_when_llm_server_disabled():
+    cfg = make_cfg(llm_server={"enabled": False})
+    cfg["runtime"]["models_max"] = 99
+    assert validate_config(cfg) == []
