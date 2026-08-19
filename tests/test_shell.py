@@ -5736,6 +5736,7 @@ def run_check_server(
     omniroute_api_key: str = "sk-fixture-omniroute-scoped-key",
     omniroute_issue_key_exit: int = 0,
     llm_server_enabled: bool = True,
+    omniroute_providers_body: str = '{"connections":[{"name":"llm-env-local","isActive":true}]}',
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
     real_jq = shutil.which("jq")
@@ -5805,7 +5806,7 @@ def run_check_server(
         "    ;;\n"
         "  http://127.0.0.1:20128/api/providers)\n"
         "    if [ -n \"$cookie_read\" ] && [ \"$(<\"$cookie_read\")\" = omniroute-session-cookie ]; then\n"
-        "      write_response '{\"connections\":[{\"name\":\"llm-env-local\",\"isActive\":true}]}'\n"
+        "      write_response \"$OMNIROUTE_PROVIDERS_BODY\"\n"
         "      printf '200'\n"
         "    else\n"
         "      write_response '{\"error\":\"unauthorized\"}'\n"
@@ -5919,6 +5920,7 @@ def run_check_server(
         "MODEL_JQ_EXIT": str(model_jq_exit),
         "MODEL_LIST_BODY": '{"data":[]}' if not models_enabled else model_list_body,
         "MODEL_YQ_EXIT": str(model_yq_exit),
+        "OMNIROUTE_PROVIDERS_BODY": omniroute_providers_body,
         "ORNITH_CURL_EXIT": str(completion_curl_exits.get("ornith", 0)),
         "ORNITH_RESPONSE": ornith_response,
         "ORNITH_STATUS": str(completion_statuses.get("ornith", 200)),
@@ -6268,8 +6270,15 @@ def test_check_server_skips_direct_llm_server_checks_when_disabled(
     assert "/v1/models" not in recorded
     assert "127.0.0.1:20128" in recorded
     assert "Verdict: PASS identity=omniroute dashboard login" in result.stdout
-    assert "Verdict: PASS identity=omniroute provider listing" in result.stdout
     assert "Verdict: PASS identity=omniroute api key" in result.stdout
+    # Regression guard: the "llm-env-local" OmniRoute connection is only ever
+    # provisioned when llm-server is enabled (start.sh skips provisioning
+    # entirely when disabled) -- asserting it's "missing" would always FAIL
+    # in this mode even though nothing is actually wrong, so it must SKIP.
+    assert (
+        "Verdict: SKIP identity=omniroute provider listing llm-env-local "
+        "reason=llm-server is disabled" in result.stderr
+    )
     # Regression guard: an OmniRoute API key IS present (the normal case) and
     # models_ready is 0 solely because llm-server is disabled -- this must
     # report a SKIP verdict, not silently print only the section header.
@@ -6277,6 +6286,29 @@ def test_check_server_skips_direct_llm_server_checks_when_disabled(
         "Verdict: SKIP identity=omniroute completions "
         "reason=llm-server is disabled" in result.stderr
     )
+    assert "Results:" in result.stdout
+
+
+def test_check_server_skips_the_local_connection_lookup_when_llm_server_is_missing_from_omniroute(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Realistic disabled-mode fixture: the 'llm-env-local' connection is
+    genuinely absent from OmniRoute's provider listing (never provisioned).
+    Before the fix, this hit the FAIL branch unconditionally regardless of
+    llm_server_enabled; verify it now SKIPs instead of failing the run."""
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        llm_server_enabled=False,
+        omniroute_providers_body='{"connections":[]}',
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "Verdict: SKIP identity=omniroute provider listing llm-env-local "
+        "reason=llm-server is disabled" in result.stderr
+    )
+    assert "Verdict: FAIL stage=connection lookup" not in result.stdout
     assert "Results:" in result.stdout
 
 

@@ -48,7 +48,7 @@ gpu_default="Y"
 persisted_llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH" 2>/dev/null)"
 [ "$persisted_llm_server_enabled" = "false" ] && gpu_default="n"
 [ "$NO_GPU" = "1" ] && gpu_default="n"
-gpu_answer="$(ask "¿Habilitar inferencia local con GPU (llm-server)? [Y/n]: " "$gpu_default")"
+gpu_answer="$(ask "Enable local GPU inference (llm-server)? [Y/n]: " "$gpu_default")"
 case "$gpu_answer" in
     [nN]*) llm_server_enabled=false ;;
     *) llm_server_enabled=true ;;

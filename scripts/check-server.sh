@@ -285,18 +285,23 @@ else
     if request_failed 200 "omniroute provider listing"; then
         :
     else
-        connection_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
-        is_active="$(jq -r '
-            (if type == "array" then . else (.connections // .providers // .data // []) end)
-            | map(select(.name == "llm-env-local"))[0].isActive // false
-          ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
-        log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
-        if [ "$is_active" = "true" ]; then
+        if [ "$llm_server_enabled" = "false" ]; then
             close_diagnostic_capture 0
-            ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
+            log_warn "Verdict: SKIP identity=omniroute provider listing llm-env-local reason=llm-server is disabled; no local connection is provisioned"
         else
-            close_diagnostic_capture 1
-            bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
+            connection_parse_stderr="$(mktemp "${diagnostic_dir}/parse.XXXXXX")"
+            is_active="$(jq -r '
+                (if type == "array" then . else (.connections // .providers // .data // []) end)
+                | map(select(.name == "llm-env-local"))[0].isActive // false
+              ' < "$REQUEST_BODY_FILE" 2>"$connection_parse_stderr")"
+            log_nonempty_block "Response parsing stderr" "$(<"$connection_parse_stderr")"
+            if [ "$is_active" = "true" ]; then
+                close_diagnostic_capture 0
+                ok "Verdict: PASS identity=omniroute provider listing llm-env-local connection is present and active"
+            else
+                close_diagnostic_capture 1
+                bad "Verdict: FAIL stage=connection lookup reason=llm-env-local connection missing or inactive"
+            fi
         fi
     fi
 fi
