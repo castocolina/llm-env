@@ -20,6 +20,7 @@ CFG = {
     "gpu": {
         "image": "ghcr.io/ggml-org/llama.cpp:server-vulkan",
     },
+    "llm_server": {"enabled": True},
     "runtime": {
         "models_max": 1,
     },
@@ -365,3 +366,36 @@ def test_remote_setup_service_has_a_healthcheck():
     assert test[:3] == ["CMD", "python3", "-c"]
     assert "/setup.sh" in test[3]
     assert "127.0.0.1:20130" in test[3]
+
+
+def test_llm_server_service_omitted_when_disabled():
+    cfg = {**CFG, "llm_server": {"enabled": False}}
+    _, document = compose_dict(cfg)
+    assert "llm-server" not in document["services"]
+    assert "omniroute" in document["services"]
+    assert "remote-setup" in document["services"]
+
+
+def test_omniroute_depends_on_llm_server_omitted_when_disabled():
+    cfg = {**CFG, "llm_server": {"enabled": False}}
+    _, document = compose_dict(cfg)
+    assert "depends_on" not in document["services"]["omniroute"]
+
+
+def test_llm_server_service_present_when_llm_server_key_absent():
+    """Default-true: a config with no llm_server key at all (pre-migration)
+    must still render llm-server."""
+    cfg = {key: value for key, value in CFG.items() if key != "llm_server"}
+    _, document = compose_dict(cfg)
+    assert "llm-server" in document["services"]
+    assert document["services"]["omniroute"]["depends_on"] == {
+        "llm-server": {"condition": "service_healthy"}
+    }
+
+
+def test_remote_setup_depends_on_omniroute_unaffected_by_llm_server_disabled():
+    cfg = {**CFG, "llm_server": {"enabled": False}}
+    _, document = compose_dict(cfg)
+    assert document["services"]["remote-setup"]["depends_on"] == {
+        "omniroute": {"condition": "service_healthy"}
+    }

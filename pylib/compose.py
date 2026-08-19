@@ -36,6 +36,7 @@ def render_compose(
     server = cfg["server"]
     gpu = cfg["gpu"]
     runtime = cfg["runtime"]
+    llm_server_enabled = cfg.get("llm_server", {}).get("enabled", True)
     llm_server_resources = cfg.get("resources", {}).get("llm_server", {})
     omniroute_cfg = cfg.get("omniroute", {})
     omniroute_resources = cfg.get("resources", {}).get("omniroute", {})
@@ -115,9 +116,10 @@ def render_compose(
             "start_period": "15s",
         },
         "stop_grace_period": "40s",
-        "depends_on": {"llm-server": {"condition": "service_healthy"}},
         "restart": "unless-stopped",
     }
+    if llm_server_enabled:
+        omniroute_service["depends_on"] = {"llm-server": {"condition": "service_healthy"}}
     omniroute_cpus = omniroute_resources.get("cpus")
     if omniroute_cpus:
         omniroute_service["cpus"] = omniroute_cpus
@@ -186,12 +188,13 @@ def render_compose(
         },
     }
 
+    services: dict[str, Any] = {}
+    if llm_server_enabled:
+        services["llm-server"] = service
+    services["omniroute"] = omniroute_service
+    services["remote-setup"] = remote_setup_service
     document = {
-        "services": {
-            "llm-server": service,
-            "omniroute": omniroute_service,
-            "remote-setup": remote_setup_service,
-        },
+        "services": services,
         "volumes": {"omniroute-data": {}, "remote-setup-data": {}},
     }
     return HEADER_COMMENT + yaml.safe_dump(
