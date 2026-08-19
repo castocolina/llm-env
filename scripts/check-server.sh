@@ -24,6 +24,7 @@ omniroute_cookie_jar="$(mktemp)"
 chmod 600 "$omniroute_cookie_jar"
 omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
 omniroute_password="$(yq -r '.omniroute.initial_password' "$CONFIG_PATH")"
+llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH" 2>/dev/null)"
 omniroute_base="http://127.0.0.1:${omniroute_port}"
 diagnostic_dir="$(prepare_diagnostic_dir server)"
 
@@ -113,6 +114,8 @@ request_failed() {
     fi
     return 1
 }
+
+if [ "$llm_server_enabled" != "false" ]; then
 
 log_step "Health"
 request_record "server health" \
@@ -243,6 +246,18 @@ fi
 
 if [ "$models_ready" -eq 1 ] && [ "$checked_models" -eq 0 ]; then
     bad "Verdict: FAIL stage=model checks reason=no enabled models were checked"
+fi
+
+else
+    log_step "Health"
+    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_step "Authentication"
+    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_step "Model listing"
+    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    log_step "Completions"
+    log_warn "Verdict: SKIP reason=llm-server is disabled"
+    models_ready=0
 fi
 
 log_step "OmniRoute login"

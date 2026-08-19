@@ -5667,6 +5667,7 @@ def run_check_server(
     verbose: bool = False,
     omniroute_api_key: str = "sk-fixture-omniroute-scoped-key",
     omniroute_issue_key_exit: int = 0,
+    llm_server_enabled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
     real_jq = shutil.which("jq")
@@ -5680,6 +5681,8 @@ def run_check_server(
     calls.touch()
     config = tmp_path / "models.yml"
     config.write_text(
+        "llm_server:\n"
+        f"  enabled: {str(llm_server_enabled).lower()}\n"
         "server:\n"
         "  port: 8000\n"
         "  api_key: fixture-secret\n"
@@ -6161,6 +6164,30 @@ def test_check_server_fails_when_no_direct_model_check_can_run(
         and json.loads(row["payload"]).get("model") != "x"
     ]
     assert non_auth_completions == []
+
+
+def test_check_server_skips_direct_llm_server_checks_when_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When llm_server.enabled is false, Health/Authentication/Model listing/
+    Completions must report SKIP rather than probing llm-server directly,
+    while OmniRoute login/providers/API-key/completions still run."""
+    result, calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ready", "ornith": "ready"},
+        llm_server_enabled=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 4
+    recorded = calls.read_text()
+    assert "/health" not in recorded
+    assert "/v1/models" not in recorded
+    assert "127.0.0.1:20128" in recorded
+    assert "Verdict: PASS identity=omniroute dashboard login" in result.stdout
+    assert "Verdict: PASS identity=omniroute provider listing" in result.stdout
+    assert "Verdict: PASS identity=omniroute api key" in result.stdout
+    assert "Results:" in result.stdout
 
 
 def run_agent_check(
