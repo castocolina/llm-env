@@ -1,13 +1,14 @@
 # llm-env
 
-Local llama.cpp router server with GPU acceleration, running as a rootless
-podman compose stack on Bazzite.
+Local llama.cpp router server with GPU acceleration, fronted by an OmniRoute
+gateway and a LAN installer for other machines, running as a rootless podman
+compose stack on Bazzite.
 
 ## Quick start
 
 ```bash
 make prerequisites  # confirm and install Bazzite/Fedora host tools
-make setup       # choose GPU and models, download, generate config
+make setup       # choose GPU and models (or opt out of local GPU inference entirely), download, generate config
 make benchmark   # measure Vulkan throughput; CPU fallback still reports a failed Vulkan benchmark
 make start       # start the server
 make check-server
@@ -27,6 +28,11 @@ make check-server
   mDNS `.local` name.
 - Runs an OmniRoute gateway alongside the router and auto-configures its
   connection to the local model on every start — no manual dashboard setup.
+- Serves a LAN installer other machines can run with one `curl | bash` to
+  configure Pi/OpenCode against this host's OmniRoute gateway. See
+  [Remote setup](#remote-setup).
+- Can run with no local GPU at all — OmniRoute + the remote installer only,
+  routing to models elsewhere. See [GPU-optional mode](#gpu-optional-mode).
 
 ## Configuration
 
@@ -75,6 +81,35 @@ prompt tokens must be less than `n_ctx`. With Gemma's 131,072-token slot,
 131,071 is admitted with `max_tokens: 1`; 131,072 and above are rejected.
 Ornith's 262,144-token slot follows the same rule at its own boundary. This
 practical boundary does not change either model's configured client context.
+
+## GPU-optional mode
+
+`make setup` asks "Enable local GPU inference (llm-server)? [Y/n]" — answer
+`n` (or set `LLM_ENV_NO_GPU=1` for unattended runs) to skip GPU detection,
+model selection/download, and VRAM budgeting entirely, and run this host as
+an OmniRoute gateway + remote installer only, with no local llama.cpp
+instance and the GPU untouched. This is persisted as `llm_server.enabled` in
+`models.yml` — flip it and re-run `make setup`/`make start` to change modes
+later. In this mode, configure an upstream provider (OpenRouter, another
+frontier API, etc.) through the OmniRoute dashboard yourself; `make start`
+does not auto-provision a connection to a local model that doesn't exist.
+
+## Remote setup
+
+Any other machine on the LAN can configure its own Pi/OpenCode sessions
+against this host's OmniRoute gateway with one command:
+
+```bash
+curl http://<this-host>.local:<remote-setup-port>/setup.sh | bash
+```
+
+It prompts for `OMNI_ROUTER_MASTER_KEY` (set in this repo's `.env`) and, once
+authenticated, writes a scoped OmniRoute API key to the remote machine's
+client configs — it never hands out the master key itself. `make status`
+(after `make start`) prints the exact one-liners (mDNS and LAN-IP forms) plus
+every other credential you need — OmniRoute's dashboard password and, when
+GPU inference is enabled, this host's own API key — under one banner. Run
+`make show-secrets` for the same credentials without starting anything.
 
 ## Clients
 

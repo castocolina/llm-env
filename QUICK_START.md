@@ -3,11 +3,16 @@
 ## First run
 
 ```bash
-make setup       # 1. pick GPU + models, download, write config
-make benchmark   # 2. measure Vulkan throughput; CPU fallback exits nonzero
+make setup       # 1. pick GPU + models (or opt out of local GPU inference), download, write config
+make benchmark   # 2. measure Vulkan throughput; CPU fallback exits nonzero; skipped if GPU inference is disabled
 make start       # 3. start
 make check-server
 ```
+
+`make setup` asks "Enable local GPU inference (llm-server)? [Y/n]" — answer
+`n` (or set `LLM_ENV_NO_GPU=1` for unattended runs) to skip GPU/model steps
+entirely and run this host as an OmniRoute gateway + remote installer only.
+See the main [README](README.md#gpu-optional-mode) for details.
 
 ## Daily use
 
@@ -27,10 +32,27 @@ make disable-boot
 
 ## OmniRoute dashboard
 
-`make start` auto-provisions OmniRoute's connection to the local router.
-The dashboard itself is at `http://127.0.0.1:20128` (or your configured
-`omniroute.port`); the login password is `omniroute.initial_password` in
-`~/.config/llm-env/models.yml`.
+`make start` auto-provisions OmniRoute's connection to the local router
+(skipped when GPU inference is disabled — configure an upstream provider
+through the dashboard yourself in that mode). The dashboard itself is at
+`http://127.0.0.1:20128` (or your configured `omniroute.port`); the login
+password is `omniroute.initial_password` in `~/.config/llm-env/models.yml`.
+
+## Remote setup (other machines on the LAN)
+
+```bash
+make show-secrets   # or `make status` after `make start`
+```
+
+Prints the exact one-liner for another machine to configure its own
+Pi/OpenCode sessions against this host's OmniRoute gateway:
+
+```bash
+curl http://<this-host>.local:<remote-setup-port>/setup.sh | bash
+```
+
+It prompts for `OMNI_ROUTER_MASTER_KEY` (from this repo's `.env`) and never
+hands out the master key itself.
 
 ## Using it
 
