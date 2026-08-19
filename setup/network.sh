@@ -8,6 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 require_cmd ip jq yq
 
 load_server_config
+migrate_config_file || die "configuration migration failed"
 # shellcheck disable=SC2153 # PORT is set by load_server_config() in ../tools/lib.sh.
 port="$PORT"
 omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"

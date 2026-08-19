@@ -9301,16 +9301,34 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
     real_yq = shutil.which("yq")
     real_jq = shutil.which("jq")
     real_ip = shutil.which("ip")
+    real_uv = shutil.which("uv")
     assert real_yq is not None
     assert real_jq is not None
     assert real_ip is not None
+    assert real_uv is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
-    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+
+    # Stub yq to pass through to real yq
+    yq_stub = commands / "yq"
+    yq_stub.write_text(f"#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq_stub.chmod(0o755)
+
+    # Stub other commands to pass through directly
+    for name, real in (("jq", real_jq), ("ip", real_ip)):
         stub = commands / name
         stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
         stub.chmod(0o755)
+
+    # Stub uv to handle migrate-config by calling the real uv
+    uv_stub = commands / "uv"
+    uv_stub.write_text(
+        f"#!/usr/bin/bash\n"
+        f'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
+    )
+    uv_stub.chmod(0o755)
+
     firewall_cmd = commands / "firewall-cmd"
     firewall_cmd.write_text("#!/usr/bin/bash\nexit 1\n")
     firewall_cmd.chmod(0o755)
@@ -9319,18 +9337,46 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
     config = home / ".config/llm-env/models.yml"
     config.parent.mkdir(parents=True)
     config.write_text(
+        "version: 1\n"
         "server:\n"
         "  port: 8000\n"
         "  mdns_name: llm\n"
         "  api_key: fixture-api-key\n"
+        "  host: 0.0.0.0\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "gpu:\n"
+        "  backend: cpu\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "  vram_total_mib: 0\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
         "omniroute:\n"
         "  port: 20128\n"
         "  initial_password: fixture-omniroute-password\n"
         "remote_setup:\n"
         "  port: 20130\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
         "models:\n"
         "  - alias: a\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
         "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
     )
 
     result = subprocess.run(
@@ -9341,6 +9387,8 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
             "HOME": str(home),
             "LLM_ENV_CONFIG": str(config),
             "PATH": f"{commands}:/usr/bin:/bin",
+            "REAL_YQ": real_yq,
+            "REAL_UV": real_uv,
         },
         stdin=subprocess.DEVNULL,
         text=True,
@@ -9369,16 +9417,34 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     real_yq = shutil.which("yq")
     real_jq = shutil.which("jq")
     real_ip = shutil.which("ip")
+    real_uv = shutil.which("uv")
     assert real_yq is not None
     assert real_jq is not None
     assert real_ip is not None
+    assert real_uv is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
-    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+
+    # Stub yq to pass through to real yq
+    yq_stub = commands / "yq"
+    yq_stub.write_text(f"#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq_stub.chmod(0o755)
+
+    # Stub other commands to pass through directly
+    for name, real in (("jq", real_jq), ("ip", real_ip)):
         stub = commands / name
         stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
         stub.chmod(0o755)
+
+    # Stub uv to handle migrate-config by calling the real uv
+    uv_stub = commands / "uv"
+    uv_stub.write_text(
+        f"#!/usr/bin/bash\n"
+        f'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
+    )
+    uv_stub.chmod(0o755)
+
     # Stub firewall-cmd to track if it's called with the llm-server port
     firewall_cmd = commands / "firewall-cmd"
     firewall_calls_file = tmp_path / "firewall_calls.txt"
@@ -9393,20 +9459,48 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     config = home / ".config/llm-env/models.yml"
     config.parent.mkdir(parents=True)
     config.write_text(
+        "version: 1\n"
         "server:\n"
         "  port: 8000\n"
         "  mdns_name: llm\n"
         "  api_key: fixture-api-key\n"
+        "  host: 0.0.0.0\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
         "llm_server:\n"
         "  enabled: false\n"
+        "gpu:\n"
+        "  backend: cpu\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "  vram_total_mib: 0\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
         "omniroute:\n"
         "  port: 20128\n"
         "  initial_password: fixture-omniroute-password\n"
         "remote_setup:\n"
         "  port: 20130\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
         "models:\n"
         "  - alias: a\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
         "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
     )
 
     result = subprocess.run(
@@ -9417,6 +9511,8 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
             "HOME": str(home),
             "LLM_ENV_CONFIG": str(config),
             "PATH": f"{commands}:/usr/bin:/bin",
+            "REAL_YQ": real_yq,
+            "REAL_UV": real_uv,
         },
         stdin=subprocess.DEVNULL,
         text=True,
@@ -9427,15 +9523,11 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     assert result.returncode == 0, result.stderr
     combined = result.stdout + result.stderr
 
-    # Verify that firewall-cmd was NOT called with the llm-server port
-    if firewall_calls_file.exists():
-        firewall_calls = firewall_calls_file.read_text()
-        assert "--query-port=8000/tcp" not in firewall_calls, (
-            f"firewall-cmd should not query port 8000/tcp when llm_server.enabled is false"
-        )
-        assert "--add-port=8000/tcp" not in firewall_calls, (
-            f"firewall-cmd should not add port 8000/tcp when llm_server.enabled is false"
-        )
+    # Verify that firewall-cmd was NOT called at all (not even for port 8000/tcp)
+    # when llm_server is disabled
+    assert not firewall_calls_file.exists(), (
+        "firewall-cmd should not be invoked when llm_server.enabled is false"
+    )
 
     # Verify that the output does not contain the firewall prompt for llm-server
     assert "Open firewall port 8000/tcp for LAN access" not in combined
