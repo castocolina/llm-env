@@ -3514,6 +3514,7 @@ def run_lifecycle_script(
     env_overrides: dict[str, str] | None = None,
     omniroute_port: int | None = None,
     resources_failure: bool = False,
+    llm_server_enabled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -3530,6 +3531,8 @@ def run_lifecycle_script(
     config.parent.mkdir(parents=True)
     config.write_text(
         "version: 1\n"
+        "llm_server:\n"
+        f"  enabled: {str(llm_server_enabled).lower()}\n"
         "server:\n"
         "  host: 0.0.0.0\n"
         "  port: 8000\n"
@@ -3662,6 +3665,56 @@ def run_lifecycle_script(
         check=False,
     )
     return result, config, calls
+
+
+def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert " budget " not in calls.read_text()
+    assert "server is ready" not in result.stdout
+
+
+def test_start_no_gpu_still_waits_for_omniroute_and_runs_network_sh(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "network.sh" in calls.read_text()
+
+
+def test_start_no_gpu_skips_omniroute_provisioning(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "omniroute provision" not in calls.read_text()
+    assert (
+        "llm-server disabled -- skipping local OmniRoute provider provisioning"
+        in result.stdout
+    )
+
+
+def test_start_no_gpu_still_starts_the_compose_stack(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "systemctl --user start" in calls.read_text()
+
+
+def test_start_enabled_still_waits_for_health_and_provisions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression guard: llm_server_enabled=True (the default) must be
+    unaffected."""
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert " budget " in calls.read_text()
+    assert "server is ready" in result.stdout
 
 
 def run_opencode_config_editor(
