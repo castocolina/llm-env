@@ -9358,3 +9358,193 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
     assert "the OmniRoute container only binds 127.0.0.1" not in combined
     assert "curl http://" in result.stdout
     assert ":20130/setup.sh | bash" in result.stdout
+
+
+def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When llm_server.enabled is false, network.sh must not query or prompt
+    for opening the firewall port for the llm-server. The OmniRoute/remote-setup
+    warnings and print-endpoints.sh output must be unaffected."""
+    real_yq = shutil.which("yq")
+    real_jq = shutil.which("jq")
+    real_ip = shutil.which("ip")
+    assert real_yq is not None
+    assert real_jq is not None
+    assert real_ip is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+        stub = commands / name
+        stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
+        stub.chmod(0o755)
+    # Stub firewall-cmd to track if it's called with the llm-server port
+    firewall_cmd = commands / "firewall-cmd"
+    firewall_calls_file = tmp_path / "firewall_calls.txt"
+    firewall_cmd.write_text(
+        f"#!/usr/bin/bash\n"
+        f'echo "$@" >> "{firewall_calls_file}"\n'
+        f"exit 1\n"
+    )
+    firewall_cmd.chmod(0o755)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "  mdns_name: llm\n"
+        "  api_key: fixture-api-key\n"
+        "llm_server:\n"
+        "  enabled: false\n"
+        "omniroute:\n"
+        "  port: 20128\n"
+        "  initial_password: fixture-omniroute-password\n"
+        "remote_setup:\n"
+        "  port: 20130\n"
+        "models:\n"
+        "  - alias: a\n"
+        "    enabled: true\n"
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/network.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+
+    # Verify that firewall-cmd was NOT called with the llm-server port
+    if firewall_calls_file.exists():
+        firewall_calls = firewall_calls_file.read_text()
+        assert "--query-port=8000/tcp" not in firewall_calls, (
+            f"firewall-cmd should not query port 8000/tcp when llm_server.enabled is false"
+        )
+        assert "--add-port=8000/tcp" not in firewall_calls, (
+            f"firewall-cmd should not add port 8000/tcp when llm_server.enabled is false"
+        )
+
+    # Verify that the output does not contain the firewall prompt for llm-server
+    assert "Open firewall port 8000/tcp for LAN access" not in combined
+
+    # Verify that OmniRoute and remote-setup warnings ARE present
+    assert (
+        "firewalld rules for OmniRoute (port 20128/tcp) and the remote-setup "
+        "installer (port 20130/tcp) are not opened automatically" in combined
+    )
+    assert "sudo firewall-cmd --permanent --add-port=20128/tcp --add-port=20130/tcp" in combined
+
+    # Verify that print-endpoints.sh output is present
+    assert "curl http://" in result.stdout
+    assert ":20130/setup.sh | bash" in result.stdout
+
+
+def test_status_prints_the_same_endpoint_banner_as_network_sh(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`make status` must be as useful as the post-`make start` banner:
+    the same Local/Network/mDNS endpoints and credentials, plus the
+    remote-agent-setup one-liners in both domain (mDNS) and LAN-IP form."""
+    real_yq = shutil.which("yq")
+    real_jq = shutil.which("jq")
+    real_ip = shutil.which("ip")
+    assert real_yq is not None
+    assert real_jq is not None
+    assert real_ip is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name, real in (("yq", real_yq), ("jq", real_jq), ("ip", real_ip)):
+        stub = commands / name
+        stub.write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
+        stub.chmod(0o755)
+    for name in ("systemctl", "podman"):
+        stub = commands / name
+        stub.write_text("#!/usr/bin/bash\nexit 0\n")
+        stub.chmod(0o755)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "server:\n"
+        "  port: 8000\n"
+        "  mdns_name: llm\n"
+        "  api_key: fixture-api-key\n"
+        "omniroute:\n"
+        "  port: 20128\n"
+        "  initial_password: fixture-omniroute-password\n"
+        "remote_setup:\n"
+        "  port: 20130\n"
+        "models:\n"
+        "  - alias: a\n"
+        "    enabled: true\n"
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/status.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "fixture-api-key" in result.stdout
+    assert "fixture-omniroute-password" in result.stdout
+    assert "mDNS:    http://llm.local:20130" in result.stdout
+    assert "curl http://llm.local:20130/setup.sh | bash" in result.stdout
+    assert "curl http://" in result.stdout and ":20130/setup.sh | bash" in result.stdout
+
+
+def test_status_skips_the_endpoint_banner_when_unconfigured(
+    tmp_path: pathlib.Path,
+) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("systemctl", "podman"):
+        stub = commands / name
+        stub.write_text("#!/usr/bin/bash\nexit 0\n")
+        stub.chmod(0o755)
+
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/status.sh"],
+        cwd=ROOT,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "LLM_ENV_CONFIG": str(config),
+            "PATH": f"{commands}:/usr/bin:/bin",
+        },
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "run 'make setup' first" in result.stdout + result.stderr
+    assert "curl http://" not in result.stdout
