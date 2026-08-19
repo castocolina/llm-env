@@ -3219,6 +3219,7 @@ def run_check_setup_with_stubs(
     yq_models_json_exit: int = 0,
     render_node: str | None = "renderD128",
     verbose: bool = False,
+    llm_server_enabled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
@@ -3314,6 +3315,8 @@ def run_check_setup_with_stubs(
 
     config = tmp_path / "models.yml"
     config.write_text(
+        "llm_server:\n"
+        f"  enabled: {str(llm_server_enabled).lower()}\n"
         "server:\n"
         f"  api_key: {api_key}\n"
         "gpu:\n"
@@ -3612,6 +3615,26 @@ def test_check_setup_fails_when_model_enumeration_fails(
     assert result.returncode != 0
     assert "failed to enumerate enabled models" in result.stderr
     assert " cli " not in calls.read_text()
+
+
+def test_check_setup_skips_gpu_and_model_sections_when_llm_server_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """When llm_server.enabled is false, GPU/model/inference sections must
+    report SKIP rather than running or failing, while Tooling, Configuration,
+    Compose file, and Model files (GGUF validation) still run."""
+    result, calls, _ = run_check_setup_with_stubs(tmp_path, llm_server_enabled=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 5
+    recorded = calls.read_text()
+    assert "detect" not in recorded
+    assert "podman image exists" not in recorded
+    assert " cli " not in recorded
+    assert "Verdict: PASS identity=tooling command uv" in result.stdout
+    assert "Verdict: PASS identity=GGUF validation" in result.stdout
+    assert "Verdict: PASS identity=compose file syntax" in result.stdout
+    assert "Results:" in result.stdout
 
 
 def run_lifecycle_script(

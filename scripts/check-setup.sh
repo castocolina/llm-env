@@ -80,6 +80,18 @@ record_inference_skip() {
     log_warn "Verdict: SKIP reason=${reason}"
 }
 
+record_section_skip() {
+    local identity="$1" reason="$2"
+
+    log_identity "$identity"
+    log_command "not run: llm-server is disabled"
+    log_block "Input" ""
+    log_block "Command stdout" ""
+    log_block "Exit status" "SKIP"
+    log_block "Expectation" "n/a"
+    log_warn "Verdict: SKIP reason=${reason}"
+}
+
 inference_command() {
     local file="$1" device="$2" layers="$3" n_cpu_moe="$4"
     local ctx_size="$5" max_output_tokens="$6" timeout_seconds="$7" moe_part=""
@@ -165,41 +177,52 @@ record_command "configuration validation" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" \
     uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" models list || true
 
-pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || true)"
-image="$(yq -r '.gpu.image' "$CONFIG_PATH" 2>/dev/null || true)"
+llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH" 2>/dev/null)"
 
-log_step "GPU access"
-record_command "GPU directory" "test -d /dev/dri" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" test -d /dev/dri || true
-record_command "GPU detection" \
-    "uv run ${REPO_DIR}/llmenv.py detect" "configured PCI address: ${pci}" \
-    "GPU record for ${pci}" "" 0 "Command stdout" "Command stderr" \
-    uv run "${REPO_DIR}/llmenv.py" detect
-detect_status=$?
-detected_gpus="$(<"$record_stdout_file")"
-render_node="$(jq -r --arg p "$pci" '.gpus[] | select(.pci_address==$p) | .render_node' <<<"$detected_gpus")"
-if [ "$detect_status" -eq 0 ] && [ -n "$render_node" ] && [ "$render_node" != "null" ]; then
-    record_command "GPU render node" "test -r /dev/dri/${render_node}" "" \
-        "exit status: 0" "" 0 "Command stdout" "Command stderr" test -r "/dev/dri/${render_node}" || true
+if [ "$llm_server_enabled" != "false" ]; then
+    pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH" 2>/dev/null || true)"
+    image="$(yq -r '.gpu.image' "$CONFIG_PATH" 2>/dev/null || true)"
+
+    log_step "GPU access"
+    record_command "GPU directory" "test -d /dev/dri" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" test -d /dev/dri || true
+    record_command "GPU detection" \
+        "uv run ${REPO_DIR}/llmenv.py detect" "configured PCI address: ${pci}" \
+        "GPU record for ${pci}" "" 0 "Command stdout" "Command stderr" \
+        uv run "${REPO_DIR}/llmenv.py" detect
+    detect_status=$?
+    detected_gpus="$(<"$record_stdout_file")"
+    render_node="$(jq -r --arg p "$pci" '.gpus[] | select(.pci_address==$p) | .render_node' <<<"$detected_gpus")"
+    if [ "$detect_status" -eq 0 ] && [ -n "$render_node" ] && [ "$render_node" != "null" ]; then
+        record_command "GPU render node" "test -r /dev/dri/${render_node}" "" \
+            "exit status: 0" "" 0 "Command stdout" "Command stderr" test -r "/dev/dri/${render_node}" || true
+    else
+        log_identity "GPU render node"
+        log_command "test -r /dev/dri/<resolved-render-node>"
+        log_block "Input" "configured PCI address: ${pci}"
+        log_block "Command stdout" ""
+        log_block "Exit status" "SKIP"
+        log_block "Expectation" "a detected readable render node"
+        log_warn "Verdict: SKIP reason=GPU detection did not provide a render node"
+    fi
+
+    log_step "Configured GPU is present"
+    record_command "configured GPU" \
+        "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address==\$p)'" \
+        "configured PCI address: ${pci}" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        bash -c "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'" || true
+
+    log_step "Container image"
+    record_command "container image" "podman image exists ${image}" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" podman image exists "$image" || true
 else
-    log_identity "GPU render node"
-    log_command "test -r /dev/dri/<resolved-render-node>"
-    log_block "Input" "configured PCI address: ${pci}"
-    log_block "Command stdout" ""
-    log_block "Exit status" "SKIP"
-    log_block "Expectation" "a detected readable render node"
-    log_warn "Verdict: SKIP reason=GPU detection did not provide a render node"
+    log_step "GPU access"
+    record_section_skip "GPU access" "llm-server is disabled"
+    log_step "Configured GPU is present"
+    record_section_skip "configured GPU" "llm-server is disabled"
+    log_step "Container image"
+    record_section_skip "container image" "llm-server is disabled"
 fi
-
-log_step "Configured GPU is present"
-record_command "configured GPU" \
-    "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address==\$p)'" \
-    "configured PCI address: ${pci}" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-    bash -c "uv run '${REPO_DIR}/llmenv.py' detect | jq -e --arg p '${pci}' '.gpus[] | select(.pci_address==\$p)'" || true
-
-log_step "Container image"
-record_command "container image" "podman image exists ${image}" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" podman image exists "$image" || true
 
 log_step "Compose file"
 record_command "compose file syntax" \
@@ -213,49 +236,56 @@ record_command "GGUF validation" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" \
     uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" || true
 
-log_step "VRAM budget"
-record_command "VRAM budget" \
-    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} budget --models-dir ${MODELS_DIR}" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR"
-budget_status=$?
-if [ "$budget_status" -ne 0 ]; then
-    record_inferences "" "VRAM budget check failed"
-else
-    device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || true)"
-    record_command "GPU device listing" \
-        "podman run --rm --device /dev/dri ${image} --list-devices" "" \
+if [ "$llm_server_enabled" != "false" ]; then
+    log_step "VRAM budget"
+    record_command "VRAM budget" \
+        "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} budget --models-dir ${MODELS_DIR}" "" \
         "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        podman run --rm --device /dev/dri "$image" --list-devices
-    listing_file="$record_stdout_file"
-    record_command "GPU device resolution" \
-        "uv run ${REPO_DIR}/llmenv.py resolve-device --device-name ${device_name} --listing-file ${listing_file}" \
-        "device name: ${device_name}" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" --listing-file "$listing_file"
-    resolve_status=$?
-    device=""
-    if [ "$resolve_status" -eq 0 ]; then
-        device="$(jq -r '.device // empty' < "$record_stdout_file" 2>/dev/null || true)"
-    fi
-    if [ "$resolve_status" -ne 0 ]; then
-        record_inferences "" "GPU device could not be resolved" ""
-    elif [ -z "$device" ]; then
-        log_error "GPU device resolution returned no device"
-        FAIL=$((FAIL + 1))
-        record_inferences "" "GPU device resolution returned no device" ""
+        uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR"
+    budget_status=$?
+    if [ "$budget_status" -ne 0 ]; then
+        record_inferences "" "VRAM budget check failed"
     else
-        presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")" \
-            || die "could not create presets diagnostic"
-        presets_status=0
-        render_presets_file "$device" "$presets_file" || presets_status=$?
-        if [ "$presets_status" -ne 0 ]; then
-            log_error "presets rendering failed for ${device} (exit ${presets_status})"
+        device_name="$(yq -r '.gpu.device_name' "$CONFIG_PATH" 2>/dev/null || true)"
+        record_command "GPU device listing" \
+            "podman run --rm --device /dev/dri ${image} --list-devices" "" \
+            "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+            podman run --rm --device /dev/dri "$image" --list-devices
+        listing_file="$record_stdout_file"
+        record_command "GPU device resolution" \
+            "uv run ${REPO_DIR}/llmenv.py resolve-device --device-name ${device_name} --listing-file ${listing_file}" \
+            "device name: ${device_name}" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+            uv run "${REPO_DIR}/llmenv.py" resolve-device --device-name "$device_name" --listing-file "$listing_file"
+        resolve_status=$?
+        device=""
+        if [ "$resolve_status" -eq 0 ]; then
+            device="$(jq -r '.device // empty' < "$record_stdout_file" 2>/dev/null || true)"
+        fi
+        if [ "$resolve_status" -ne 0 ]; then
+            record_inferences "" "GPU device could not be resolved" ""
+        elif [ -z "$device" ]; then
+            log_error "GPU device resolution returned no device"
             FAIL=$((FAIL + 1))
-            record_inferences "$device" "presets rendering failed" ""
+            record_inferences "" "GPU device resolution returned no device" ""
         else
-            record_inferences "$device" "" "$presets_file"
+            presets_file="$(mktemp "${diagnostic_dir}/presets.XXXXXX")" \
+                || die "could not create presets diagnostic"
+            presets_status=0
+            render_presets_file "$device" "$presets_file" || presets_status=$?
+            if [ "$presets_status" -ne 0 ]; then
+                log_error "presets rendering failed for ${device} (exit ${presets_status})"
+                FAIL=$((FAIL + 1))
+                record_inferences "$device" "presets rendering failed" ""
+            else
+                record_inferences "$device" "" "$presets_file"
+            fi
         fi
     fi
+else
+    log_step "VRAM budget"
+    record_section_skip "VRAM budget" "llm-server is disabled"
+    log_step "Offline inference"
+    record_inference_skip "n/a" "not run: no enabled models to check" "llm-server is disabled"
 fi
 
 echo
