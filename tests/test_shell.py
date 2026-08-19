@@ -3772,7 +3772,7 @@ def run_lifecycle_script(
         "#!/usr/bin/bash\n"
         "printf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
-        "  *'daemon-reload'*) [ -f \"$MDNS_UNIT\" ] || exit 66 ;;\n"
+        "  *'daemon-reload'*) [ \"$LLM_SERVER_ENABLED\" = \"false\" ] || [ -f \"$MDNS_UNIT\" ] || exit 66 ;;\n"
         "  *'is-active --quiet'*) [ \"$ACTIVE\" = 1 ] ;;\n"
         "esac\n"
     )
@@ -3786,6 +3786,7 @@ def run_lifecycle_script(
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
         "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
+        "LLM_SERVER_ENABLED": "true" if llm_server_enabled else "false",
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
