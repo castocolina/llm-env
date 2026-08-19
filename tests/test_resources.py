@@ -171,3 +171,49 @@ def test_cpu_ceiling_never_rounds_down_to_zero_across_tiny_percentages(cpu_ceili
         cpu_ceiling_floor_pct=1,
     )
     assert result["llm_server"]["cpus"] >= 1
+
+
+def test_llm_server_limits_are_zeroed_when_disabled():
+    result = compute_resource_limits(
+        host_cpu_count=8, host_memory_total_mib=32768, llm_server_enabled=False
+    )
+    assert result["llm_server"] == {"cpus": 0, "memory_mib": 0}
+    assert result["omniroute"] == {
+        "cpus": OMNIROUTE_CPU_FIXED,
+        "memory_mib": OMNIROUTE_MEMORY_FIXED_MIB,
+    }
+
+
+def test_disabled_llm_server_only_requires_the_host_and_omniroute_floor():
+    """Exactly HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED CPUs (no spare core for
+    llm-server) must be feasible when llm_server_enabled=False -- today's
+    enabled-path floor check raises at this exact count."""
+    result = compute_resource_limits(
+        host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED,
+        host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB,
+        llm_server_enabled=False,
+    )
+    assert result["llm_server"] == {"cpus": 0, "memory_mib": 0}
+
+
+def test_disabled_llm_server_still_raises_below_the_host_and_omniroute_floor():
+    with pytest.raises(ResourceError):
+        compute_resource_limits(
+            host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED - 1,
+            host_memory_total_mib=32768,
+            llm_server_enabled=False,
+        )
+    with pytest.raises(ResourceError):
+        compute_resource_limits(
+            host_cpu_count=8,
+            host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB - 1,
+            llm_server_enabled=False,
+        )
+
+
+def test_llm_server_enabled_defaults_to_true():
+    enabled_default = compute_resource_limits(host_cpu_count=8, host_memory_total_mib=32768)
+    enabled_explicit = compute_resource_limits(
+        host_cpu_count=8, host_memory_total_mib=32768, llm_server_enabled=True
+    )
+    assert enabled_default == enabled_explicit

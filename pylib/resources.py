@@ -31,52 +31,73 @@ def compute_resource_limits(
     memory_ceiling_floor_pct: float = 20,
     cpu_ceiling_pct: float = 100,
     cpu_ceiling_floor_pct: float = 20,
+    llm_server_enabled: bool = True,
 ) -> dict[str, Any]:
     cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED
     memory_floor_mib = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB
-    if host_cpu_count <= cpu_floor:
-        raise ResourceError(
-            f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
-            "required to reserve the host floor and OmniRoute's fixed "
-            "allocation and still run llm-server"
+    if llm_server_enabled:
+        if host_cpu_count <= cpu_floor:
+            raise ResourceError(
+                f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
+                "required to reserve the host floor and OmniRoute's fixed "
+                "allocation and still run llm-server"
+            )
+        if host_memory_total_mib <= memory_floor_mib:
+            raise ResourceError(
+                f"host has {host_memory_total_mib} MiB RAM; more than "
+                f"{memory_floor_mib} MiB is required to reserve the host floor "
+                "and OmniRoute's fixed allocation and still run llm-server"
+            )
+    else:
+        if host_cpu_count < cpu_floor:
+            raise ResourceError(
+                f"host has {host_cpu_count} CPUs; at least {cpu_floor} are "
+                "required to reserve the host floor and OmniRoute's fixed "
+                "allocation"
+            )
+        if host_memory_total_mib < memory_floor_mib:
+            raise ResourceError(
+                f"host has {host_memory_total_mib} MiB RAM; at least "
+                f"{memory_floor_mib} MiB is required to reserve the host floor "
+                "and OmniRoute's fixed allocation"
+            )
+
+    if llm_server_enabled:
+        # See the comment above the previous version of this function for why a
+        # percentage-of-total floor is used instead of a bare pct: it can never
+        # be a no-op on any host, unlike a fixed-MiB (or, for CPU, fixed-core)
+        # floor could be.
+        memory_ceiling_mib = max(
+            round(host_memory_total_mib * memory_ceiling_floor_pct / 100),
+            round(host_memory_total_mib * memory_ceiling_pct / 100),
         )
-    if host_memory_total_mib <= memory_floor_mib:
-        raise ResourceError(
-            f"host has {host_memory_total_mib} MiB RAM; more than "
-            f"{memory_floor_mib} MiB is required to reserve the host floor "
-            "and OmniRoute's fixed allocation and still run llm-server"
+        llm_server_memory_mib = min(
+            host_memory_total_mib - memory_floor_mib, memory_ceiling_mib
         )
-    # See the comment above the previous version of this function for why a
-    # percentage-of-total floor is used instead of a bare pct: it can never
-    # be a no-op on any host, unlike a fixed-MiB (or, for CPU, fixed-core)
-    # floor could be.
-    memory_ceiling_mib = max(
-        round(host_memory_total_mib * memory_ceiling_floor_pct / 100),
-        round(host_memory_total_mib * memory_ceiling_pct / 100),
-    )
-    llm_server_memory_mib = min(
-        host_memory_total_mib - memory_floor_mib, memory_ceiling_mib
-    )
-    # MoE CPU-offload inference (see docs/superpowers/specs/2026-08-10-
-    # ornith-35b-moe-incorporation-design.md) measured sustained ~44% CPU
-    # utilization across all threads. Uncapped, llm-server previously got
-    # every core minus the fixed floor -- fine for GPU-resident dense
-    # models, but not something a heavier future MoE config should be able
-    # to grow into unbounded. Same floor/ceiling shape as the memory cap
-    # above, EXCEPT for the explicit `max(1, ...)`: memory is measured in
-    # MiB, where a percentage-of-total floor can never round down to 0 on
-    # any real host, but CPU core counts are small whole numbers -- on a
-    # 4-core host, round(4 * 1 / 100) == 0, so both a tiny cpu_ceiling_pct
-    # AND a tiny cpu_ceiling_floor_pct can independently round to 0. Without
-    # this floor, compose.py's `if cpus:` treats a computed 0 as "omit the
-    # limit" (fully uncapped) rather than "cap at 0 cores" -- silently
-    # defeating the whole point of this ceiling on a small host.
-    cpu_ceiling = max(
-        1,
-        round(host_cpu_count * cpu_ceiling_floor_pct / 100),
-        round(host_cpu_count * cpu_ceiling_pct / 100),
-    )
-    llm_server_cpus = min(host_cpu_count - cpu_floor, cpu_ceiling)
+        # MoE CPU-offload inference (see docs/superpowers/specs/2026-08-10-
+        # ornith-35b-moe-incorporation-design.md) measured sustained ~44% CPU
+        # utilization across all threads. Uncapped, llm-server previously got
+        # every core minus the fixed floor -- fine for GPU-resident dense
+        # models, but not something a heavier future MoE config should be able
+        # to grow into unbounded. Same floor/ceiling shape as the memory cap
+        # above, EXCEPT for the explicit `max(1, ...)`: memory is measured in
+        # MiB, where a percentage-of-total floor can never round down to 0 on
+        # any real host, but CPU core counts are small whole numbers -- on a
+        # 4-core host, round(4 * 1 / 100) == 0, so both a tiny cpu_ceiling_pct
+        # AND a tiny cpu_ceiling_floor_pct can independently round to 0. Without
+        # this floor, compose.py's `if cpus:` treats a computed 0 as "omit the
+        # limit" (fully uncapped) rather than "cap at 0 cores" -- silently
+        # defeating the whole point of this ceiling on a small host.
+        cpu_ceiling = max(
+            1,
+            round(host_cpu_count * cpu_ceiling_floor_pct / 100),
+            round(host_cpu_count * cpu_ceiling_pct / 100),
+        )
+        llm_server_cpus = min(host_cpu_count - cpu_floor, cpu_ceiling)
+    else:
+        llm_server_memory_mib = 0
+        llm_server_cpus = 0
+
     return {
         "host_cpu_floor": HOST_CPU_FLOOR,
         "host_memory_floor_mib": HOST_MEMORY_FLOOR_MIB,
