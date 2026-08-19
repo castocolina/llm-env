@@ -173,11 +173,13 @@ def test_build_config_response_shape():
         host="192.0.2.1",
         omniroute_port="20128",
         api_key="sk-test",
+        omniroute_dashboard_password="dashboard-pw",
         models=[{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}],
     )
     assert response == {
         "omniroute_base_url": "http://192.0.2.1:20128",
         "api_key": "sk-test",
+        "omniroute_dashboard_password": "dashboard-pw",
         "models": [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}],
     }
 
@@ -539,6 +541,7 @@ def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypat
             assert response.status == 200
             assert payload["api_key"] == "sk-live-value"
             assert payload["omniroute_base_url"] == "http://127.0.0.1:20128"
+            assert payload["omniroute_dashboard_password"] == "dashboard-pw"
             assert payload["models"] == [
                 {"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
             ]
@@ -862,6 +865,9 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     pi_models_path = home_dir / ".pi" / "agent" / "models.json"
     assert (pi_models_path.stat().st_mode & 0o777) == 0o600
 
+    assert "OmniRoute dashboard: http://127.0.0.1:20128" in output
+    assert "dashboard-pw" in output
+
 
 def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     tmp_path, monkeypatch
@@ -1000,6 +1006,68 @@ def test_setup_sh_rejects_an_existing_pi_config_with_a_non_object_providers(
     assert "object providers" in output
 
 
+def test_setup_sh_updates_an_existing_opencode_favorites_state(tmp_path, monkeypatch):
+    """If the remote machine already has OpenCode state
+    ($XDG_STATE_HOME/opencode/model.json, here defaulting to
+    ~/.local/state/opencode/model.json since XDG_STATE_HOME isn't set),
+    the installer adds the configured model to favorites -- same outcome
+    setup-local-llm-agents.sh produces locally -- without requiring
+    `opencode` to be installed or any particular version, since editing
+    an existing file needs no version check."""
+
+    def prepare(home_dir):
+        state_dir = home_dir / ".local" / "state" / "opencode"
+        state_dir.mkdir(parents=True)
+        (state_dir / "model.json").write_text(
+            json.dumps(
+                {
+                    "recent": [],
+                    "favorite": [{"providerID": "other", "modelID": "some-model"}],
+                    "variant": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare
+    )
+
+    assert exit_code == 0, output
+    assert "OpenCode favorites configured" in output
+    state = json.loads(
+        (home_dir / ".local" / "state" / "opencode" / "model.json").read_text()
+    )
+    assert {"providerID": "local-llm-env", "modelID": "llama-cpp/a"} in state["favorite"]
+    assert {"providerID": "other", "modelID": "some-model"} in state["favorite"]
+
+
+def test_setup_sh_leaves_opencode_favorites_untouched_when_absent(tmp_path, monkeypatch):
+    """No pre-existing state file -- the installer must not create one
+    (that would require `opencode` installed at an exact pinned version
+    on the remote machine, per the design trade-off); OpenCode creates
+    its own default state on first use instead."""
+    exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
+
+    assert exit_code == 0, output
+    assert "OpenCode favorites configured" not in output
+    assert not (home_dir / ".local" / "state" / "opencode" / "model.json").exists()
+
+
+def test_setup_sh_rejects_a_non_regular_opencode_state_file(tmp_path, monkeypatch):
+    def prepare(home_dir):
+        state_dir = home_dir / ".local" / "state" / "opencode"
+        state_dir.mkdir(parents=True)
+        os.mkfifo(state_dir / "model.json")
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=prepare, timeout=30.0
+    )
+
+    assert exit_code == 1, output
+    assert "not a regular file" in output
+
+
 class _BareListKeysHandler(_FakeOmniRouteHandler):
     """GET /api/keys answers with a BARE LIST instead of {"keys": [...]}.
 
@@ -1102,3 +1170,36 @@ def test_handler_logs_a_non_2xx_response_but_stays_quiet_on_200(capsys, monkeypa
         server.shutdown()
         thread.join()
     assert '"GET /nope HTTP/1.1" 404' in capsys.readouterr().err
+
+
+def test_install_termination_handlers_shuts_the_server_down_on_sigterm():
+    """main() runs this process directly as the container's `command` --
+    no tini/init wrapper. As PID 1 inside its own PID namespace, Linux
+    only applies the normal "terminate on SIGTERM" default to signals the
+    process has installed a handler for; an *unhandled* SIGTERM is
+    silently ignored there. That failure mode can't be reproduced by
+    sending a real SIGTERM to a subprocess in a test -- a plain
+    subprocess on the host is never PID 1 of its own PID namespace, so
+    the kernel's default disposition already terminates it whether or not
+    a handler is installed, masking exactly the bug this guards against.
+    Instead this exercises install_termination_handlers() directly: it
+    must register handlers that receive a real, process-wide SIGTERM (the
+    prerequisite for behaving correctly once it *is* PID 1) and shut the
+    server down promptly without calling shutdown() from the handler
+    itself (which would deadlock against serve_forever()'s own lock)."""
+    import signal
+
+    server, thread = _start_server(RemoteSetupHandler)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    previous_int = signal.getsignal(signal.SIGINT)
+    try:
+        remote_setup_module.install_termination_handlers(server)
+        os.kill(os.getpid(), signal.SIGTERM)
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "server did not shut down after SIGTERM"
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+        if thread.is_alive():
+            server.shutdown()
+            thread.join()

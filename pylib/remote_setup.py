@@ -20,6 +20,7 @@ import http.server
 import json
 import os
 import re
+import signal
 import tempfile
 import threading
 from pathlib import Path
@@ -126,8 +127,10 @@ if [ "$http_status" != "200" ]; then
 fi
 
 config_json="$(cat "$response_file")"
-base_url="$(printf '%s' "$config_json" | jq -r '.omniroute_base_url')/v1"
+omniroute_dashboard_url="$(printf '%s' "$config_json" | jq -r '.omniroute_base_url')"
+base_url="${omniroute_dashboard_url}/v1"
 api_key="$(printf '%s' "$config_json" | jq -r '.api_key')"
+omniroute_dashboard_password="$(printf '%s' "$config_json" | jq -r '.omniroute_dashboard_password')"
 models_json="$(printf '%s' "$config_json" | jq -c '.models')"
 
 api_key_file="${workdir}/api-key"
@@ -218,15 +221,12 @@ if [ "${#opencode_targets[@]}" -eq 0 ]; then
 fi
 
 # OpenCode's own recent/favorite/variant model-cycling state
-# ($XDG_STATE_HOME/opencode/model.json) -- out of scope for this installer.
-# It is per-installation runtime UI state, not provider/model
-# configuration: OpenCode regenerates it on its own on first use, and
-# replicating setup-local-llm-agents.sh's version-pinned
-# (`opencode --version` == 1.18.10) creation path here would make the
-# remote installer hard-fail on any machine running a different OpenCode
-# version, for a file that isn't required for OmniRoute connectivity to
-# work. See docs/superpowers/specs/2026-08-12-remote-agent-setup-design.md,
-# "Explicitly out of scope".
+# ($XDG_STATE_HOME/opencode/model.json) is staged further below, once
+# every other target has staged cleanly -- see the comment there for why
+# it's only touched when it already exists.
+opencode_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
+opencode_state_path="${opencode_state_dir}/model.json"
+opencode_state_staged=""
 
 # Model ids sent TO OmniRoute must be "llama-cpp/<alias>" -- OmniRoute
 # routes on the provider slug, not the connection's own name (confirmed
@@ -343,6 +343,47 @@ for index in "${!opencode_targets[@]}"; do
     }
 done
 
+# OpenCode's favorites/recent-model state is only touched if it ALREADY
+# exists on this machine: editing an existing file needs no version check
+# at all (setup-local-llm-agents.sh only pins `opencode --version` when it
+# has to CREATE this file from scratch, which requires calling `opencode
+# debug paths` to learn the exact path OpenCode itself would use). A
+# fresh remote machine that has never actually run OpenCode yet has no
+# file to preserve favorites in, and requiring `opencode` to be installed
+# there just to create one would make the installer hard-fail on
+# machines where it's perfectly fine to skip this and let OpenCode create
+# its own default state on first use -- so a missing file is silently
+# left alone, never created.
+if [ -e "$opencode_state_path" ]; then
+    [ -f "$opencode_state_path" ] || {
+        echo "remote-setup: OpenCode model state is not a regular file: ${opencode_state_path}" >&2
+        exit 1
+    }
+    models_state_file="${workdir}/models-state.json"
+    jq '[.[] | .alias = "llama-cpp/\(.alias)"]' "$models_file" >"$models_state_file" || {
+        echo "remote-setup: could not build prefixed model ids for OpenCode model state" >&2
+        exit 1
+    }
+    chmod 600 "$models_state_file"
+    opencode_state_staged="$(mktemp "${opencode_state_dir}/.model.json.XXXXXX")"
+    chmod 600 "$opencode_state_staged"
+    staged_files+=("$opencode_state_staged")
+    node "$updater" --update-model-state "$opencode_state_path" "$models_state_file" "$opencode_state_staged" || {
+        echo "remote-setup: could not update OpenCode model state" >&2
+        exit 1
+    }
+    state_check="${workdir}/checked-opencode-model.json"
+    node "$updater" --update-model-state "$opencode_state_staged" "$models_state_file" "$state_check" || {
+        echo "remote-setup: could not validate staged OpenCode model state" >&2
+        exit 1
+    }
+    cmp -s "$opencode_state_staged" "$state_check" || {
+        echo "remote-setup: staged OpenCode model state is not idempotent" >&2
+        exit 1
+    }
+    chmod 600 "$opencode_state_staged"
+fi
+
 # All targets -- Pi's models.json, Pi's settings.json, and every detected/
 # created OpenCode config -- are now staged in full. Only past this point
 # does anything get moved into place, so a failure in any of the jq/node
@@ -357,11 +398,24 @@ for index in "${!opencode_targets[@]}"; do
     mv -f -- "${opencode_staged[$index]}" "${opencode_targets[$index]}"
     staged_files=("${staged_files[@]:1}")
 done
+if [ -n "$opencode_state_staged" ]; then
+    mv -f -- "$opencode_state_staged" "$opencode_state_path"
+    staged_files=("${staged_files[@]:1}")
+fi
 echo "Pi configured: ${pi_path}"
 for opencode_target in "${opencode_targets[@]}"; do
     echo "OpenCode configured: ${opencode_target}"
 done
+if [ -n "$opencode_state_staged" ]; then
+    echo "OpenCode favorites configured: ${opencode_state_path}"
+fi
 echo "Done. Model(s): $(jq -r '[.[].alias] | join(", ")' "$models_file")"
+echo
+echo "OmniRoute dashboard: ${omniroute_dashboard_url}"
+echo "  Password: ${omniroute_dashboard_password}"
+echo "  (this is the OmniRoute ADMIN password -- full access to add/remove"
+echo "  provider connections and revoke API keys, not just chat access."
+echo "  Keep it as private as the master key.)"
 '''
 
 
@@ -543,11 +597,24 @@ def validate_host_header(host_header: str) -> bool:
 
 
 def build_config_response(
-    *, host: str, omniroute_port: str, api_key: str, models: list[dict[str, Any]]
+    *,
+    host: str,
+    omniroute_port: str,
+    api_key: str,
+    omniroute_dashboard_password: str,
+    models: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "omniroute_base_url": f"http://{host}:{omniroute_port}",
         "api_key": api_key,
+        # Deliberately included (not the scoped-key-only design this
+        # endpoint started with): the operator gates this endpoint behind
+        # OMNI_ROUTER_MASTER_KEY and wants remote machines able to reach
+        # the OmniRoute admin dashboard without copying the full random
+        # password by hand. Anyone who can call /config already has admin
+        # reach through this value -- treat it as sensitive as the master
+        # key itself.
+        "omniroute_dashboard_password": omniroute_dashboard_password,
         "models": models,
     }
 
@@ -648,7 +715,11 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         omniroute_port = os.environ.get("OMNIROUTE_PORT", "")
         models = json.loads(os.environ.get("MODELS_JSON", "[]"))
         response = build_config_response(
-            host=host, omniroute_port=omniroute_port, api_key=api_key, models=models
+            host=host,
+            omniroute_port=omniroute_port,
+            api_key=api_key,
+            omniroute_dashboard_password=dashboard_password,
+            models=models,
         )
         self._write_json(200, response)
 
@@ -672,9 +743,33 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         http.server.BaseHTTPRequestHandler.log_message(self, format_string, *args)
 
 
+def install_termination_handlers(server: http.server.HTTPServer) -> None:
+    """Make SIGTERM/SIGINT actually stop `server`.
+
+    main() runs this process as the container's command directly (no
+    init/tini wrapper) -- as PID 1 inside its own PID namespace, Linux
+    does NOT apply the normal "terminate on SIGTERM" default for signals
+    with no explicit handler; unhandled SIGTERM/SIGINT are silently
+    ignored. Without this, `podman stop`/`podman compose down` never
+    terminate the process, block until their own timeout, then have to
+    SIGKILL -- which can leave the container wedged in a "Stopping" state
+    that refuses the next `up -d` ("container state improper") until it's
+    force-killed by hand. shutdown() runs on a separate thread because it
+    must not be called from the signal handler itself while
+    serve_forever()'s loop may be holding the lock shutdown() waits on.
+    """
+
+    def _handle_termination(signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _handle_termination)
+    signal.signal(signal.SIGINT, _handle_termination)
+
+
 def main() -> None:
     port = int(os.environ.get("REMOTE_SETUP_PORT", "20130"))
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), RemoteSetupHandler)
+    install_termination_handlers(server)
     server.serve_forever()
 
 
