@@ -29,6 +29,12 @@ runtime:
   cache_type_k: q5_1
   cache_type_v: q5_1
 
+# false = omniroute/remote-setup only, no local llama.cpp inference; the GPU
+# stays completely unused. Set interactively during `make setup` (Step 1),
+# or via LLM_ENV_NO_GPU=1 for unattended runs.
+llm_server:
+  enabled: true
+
 resources:
   llm_server:
     cpus: 0

@@ -18,6 +18,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
 | `pylib/omniroute.py` | Idempotent OmniRoute provider-connection provisioning via its admin API |
 | `pylib/remote_setup.py` | HTTP server for the master-key-gated remote-machine installer (`/setup.sh`, `/config`) |
+| `scripts/print-endpoints.sh` | Local/Network/mDNS URLs and credentials for llm-server, OmniRoute, and remote-setup; shared by `setup/network.sh` (post-`make start`) and `scripts/status.sh` |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
@@ -90,9 +91,14 @@ round-trip. `GET /config` requires
 `Authorization: Bearer <OMNI_ROUTER_MASTER_KEY>` (a value the operator
 sets in this repo's gitignored `.env`, never in `models.yml`) and, once
 authorized, hands back a *scoped* OmniRoute API key from `POST
-/api/keys` -- never the dashboard password (`POST /api/keys`-issued keys
+/api/keys` for Pi/OpenCode to actually use (`POST /api/keys`-issued keys
 are accepted by `/v1/chat/completions` but rejected by `/api/providers`,
-verified live). Because OmniRoute never re-reveals a created key's raw
+verified live) *and* the OmniRoute dashboard password itself, so the
+machine's operator can also reach the admin dashboard from there without
+copying the full random password by hand -- an explicit convenience
+trade-off: the `Authorization: Bearer <OMNI_ROUTER_MASTER_KEY>` gate is
+what's relied on to keep that password from leaking, not omission from
+the response. Because OmniRoute never re-reveals a created key's raw
 value after the fact, that key is cached in the `remote-setup-data`
 volume (`/app/data/api-key.json`) and reused on subsequent `/config`
 calls rather than minting a new one every time -- self-healing if the
@@ -107,6 +113,14 @@ prefixed `llama-cpp/`) with a scoped key obtained through `llmenv
 omniroute issue-key` -- a distinct `llm-env-local-agents` key cached at
 `<config-dir>/omniroute-api-key.json` (removed by `make clean`), never
 the dashboard password and never the raw `server.api_key`.
+
+When `models.yml`'s `llm_server.enabled` is `false`, the `llm-server`
+compose service is omitted entirely (`pylib/compose.py`), `make setup`
+skips GPU detection, model selection/download/validation, and Vulkan/VRAM
+steps, and `make start` skips the VRAM budget check and llm-server health
+wait, bringing up only `omniroute` and `remote-setup`. This is the
+"OmniRoute + remote-setup only" mode for a machine with no GPU that exists
+purely to route to other machines' `llm-server` instances on the LAN.
 
 ### Topology and what survives a restart
 
