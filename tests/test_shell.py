@@ -3060,16 +3060,27 @@ def test_render_unit_no_gpu_still_writes_the_wrapper_unit(
     assert "ExecStart=podman compose" in wrapper_unit.read_text()
 
 
-def test_render_unit_no_gpu_skips_mdns_unit_generation(
+def test_render_unit_no_gpu_still_publishes_mdns_against_omniroutes_port(
     tmp_path: pathlib.Path,
 ) -> None:
+    """The published "*.local" alias is also used by OmniRoute's and
+    remote-setup's own mDNS URLs (scripts/print-endpoints.sh), so it must
+    keep publishing even when llm-server is disabled -- only the readiness
+    probe and advertised port switch to OmniRoute's, since llm-server's own
+    /health never answers in this mode."""
     result, wrapper_unit = run_render_unit_with_legacy_rocm_config(
         tmp_path, llm_server_enabled=False
     )
     mdns_unit = wrapper_unit.parent / "llm-server-mdns.service"
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not mdns_unit.exists()
+    unit = mdns_unit.read_text()
+    assert "(exec 3<>/dev/tcp/127.0.0.1/20128) 2>/dev/null" in unit
+    assert "http://127.0.0.1:8000/health" not in unit
+    assert "tools/publish-mdns-hostname.sh null.local null 20128" in unit
+    # No nested `bash -c '...'` inside the outer ExecStartPre's single quotes
+    # -- that would prematurely close the outer quoting (confirmed live).
+    assert unit.count("/usr/bin/bash -c") == 1
 
 
 def test_render_unit_copies_presets_ini_to_the_inspect_dir(
