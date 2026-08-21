@@ -110,10 +110,17 @@ def render_compose(
         },
         "healthcheck": {
             "test": ["CMD", "node", "healthcheck.mjs"],
-            "interval": "30s",
-            "timeout": "5s",
-            "retries": 3,
-            "start_period": "15s",
+            # Local loopback probe of an already-running node process --
+            # 5s is plenty even under load, and a short interval matters
+            # more than a long timeout for how fast `make start` reports
+            # ready: podman marks the container healthy on the first
+            # successful probe, so a shorter interval means less time spent
+            # waiting on a service that finished starting well before the
+            # next check was due.
+            "interval": "5s",
+            "timeout": "3s",
+            "retries": 5,
+            "start_period": "10s",
         },
         "stop_grace_period": "40s",
         "depends_on": {"llm-server": {"condition": "service_healthy"}},
@@ -182,10 +189,10 @@ def render_compose(
                     ")"
                 ),
             ],
-            "interval": "10s",
-            "timeout": "5s",
+            "interval": "5s",
+            "timeout": "3s",
             "retries": 5,
-            "start_period": "10s",
+            "start_period": "5s",
         },
     }
 

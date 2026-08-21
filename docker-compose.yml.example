@@ -64,10 +64,10 @@ services:
       - CMD
       - node
       - healthcheck.mjs
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     stop_grace_period: 40s
     depends_on:
       # Both services join the compose stack's default network, giving
@@ -120,10 +120,10 @@ services:
       - python3
       - -c
       - import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:20130/setup.sh', timeout=3)
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 5s
 volumes:
   omniroute-data: {}
   remote-setup-data: {}
