@@ -265,9 +265,13 @@ node "${REPO_DIR}/setup/update-opencode-config.mjs" \
     --validate-model-state "$opencode_state_source" \
     || die "incompatible OpenCode model state: ${opencode_state_source}"
 
-server_port="$(yq -r '.server.port // ""' "$CONFIG_PATH")"
-curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:${server_port}/health" \
-    || die "local server is not healthy; run 'make start' and retry"
+# Pi/OpenCode are pointed at OmniRoute (base_url above), not llm-server
+# directly, so readiness must be checked against OmniRoute's own health
+# endpoint -- checking llm-server's port here would wrongly fail whenever
+# llm_server.enabled is false (OmniRoute-only mode), even though OmniRoute
+# itself is healthy and this script has nothing to do with llm-server.
+curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:${omniroute_port}/api/monitoring/health" \
+    || die "OmniRoute is not healthy; run 'make start' and retry"
 
 if [ ! -e "$pi_path" ]; then
     printf '{}\n' >"$pi_source" || die "could not prepare empty Pi configuration"

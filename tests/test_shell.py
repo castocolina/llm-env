@@ -4447,7 +4447,7 @@ def run_setup_local_llm_agents(
     curl.write_text(
         "#!/usr/bin/bash\n"
         "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "[ \"${!#}\" = 'http://127.0.0.1:18123/health' ] || exit 64\n"
+        "[ \"${!#}\" = 'http://127.0.0.1:20128/api/monitoring/health' ] || exit 64\n"
         "exit \"$HEALTH_EXIT\"\n"
     )
     curl.chmod(0o755)
@@ -5066,7 +5066,7 @@ def test_setup_local_llm_agents_migrates_missing_output_limit_before_replacement
 @pytest.mark.parametrize(
     ("config_text", "health_exit", "pi_text"),
     [
-        (VALID_AGENT_SETUP_CONFIG.replace("port: 18123", "port: 0"), 0, None),
+        (VALID_AGENT_SETUP_CONFIG.replace("port: 20128", "port: 0"), 0, None),
         (
             VALID_AGENT_SETUP_CONFIG.replace("enabled: true", "enabled: false"),
             0,
