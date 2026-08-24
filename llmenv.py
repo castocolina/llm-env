@@ -54,7 +54,7 @@ from pylib.gguf import (
     read_gguf_header,
     validate_gguf,
 )
-from pylib.omniroute import OmniRouteError, provision
+from pylib.omniroute import OmniRouteError, import_codex_auth, provision
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -385,6 +385,10 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
             base_url, initial_password, cfg["server"]["port"], cfg["server"]["api_key"]
         )
         return emit(result)
+    if args.action == "import-codex":
+        auth_path = Path(args.auth_path).expanduser()
+        result = import_codex_auth(base_url, initial_password, auth_path, name=args.name)
+        return emit(result)
     # args.action == "issue-key"
     cache_path = Path(args.config).parent / "omniroute-api-key.json"
     api_key = ensure_api_key(
@@ -530,7 +534,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     omniroute_parser = sub.add_parser("omniroute")
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
-    omniroute_parser.add_argument("action", choices=["provision", "issue-key"])
+    omniroute_parser.add_argument("action", choices=["provision", "issue-key", "import-codex"])
+    omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
+    omniroute_parser.add_argument("--name", default="cco-cl")
     omniroute_parser.set_defaults(func=cmd_omniroute)
 
     presets = sub.add_parser("presets")

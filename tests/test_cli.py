@@ -1509,6 +1509,83 @@ def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
     assert rc != 0
 
 
+class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
+    received: list[tuple[str, str, object]] = []
+
+    def _reply(self, payload, *, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        if self.path == "/api/auth/login":
+            self.received.append(("POST", self.path, body))
+            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            return
+        self.received.append(("POST", self.path, body))
+        self._reply({"created": True, "connection": {"id": "codex-id", "name": body["name"]}})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_import_codex_posts_the_local_auth_file(tmp_path):
+    _RecordingCodexImportHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingCodexImportHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        auth_path = tmp_path / "codex-auth.json"
+        auth_path.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"id_token": "x"}}))
+        result = run(
+            "--config", str(config),
+            "omniroute", "import-codex",
+            "--auth-path", str(auth_path),
+            "--name", "cco-cl",
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "action": "created",
+            "id": "codex-id",
+            "name": "cco-cl",
+        }
+        method, path, body = _RecordingCodexImportHandler.received[1]
+        assert method == "POST"
+        assert path == "/api/providers/codex-auth/import"
+        assert body["name"] == "cco-cl"
+        assert body["overwriteExisting"] is True
+        assert body["source"] == {
+            "kind": "json",
+            "json": {"auth_mode": "chatgpt", "tokens": {"id_token": "x"}},
+        }
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_import_codex_fails_cleanly_when_auth_file_is_missing(tmp_path):
+    config = _write_omniroute_test_config(
+        tmp_path, omniroute_port=20128, initial_password="dashboard-pw"
+    )
+    result = run(
+        "--config", str(config),
+        "omniroute", "import-codex",
+        "--auth-path", str(tmp_path / "missing.json"),
+    )
+    assert result.returncode != 0
+    assert "no Codex session" in json.loads(result.stdout)["error"]
+
+
 def test_render_compose_writes_a_compose_file(tmp_path):
     config = write_test_config(tmp_path)
     output = tmp_path / "docker-compose.yml"

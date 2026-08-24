@@ -17,6 +17,7 @@ import http.cookies
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 CONNECTION_NAME = "llm-env-local"
@@ -63,7 +64,19 @@ def _request(
         with urllib.request.urlopen(request, timeout=10) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
-        raise OmniRouteError(f"{method} {url} failed: HTTP {exc.code}") from exc
+        # OmniRoute's API routes always shape a failure body as {"error": "..."},
+        # a short, purpose-written message (e.g. "session expired, re-authenticate")
+        # -- never raw connection data -- so surfacing just that field is safe and
+        # far more actionable than a bare status code. Any other body shape (or an
+        # unparseable one) falls back to the status code alone, never the raw body.
+        detail = ""
+        try:
+            error_body = json.loads(exc.read())
+            if isinstance(error_body, dict) and isinstance(error_body.get("error"), str):
+                detail = f": {error_body['error']}"
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            pass
+        raise OmniRouteError(f"{method} {url} failed: HTTP {exc.code}{detail}") from exc
     except urllib.error.URLError as exc:
         raise OmniRouteError(f"{method} {url} failed: {exc.reason}") from exc
     return json.loads(body) if body else None
@@ -145,3 +158,44 @@ def provision(base_url: str, dashboard_password: str, port: int, api_key: str) -
         )
     _request("PUT", f"{base_url}/api/providers/{provider_id}", session_token, payload)
     return {"action": "updated", "id": provider_id}
+
+
+def import_codex_auth(
+    base_url: str, dashboard_password: str, auth_json_path: Path, name: str
+) -> dict[str, Any]:
+    """Import a local Codex CLI session (~/.codex/auth.json) into OmniRoute
+    as a named provider connection, creating it on first run and updating
+    the same connection's tokens on every later run (overwriteExisting).
+
+    Bypasses Codex's normal OAuth loopback flow entirely -- there is no
+    browser callback involved, so this works whether OmniRoute is reached
+    over its published dashboard port from the same host or a remote one;
+    no SSH tunnel or extra port publishing is needed. Uses
+    POST /api/providers/codex-auth/import (distinct from the bulk
+    /api/oauth/codex/import route, which always creates a new connection
+    and does not accept a custom name -- verified against a live instance).
+    """
+    try:
+        auth_json = json.loads(auth_json_path.read_text())
+    except FileNotFoundError as exc:
+        raise OmniRouteError(f"no Codex session at {auth_json_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise OmniRouteError(f"{auth_json_path} is not valid JSON") from exc
+
+    session_token = _login(base_url, dashboard_password)
+    payload = {
+        "source": {"kind": "json", "json": auth_json},
+        "name": name,
+        "overwriteExisting": True,
+    }
+    result = _request(
+        "POST", f"{base_url}/api/providers/codex-auth/import", session_token, payload
+    )
+    if not isinstance(result, dict) or "connection" not in result:
+        raise OmniRouteError("unexpected response from codex-auth import")
+    connection = result.get("connection") or {}
+    return {
+        "action": "created" if result.get("created") else "updated",
+        "id": connection.get("id"),
+        "name": connection.get("name"),
+    }

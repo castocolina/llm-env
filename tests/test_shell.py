@@ -1382,6 +1382,133 @@ def run_gpu_status_with_stubs(
     return result, config, home
 
 
+def run_provider_provision_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    codex_auth_json: str | None = None,
+    import_codex_case: str = 'printf \'{"action":"updated","id":"x","name":"cco-cl"}\\n\'',
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run provider-provision.sh against a stubbed llmenv pipeline. Pass a
+    real listening socket's port as omniroute_port to simulate "reachable";
+    omit codex_auth_json to simulate no local Codex session."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute import-codex'*) {import_codex_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    if codex_auth_json is not None:
+        codex_dir = home / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        (codex_dir / "auth.json").write_text(codex_auth_json)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/provider-provision.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_provider_provision_skips_codex_when_no_local_session(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_provider_provision_with_stubs(tmp_path, omniroute_port=port)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no local Codex session" in result.stdout
+    assert "skipping" in result.stdout
+
+
+def test_provider_provision_imports_a_local_codex_session(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_provider_provision_with_stubs(
+            tmp_path,
+            omniroute_port=port,
+            codex_auth_json='{"auth_mode": "chatgpt", "tokens": {}}',
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Codex connection cco-cl updated" in result.stdout
+
+
+def test_provider_provision_warns_but_succeeds_when_codex_import_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_provider_provision_with_stubs(
+            tmp_path,
+            omniroute_port=port,
+            codex_auth_json='{"auth_mode": "chatgpt", "tokens": {}}',
+            import_codex_case=(
+                'printf \'{"error":"Re-authenticate this account"}\\n\'; exit 1'
+            ),
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Re-authenticate this account" in result.stdout + result.stderr
+    assert "Codex import failed; connect it manually" in result.stdout + result.stderr
+
+
+def test_provider_provision_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Must not depend on the default OmniRoute port (20128) actually being
+    closed on the machine running the tests -- bind an ephemeral port and
+    never listen() on it, guaranteeing "unreachable" regardless of host state."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_provider_provision_with_stubs(tmp_path, omniroute_port=unreachable_port)
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
 def test_gpu_status_reports_total_used_ceiling_and_headroom(tmp_path: pathlib.Path) -> None:
     result, _, _ = run_gpu_status_with_stubs(tmp_path)
     assert result.returncode == 0
@@ -3837,6 +3964,7 @@ def run_lifecycle_script(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
+        "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
         f"case \"$*\" in *' resources') {resources_case} ;; esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -3930,6 +4058,29 @@ def test_start_enabled_still_waits_for_health_and_provisions(
     assert result.returncode == 0, result.stdout + result.stderr
     assert " budget " in calls.read_text()
     assert "server is ready" in result.stdout
+
+
+def test_start_chains_provider_provision_once_omniroute_is_ready(
+    tmp_path: pathlib.Path,
+) -> None:
+    """make start must trigger scripts/provider-provision.sh (the Codex
+    session import) once OmniRoute is confirmed reachable -- not gated on
+    llm_server_enabled, since it has nothing to do with the local router."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config, calls = run_lifecycle_script(
+            tmp_path,
+            "scripts/start.sh",
+            llm_server_enabled=False,
+            omniroute_port=port,
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/provider-provision.sh" in calls.read_text()
+    # No ~/.codex/auth.json exists in this sandbox's synthetic $HOME.
+    assert "no local Codex session" in result.stdout
 
 
 def run_opencode_config_editor(

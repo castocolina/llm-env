@@ -129,6 +129,8 @@ if wait_for_tcp_port "$omniroute_port"; then
     else
         log_info "llm-server disabled -- skipping local OmniRoute provider provisioning; configure providers via the OmniRoute dashboard."
     fi
+    bash "${REPO_DIR}/scripts/provider-provision.sh" \
+        || log_warn "provider-provision failed; run 'make provider-provision' manually"
 else
     log_warn "OmniRoute did not become reachable within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s; configure it manually"
 fi
