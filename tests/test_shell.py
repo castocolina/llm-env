@@ -10702,11 +10702,21 @@ def test_install_agent_clients_creates_missing_state_when_requested(tmp_path, mo
     lib_path = ROOT / "setup" / "lib" / "install-agent-clients.sh"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    # Create stub commands for required tools, but not opencode
+
+    # Resolve real command paths before restricting PATH, then symlink them
+    # into the bin directory. This ensures the stubs work regardless of which
+    # order checks are performed in the library.
+    cmd_paths = {}
     for cmd in ("jq", "node", "mktemp", "cmp"):
-        stub = bin_dir / cmd
-        stub.write_text("#!/bin/bash\n" + (f'exec /usr/bin/{cmd} "$@"' if cmd != "node" else 'exec /usr/bin/node "$@"'))
-        stub.chmod(0o755)
+        cmd_path = shutil.which(cmd)
+        if cmd_path:
+            cmd_paths[cmd] = pathlib.Path(cmd_path)
+
+    # Create symlinks for all required tools, but don't create opencode
+    for cmd in ("jq", "node", "mktemp", "cmp"):
+        if cmd in cmd_paths:
+            stub = bin_dir / cmd
+            stub.symlink_to(cmd_paths[cmd])
 
     script = f'''
 set -euo pipefail
