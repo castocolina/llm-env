@@ -22,6 +22,36 @@ from typing import Any
 
 CONNECTION_NAME = "llm-env-local"
 
+# OpenAI's own GPT-5.6 spec (raw context window: 1,050,000 tokens) is shared
+# identically across the "sol"/"terra"/"luna" branded variants and the bare
+# "gpt-5.6" id -- confirmed both in OmniRoute's own bundled model spec and
+# independently via live web research (OpenAI/Codex community reporting,
+# August 2026). Codex CLI's *product* layer defaults to a much more
+# conservative 272,000-token window for these models (a client-side choice,
+# not an upstream API limit -- see openai/codex#32806); OmniRoute's synced
+# catalog inherits that same conservative number for any effort-suffixed
+# variant id (e.g. "gpt-5.6-sol-high"), because its alias-matching only
+# recognizes the bare family name. Verified live against a real OmniRoute
+# instance: a 591,211-token request to "cx/gpt-5.6-sol-high" completed
+# successfully once the override below was applied, confirming the true
+# ceiling is far above 272,000 for this account.
+CODEX_GPT_5_6_CONTEXT_WINDOW = 1_050_000
+CODEX_GPT_5_6_FAMILIES = ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+CODEX_EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max", "ultra")
+
+# grok-composer-2.5-fast is genuinely served through xAI's "Grok Build" CLI/API
+# integration at a 200,000-token window (confirmed via live web research,
+# August 2026 sources) -- this is correct, not a bug, and matches OmniRoute's
+# own hardcoded registry entry for it (open-sse/config/providers/registry/
+# grok-cli/index.ts). It never appears in /v1/models at all, though (neither
+# via API key nor the dashboard session cookie): OmniRoute's Grok Build
+# normalizer deliberately hides supported_in_api=false models from the
+# catalog while still routing combo requests to them. Without this constant,
+# a combo containing it would silently drop it from the min() calculation --
+# understating risk for the exact combo ("my-coding") this feature exists to
+# get right.
+GROK_COMPOSER_2_5_FAST_CONTEXT_WINDOW = 200_000
+
 
 class OmniRouteError(Exception):
     """Raised when OmniRoute's admin API cannot be reached or misbehaves."""
@@ -199,3 +229,163 @@ def import_codex_auth(
         "id": connection.get("id"),
         "name": connection.get("name"),
     }
+
+
+def _codex_gpt_5_6_family(root_model_id: str) -> str | None:
+    """Strip a known effort-tier suffix (e.g. "-high") off a catalog model id
+    and return the base family name if it's a known GPT-5.6 variant, else
+    None. "gpt-5.6-sol-high" -> "gpt-5.6-sol"; "gpt-5.6-sol" -> itself
+    (models can be listed at their default effort with no suffix)."""
+    for suffix in CODEX_EFFORT_SUFFIXES:
+        marker = f"-{suffix}"
+        if root_model_id.endswith(marker):
+            base = root_model_id[: -len(marker)]
+            if base in CODEX_GPT_5_6_FAMILIES:
+                return base
+    if root_model_id in CODEX_GPT_5_6_FAMILIES:
+        return root_model_id
+    return None
+
+
+def fix_codex_context_overrides(base_url: str, dashboard_password: str) -> list[dict[str, Any]]:
+    """Correct OmniRoute's understanding of the codex GPT-5.6 family's real
+    context window (see CODEX_GPT_5_6_CONTEXT_WINDOW's comment for why this
+    is needed and how it was verified). Scans the live catalog for every
+    codex-owned model id -- current and future effort-tier variants alike --
+    and sets a manual context-window override for each GPT-5.6 family member
+    found, so this never needs to be repeated by hand per combo/model.
+
+    Idempotent: OmniRoute upserts the underlying override row, so re-running
+    this is always safe and just re-affirms the same value.
+    """
+    session_token = _login(base_url, dashboard_password)
+    catalog = _request("GET", f"{base_url}/v1/models", session_token)
+    entries = catalog.get("data") if isinstance(catalog, dict) else None
+    if not isinstance(entries, list):
+        raise OmniRouteError("unexpected /v1/models response shape")
+
+    seen_roots: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("owned_by") != "codex":
+            continue
+        root = entry.get("root")
+        if not isinstance(root, str) or root in seen_roots:
+            continue
+        seen_roots.add(root)
+        family = _codex_gpt_5_6_family(root)
+        if family is None:
+            continue
+        payload = {
+            "provider": "codex",
+            "modelId": root,
+            "contextWindowOverride": CODEX_GPT_5_6_CONTEXT_WINDOW,
+        }
+        _request("PUT", f"{base_url}/api/provider-models", session_token, payload)
+        results.append(
+            {"model": root, "family": family, "context_window": CODEX_GPT_5_6_CONTEXT_WINDOW}
+        )
+    return results
+
+
+def _resolve_member_context_window(
+    catalog_context_by_root: dict[str, int], provider_id: str, model_id: str
+) -> int | None:
+    """Resolve a combo member's real context window.
+
+    OmniRoute's /v1/models catalog never reflects manual context-window
+    overrides (confirmed by reading OmniRoute's own source: catalog.ts
+    resolves "synced -> registry -> spec", the same chain as the buggy
+    /api/combos "computed_context_length" field, and never consults the
+    override table) -- so a codex GPT-5.6 family member is corrected here
+    using the exact same value fix_codex_context_overrides() persists,
+    instead of trusting the catalog's stale number for it.
+    """
+    if provider_id == "codex" and _codex_gpt_5_6_family(model_id) is not None:
+        return CODEX_GPT_5_6_CONTEXT_WINDOW
+    if provider_id == "grok-cli" and model_id == "grok-composer-2.5-fast":
+        return GROK_COMPOSER_2_5_FAST_CONTEXT_WINDOW
+    return catalog_context_by_root.get(model_id)
+
+
+def compute_combo_context(
+    base_url: str, dashboard_password: str, combo_name: str | None = None
+) -> list[dict[str, Any]]:
+    """Compute each combo's real minimum context window across its members.
+
+    OmniRoute's own /api/combos "computed_context_length" field is not
+    trustworthy: it short-circuits on the same stale catalog value described
+    in _resolve_member_context_window's docstring, so it never reflects a
+    manual override (see fix_codex_context_overrides). This walks the live
+    catalog and combo membership directly and applies the known corrections
+    itself, so the result is the actual minimum an orchestrator can rely on
+    to decide when to split a request before the provider ever rejects it.
+
+    Raises OmniRouteError if combo_name is given but no combo has that name.
+    """
+    session_token = _login(base_url, dashboard_password)
+    catalog = _request("GET", f"{base_url}/v1/models", session_token)
+    entries = catalog.get("data") if isinstance(catalog, dict) else None
+    if not isinstance(entries, list):
+        raise OmniRouteError("unexpected /v1/models response shape")
+
+    catalog_context_by_root: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        root = entry.get("root")
+        context_length = entry.get("context_length")
+        if (
+            isinstance(root, str)
+            and isinstance(context_length, int)
+            and root not in catalog_context_by_root
+        ):
+            catalog_context_by_root[root] = context_length
+
+    combos_payload = _request("GET", f"{base_url}/api/combos", session_token)
+    combos = combos_payload.get("combos") if isinstance(combos_payload, dict) else None
+    if not isinstance(combos, list):
+        raise OmniRouteError("unexpected /api/combos response shape")
+
+    results: list[dict[str, Any]] = []
+    for combo in combos:
+        if not isinstance(combo, dict):
+            continue
+        name = combo.get("name")
+        if not isinstance(name, str):
+            continue
+        if combo_name is not None and name != combo_name:
+            continue
+
+        members: list[dict[str, Any]] = []
+        for member in combo.get("models") or []:
+            if not isinstance(member, dict) or member.get("kind") != "model":
+                continue
+            provider_id = member.get("providerId")
+            model_field = member.get("model")
+            if not isinstance(provider_id, str) or not isinstance(model_field, str):
+                continue
+            model_id = model_field.split("/", 1)[-1]
+            context_window = _resolve_member_context_window(
+                catalog_context_by_root, provider_id, model_id
+            )
+            members.append(
+                {"provider": provider_id, "model": model_id, "context_window": context_window}
+            )
+
+        known_windows = [
+            member["context_window"]
+            for member in members
+            if isinstance(member["context_window"], int)
+        ]
+        results.append(
+            {
+                "combo": name,
+                "members": members,
+                "min_context_window": min(known_windows) if known_windows else None,
+            }
+        )
+
+    if combo_name is not None and not results:
+        raise OmniRouteError(f"no combo named {combo_name!r} found")
+    return results

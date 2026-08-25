@@ -1510,7 +1510,7 @@ def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
 
 
 class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
-    received: list[tuple[str, str, object]] = []
+    received: ClassVar[list[tuple[str, str, object]]] = []
 
     def _reply(self, payload, *, set_cookie=None):
         body = json.dumps(payload).encode()
@@ -1584,6 +1584,224 @@ def test_omniroute_import_codex_fails_cleanly_when_auth_file_is_missing(tmp_path
     )
     assert result.returncode != 0
     assert "no Codex session" in json.loads(result.stdout)["error"]
+
+
+class _RecordingFixContextHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple[str, str, object]]] = []
+
+    def _reply(self, payload, *, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("POST", self.path, body))
+        self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, None))
+        self._reply(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "cx/gpt-5.6-sol-high",
+                        "root": "gpt-5.6-sol-high",
+                        "owned_by": "codex",
+                        "context_length": 272000,
+                    },
+                    {
+                        "id": "cx/gpt-5.4",
+                        "root": "gpt-5.4",
+                        "owned_by": "codex",
+                        "context_length": 400000,
+                    },
+                ],
+            }
+        )
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("PUT", self.path, body))
+        self._reply({"ok": True})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_fix_codex_context_corrects_the_gpt_5_6_family(tmp_path):
+    _RecordingFixContextHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingFixContextHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        result = run("--config", str(config), "omniroute", "fix-codex-context")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "fixed": [
+                {
+                    "model": "gpt-5.6-sol-high",
+                    "family": "gpt-5.6-sol",
+                    "context_window": 1_050_000,
+                }
+            ]
+        }
+        puts = [r for r in _RecordingFixContextHandler.received if r[0] == "PUT"]
+        assert len(puts) == 1
+        assert puts[0][1] == "/api/provider-models"
+        assert puts[0][2] == {
+            "provider": "codex",
+            "modelId": "gpt-5.6-sol-high",
+            "contextWindowOverride": 1_050_000,
+        }
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+class _RecordingComboContextHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple[str, str, object]]] = []
+
+    def _reply(self, payload, *, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("POST", self.path, body))
+        self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, None))
+        if self.path == "/v1/models":
+            self._reply(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "cx/gpt-5.6-sol-high",
+                            "root": "gpt-5.6-sol-high",
+                            "owned_by": "codex",
+                            "context_length": 272000,
+                        },
+                        {
+                            "id": "opencode-go/kimi-k2.7-code",
+                            "root": "kimi-k2.7-code",
+                            "owned_by": "opencode-go",
+                            "context_length": 262144,
+                        },
+                    ],
+                }
+            )
+            return
+        assert self.path == "/api/combos"
+        self._reply(
+            {
+                "combos": [
+                    {
+                        "name": "my-coding",
+                        "models": [
+                            {
+                                "kind": "model",
+                                "providerId": "codex",
+                                "model": "codex/gpt-5.6-sol-high",
+                            },
+                            {
+                                "kind": "model",
+                                "providerId": "grok-cli",
+                                "model": "grok-cli/grok-composer-2.5-fast",
+                            },
+                            {
+                                "kind": "model",
+                                "providerId": "opencode-go",
+                                "model": "opencode-go/kimi-k2.7-code",
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_combo_context_reports_the_true_minimum(tmp_path):
+    _RecordingComboContextHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingComboContextHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        result = run("--config", str(config), "omniroute", "combo-context")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "combos": [
+                {
+                    "combo": "my-coding",
+                    "members": [
+                        {
+                            "provider": "codex",
+                            "model": "gpt-5.6-sol-high",
+                            "context_window": 1_050_000,
+                        },
+                        {
+                            "provider": "grok-cli",
+                            "model": "grok-composer-2.5-fast",
+                            "context_window": 200_000,
+                        },
+                        {
+                            "provider": "opencode-go",
+                            "model": "kimi-k2.7-code",
+                            "context_window": 262144,
+                        },
+                    ],
+                    "min_context_window": 200_000,
+                }
+            ]
+        }
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
+    _RecordingComboContextHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingComboContextHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        result = run(
+            "--config", str(config), "omniroute", "combo-context", "--combo", "not-a-combo"
+        )
+        assert result.returncode != 0
+        assert "not-a-combo" in json.loads(result.stdout)["error"]
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 def test_render_compose_writes_a_compose_file(tmp_path):

@@ -54,7 +54,13 @@ from pylib.gguf import (
     read_gguf_header,
     validate_gguf,
 )
-from pylib.omniroute import OmniRouteError, import_codex_auth, provision
+from pylib.omniroute import (
+    OmniRouteError,
+    compute_combo_context,
+    fix_codex_context_overrides,
+    import_codex_auth,
+    provision,
+)
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -389,6 +395,12 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
         auth_path = Path(args.auth_path).expanduser()
         result = import_codex_auth(base_url, initial_password, auth_path, name=args.name)
         return emit(result)
+    if args.action == "fix-codex-context":
+        fixed = fix_codex_context_overrides(base_url, initial_password)
+        return emit({"fixed": fixed})
+    if args.action == "combo-context":
+        combos = compute_combo_context(base_url, initial_password, combo_name=args.combo)
+        return emit({"combos": combos})
     # args.action == "issue-key"
     cache_path = Path(args.config).parent / "omniroute-api-key.json"
     api_key = ensure_api_key(
@@ -534,9 +546,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     omniroute_parser = sub.add_parser("omniroute")
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
-    omniroute_parser.add_argument("action", choices=["provision", "issue-key", "import-codex"])
+    omniroute_parser.add_argument(
+        "action",
+        choices=["provision", "issue-key", "import-codex", "fix-codex-context", "combo-context"],
+    )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
     omniroute_parser.add_argument("--name", default="cco-cl")
+    omniroute_parser.add_argument(
+        "--combo", default=None, help="limit combo-context to a single combo name"
+    )
     omniroute_parser.set_defaults(func=cmd_omniroute)
 
     presets = sub.add_parser("presets")

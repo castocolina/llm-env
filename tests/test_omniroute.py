@@ -14,7 +14,9 @@ from pylib.omniroute import (
     CONNECTION_NAME,
     OmniRouteError,
     build_payload,
+    compute_combo_context,
     find_connection,
+    fix_codex_context_overrides,
     import_codex_auth,
     provision,
 )
@@ -295,3 +297,236 @@ def test_import_codex_auth_surfaces_the_servers_error_detail(monkeypatch, tmp_pa
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(OmniRouteError, match="Re-authenticate this account"):
         import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path, name="cco-cl")
+
+
+def _catalog_entry(model_id, root, owned_by="codex"):
+    return {"id": model_id, "root": root, "owned_by": owned_by, "context_length": 272000}
+
+
+def test_fix_codex_context_overrides_corrects_every_gpt_5_6_variant(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {
+        "object": "list",
+        "data": [
+            _catalog_entry("cx/gpt-5.6-sol-high", "gpt-5.6-sol-high"),
+            # Duplicate root under the "codex/" alias prefix -- must be deduped,
+            # not PUT twice.
+            _catalog_entry("codex/gpt-5.6-sol-high", "gpt-5.6-sol-high"),
+            _catalog_entry("cx/gpt-5.6-terra-low", "gpt-5.6-terra-low"),
+            _catalog_entry("cx/gpt-5.6-luna", "gpt-5.6-luna"),
+            # A real codex model outside the GPT-5.6 family -- must be left alone.
+            _catalog_entry("cx/gpt-5.4", "gpt-5.4"),
+            # A non-codex model -- must be ignored entirely.
+            _catalog_entry("grok-cli/grok-4.6", "grok-4.6", owned_by="grok-cli"),
+        ],
+    }
+    puts = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        if request.full_url == "http://127.0.0.1:20128/v1/models":
+            assert request.get_method() == "GET"
+            return FakeResponse(catalog)
+        assert request.get_method() == "PUT"
+        assert request.full_url == "http://127.0.0.1:20128/api/provider-models"
+        puts.append(json.loads(request.data))
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    result = fix_codex_context_overrides("http://127.0.0.1:20128", "dashboard-pw")
+
+    assert result == [
+        {"model": "gpt-5.6-sol-high", "family": "gpt-5.6-sol", "context_window": 1_050_000},
+        {"model": "gpt-5.6-terra-low", "family": "gpt-5.6-terra", "context_window": 1_050_000},
+        {"model": "gpt-5.6-luna", "family": "gpt-5.6-luna", "context_window": 1_050_000},
+    ]
+    assert len(puts) == 3
+    assert puts[0] == {
+        "provider": "codex",
+        "modelId": "gpt-5.6-sol-high",
+        "contextWindowOverride": 1_050_000,
+    }
+    assert {p["modelId"] for p in puts} == {"gpt-5.6-sol-high", "gpt-5.6-terra-low", "gpt-5.6-luna"}
+
+
+def test_fix_codex_context_overrides_is_a_noop_without_gpt_5_6_models(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": [_catalog_entry("cx/gpt-5.4", "gpt-5.4")]}
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        assert request.full_url == "http://127.0.0.1:20128/v1/models"
+        return FakeResponse(catalog)
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    result = fix_codex_context_overrides("http://127.0.0.1:20128", "dashboard-pw")
+    assert result == []
+
+
+def test_fix_codex_context_overrides_raises_on_unexpected_catalog_shape(monkeypatch):
+    login = _fake_login_ok()
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        return FakeResponse({"unexpected": "shape"})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(OmniRouteError, match="unexpected /v1/models response shape"):
+        fix_codex_context_overrides("http://127.0.0.1:20128", "dashboard-pw")
+
+
+def _combo_member(provider_id, model):
+    return {"kind": "model", "providerId": provider_id, "model": f"{provider_id}/{model}"}
+
+
+def _combo_context_urlopen(login, catalog, combos_payload):
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        if request.full_url == "http://127.0.0.1:20128/v1/models":
+            assert request.get_method() == "GET"
+            return FakeResponse(catalog)
+        assert request.full_url == "http://127.0.0.1:20128/api/combos"
+        assert request.get_method() == "GET"
+        return FakeResponse(combos_payload)
+
+    return fake_urlopen
+
+
+def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {
+        "object": "list",
+        "data": [
+            # Still stale in the catalog even though an override has been
+            # applied -- OmniRoute's own /v1/models never reflects it.
+            _catalog_entry("cx/gpt-5.6-sol-high", "gpt-5.6-sol-high"),
+            {
+                "id": "opencode-go/kimi-k2.7-code",
+                "root": "kimi-k2.7-code",
+                "owned_by": "opencode-go",
+                "context_length": 262144,
+            },
+            # grok-composer-2.5-fast is deliberately absent from the catalog
+            # entirely -- must still be corrected via the known constant.
+        ],
+    }
+    combos_payload = {
+        "combos": [
+            {
+                "name": "my-coding",
+                "models": [
+                    _combo_member("codex", "gpt-5.6-sol-high"),
+                    _combo_member("grok-cli", "grok-composer-2.5-fast"),
+                    _combo_member("opencode-go", "kimi-k2.7-code"),
+                ],
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, combos_payload),
+    )
+    result = compute_combo_context("http://127.0.0.1:20128", "dashboard-pw")
+
+    assert result == [
+        {
+            "combo": "my-coding",
+            "members": [
+                {"provider": "codex", "model": "gpt-5.6-sol-high", "context_window": 1_050_000},
+                {
+                    "provider": "grok-cli",
+                    "model": "grok-composer-2.5-fast",
+                    "context_window": 200_000,
+                },
+                {
+                    "provider": "opencode-go",
+                    "model": "kimi-k2.7-code",
+                    "context_window": 262144,
+                },
+            ],
+            "min_context_window": 200_000,
+        }
+    ]
+
+
+def test_compute_combo_context_leaves_unknown_models_out_of_the_minimum(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": []}
+    combos_payload = {
+        "combos": [
+            {
+                "name": "solo-mystery",
+                "models": [_combo_member("mystery-provider", "mystery-model")],
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, combos_payload),
+    )
+    result = compute_combo_context("http://127.0.0.1:20128", "dashboard-pw")
+
+    assert result == [
+        {
+            "combo": "solo-mystery",
+            "members": [
+                {"provider": "mystery-provider", "model": "mystery-model", "context_window": None}
+            ],
+            "min_context_window": None,
+        }
+    ]
+
+
+def test_compute_combo_context_filters_by_combo_name(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": []}
+    combos_payload = {
+        "combos": [
+            {"name": "combo-a", "models": [_combo_member("grok-cli", "grok-4.6")]},
+            {"name": "combo-b", "models": [_combo_member("grok-cli", "grok-4.6")]},
+        ]
+    }
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, combos_payload),
+    )
+    result = compute_combo_context("http://127.0.0.1:20128", "dashboard-pw", combo_name="combo-b")
+
+    assert [combo["combo"] for combo in result] == ["combo-b"]
+
+
+def test_compute_combo_context_raises_when_combo_name_not_found(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": []}
+    combos_payload = {"combos": [{"name": "combo-a", "models": []}]}
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, combos_payload),
+    )
+    with pytest.raises(OmniRouteError, match="no combo named 'nope' found"):
+        compute_combo_context("http://127.0.0.1:20128", "dashboard-pw", combo_name="nope")
+
+
+def test_compute_combo_context_raises_on_unexpected_combos_shape(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": []}
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, {"unexpected": "shape"}),
+    )
+    with pytest.raises(OmniRouteError, match="unexpected /api/combos response shape"):
+        compute_combo_context("http://127.0.0.1:20128", "dashboard-pw")
