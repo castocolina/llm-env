@@ -1813,6 +1813,7 @@ def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
 class _RecordingComboBackupRestoreHandler(http.server.BaseHTTPRequestHandler):
     received: ClassVar[list[tuple[str, str, object]]] = []
     combos: ClassVar[list[dict]] = []
+    connections: ClassVar[list[dict]] = []
 
     def _reply(self, payload, *, status=200, set_cookie=None):
         body = json.dumps(payload).encode()
@@ -1836,6 +1837,9 @@ class _RecordingComboBackupRestoreHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.received.append(("GET", self.path, None))
+        if self.path == "/api/providers":
+            self._reply({"connections": self.connections})
+            return
         assert self.path == "/api/combos"
         self._reply({"combos": self.combos, "total": len(self.combos)})
 
@@ -1916,6 +1920,85 @@ def test_omniroute_restore_combos_creates_and_reports(tmp_path):
         }
         posts = [r for r in _RecordingComboBackupRestoreHandler.received if r[0] == "POST"]
         assert posts[-1][2] == {"name": "my-planning", "strategy": "priority"}
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_backup_connections_writes_metadata_only(tmp_path):
+    _RecordingComboBackupRestoreHandler.received = []
+    _RecordingComboBackupRestoreHandler.combos = []
+    _RecordingComboBackupRestoreHandler.connections = [
+        {"id": "conn-1", "provider": "codex", "name": "cco-cl", "authType": "oauth"},
+    ]
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _RecordingComboBackupRestoreHandler
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        output = tmp_path / "connections-backup.json"
+        result = run(
+            "--config", str(config), "omniroute", "backup-connections", "--output", str(output)
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"path": str(output), "count": 1}
+        backup = json.loads(output.read_text())
+        assert backup["connections"] == [{"provider": "codex", "name": "cco-cl", "id": "conn-1"}]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_restore_combos_remaps_connection_id_by_live_provider_and_label(tmp_path):
+    _RecordingComboBackupRestoreHandler.received = []
+    _RecordingComboBackupRestoreHandler.combos = []
+    _RecordingComboBackupRestoreHandler.connections = [
+        {"id": "conn-live", "provider": "codex", "name": "cco-cl"},
+    ]
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _RecordingComboBackupRestoreHandler
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        backup_file = tmp_path / "backup.json"
+        backup_file.write_text(
+            json.dumps(
+                {
+                    "combos": [
+                        {
+                            "name": "my-planning",
+                            "strategy": "priority",
+                            "models": [
+                                {
+                                    "kind": "model",
+                                    "providerId": "codex",
+                                    "model": "codex/gpt-5.6-sol-high",
+                                    "label": "cco-cl",
+                                    "connectionId": "conn-stale",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        result = run(
+            "--config", str(config), "omniroute", "restore-combos", "--input", str(backup_file)
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "restored": [{"combo": "my-planning", "action": "created"}]
+        }
+        posts = [r for r in _RecordingComboBackupRestoreHandler.received if r[0] == "POST"]
+        assert posts[-1][2]["models"][0]["connectionId"] == "conn-live"
     finally:
         server.shutdown()
         thread.join()

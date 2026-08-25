@@ -61,7 +61,7 @@ from pylib.omniroute import (
     import_codex_auth,
     provision,
 )
-from pylib.omniroute_combos import backup_combos, restore_combos
+from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -414,6 +414,11 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
             base_url, initial_password, Path(args.input), overwrite=args.overwrite
         )
         return emit({"restored": restored})
+    if args.action == "backup-connections":
+        if not args.output:
+            return fail("--output is required for backup-connections")
+        result = backup_connections(base_url, initial_password, Path(args.output))
+        return emit(result)
     # args.action == "issue-key"
     cache_path = Path(args.config).parent / "omniroute-api-key.json"
     api_key = ensure_api_key(
@@ -569,6 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
             "combo-context",
             "backup-combos",
             "restore-combos",
+            "backup-connections",
         ],
     )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
@@ -576,7 +582,9 @@ def build_parser() -> argparse.ArgumentParser:
     omniroute_parser.add_argument(
         "--combo", default=None, help="limit combo-context to a single combo name"
     )
-    omniroute_parser.add_argument("--output", default=None, help="backup-combos output file path")
+    omniroute_parser.add_argument(
+        "--output", default=None, help="backup-combos/backup-connections output file path"
+    )
     omniroute_parser.add_argument("--input", default=None, help="restore-combos input file path")
     omniroute_parser.add_argument(
         "--overwrite",

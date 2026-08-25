@@ -44,3 +44,14 @@ created="$(echo "$result" | jq '[.restored[] | select(.action == "created")] | l
 updated="$(echo "$result" | jq '[.restored[] | select(.action == "updated")] | length')"
 skipped="$(echo "$result" | jq '[.restored[] | select(.action == "skipped")] | length')"
 log_info "created ${created}, updated ${updated}, skipped ${skipped}"
+
+unresolved="$(echo "$result" | jq -r '
+    [.restored[] | select(.unresolved_connections != null) |
+        .combo as $combo | .unresolved_connections[] |
+        "  \($combo): \(.provider)/\(.label) (model \(.model)) -- no matching live connection, connectionId cleared"
+    ] | .[]
+')"
+if [ -n "$unresolved" ]; then
+    log_warn "some members could not be remapped to a live connection; re-select their connection in the OmniRoute dashboard:"
+    echo "$unresolved"
+fi

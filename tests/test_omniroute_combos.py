@@ -9,10 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.omniroute as omniroute_module
 from pylib.omniroute import OmniRouteError
-from pylib.omniroute_combos import backup_combos, restore_combos
+from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
 
 LOGIN_URL = "http://127.0.0.1:20128/api/auth/login"
 COMBOS_URL = "http://127.0.0.1:20128/api/combos"
+PROVIDERS_URL = "http://127.0.0.1:20128/api/providers"
 
 
 class FakeResponse:
@@ -115,6 +116,8 @@ def test_restore_combos_creates_missing_combos(tmp_path, monkeypatch):
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
+        if request.full_url == PROVIDERS_URL:
+            return FakeResponse({"connections": []})
         if request.get_method() == "GET":
             assert request.full_url == COMBOS_URL
             return FakeResponse(existing_payload)
@@ -139,6 +142,8 @@ def test_restore_combos_skips_existing_combos_without_overwrite(tmp_path, monkey
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
+        if request.full_url == PROVIDERS_URL:
+            return FakeResponse({"connections": []})
         assert request.get_method() == "GET"
         return FakeResponse(existing_payload)
 
@@ -158,6 +163,8 @@ def test_restore_combos_updates_existing_combos_with_overwrite(tmp_path, monkeyp
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
+        if request.full_url == PROVIDERS_URL:
+            return FakeResponse({"connections": []})
         if request.get_method() == "GET":
             return FakeResponse(existing_payload)
         assert request.get_method() == "PUT"
@@ -205,3 +212,147 @@ def test_restore_combos_raises_on_unexpected_existing_combos_shape(tmp_path, mon
     input_path = _write_backup(tmp_path, [{"name": "my-planning"}])
     with pytest.raises(OmniRouteError, match="unexpected /api/combos response shape"):
         restore_combos("http://127.0.0.1:20128", "dashboard-pw", input_path)
+
+
+def test_backup_connections_writes_only_metadata_no_secrets(tmp_path, monkeypatch):
+    login = _fake_login_ok()
+    connections_payload = {
+        "connections": [
+            {
+                "id": "conn-1",
+                "provider": "codex",
+                "name": "cco-cl",
+                "authType": "oauth",
+            },
+            {
+                "id": "conn-2",
+                "provider": "opencode-go",
+                "name": "og-main",
+                "authType": "apikey",
+                "apiKey": "sk-q4X8A****0sM8",
+            },
+        ]
+    }
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        assert request.full_url == PROVIDERS_URL
+        assert request.get_method() == "GET"
+        return FakeResponse(connections_payload)
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+
+    output_path = tmp_path / "connections-backup.json"
+    result = backup_connections("http://127.0.0.1:20128", "dashboard-pw", output_path)
+
+    assert result == {"path": str(output_path), "count": 2}
+    written = json.loads(output_path.read_text())
+    assert "backed_up_at" in written
+    assert written["connections"] == [
+        {"provider": "codex", "name": "cco-cl", "id": "conn-1"},
+        {"provider": "opencode-go", "name": "og-main", "id": "conn-2"},
+    ]
+    for connection in written["connections"]:
+        assert "apiKey" not in connection
+        assert "authType" not in connection
+
+
+def test_backup_connections_raises_on_unexpected_shape(tmp_path, monkeypatch):
+    login = _fake_login_ok()
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        return FakeResponse({"unexpected": "shape"})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(OmniRouteError, match="unexpected provider listing shape"):
+        backup_connections("http://127.0.0.1:20128", "dashboard-pw", tmp_path / "out.json")
+
+
+def test_restore_combos_remaps_connection_id_by_provider_and_label(tmp_path, monkeypatch):
+    login = _fake_login_ok()
+    existing_payload = {"combos": [], "total": 0}
+    connections_payload = {
+        "connections": [
+            {"id": "conn-live", "provider": "codex", "name": "cco-cl"},
+        ]
+    }
+    posts = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        if request.full_url == PROVIDERS_URL:
+            return FakeResponse(connections_payload)
+        if request.get_method() == "GET":
+            return FakeResponse(existing_payload)
+        assert request.get_method() == "POST"
+        posts.append(json.loads(request.data))
+        return FakeResponse({"name": "my-planning"})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+
+    backup_combo = {
+        "name": "my-planning",
+        "models": [
+            {
+                "kind": "model",
+                "providerId": "codex",
+                "model": "codex/gpt-5.6-sol-high",
+                "label": "cco-cl",
+                "connectionId": "conn-stale",
+            }
+        ],
+    }
+    input_path = _write_backup(tmp_path, [backup_combo])
+    result = restore_combos("http://127.0.0.1:20128", "dashboard-pw", input_path)
+
+    assert result == [{"combo": "my-planning", "action": "created"}]
+    assert posts[0]["models"][0]["connectionId"] == "conn-live"
+
+
+def test_restore_combos_clears_and_reports_unresolved_connection_id(tmp_path, monkeypatch):
+    login = _fake_login_ok()
+    existing_payload = {"combos": [], "total": 0}
+    posts = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        if request.full_url == PROVIDERS_URL:
+            return FakeResponse({"connections": []})
+        if request.get_method() == "GET":
+            return FakeResponse(existing_payload)
+        assert request.get_method() == "POST"
+        posts.append(json.loads(request.data))
+        return FakeResponse({"name": "my-planning"})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+
+    backup_combo = {
+        "name": "my-planning",
+        "models": [
+            {
+                "kind": "model",
+                "providerId": "codex",
+                "model": "codex/gpt-5.6-sol-high",
+                "label": "cco-cl",
+                "connectionId": "conn-stale",
+            }
+        ],
+    }
+    input_path = _write_backup(tmp_path, [backup_combo])
+    result = restore_combos("http://127.0.0.1:20128", "dashboard-pw", input_path)
+
+    assert result == [
+        {
+            "combo": "my-planning",
+            "action": "created",
+            "unresolved_connections": [
+                {"provider": "codex", "label": "cco-cl", "model": "codex/gpt-5.6-sol-high"}
+            ],
+        }
+    ]
+    assert posts[0]["models"][0]["connectionId"] is None
