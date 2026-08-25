@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context logs validate test clean prune
+        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore logs validate test clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -64,6 +64,12 @@ fix-codex-context:
 
 combo-context:
 	@bash tools/run-target.sh combo-context -- bash scripts/omniroute-combo-context.sh $(COMBO)
+
+combo-backup:
+	@bash tools/run-target.sh combo-backup -- bash scripts/omniroute-combo-backup.sh $(OUTPUT)
+
+combo-restore:
+	@bash tools/run-target.sh combo-restore -- bash scripts/omniroute-combo-restore.sh $(INPUT) $(if $(OVERWRITE),--overwrite)
 
 logs:
 	@bash tools/run-target.sh logs -- bash scripts/logs.sh

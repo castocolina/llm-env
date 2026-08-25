@@ -1713,6 +1713,223 @@ def test_combo_context_dies_clearly_when_omniroute_is_unreachable(
     assert "OmniRoute is not reachable" in result.stdout + result.stderr
 
 
+def run_combo_backup_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    output_arg: str | None = None,
+    backup_case: str = 'printf \'{"path":"/tmp/backup.json","count":2}\\n\'',
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-combo-backup.sh against a stubbed llmenv pipeline. Pass a
+    real listening socket's port as omniroute_port to simulate "reachable"."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute backup-combos'*) {backup_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    args = ["/usr/bin/bash", "scripts/omniroute-combo-backup.sh"]
+    if output_arg is not None:
+        args.append(output_arg)
+
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_combo_backup_reports_the_backed_up_count(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        output = tmp_path / "my-backup.json"
+        result, _config = run_combo_backup_with_stubs(
+            tmp_path,
+            omniroute_port=port,
+            output_arg=str(output),
+            backup_case=(
+                f'printf \'{{"path":"{output}","count":2}}\\n\''
+            ),
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"backed up 2 combo(s) to {output}" in result.stdout
+
+
+def test_combo_backup_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_combo_backup_with_stubs(tmp_path, omniroute_port=unreachable_port)
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
+def run_combo_restore_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    input_path: pathlib.Path,
+    overwrite: bool = False,
+    restore_case: str = (
+        'printf \'{"restored":[{"combo":"my-planning","action":"created"}]}\\n\''
+    ),
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-combo-restore.sh against a stubbed llmenv pipeline. Pass a
+    real listening socket's port as omniroute_port to simulate "reachable"."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute restore-combos'*) {restore_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    args = ["/usr/bin/bash", "scripts/omniroute-combo-restore.sh", str(input_path)]
+    if overwrite:
+        args.append("--overwrite")
+
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_combo_restore_reports_created_updated_skipped_counts(tmp_path: pathlib.Path) -> None:
+    input_path = tmp_path / "backup.json"
+    input_path.write_text('{"combos":[{"name":"my-planning"}]}')
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_combo_restore_with_stubs(
+            tmp_path,
+            omniroute_port=port,
+            input_path=input_path,
+            restore_case=(
+                'printf \'{"restored":['
+                '{"combo":"my-planning","action":"created"},'
+                '{"combo":"my-coding","action":"updated"},'
+                '{"combo":"my-plan-review","action":"skipped"}'
+                ']}\\n\''
+            ),
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "my-planning: created" in result.stdout
+    assert "my-coding: updated" in result.stdout
+    assert "my-plan-review: skipped" in result.stdout
+    assert "created 1, updated 1, skipped 1" in result.stdout
+
+
+def test_combo_restore_requires_an_existing_backup_file(tmp_path: pathlib.Path) -> None:
+    missing = tmp_path / "does-not-exist.json"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_combo_restore_with_stubs(
+            tmp_path, omniroute_port=port, input_path=missing
+        )
+
+    assert result.returncode != 0
+    assert "no backup file at" in result.stdout + result.stderr
+
+
+def test_combo_restore_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    input_path = tmp_path / "backup.json"
+    input_path.write_text('{"combos":[]}')
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_combo_restore_with_stubs(
+        tmp_path, omniroute_port=unreachable_port, input_path=input_path
+    )
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
 def test_gpu_status_reports_total_used_ceiling_and_headroom(tmp_path: pathlib.Path) -> None:
     result, _, _ = run_gpu_status_with_stubs(tmp_path)
     assert result.returncode == 0

@@ -61,6 +61,7 @@ from pylib.omniroute import (
     import_codex_auth,
     provision,
 )
+from pylib.omniroute_combos import backup_combos, restore_combos
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -401,6 +402,18 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
     if args.action == "combo-context":
         combos = compute_combo_context(base_url, initial_password, combo_name=args.combo)
         return emit({"combos": combos})
+    if args.action == "backup-combos":
+        if not args.output:
+            return fail("--output is required for backup-combos")
+        result = backup_combos(base_url, initial_password, Path(args.output))
+        return emit(result)
+    if args.action == "restore-combos":
+        if not args.input:
+            return fail("--input is required for restore-combos")
+        restored = restore_combos(
+            base_url, initial_password, Path(args.input), overwrite=args.overwrite
+        )
+        return emit({"restored": restored})
     # args.action == "issue-key"
     cache_path = Path(args.config).parent / "omniroute-api-key.json"
     api_key = ensure_api_key(
@@ -548,12 +561,27 @@ def build_parser() -> argparse.ArgumentParser:
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
     omniroute_parser.add_argument(
         "action",
-        choices=["provision", "issue-key", "import-codex", "fix-codex-context", "combo-context"],
+        choices=[
+            "provision",
+            "issue-key",
+            "import-codex",
+            "fix-codex-context",
+            "combo-context",
+            "backup-combos",
+            "restore-combos",
+        ],
     )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
     omniroute_parser.add_argument("--name", default="cco-cl")
     omniroute_parser.add_argument(
         "--combo", default=None, help="limit combo-context to a single combo name"
+    )
+    omniroute_parser.add_argument("--output", default=None, help="backup-combos output file path")
+    omniroute_parser.add_argument("--input", default=None, help="restore-combos input file path")
+    omniroute_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="restore-combos: update existing combos in place instead of skipping them",
     )
     omniroute_parser.set_defaults(func=cmd_omniroute)
 

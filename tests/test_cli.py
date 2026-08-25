@@ -1804,6 +1804,117 @@ def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
         thread.join()
 
 
+class _RecordingComboBackupRestoreHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple[str, str, object]]] = []
+    combos: ClassVar[list[dict]] = []
+
+    def _reply(self, payload, *, status=200, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("POST", self.path, body))
+        if self.path == "/api/auth/login":
+            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            return
+        assert self.path == "/api/combos"
+        self._reply({**body, "id": f"id-{body['name']}"}, status=201)
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, None))
+        assert self.path == "/api/combos"
+        self._reply({"combos": self.combos, "total": len(self.combos)})
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("PUT", self.path, body))
+        self._reply({**body, "id": self.path.rsplit("/", 1)[-1]})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_backup_combos_writes_a_file(tmp_path):
+    _RecordingComboBackupRestoreHandler.received = []
+    _RecordingComboBackupRestoreHandler.combos = [
+        {
+            "name": "my-planning",
+            "id": "id-my-planning",
+            "strategy": "priority",
+            "models": [{"kind": "model", "providerId": "grok-cli", "model": "grok-cli/grok-4.6"}],
+            "isHidden": False,
+            "computed_context_length": 500000,
+        }
+    ]
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _RecordingComboBackupRestoreHandler
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        output = tmp_path / "backup.json"
+        result = run(
+            "--config", str(config), "omniroute", "backup-combos", "--output", str(output)
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"path": str(output), "count": 1}
+        backup = json.loads(output.read_text())
+        assert backup["combos"] == [
+            {
+                "name": "my-planning",
+                "strategy": "priority",
+                "models": [
+                    {"kind": "model", "providerId": "grok-cli", "model": "grok-cli/grok-4.6"}
+                ],
+            }
+        ]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_restore_combos_creates_and_reports(tmp_path):
+    _RecordingComboBackupRestoreHandler.received = []
+    _RecordingComboBackupRestoreHandler.combos = []
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _RecordingComboBackupRestoreHandler
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        backup_file = tmp_path / "backup.json"
+        backup_file.write_text(
+            json.dumps({"combos": [{"name": "my-planning", "strategy": "priority"}]})
+        )
+        result = run(
+            "--config", str(config), "omniroute", "restore-combos", "--input", str(backup_file)
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "restored": [{"combo": "my-planning", "action": "created"}]
+        }
+        posts = [r for r in _RecordingComboBackupRestoreHandler.received if r[0] == "POST"]
+        assert posts[-1][2] == {"name": "my-planning", "strategy": "priority"}
+    finally:
+        server.shutdown()
+        thread.join()
+
+
 def test_render_compose_writes_a_compose_file(tmp_path):
     config = write_test_config(tmp_path)
     output = tmp_path / "docker-compose.yml"
