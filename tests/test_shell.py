@@ -10641,3 +10641,83 @@ def test_status_skips_the_endpoint_banner_when_unconfigured(
     assert result.returncode == 0, result.stderr
     assert "run 'make setup' first" in result.stdout + result.stderr
     assert "curl http://" not in result.stdout
+
+
+def test_install_agent_clients_writes_expected_files_and_summary(tmp_path):
+    """Sources setup/lib/install-agent-clients.sh directly (no wrapper
+    script involved) and calls install_agent_clients with fixture inputs.
+    Fastest possible regression net for the shared library itself."""
+    home = tmp_path / "home"
+    home.mkdir()
+    api_key_file = tmp_path / "api-key"
+    api_key_file.write_text("sk-test-key")
+    models_file = tmp_path / "models.json"
+    models_file.write_text(json.dumps([
+        {"id": "my-planning", "label": "my-planning (combo)",
+         "ctx_size": 500000, "client_max_output_tokens": 128000},
+    ]))
+    updater_path = ROOT / "setup" / "update-opencode-config.mjs"
+    lib_path = ROOT / "setup" / "lib" / "install-agent-clients.sh"
+
+    script = f'''
+set -euo pipefail
+export HOME="{home}"
+source "{lib_path}"
+create_agent_client_workdir
+install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file}" "{updater_path}" "{lib_path}" "false"
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    pi_models = json.loads((home / ".pi" / "agent" / "models.json").read_text())
+    assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "my-planning"
+    opencode_config = json.loads(
+        (home / ".config" / "opencode" / "opencode.jsonc").read_text()
+    )
+    assert "my-planning" in opencode_config["provider"]["local-llm-env"]["models"]
+
+    assert "enabled model: my-planning (context 500000)" in result.stdout
+    assert "restart Pi and OpenCode to load the updated configuration" in result.stdout
+    assert "Installer version: " in result.stdout
+    # create_missing_state="false" and no prior OpenCode state file: must
+    # not be created, and must not be mentioned in the summary.
+    assert not (home / ".local" / "state" / "opencode" / "model.json").exists()
+    assert "configured OpenCode favorites" not in result.stdout
+
+
+def test_install_agent_clients_creates_missing_state_when_requested(tmp_path, monkeypatch):
+    """create_missing_state="true" without a local `opencode` binary must
+    fail clearly rather than silently skip -- the local script's contract."""
+    home = tmp_path / "home"
+    home.mkdir()
+    api_key_file = tmp_path / "api-key"
+    api_key_file.write_text("sk-test-key")
+    models_file = tmp_path / "models.json"
+    models_file.write_text(json.dumps([
+        {"id": "llama-cpp/a", "label": "a", "ctx_size": 8192, "client_max_output_tokens": 4096},
+    ]))
+    updater_path = ROOT / "setup" / "update-opencode-config.mjs"
+    lib_path = ROOT / "setup" / "lib" / "install-agent-clients.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Create stub commands for required tools, but not opencode
+    for cmd in ("jq", "node", "mktemp", "cmp"):
+        stub = bin_dir / cmd
+        stub.write_text("#!/bin/bash\n" + (f'exec /usr/bin/{cmd} "$@"' if cmd != "node" else 'exec /usr/bin/node "$@"'))
+        stub.chmod(0o755)
+
+    script = f'''
+set -euo pipefail
+export HOME="{home}"
+export PATH="{bin_dir}:/usr/bin:/bin"
+source "{lib_path}"
+create_agent_client_workdir
+install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file}" "{updater_path}" "{lib_path}" "true"
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 1
+    assert "missing required command: opencode" in result.stdout + result.stderr
