@@ -92,7 +92,12 @@ staged_files=()
 cleanup() {
     local status=$?
     local path
-    for path in "${staged_files[@]}"; do
+    # "${staged_files[@]}" alone raises "unbound variable" under `set -u`
+    # on bash < 4.4 -- notably macOS's stock /bin/bash (3.2) -- once every
+    # element has been consumed by the staged_files=("${staged_files[@]:1}")
+    # slices below, leaving a legitimately empty array. The `-` default
+    # (`[@]-`) is the portable idiom; harmless on newer bash too.
+    for path in "${staged_files[@]-}"; do
         [ -n "$path" ] && rm -f -- "$path"
     done
     rm -rf -- "$workdir"
@@ -411,7 +416,7 @@ done
 if [ -n "$opencode_state_staged" ]; then
     echo "OpenCode favorites configured: ${opencode_state_path}"
 fi
-echo "Done. Model(s): $(jq -r '[.[].alias] | join(", ")' "$models_file")"
+echo "Done. Model(s): $(jq -r '[.[].id] | join(", ")' "$models_file")"
 echo
 echo "OmniRoute dashboard: ${omniroute_dashboard_url}"
 echo "  Password: ${omniroute_dashboard_password}"

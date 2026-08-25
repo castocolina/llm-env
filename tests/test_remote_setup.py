@@ -1047,6 +1047,10 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
 
     assert "OmniRoute dashboard: http://127.0.0.1:20128" in output
     assert "dashboard-pw" in output
+    # Regression: the final summary used to read a `.alias` field that
+    # doesn't exist on the id/label model shape, silently printing
+    # "Done. Model(s): " with no names at all.
+    assert "Done. Model(s): llama-cpp/a" in output
 
 
 def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
@@ -1080,6 +1084,19 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
     assert pi_models["providers"]["local-llm-env"]["apiKey"] == "sk-live-value"
     assert "sk-live-value" not in output
+
+
+def test_setup_sh_cleanup_trap_survives_an_empty_staged_files_array(monkeypatch):
+    """`"${staged_files[@]}"` alone raises "unbound variable" under `set -u`
+    on bash < 4.4 (macOS's stock /bin/bash is 3.2) once every element has
+    been consumed by the staged_files=("${staged_files[@]:1}") slices --
+    i.e. on every successful run, right as cleanup() fires on exit. Live
+    reproduction on macOS: exactly this crash, right after the final
+    "Done." output. `"${staged_files[@]-}"` is the portable, bash-3.2-safe
+    idiom; assert it's actually what's rendered."""
+    _use_real_opencode_updater(monkeypatch)
+    script = render_setup_script("llm.local:20130")
+    assert 'for path in "${staged_files[@]-}"; do' in script
 
 
 def test_setup_sh_merges_into_a_well_formed_existing_pi_configuration(

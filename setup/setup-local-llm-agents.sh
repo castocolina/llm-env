@@ -207,7 +207,12 @@ temporary_sources=()
 
 cleanup() {
     local status=$? path
-    for path in "${staged_files[@]}" "${temporary_sources[@]}"; do
+    # "${arr[@]}" alone raises "unbound variable" under `set -u` on bash <
+    # 4.4 once an array is legitimately empty (see the identical fix in
+    # pylib/remote_setup.py's SETUP_SCRIPT_TEMPLATE, which hits this for
+    # real on macOS's stock bash 3.2). Harmless here on newer bash, kept
+    # for consistency since this code moves into the shared library.
+    for path in "${staged_files[@]-}" "${temporary_sources[@]-}"; do
         [ -n "$path" ] && rm -f -- "$path"
     done
     rm -rf -- "$workdir"
