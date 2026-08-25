@@ -409,6 +409,7 @@ def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
                 "root": "kimi-k2.7-code",
                 "owned_by": "opencode-go",
                 "context_length": 262144,
+                "max_output_tokens": 262144,
             },
             # grok-composer-2.5-fast is deliberately absent from the catalog
             # entirely -- must still be corrected via the known constant.
@@ -438,19 +439,27 @@ def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
         {
             "combo": "my-coding",
             "members": [
-                {"provider": "codex", "model": "gpt-5.6-sol-high", "context_window": 1_050_000},
+                {
+                    "provider": "codex",
+                    "model": "gpt-5.6-sol-high",
+                    "context_window": 1_050_000,
+                    "max_output_tokens": None,
+                },
                 {
                     "provider": "grok-cli",
                     "model": "grok-composer-2.5-fast",
                     "context_window": 200_000,
+                    "max_output_tokens": None,
                 },
                 {
                     "provider": "opencode-go",
                     "model": "kimi-k2.7-code",
                     "context_window": 262144,
+                    "max_output_tokens": 262144,
                 },
             ],
             "min_context_window": 200_000,
+            "min_max_output_tokens": 262144,
         }
     ]
 
@@ -478,9 +487,15 @@ def test_compute_combo_context_leaves_unknown_models_out_of_the_minimum(monkeypa
         {
             "combo": "solo-mystery",
             "members": [
-                {"provider": "mystery-provider", "model": "mystery-model", "context_window": None}
+                {
+                    "provider": "mystery-provider",
+                    "model": "mystery-model",
+                    "context_window": None,
+                    "max_output_tokens": None,
+                }
             ],
             "min_context_window": None,
+            "min_max_output_tokens": None,
         }
     ]
 

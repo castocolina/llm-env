@@ -16,24 +16,68 @@ key_response="$(llmenv omniroute issue-key --config "$CONFIG_PATH")" \
     || die "could not obtain an OmniRoute API key; run 'make start' first"
 api_key="$(jq -r '.api_key // ""' <<<"$key_response")"
 [ -n "$api_key" ] || die "OmniRoute did not return a usable API key"
-models_json="$(yq -o=json '[.models[] | select(.enabled) | {
-    "alias": .alias,
-    "ctx_size": .ctx_size,
-    "client_max_output_tokens": .client_max_output_tokens
-}]' "$CONFIG_PATH")"
+
+# No llama.cpp instance exists behind OmniRoute in this mode (see
+# llm_server.enabled in models.yml.example): mapping "llama-cpp/<alias>"
+# model ids here would create dead provider entries with nothing to route
+# to. OmniRoute combos (below) are always mapped regardless -- they route
+# to real, live provider connections and are the whole point of this mode.
+#
+# migrate_config_file (above) always normalizes llm_server.enabled to a
+# real boolean, so a bare read is used here -- not `// true`, which would
+# silently coerce an explicit `false` back to "true" (yq/jq's `//`
+# alternative operator treats `false` as falsy, same footgun documented in
+# setup.sh and print-endpoints.sh).
+llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
+if [ "$llm_server_enabled" = "true" ]; then
+    llama_models_json="$(yq -o=json '[.models[] | select(.enabled) | {
+        "id": "llama-cpp/\(.alias)",
+        "label": .alias,
+        "ctx_size": .ctx_size,
+        "client_max_output_tokens": .client_max_output_tokens
+    }]' "$CONFIG_PATH")"
+else
+    llama_models_json='[]'
+fi
+
+# OmniRoute's own /v1/models catalog and /api/combos do not reflect
+# manually-corrected context windows (a real OmniRoute display bug -- see
+# pylib/omniroute.py::compute_combo_context for the full writeup and live
+# verification), so this uses the corrected minimum per combo instead of
+# trusting OmniRoute's own numbers, matching what `make combo-context`
+# reports.
+combo_context_response="$(llmenv omniroute combo-context --config "$CONFIG_PATH")" \
+    || die "$(jq -r '.error // "could not fetch OmniRoute combos"' <<<"$combo_context_response")"
+combo_models_json="$(jq '[.combos[] | select(.min_context_window != null) | {
+    id: .combo,
+    label: "\(.combo) (combo)",
+    ctx_size: .min_context_window,
+    client_max_output_tokens: (
+        if .min_max_output_tokens == null then
+            ([.min_context_window, 128000] | min)
+        elif .min_max_output_tokens > .min_context_window then
+            .min_context_window
+        else
+            .min_max_output_tokens
+        end
+    )
+}]' <<<"$combo_context_response")"
+
+models_json="$(jq -s '.[0] + .[1]' <(printf '%s' "$llama_models_json") <(printf '%s' "$combo_models_json"))"
 
 jq -ne --arg port "$omniroute_port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
     || die "omniroute port must be an integer from 1 to 65535"
 jq -e '
     type == "array" and length > 0 and
-    ([.[].alias] | length == (unique | length)) and
+    ([.[].id] | length == (unique | length)) and
     all(.[];
-        (.alias | type == "string" and length > 0) and
+        (.id | type == "string" and length > 0) and
+        (.label | type == "string" and length > 0) and
         (.ctx_size | type == "number" and . > 0 and floor == .) and
         (.client_max_output_tokens | type == "number" and . > 0 and floor == .) and
         .client_max_output_tokens <= .ctx_size)
 ' <<<"$models_json" >/dev/null \
-    || die "enabled model records require unique aliases and valid context/output limits"
+    || die "mapped model records require unique ids and valid context/output limits"
 
 base_url="http://127.0.0.1:${omniroute_port}/v1"
 
@@ -56,9 +100,9 @@ chmod 600 "$api_key_file" || die "could not secure private API key"
 printf '%s\n' "$models_json" >"$models_file" || die "could not write enabled models"
 chmod 600 "$models_file" || die "could not secure enabled models"
 models_state_file="${workdir}/models-state.json"
-jq '[.[] | .alias = "llama-cpp/\(.alias)"]' "$models_file" >"$models_state_file" \
-    || die "could not build prefixed model ids for OpenCode model state"
-chmod 600 "$models_state_file" || die "could not secure prefixed model ids"
+jq '[.[] | .alias = .id]' "$models_file" >"$models_state_file" \
+    || die "could not build model ids for OpenCode model state"
+chmod 600 "$models_state_file" || die "could not secure model ids"
 
 jq -n \
     --arg base_url "$base_url" \
@@ -70,7 +114,7 @@ jq -n \
         apiKey: ($api_key | rtrimstr("\n")),
         compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
         models: [$models[] | {
-            id: "llama-cpp/\(.alias)",
+            id: .id,
             contextWindow: .ctx_size,
             maxTokens: .client_max_output_tokens
         }]
@@ -86,8 +130,8 @@ jq -n \
         name: "local-llm-env",
         options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
         models: (reduce $models[] as $model ({};
-            .["llama-cpp/\($model.alias)"] = {
-                name: $model.alias,
+            .[$model.id] = {
+                name: $model.label,
                 limit: {
                     context: $model.ctx_size,
                     output: $model.client_max_output_tokens
@@ -137,7 +181,7 @@ stage_pi_settings() {
     local source="$1" models="$2" staged="$3"
     jq --slurpfile models "$models" '
         if type != "object" then error("Pi settings must be an object") else
-          .enabledModels = [$models[0][] | "local-llm-env/llama-cpp/\(.alias)"]
+          .enabledModels = [$models[0][] | "local-llm-env/\(.id)"]
         end
     ' "$source" >"$staged"
 }
@@ -350,7 +394,7 @@ for opencode_target in "${opencode_targets[@]}"; do
     log_info "configured OpenCode provider: ${opencode_target}"
 done
 log_info "configured OpenCode favorites: ${opencode_state_path}"
-while IFS= read -r alias; do
-    log_info "enabled model: ${alias}"
-done < <(jq -r '.[].alias' "$models_file")
+while IFS= read -r model_id; do
+    log_info "enabled model: ${model_id}"
+done < <(jq -r '.[].id' "$models_file")
 log_info "restart Pi and OpenCode to load the updated configuration"

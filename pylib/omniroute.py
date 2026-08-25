@@ -311,15 +311,22 @@ def _resolve_member_context_window(
 def compute_combo_context(
     base_url: str, dashboard_password: str, combo_name: str | None = None
 ) -> list[dict[str, Any]]:
-    """Compute each combo's real minimum context window across its members.
+    """Compute each combo's real minimum context/output window across its members.
 
     OmniRoute's own /api/combos "computed_context_length" field is not
     trustworthy: it short-circuits on the same stale catalog value described
     in _resolve_member_context_window's docstring, so it never reflects a
     manual override (see fix_codex_context_overrides). This walks the live
     catalog and combo membership directly and applies the known corrections
-    itself, so the result is the actual minimum an orchestrator can rely on
-    to decide when to split a request before the provider ever rejects it.
+    itself, so the result is the actual minimum an orchestrator (or a
+    downstream client config generator) can rely on -- e.g. to decide when
+    to split a request before the provider ever rejects it, or to populate
+    a client's per-model context/output limits accurately.
+
+    Unlike context_length, max_output_tokens has no known OmniRoute
+    catalog-staleness bug -- it is read straight off the catalog per member
+    with no correction applied, and is simply absent (None) for a member
+    that is hidden from the catalog entirely (e.g. grok-composer-2.5-fast).
 
     Raises OmniRouteError if combo_name is given but no combo has that name.
     """
@@ -330,17 +337,19 @@ def compute_combo_context(
         raise OmniRouteError("unexpected /v1/models response shape")
 
     catalog_context_by_root: dict[str, int] = {}
+    catalog_output_by_root: dict[str, int] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         root = entry.get("root")
+        if not isinstance(root, str):
+            continue
         context_length = entry.get("context_length")
-        if (
-            isinstance(root, str)
-            and isinstance(context_length, int)
-            and root not in catalog_context_by_root
-        ):
+        if isinstance(context_length, int) and root not in catalog_context_by_root:
             catalog_context_by_root[root] = context_length
+        max_output_tokens = entry.get("max_output_tokens")
+        if isinstance(max_output_tokens, int) and root not in catalog_output_by_root:
+            catalog_output_by_root[root] = max_output_tokens
 
     combos_payload = _request("GET", f"{base_url}/api/combos", session_token)
     combos = combos_payload.get("combos") if isinstance(combos_payload, dict) else None
@@ -370,7 +379,12 @@ def compute_combo_context(
                 catalog_context_by_root, provider_id, model_id
             )
             members.append(
-                {"provider": provider_id, "model": model_id, "context_window": context_window}
+                {
+                    "provider": provider_id,
+                    "model": model_id,
+                    "context_window": context_window,
+                    "max_output_tokens": catalog_output_by_root.get(model_id),
+                }
             )
 
         known_windows = [
@@ -378,11 +392,17 @@ def compute_combo_context(
             for member in members
             if isinstance(member["context_window"], int)
         ]
+        known_outputs = [
+            member["max_output_tokens"]
+            for member in members
+            if isinstance(member["max_output_tokens"], int)
+        ]
         results.append(
             {
                 "combo": name,
                 "members": members,
                 "min_context_window": min(known_windows) if known_windows else None,
+                "min_max_output_tokens": min(known_outputs) if known_outputs else None,
             }
         )
 

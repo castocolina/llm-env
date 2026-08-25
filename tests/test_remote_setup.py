@@ -20,6 +20,7 @@ import pylib.remote_setup as remote_setup_module
 from pylib.omniroute import OmniRouteError
 from pylib.remote_setup import (
     RemoteSetupHandler,
+    _build_unified_models,
     build_config_response,
     host_without_port,
     master_key_matches,
@@ -168,6 +169,53 @@ def test_host_without_port_round_trips_a_validated_bracketed_ipv6_literal():
     assert host_without_port("[2001:db8::1]:20128") == "[2001:db8::1]"
 
 
+def test_build_unified_models_prefixes_llm_server_models():
+    result = _build_unified_models(
+        [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}], []
+    )
+    assert result == [
+        {"id": "llama-cpp/a", "label": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
+    ]
+
+
+def test_build_unified_models_includes_combos_with_known_context():
+    result = _build_unified_models(
+        [],
+        [{"combo": "my-coding", "min_context_window": 200000, "min_max_output_tokens": 128000}],
+    )
+    assert result == [
+        {
+            "id": "my-coding",
+            "label": "my-coding (combo)",
+            "ctx_size": 200000,
+            "client_max_output_tokens": 128000,
+        }
+    ]
+
+
+def test_build_unified_models_falls_back_to_capped_output_when_unknown():
+    result = _build_unified_models(
+        [],
+        [{"combo": "my-planning", "min_context_window": 500000, "min_max_output_tokens": None}],
+    )
+    assert result[0]["client_max_output_tokens"] == 128000
+
+
+def test_build_unified_models_clamps_output_above_context():
+    result = _build_unified_models(
+        [],
+        [{"combo": "weird", "min_context_window": 50000, "min_max_output_tokens": 999999}],
+    )
+    assert result[0]["client_max_output_tokens"] == 50000
+
+
+def test_build_unified_models_skips_combos_with_unknown_context():
+    result = _build_unified_models(
+        [], [{"combo": "mystery", "min_context_window": None, "min_max_output_tokens": None}]
+    )
+    assert result == []
+
+
 def test_build_config_response_shape():
     response = build_config_response(
         host="192.0.2.1",
@@ -238,13 +286,15 @@ def test_render_setup_script_never_passes_the_master_key_as_a_curl_argument(monk
 
 
 def test_render_setup_script_sends_omniroute_routed_model_ids(monkeypatch):
-    # Requests going TO OmniRoute must use "llama-cpp/<alias>", matching
-    # this repo's own established, live-verified routing convention (see
-    # scripts/check-server.sh's OmniRoute completion check).
+    # $models_file already carries the final client-visible "id" per entry
+    # ("llama-cpp/<alias>" for llm-server models, the bare combo name for
+    # OmniRoute combos) -- built server-side by pylib.remote_setup before
+    # /config ever returns it, so the bash template must consume .id
+    # verbatim rather than re-prefixing "llama-cpp/" itself.
     _use_real_opencode_updater(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
-    assert 'id: "llama-cpp/\\(.alias)"' in script
-    assert '.["llama-cpp/\\($model.alias)"]' in script
+    assert "id: .id" in script
+    assert ".[$model.id]" in script
 
 
 def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch):
@@ -353,6 +403,10 @@ class _FakeOmniRouteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/keys":
             self._reply({"keys": [{"id": "key-id", "keyPreview": "abcd"}]})
+        elif self.path == "/v1/models":
+            self._reply({"object": "list", "data": []})
+        elif self.path == "/api/combos":
+            self._reply({"combos": [], "total": 0})
 
     def log_message(self, format_string, *args):
         pass
@@ -543,7 +597,7 @@ def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypat
             assert payload["omniroute_base_url"] == "http://127.0.0.1:20128"
             assert payload["omniroute_dashboard_password"] == "dashboard-pw"
             assert payload["models"] == [
-                {"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
+                {"id": "llama-cpp/a", "label": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
             ]
             assert _FakeOmniRouteHandler.keys_created == 1
 
@@ -556,6 +610,132 @@ def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypat
             payload = json.loads(response.read())
             assert payload["api_key"] == "sk-live-value"
             assert _FakeOmniRouteHandler.keys_created == 1
+        finally:
+            server.shutdown()
+            thread.join()
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+class _FakeOmniRouteWithComboHandler(_FakeOmniRouteHandler):
+    """Adds a real combo to /v1/models and /api/combos so /config's
+    server-side compute_combo_context() call has something to resolve."""
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._reply(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "grok-cli/grok-4.6",
+                            "root": "grok-4.6",
+                            "owned_by": "grok-cli",
+                            "context_length": 500000,
+                            "max_output_tokens": 128000,
+                        }
+                    ],
+                }
+            )
+            return
+        if self.path == "/api/combos":
+            self._reply(
+                {
+                    "combos": [
+                        {
+                            "name": "my-planning",
+                            "models": [
+                                {
+                                    "kind": "model",
+                                    "providerId": "grok-cli",
+                                    "model": "grok-cli/grok-4.6",
+                                }
+                            ],
+                        }
+                    ],
+                    "total": 1,
+                }
+            )
+            return
+        super().do_GET()
+
+
+def test_config_includes_omniroute_combos_alongside_llm_server_models(tmp_path, monkeypatch):
+    _FakeOmniRouteWithComboHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteWithComboHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+        monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+        monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+        monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+        monkeypatch.setenv(
+            "MODELS_JSON",
+            json.dumps([{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]),
+        )
+
+        server, thread = _start_server(RemoteSetupHandler)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            assert response.status == 200
+            assert payload["models"] == [
+                {
+                    "id": "llama-cpp/a",
+                    "label": "a",
+                    "ctx_size": 8192,
+                    "client_max_output_tokens": 4096,
+                },
+                {
+                    "id": "my-planning",
+                    "label": "my-planning (combo)",
+                    "ctx_size": 500000,
+                    "client_max_output_tokens": 128000,
+                },
+            ]
+        finally:
+            server.shutdown()
+            thread.join()
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_config_returns_502_when_combo_context_fails(tmp_path, monkeypatch):
+    class _BrokenComboHandler(_FakeOmniRouteHandler):
+        def do_GET(self):
+            if self.path == "/v1/models":
+                self._reply({"unexpected": "shape"})
+                return
+            super().do_GET()
+
+    _BrokenComboHandler.keys_created = 0
+    fake_omniroute, fake_thread = _start_server(_BrokenComboHandler)
+    try:
+        fake_port = fake_omniroute.server_address[1]
+        cache_path = tmp_path / "api-key.json"
+        monkeypatch.setattr(remote_setup_module, "CACHE_PATH", cache_path)
+        monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+        monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+        monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+        monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+        monkeypatch.setenv("MODELS_JSON", "[]")
+
+        server, thread = _start_server(RemoteSetupHandler)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port)
+            conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            assert response.status == 502
+            assert "combo" in payload["error"]
         finally:
             server.shutdown()
             thread.join()

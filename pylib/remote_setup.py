@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from pylib.omniroute import OmniRouteError, _login, _request
+from pylib.omniroute import OmniRouteError, _login, _request, compute_combo_context
 
 KEY_NAME = "llm-env-remote-agents"
 CACHE_PATH = Path("/app/data/api-key.json")
@@ -228,16 +228,18 @@ opencode_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
 opencode_state_path="${opencode_state_dir}/model.json"
 opencode_state_staged=""
 
-# Model ids sent TO OmniRoute must be "llama-cpp/<alias>" -- OmniRoute
-# routes on the provider slug, not the connection's own name (confirmed
-# live; see scripts/check-server.sh's own OmniRoute completion check,
-# which uses the identical "llama-cpp/${alias}" convention).
+# $models_file already carries the final client-visible "id" per entry
+# ("llama-cpp/<alias>" for llama-cpp models, the bare combo name for
+# OmniRoute combos -- OmniRoute routes combos on their name directly, not
+# a provider-prefixed id, confirmed live) -- built server-side by
+# pylib.remote_setup before /config ever returned it, so no prefixing
+# happens here.
 pi_provider_file="${workdir}/pi-provider.json"
 jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
     --slurpfile models "$models_file" \
     '{baseUrl: $base_url, api: "openai-completions", apiKey: ($api_key | rtrimstr("\n")),
       compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
-      models: [$models[0][] | {id: "llama-cpp/\(.alias)", contextWindow: .ctx_size, maxTokens: .client_max_output_tokens}]}' \
+      models: [$models[0][] | {id: .id, contextWindow: .ctx_size, maxTokens: .client_max_output_tokens}]}' \
     >"$pi_provider_file" || {
     echo "remote-setup: could not build the Pi provider" >&2
     exit 1
@@ -308,7 +310,7 @@ chmod 600 "$pi_settings_staged"
 staged_files+=("$pi_settings_staged")
 jq --slurpfile models "$models_file" '
     if type != "object" then error("Pi settings must be an object") else
-      .enabledModels = [$models[0][] | "local-llm-env/llama-cpp/\(.alias)"]
+      .enabledModels = [$models[0][] | "local-llm-env/\(.id)"]
     end
 ' "$pi_settings_source" >"$pi_settings_staged" || {
     echo "remote-setup: could not update Pi settings" >&2
@@ -321,7 +323,7 @@ jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
     '{npm: "@ai-sdk/openai-compatible", name: "local-llm-env",
       options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
       models: (reduce $models[0][] as $model ({};
-          .["llama-cpp/\($model.alias)"] = {name: $model.alias,
+          .[$model.id] = {name: $model.label,
               limit: {context: $model.ctx_size, output: $model.client_max_output_tokens}}))}' \
     >"$provider_file" || {
     echo "remote-setup: could not build the OpenCode provider" >&2
@@ -360,8 +362,8 @@ if [ -e "$opencode_state_path" ]; then
         exit 1
     }
     models_state_file="${workdir}/models-state.json"
-    jq '[.[] | .alias = "llama-cpp/\(.alias)"]' "$models_file" >"$models_state_file" || {
-        echo "remote-setup: could not build prefixed model ids for OpenCode model state" >&2
+    jq '[.[] | .alias = .id]' "$models_file" >"$models_state_file" || {
+        echo "remote-setup: could not build model ids for OpenCode model state" >&2
         exit 1
     }
     chmod 600 "$models_state_file"
@@ -596,6 +598,59 @@ def validate_host_header(host_header: str) -> bool:
     return parse_host_header(host_header) is not None
 
 
+def _build_unified_models(
+    llm_server_models: list[dict[str, Any]], combos: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Build the client-visible model list SETUP_SCRIPT_TEMPLATE consumes
+    verbatim (no further prefixing/correction happens in bash).
+
+    Mirrors setup/setup-local-llm-agents.sh's own equivalent jq construction
+    -- keep both in sync if this shape changes. Each entry:
+        {id, label, ctx_size, client_max_output_tokens}
+    - llm-server models: id="llama-cpp/<alias>" (only ever non-empty when
+      llm_server.enabled is true -- see pylib/compose.py's enabled_models).
+    - OmniRoute combos: id=<combo name> (OmniRoute routes combos by their
+      bare name, not a provider-prefixed id, confirmed live), always
+      included regardless of llm_server.enabled -- combos route to real,
+      live provider connections and are the point of remote-setup's
+      OmniRoute-only mode. ctx_size uses the corrected minimum
+      (compute_combo_context) since OmniRoute's own /v1/models and
+      /api/combos do not reflect manual context-window overrides (see
+      compute_combo_context's docstring). A combo with no known context
+      window across any member is skipped entirely rather than mapped with
+      a fabricated limit.
+    """
+    models = [
+        {
+            "id": f"llama-cpp/{model['alias']}",
+            "label": model["alias"],
+            "ctx_size": model["ctx_size"],
+            "client_max_output_tokens": model["client_max_output_tokens"],
+        }
+        for model in llm_server_models
+    ]
+    for combo in combos:
+        ctx_size = combo.get("min_context_window")
+        if not isinstance(ctx_size, int):
+            continue
+        max_output = combo.get("min_max_output_tokens")
+        if not isinstance(max_output, int):
+            client_max_output_tokens = min(ctx_size, 128000)
+        elif max_output > ctx_size:
+            client_max_output_tokens = ctx_size
+        else:
+            client_max_output_tokens = max_output
+        models.append(
+            {
+                "id": combo["combo"],
+                "label": f"{combo['combo']} (combo)",
+                "ctx_size": ctx_size,
+                "client_max_output_tokens": client_max_output_tokens,
+            }
+        )
+    return models
+
+
 def build_config_response(
     *,
     host: str,
@@ -710,10 +765,16 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         except OmniRouteError as exc:
             self._write_json(502, {"error": f"could not reach OmniRoute: {exc}"})
             return
+        try:
+            combos = compute_combo_context(base_url, dashboard_password)
+        except OmniRouteError as exc:
+            self._write_json(502, {"error": f"could not fetch OmniRoute combos: {exc}"})
+            return
 
         host = host_without_port(host_header)
         omniroute_port = os.environ.get("OMNIROUTE_PORT", "")
-        models = json.loads(os.environ.get("MODELS_JSON", "[]"))
+        llm_server_models = json.loads(os.environ.get("MODELS_JSON", "[]"))
+        models = _build_unified_models(llm_server_models, combos)
         response = build_config_response(
             host=host,
             omniroute_port=omniroute_port,

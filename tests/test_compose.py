@@ -352,6 +352,20 @@ def test_remote_setup_models_json_lists_only_enabled_models_alias_ctx_and_output
     assert models_json == [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]
 
 
+def test_remote_setup_models_json_is_empty_when_llm_server_disabled():
+    cfg = {
+        **CFG,
+        "llm_server": {"enabled": False},
+        "models": [
+            {"alias": "a", "enabled": True, "ctx_size": 8192, "client_max_output_tokens": 4096},
+        ],
+    }
+    _, document = compose_dict(cfg)
+    import json as _json
+    models_json = _json.loads(document["services"]["remote-setup"]["environment"]["MODELS_JSON"])
+    assert models_json == []
+
+
 def test_remote_setup_service_depends_on_omniroute_healthy():
     _, document = compose_dict()
     assert document["services"]["remote-setup"]["depends_on"] == {

@@ -4828,6 +4828,7 @@ def run_setup_local_llm_agents(
     fail_move_number: int | None = None,
     health_exit: int = 0,
     failing_command: str | None = None,
+    combo_context_case: str = 'printf \'{"combos": []}\\n\'',
 ) -> tuple[
     subprocess.CompletedProcess[str],
     pathlib.Path,
@@ -4915,6 +4916,7 @@ def run_setup_local_llm_agents(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'omniroute issue-key'*) printf '{\"api_key\": \"%s\"}\\n' \"$OMNIROUTE_API_KEY\" ;;\n"
+        f"  *'omniroute combo-context'*) {combo_context_case} ;;\n"
         "  *) exec \"$REAL_UV\" \"$@\" ;;\n"
         "esac\n"
     )
@@ -5157,6 +5159,106 @@ def test_setup_local_llm_agents_creates_private_provider_files(
     )
     assert health_index < first_target_stage
     assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
+
+
+def test_setup_local_llm_agents_maps_combos_alongside_llama_cpp_models(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
+                '"min_max_output_tokens":128000}]}\\n\''
+            ),
+        )
+    )
+    _config_json, _opencode_json, opencode_jsonc = opencode_paths
+
+    assert result.returncode == 0, result.stderr
+    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    assert {"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000} in pi_models
+    assert any(model["id"] == "llama-cpp/gemma4" for model in pi_models)
+    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"]["models"]
+    assert opencode_models["my-coding"] == {
+        "name": "my-coding (combo)",
+        "limit": {"context": 200000, "output": 128000},
+    }
+
+
+def test_setup_local_llm_agents_falls_back_to_capped_output_when_combo_output_unknown(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, pi_path, _settings_path, _opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"my-planning","min_context_window":500000,'
+                '"min_max_output_tokens":null}]}\\n\''
+            ),
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    assert {"id": "my-planning", "contextWindow": 500000, "maxTokens": 128000} in pi_models
+
+
+def test_setup_local_llm_agents_skips_combos_with_no_known_context_window(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, pi_path, _settings_path, _opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"mystery","min_context_window":null,'
+                '"min_max_output_tokens":null}]}\\n\''
+            ),
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    assert not any(model["id"] == "mystery" for model in pi_models)
+
+
+def test_setup_local_llm_agents_omits_llama_cpp_models_when_llm_server_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    config_text = VALID_AGENT_SETUP_CONFIG + "llm_server:\n  enabled: false\n"
+    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            config_text=config_text,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
+                '"min_max_output_tokens":128000}]}\\n\''
+            ),
+        )
+    )
+    _config_json, _opencode_json, opencode_jsonc = opencode_paths
+
+    assert result.returncode == 0, result.stderr
+    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    assert pi_models == [{"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000}]
+    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"]["models"]
+    assert list(opencode_models.keys()) == ["my-coding"]
+
+
+def test_setup_local_llm_agents_dies_clearly_when_combo_context_fails(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, _pi_path, _settings_path, _opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=(
+                'printf \'{"error":"OmniRoute is unreachable"}\\n\'; exit 1'
+            ),
+        )
+    )
+
+    assert result.returncode != 0
+    assert "OmniRoute is unreachable" in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_secures_existing_client_directories_and_files(

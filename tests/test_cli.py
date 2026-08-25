@@ -1701,12 +1701,14 @@ class _RecordingComboContextHandler(http.server.BaseHTTPRequestHandler):
                             "root": "gpt-5.6-sol-high",
                             "owned_by": "codex",
                             "context_length": 272000,
+                            "max_output_tokens": 128000,
                         },
                         {
                             "id": "opencode-go/kimi-k2.7-code",
                             "root": "kimi-k2.7-code",
                             "owned_by": "opencode-go",
                             "context_length": 262144,
+                            "max_output_tokens": 262144,
                         },
                     ],
                 }
@@ -1764,19 +1766,23 @@ def test_omniroute_combo_context_reports_the_true_minimum(tmp_path):
                             "provider": "codex",
                             "model": "gpt-5.6-sol-high",
                             "context_window": 1_050_000,
+                            "max_output_tokens": 128000,
                         },
                         {
                             "provider": "grok-cli",
                             "model": "grok-composer-2.5-fast",
                             "context_window": 200_000,
+                            "max_output_tokens": None,
                         },
                         {
                             "provider": "opencode-go",
                             "model": "kimi-k2.7-code",
                             "context_window": 262144,
+                            "max_output_tokens": 262144,
                         },
                     ],
                     "min_context_window": 200_000,
+                    "min_max_output_tokens": 128000,
                 }
             ]
         }
