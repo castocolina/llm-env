@@ -122,11 +122,38 @@ cat >"$updater" <<'OPENCODE_UPDATER_EOF'
 @@OPENCODE_UPDATER_JS@@
 OPENCODE_UPDATER_EOF
 
+rm_key=0
+for arg in "$@"; do
+    case "$arg" in
+        --rm-key) rm_key=1 ;;
+        *)
+            echo "remote-setup: unknown argument: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+master_key_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/llm-env"
+master_key_cache="${master_key_cache_dir}/master-key"
+
 # `curl ... | bash` leaves stdin attached to the script pipe, not the
 # terminal -- `read` must go to /dev/tty explicitly or the prompt below
 # silently reads EOF instead of actually asking the user.
-read -r -s -p "OMNI_ROUTER_MASTER_KEY: " master_key < /dev/tty
-echo
+if [ "$rm_key" -eq 1 ]; then
+    rm -f -- "$master_key_cache"
+    read -r -s -p "OMNI_ROUTER_MASTER_KEY: " master_key < /dev/tty
+    echo
+elif [ -f "$master_key_cache" ] && \
+     [ "$(find "$master_key_cache" -mtime -7 2>/dev/null)" = "$master_key_cache" ]; then
+    master_key="$(cat "$master_key_cache")"
+else
+    read -r -s -p "OMNI_ROUTER_MASTER_KEY: " master_key < /dev/tty
+    echo
+    mkdir -p "$master_key_cache_dir"
+    chmod 700 "$master_key_cache_dir"
+    printf '%s' "$master_key" >"$master_key_cache"
+    chmod 600 "$master_key_cache"
+fi
 
 # A bearer token on the curl command line would be visible to every other
 # local user via `ps`/`/proc/<pid>/cmdline` for as long as curl runs --

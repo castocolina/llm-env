@@ -973,10 +973,27 @@ def test_ensure_api_key_reissues_after_dashboard_revocation(tmp_path, monkeypatc
         fake_thread.join()
 
 
-def _run_generated_setup_sh(tmp_path, monkeypatch, prepare_home=None, timeout=60.0):
+def _run_generated_setup_sh(
+    tmp_path,
+    monkeypatch,
+    prepare_home=None,
+    timeout=60.0,
+    home_dir=None,
+    extra_args=None,
+    send_master_key=True,
+):
     """Fetch the real /setup.sh from a live RemoteSetupHandler (backed by a
     fake OmniRoute) and execute it with bash in an isolated $HOME, typing
-    the master key into a pty. Returns (exit_code, output, home_dir)."""
+    the master key into a pty. Returns (exit_code, output, home_dir).
+
+    `home_dir`, when given, is reused as-is (e.g. to run the generated
+    script a second time against a $HOME a prior call already populated,
+    to exercise the master-key cache) instead of creating a fresh empty
+    one. `extra_args` are appended to the bash invocation (e.g.
+    ["--rm-key"]). `send_master_key=False` skips writing anything to the
+    pty -- needed for a cached run where no prompt appears at all; writing
+    to the pty in that case would just sit unread in its buffer, but a
+    test asserting "no prompt occurred" should not depend on that."""
     for cmd in ("bash", "curl", "jq", "node"):
         if shutil.which(cmd) is None:
             pytest.skip(f"{cmd} not available on this host")
@@ -1006,17 +1023,20 @@ def _run_generated_setup_sh(tmp_path, monkeypatch, prepare_home=None, timeout=60
             script_path = tmp_path / "setup.sh"
             script_path.write_bytes(script_body)
 
-            home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            if home_dir is None:
+                home_dir = tmp_path / "home"
+                home_dir.mkdir()
             if prepare_home is not None:
                 prepare_home(home_dir)
             child_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home_dir)}
 
+            argv = ["bash", str(script_path), *(extra_args or [])]
             pid, master_fd = pty.fork()
             if pid == 0:
-                os.execvpe("bash", ["bash", str(script_path)], child_env)
+                os.execvpe("bash", argv, child_env)
 
-            os.write(master_fd, b"test-master-key\n")
+            if send_master_key:
+                os.write(master_fd, b"test-master-key\n")
             # A regression that makes the installer *hang* (jq reading a
             # FIFO) must surface as a test failure, not a stuck suite.
             output = b""
@@ -1076,6 +1096,34 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     assert "dashboard-pw" in output
     assert "enabled model: llama-cpp/a (context" in output
     assert "Installer version: " in output
+
+
+def test_setup_sh_caches_the_master_key_for_seven_days(tmp_path, monkeypatch):
+    """A second run within the cache window must not prompt at all --
+    drive it with no pty input available and confirm it still succeeds."""
+    _, _, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
+    cache_path = home_dir / ".cache" / "llm-env" / "master-key"
+    assert cache_path.read_text() == "test-master-key"
+    assert (cache_path.stat().st_mode & 0o777) == 0o600
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, home_dir=home_dir, send_master_key=False
+    )
+    assert exit_code == 0, output
+    assert "OMNI_ROUTER_MASTER_KEY:" not in output
+
+
+def test_setup_sh_rm_key_prompts_fresh_and_leaves_no_cache(tmp_path, monkeypatch):
+    _, _, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
+    cache_path = home_dir / ".cache" / "llm-env" / "master-key"
+    assert cache_path.exists()
+
+    exit_code, output, _ = _run_generated_setup_sh(
+        tmp_path, monkeypatch, home_dir=home_dir, extra_args=["--rm-key"]
+    )
+    assert exit_code == 0, output
+    assert "OMNI_ROUTER_MASTER_KEY:" in output
+    assert not cache_path.exists()
 
 
 def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
