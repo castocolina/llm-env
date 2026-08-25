@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.remote_setup as remote_setup_module
-from pylib.omniroute import OmniRouteError
+from pylib.omniroute_client import OmniRouteError
 from pylib.remote_setup import (
     RemoteSetupHandler,
     build_config_response,

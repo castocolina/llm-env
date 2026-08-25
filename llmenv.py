@@ -54,7 +54,11 @@ from pylib.gguf import (
     read_gguf_header,
     validate_gguf,
 )
-from pylib.omniroute import OmniRouteError, import_codex_auth, provision
+from pylib.omniroute_client import OmniRouteError
+from pylib.omniroute_codex import import_codex_auth
+from pylib.omniroute_combos import backup_combos, restore_combos
+from pylib.omniroute_context import fix_codex_context_overrides
+from pylib.omniroute_provision import provision
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -370,6 +374,10 @@ def cmd_resources(args: argparse.Namespace) -> int:
 
 
 def cmd_omniroute(args: argparse.Namespace) -> int:
+    if args.action == "backup-combos" and not args.output:
+        return fail("backup-combos requires --output")
+    if args.action == "restore-combos" and not args.input:
+        return fail("restore-combos requires --input")
     cfg = require_valid_config(load_config(Path(args.config)))
     omniroute_cfg = cfg.get("omniroute") or {}
     initial_password = omniroute_cfg.get("initial_password")
@@ -389,6 +397,24 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
         auth_path = Path(args.auth_path).expanduser()
         result = import_codex_auth(base_url, initial_password, auth_path, name=args.name)
         return emit(result)
+    if args.action == "fix-codex-context":
+        fixed = fix_codex_context_overrides(base_url, initial_password)
+        return emit({"fixed": fixed})
+    if args.action == "backup-combos":
+        snapshot = backup_combos(base_url, initial_password)
+        Path(args.output).write_text(json.dumps(snapshot, indent=2) + "\n")
+        return emit({"written": str(args.output), "combos": len(snapshot)})
+    if args.action == "restore-combos":
+        try:
+            snapshot = json.loads(Path(args.input).read_text())
+        except FileNotFoundError:
+            return fail(f"no combo backup at {args.input}")
+        except json.JSONDecodeError:
+            return fail(f"{args.input} is not valid JSON")
+        if not isinstance(snapshot, list):
+            return fail(f"{args.input} does not contain a combo backup (expected a JSON list)")
+        restored = restore_combos(base_url, initial_password, snapshot)
+        return emit({"restored": restored})
     # args.action == "issue-key"
     cache_path = Path(args.config).parent / "omniroute-api-key.json"
     api_key = ensure_api_key(
@@ -534,9 +560,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     omniroute_parser = sub.add_parser("omniroute")
     omniroute_parser.add_argument("--config", default=argparse.SUPPRESS)
-    omniroute_parser.add_argument("action", choices=["provision", "issue-key", "import-codex"])
+    omniroute_parser.add_argument(
+        "action",
+        choices=[
+            "provision",
+            "issue-key",
+            "import-codex",
+            "fix-codex-context",
+            "backup-combos",
+            "restore-combos",
+        ],
+    )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
     omniroute_parser.add_argument("--name", default="cco-cl")
+    omniroute_parser.add_argument("--output", help="backup-combos: path to write the snapshot to")
+    omniroute_parser.add_argument("--input", help="restore-combos: path to read the snapshot from")
     omniroute_parser.set_defaults(func=cmd_omniroute)
 
     presets = sub.add_parser("presets")

@@ -1,5 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision logs validate test clean prune
+        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context \
+        backup-combos restore-combos logs validate test clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -58,6 +59,15 @@ gpu-status:
 
 provider-provision:
 	@bash tools/run-target.sh provider-provision -- bash scripts/provider-provision.sh
+
+fix-codex-context:
+	@bash tools/run-target.sh fix-codex-context -- bash scripts/omniroute-fix-context.sh
+
+backup-combos:
+	@bash tools/run-target.sh backup-combos -- bash scripts/omniroute-backup-combos.sh
+
+restore-combos:
+	@bash tools/run-target.sh restore-combos -- bash scripts/omniroute-restore-combos.sh
 
 logs:
 	@bash tools/run-target.sh logs -- bash scripts/logs.sh

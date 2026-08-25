@@ -1510,7 +1510,7 @@ def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
 
 
 class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
-    received: list[tuple[str, str, object]] = []
+    received: ClassVar[list[tuple[str, str, object]]] = []
 
     def _reply(self, payload, *, set_cookie=None):
         body = json.dumps(payload).encode()
@@ -1584,6 +1584,225 @@ def test_omniroute_import_codex_fails_cleanly_when_auth_file_is_missing(tmp_path
     )
     assert result.returncode != 0
     assert "no Codex session" in json.loads(result.stdout)["error"]
+
+
+class _RecordingFixContextHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple]] = []
+
+    def _reply(self, payload, *, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("POST", self.path, body))
+        self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, None))
+        self._reply(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "cx/gpt-5.6-sol-high",
+                        "root": "gpt-5.6-sol-high",
+                        "owned_by": "codex",
+                    },
+                ],
+            }
+        )
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("PUT", self.path, body))
+        self._reply({"ok": True})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_fix_codex_context_corrects_the_gpt_5_6_family(tmp_path):
+    _RecordingFixContextHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingFixContextHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        result = run("--config", str(config), "omniroute", "fix-codex-context")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "fixed": [
+                {
+                    "model": "gpt-5.6-sol-high",
+                    "family": "gpt-5.6-sol",
+                    "context_window": 1_050_000,
+                }
+            ]
+        }
+        method, path, body = _RecordingFixContextHandler.received[-1]
+        assert method == "PUT"
+        assert path == "/api/provider-models"
+        assert body == {
+            "provider": "codex",
+            "modelId": "gpt-5.6-sol-high",
+            "contextWindowOverride": 1_050_000,
+        }
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+class _RecordingComboHandler(http.server.BaseHTTPRequestHandler):
+    received: ClassVar[list[tuple]] = []
+
+    def _reply(self, payload, *, set_cookie=None):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        if self.path == "/api/auth/login":
+            self.received.append(("POST", self.path, body))
+            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            return
+        self.received.append(("POST", self.path, body))
+        self._reply({"id": "new-combo-id", "name": body["name"]})
+
+    def do_GET(self):
+        self.received.append(("GET", self.path, None))
+        self._reply(
+            {
+                "combos": [
+                    {
+                        "id": "combo-1",
+                        "name": "my-planning",
+                        "strategy": "priority",
+                        "models": [{"connectionId": "conn-a", "model": "kimi-k3"}],
+                    }
+                ]
+            }
+        )
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length)) if length else {}
+        self.received.append(("PUT", self.path, body))
+        self._reply({"ok": True})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_backup_combos_writes_a_restorable_snapshot(tmp_path):
+    _RecordingComboHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingComboHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        output = tmp_path / "combos-backup.json"
+        result = run(
+            "--config", str(config),
+            "omniroute", "backup-combos",
+            "--output", str(output),
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"written": str(output), "combos": 1}
+        snapshot = json.loads(output.read_text())
+        assert snapshot == [
+            {
+                "name": "my-planning",
+                "models": [{"connectionId": "conn-a", "model": "kimi-k3"}],
+                "strategy": "priority",
+            }
+        ]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_backup_combos_requires_output(tmp_path):
+    config = _write_omniroute_test_config(
+        tmp_path, omniroute_port=20128, initial_password="dashboard-pw"
+    )
+    result = run("--config", str(config), "omniroute", "backup-combos")
+    assert result.returncode == 1
+    assert "requires --output" in json.loads(result.stdout)["error"]
+
+
+def test_omniroute_restore_combos_recreates_a_missing_combo(tmp_path):
+    _RecordingComboHandler.received = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingComboHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+        backup_file = tmp_path / "combos-backup.json"
+        backup_file.write_text(
+            json.dumps(
+                [{"name": "my-new-combo", "models": [{"connectionId": "conn-z", "model": "grok-4.6"}]}]
+            )
+        )
+        result = run(
+            "--config", str(config),
+            "omniroute", "restore-combos",
+            "--input", str(backup_file),
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "restored": [
+                {"combo": "my-new-combo", "action": "created", "id": "new-combo-id", "models": 1}
+            ]
+        }
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_omniroute_restore_combos_fails_cleanly_on_invalid_json(tmp_path):
+    config = _write_omniroute_test_config(
+        tmp_path, omniroute_port=20128, initial_password="dashboard-pw"
+    )
+    backup_file = tmp_path / "combos-backup.json"
+    backup_file.write_text("not json")
+    result = run(
+        "--config", str(config),
+        "omniroute", "restore-combos",
+        "--input", str(backup_file),
+    )
+    assert result.returncode == 1
+    assert "not valid JSON" in json.loads(result.stdout)["error"]
+
+
+def test_omniroute_restore_combos_requires_input(tmp_path):
+    config = _write_omniroute_test_config(
+        tmp_path, omniroute_port=20128, initial_password="dashboard-pw"
+    )
+    result = run("--config", str(config), "omniroute", "restore-combos")
+    assert result.returncode == 1
+    assert "requires --input" in json.loads(result.stdout)["error"]
 
 
 def test_render_compose_writes_a_compose_file(tmp_path):

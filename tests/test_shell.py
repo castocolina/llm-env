@@ -768,7 +768,7 @@ def test_setup_defaults_to_gpu_enabled_when_no_gpu_env_unset(tmp_path: pathlib.P
     # no-GPU path needs) so setup is expected to fail once it reaches GPU
     # detection -- what matters is that Step 1 already persisted the
     # enabled decision before that happens.
-    result, _calls, config = run_setup_no_gpu(tmp_path, no_gpu_env="0")
+    _result, _calls, config = run_setup_no_gpu(tmp_path, no_gpu_env="0")
     assert yq_value(config, ".llm_server.enabled") == "true"
 
 
@@ -1505,6 +1505,297 @@ def test_provider_provision_dies_clearly_when_omniroute_is_unreachable(
         unreachable_port = probe.getsockname()[1]
 
     result, _config = run_provider_provision_with_stubs(tmp_path, omniroute_port=unreachable_port)
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
+def run_fix_codex_context_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    fix_codex_context_case: str = (
+        'printf \'{"fixed":[{"model":"gpt-5.6-sol-high","family":"gpt-5.6-sol",'
+        '"context_window":1050000}]}\\n\''
+    ),
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-fix-context.sh against a stubbed llmenv pipeline. Pass a
+    real listening socket's port as omniroute_port to simulate "reachable"."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute fix-codex-context')  {fix_codex_context_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/omniroute-fix-context.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_fix_codex_context_reports_each_corrected_model(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_fix_codex_context_with_stubs(tmp_path, omniroute_port=port)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "gpt-5.6-sol-high -> 1050000 tokens" in result.stdout
+    assert "corrected 1 codex GPT-5.6 model(s)" in result.stdout
+
+
+def test_fix_codex_context_reports_a_noop_cleanly(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_fix_codex_context_with_stubs(
+            tmp_path, omniroute_port=port, fix_codex_context_case='printf \'{"fixed":[]}\\n\''
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "nothing to fix" in result.stdout
+
+
+def test_fix_codex_context_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_fix_codex_context_with_stubs(tmp_path, omniroute_port=unreachable_port)
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
+def run_backup_combos_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    backup_combos_case: str = 'printf \'{"written":"ignored","combos":2}\\n\'',
+    extra_args: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-backup-combos.sh against a stubbed llmenv pipeline. The
+    script derives the log message's path from its own bash variable, not
+    the stubbed JSON's "written" field, so the stub need not echo it back."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute backup-combos'*) {backup_combos_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/omniroute-backup-combos.sh", *extra_args],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_backup_combos_writes_to_a_default_timestamped_path(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, config = run_backup_combos_with_stubs(tmp_path, omniroute_port=port)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "backed up 2 combo(s) to" in result.stdout
+    backup_dir = config.parent / "combo-backups"
+    assert backup_dir.is_dir()
+
+
+def test_backup_combos_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_backup_combos_with_stubs(tmp_path, omniroute_port=unreachable_port)
+    assert result.returncode != 0
+    assert "OmniRoute is not reachable" in result.stdout + result.stderr
+
+
+def run_restore_combos_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int | None,
+    input_path: pathlib.Path | None,
+    restore_combos_case: str = (
+        'printf \'{"restored":[{"combo":"my-planning","action":"updated","id":"1","models":1}]}\\n\''
+    ),
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-restore-combos.sh against a stubbed llmenv pipeline."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute restore-combos'*) {restore_combos_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "omniroute:\n"
+        f"  port: {omniroute_port if omniroute_port is not None else 20128}\n"
+    )
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+
+    args = [str(input_path)] if input_path is not None else []
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/omniroute-restore-combos.sh", *args],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, config
+
+
+def test_restore_combos_restores_from_an_explicit_path(tmp_path: pathlib.Path) -> None:
+    backup_file = tmp_path / "snapshot.json"
+    backup_file.write_text('[{"name": "my-planning", "models": []}]')
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_restore_combos_with_stubs(
+            tmp_path, omniroute_port=port, input_path=backup_file
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "my-planning: updated (1 model(s))" in result.stdout
+    assert "restored 1 combo(s)" in result.stdout
+
+
+def test_restore_combos_dies_clearly_when_no_backup_is_found(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_restore_combos_with_stubs(
+            tmp_path, omniroute_port=port, input_path=None
+        )
+
+    assert result.returncode != 0
+    assert "no backup path given" in result.stdout + result.stderr
+
+
+def test_restore_combos_dies_clearly_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    backup_file = tmp_path / "snapshot.json"
+    backup_file.write_text('[{"name": "my-planning", "models": []}]')
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        unreachable_port = probe.getsockname()[1]
+
+    result, _config = run_restore_combos_with_stubs(
+        tmp_path, omniroute_port=unreachable_port, input_path=backup_file
+    )
     assert result.returncode != 0
     assert "OmniRoute is not reachable" in result.stdout + result.stderr
 
@@ -9718,7 +10009,7 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
 
     # Stub yq to pass through to real yq
     yq_stub = commands / "yq"
-    yq_stub.write_text(f"#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq_stub.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
     yq_stub.chmod(0o755)
 
     # Stub other commands to pass through directly
@@ -9730,8 +10021,8 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
     # Stub uv to handle migrate-config by calling the real uv
     uv_stub = commands / "uv"
     uv_stub.write_text(
-        f"#!/usr/bin/bash\n"
-        f'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
+        "#!/usr/bin/bash\n"
+        'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
     )
     uv_stub.chmod(0o755)
 
@@ -9834,7 +10125,7 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
 
     # Stub yq to pass through to real yq
     yq_stub = commands / "yq"
-    yq_stub.write_text(f"#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq_stub.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
     yq_stub.chmod(0o755)
 
     # Stub other commands to pass through directly
@@ -9846,8 +10137,8 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     # Stub uv to handle migrate-config by calling the real uv
     uv_stub = commands / "uv"
     uv_stub.write_text(
-        f"#!/usr/bin/bash\n"
-        f'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
+        "#!/usr/bin/bash\n"
+        'case "$*" in *" migrate-config"*) exec "$REAL_UV" "$@" ;; esac\n'
     )
     uv_stub.chmod(0o755)
 

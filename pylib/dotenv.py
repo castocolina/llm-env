@@ -1,7 +1,7 @@
 """Minimal .env-style file reader.
 
 Deliberately not python-dotenv -- this repo's one Python dependency is
-pyyaml (see pylib/omniroute.py's own module docstring for the same
+pyyaml (see pylib/omniroute_client.py's own module docstring for the same
 stdlib-only constraint), and the format needed here is a single flat
 KEY=VALUE mapping, no interpolation/export/multiline support required.
 """

@@ -6,7 +6,7 @@ machine to talk to OmniRoute. Stdlib-only, run as
 `python3 -m pylib.remote_setup` inside the `remote-setup` compose service
 -- see docs/superpowers/specs/2026-08-12-remote-agent-setup-design.md.
 
-Reuses pylib.omniroute's session-login/request helpers rather than
+Reuses pylib.omniroute_client's session-login/request helpers rather than
 reimplementing OmniRoute's dashboard-session auth a second time -- both
 modules ship together in the same read-only pylib/ bind mount.
 """
@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from pylib.omniroute import OmniRouteError, _login, _request
+from pylib.omniroute_client import OmniRouteError, login, request_json
 
 KEY_NAME = "llm-env-remote-agents"
 CACHE_PATH = Path("/app/data/api-key.json")
@@ -505,7 +505,7 @@ def _cache_file_lock(cache_path: Path):
 
 def _extract_keys(payload: Any) -> list[Any]:
     """Tolerate either shape GET /api/keys might return, mirroring
-    pylib.omniroute._extract_providers: a bare list, or a dict nesting the
+    pylib.omniroute_provision._extract_providers: a bare list, or a dict nesting the
     list under a plausible key. An unrecognized shape MUST raise rather
     than degrade to `[]` -- a silent empty listing would make the cached
     key look permanently revoked and mint a brand new OmniRoute API key on
@@ -538,14 +538,14 @@ def ensure_api_key(
     key is never confused with the shared remote-installer key in
     OmniRoute's own dashboard listing)."""
     with _key_issuance_lock, _cache_file_lock(cache_path):
-        session_token = _login(base_url, dashboard_password)
+        session_token = login(base_url, dashboard_password)
         cached = read_cached_key(cache_path)
         if cached is not None:
-            listing = _request("GET", f"{base_url}/api/keys", session_token)
+            listing = request_json("GET", f"{base_url}/api/keys", session_token)
             keys = _extract_keys(listing)
             if any(isinstance(k, dict) and k.get("id") == cached["id"] for k in keys):
                 return cached["key"]
-        created = _request(
+        created = request_json(
             "POST", f"{base_url}/api/keys", session_token, {"name": key_name}
         )
         if (
