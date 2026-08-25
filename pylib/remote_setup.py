@@ -111,8 +111,24 @@ INSTALL_LIB_EOF
 source "$lib"
 
 create_agent_client_workdir
-# shellcheck disable=SC2154 # workdir/staged_files are set by create_agent_client_workdir above
-staged_files+=("$lib")
+# create_agent_client_workdir's `trap _iac_cleanup EXIT` (just installed)
+# owns cleanup for $workdir and everything staged into $staged_files by
+# install_agent_clients() below -- and that function's own mv/shift
+# bookkeeping (see setup/lib/install-agent-clients.sh's trailing
+# mv/`staged_files=("${staged_files[@]:1})` block) assumes staged_files[0]
+# is always the file *just* moved. Pushing $lib onto that array here would
+# violate that assumption: $lib (at index 0) gets shifted off after the
+# FIRST unrelated mv, not after $lib is actually removed anywhere -- so
+# $lib leaks on every successful run. Since setup/lib/install-agent-clients.sh
+# must not be modified for this, $lib is kept out of $staged_files entirely
+# and instead cleaned up by replacing the trap wholesale (bash traps do not
+# chain): remove $lib first, restore the original exit status via a
+# subshell, then delegate to _iac_cleanup -- a plain global function once
+# create_agent_client_workdir has run -- for everything else. This covers
+# every exit path: success, an _iac_die failure inside install_agent_clients,
+# and any earlier failure once this trap is installed.
+# shellcheck disable=SC2154 # _iac_cleanup is defined by create_agent_client_workdir above
+trap 'lib_exit_status=$?; rm -f -- "$lib"; (exit "$lib_exit_status"); _iac_cleanup' EXIT
 
 # The updater's own source is embedded here too, same reasoning as above. A
 # quoted heredoc delimiter means the shell does no expansion inside the JS
@@ -123,7 +139,8 @@ cat >"$updater" <<'OPENCODE_UPDATER_EOF'
 OPENCODE_UPDATER_EOF
 
 rm_key=0
-for arg in "$@"; do
+for arg in "${@-}"; do
+    [ -z "$arg" ] && continue
     case "$arg" in
         --rm-key) rm_key=1 ;;
         *)
@@ -465,7 +482,15 @@ def render_setup_script(host: str) -> str:
     lib_source = INSTALL_AGENT_CLIENTS_LIB_PATH.read_text(encoding="utf-8")
     script = SETUP_SCRIPT_TEMPLATE.replace(_HOST_PLACEHOLDER, host)
     script = script.replace(_UPDATER_JS_PLACEHOLDER, updater_source)
-    return script.replace(_INSTALL_LIB_PLACEHOLDER, lib_source)
+    # lib_source already ends in "\n"; the template puts the
+    # @@INSTALL_LIB_SH@@ placeholder on its own heredoc line followed by
+    # the template's own newline before INSTALL_LIB_EOF. Substituting the
+    # file's content verbatim would therefore leave one extra trailing
+    # blank line in the materialized $lib file compared to the real repo
+    # file, so sha256sum "$lib" on the remote side would never match
+    # sha256sum on the local file -- defeating the "Installer version"
+    # hash line's whole purpose as a local/remote staleness diagnostic.
+    return script.replace(_INSTALL_LIB_PLACEHOLDER, lib_source.rstrip("\n"))
 
 
 class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):

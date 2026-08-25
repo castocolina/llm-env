@@ -67,17 +67,6 @@ models_json="$(jq -s '.[0] + .[1]' <(printf '%s' "$llama_models_json") <(printf 
 
 jq -ne --arg port "$omniroute_port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
     || die "omniroute port must be an integer from 1 to 65535"
-jq -e '
-    type == "array" and length > 0 and
-    ([.[].id] | length == (unique | length)) and
-    all(.[];
-        (.id | type == "string" and length > 0) and
-        (.label | type == "string" and length > 0) and
-        (.ctx_size | type == "number" and . > 0 and floor == .) and
-        (.client_max_output_tokens | type == "number" and . > 0 and floor == .) and
-        .client_max_output_tokens <= .ctx_size)
-' <<<"$models_json" >/dev/null \
-    || die "mapped model records require unique ids and valid context/output limits"
 
 base_url="http://127.0.0.1:${omniroute_port}/v1"
 

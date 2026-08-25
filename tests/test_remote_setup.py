@@ -245,6 +245,29 @@ def test_build_config_response_shape():
     }
 
 
+def test_render_setup_script_embeds_the_install_lib_byte_identical(monkeypatch):
+    # The "Installer version" summary line (setup/lib/install-agent-clients.sh's
+    # own final `sha256sum "$lib"`) only means anything as a local/remote
+    # staleness diagnostic if the heredoc-materialized $lib on the remote
+    # side is byte-identical to the real repo file hashed locally. Extract
+    # the heredoc body from the rendered script and compare it exactly
+    # against the real file's content (not just "is a substring of" --
+    # a stray extra trailing newline would previously slip through any
+    # substring-based check while still breaking the hash comparison).
+    _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
+    script = render_setup_script("192.0.2.1:20130")
+    start_marker = "cat >\"$lib\" <<'INSTALL_LIB_EOF'\n"
+    end_marker = "\nINSTALL_LIB_EOF\n"
+    start = script.index(start_marker) + len(start_marker)
+    end = script.index(end_marker, start)
+    embedded = script[start:end] + "\n"
+    real_content = (
+        REPO_ROOT / "setup" / "lib" / "install-agent-clients.sh"
+    ).read_text(encoding="utf-8")
+    assert embedded == real_content
+
+
 def test_render_setup_script_embeds_the_host(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
     _use_real_install_agent_clients_lib(monkeypatch)
@@ -1028,7 +1051,18 @@ def _run_generated_setup_sh(
                 home_dir.mkdir()
             if prepare_home is not None:
                 prepare_home(home_dir)
-            child_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home_dir)}
+            # A dedicated, isolated TMPDIR (rather than the real /tmp) lets
+            # a test assert on exactly what mktemp'd files the script left
+            # behind -- most importantly $lib, the heredoc-materialized
+            # copy of install-agent-clients.sh (see the leaked-temp-file
+            # regression this was written to catch).
+            mktemp_dir = tmp_path / "system-tmp"
+            mktemp_dir.mkdir(exist_ok=True)
+            child_env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(home_dir),
+                "TMPDIR": str(mktemp_dir),
+            }
 
             argv = ["bash", str(script_path), *(extra_args or [])]
             pid, master_fd = pty.fork()
@@ -1096,6 +1130,21 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     assert "dashboard-pw" in output
     assert "enabled model: llama-cpp/a (context" in output
     assert "Installer version: " in output
+
+
+def test_setup_sh_does_not_leak_the_staged_install_lib_temp_file(tmp_path, monkeypatch):
+    """Regression test for the bug where $lib (the heredoc-materialized
+    copy of install-agent-clients.sh) was pushed onto install_agent_clients()'s
+    own $staged_files array and then silently mis-tracked by that
+    function's positional mv/shift cleanup bookkeeping, leaking a ~14KB
+    temp file on every successful run. _run_generated_setup_sh() points
+    the child's TMPDIR at an isolated, otherwise-empty directory
+    ("system-tmp" under tmp_path) specifically so this can assert nothing
+    is left behind in it once the script exits successfully."""
+    exit_code, output, _ = _run_generated_setup_sh(tmp_path, monkeypatch)
+    assert exit_code == 0, output
+    leftover = list((tmp_path / "system-tmp").iterdir())
+    assert leftover == [], f"leaked temp file(s): {leftover}"
 
 
 def test_setup_sh_caches_the_master_key_for_seven_days(tmp_path, monkeypatch):
