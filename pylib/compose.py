@@ -170,6 +170,11 @@ def render_compose(
             # generated /setup.sh response via a bash heredoc. Mounted
             # explicitly since only pylib/ is otherwise in view.
             f"{_dollar_escape(repo_root)}/setup/update-opencode-config.mjs:/app/setup/update-opencode-config.mjs:ro,z",
+            # setup/lib/install-agent-clients.sh (Task 1's shared library):
+            # not served over HTTP either -- render_setup_script() reads it
+            # and embeds it verbatim into /setup.sh via the same heredoc
+            # technique used for update-opencode-config.mjs above.
+            f"{_dollar_escape(repo_root)}/setup/lib:/app/setup/lib:ro,z",
             "remote-setup-data:/app/data",
         ],
         "ports": [f"0.0.0.0:{remote_setup_port}:{remote_setup_port}"],

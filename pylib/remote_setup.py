@@ -38,6 +38,13 @@ CACHE_PATH = Path("/app/data/api-key.json")
 # response via a bash heredoc instead of serving it as its own route.
 UPDATE_OPENCODE_CONFIG_PATH = Path("/app/setup/update-opencode-config.mjs")
 
+# Mounted read-only by pylib/compose.py's remote-setup service (Task 3 of
+# docs/superpowers/plans/2026-08-25-unify-agent-client-setup-scripts.md)
+# alongside pylib/ and update-opencode-config.mjs. Not served over HTTP --
+# embedded into /setup.sh's response via a bash heredoc, exactly like the
+# JS updater.
+INSTALL_AGENT_CLIENTS_LIB_PATH = Path("/app/setup/lib/install-agent-clients.sh")
+
 # An HTTP Host header is an *authority*, and we interpolate it into a
 # generated shell script and a JSON response -- so it is parsed, not just
 # character-filtered. A character-class-only check ("are all these bytes
@@ -65,6 +72,7 @@ _HOST_AUTHORITY_RE = re.compile(r"^([A-Za-z0-9.-]+)(?::(\d{1,5}))?$")
 # never written for.
 _HOST_PLACEHOLDER = "@@LLM_ENV_HOST@@"
 _UPDATER_JS_PLACEHOLDER = "@@OPENCODE_UPDATER_JS@@"
+_INSTALL_LIB_PLACEHOLDER = "@@INSTALL_LIB_SH@@"
 
 SETUP_SCRIPT_TEMPLATE = r'''#!/usr/bin/env bash
 set -euo pipefail
@@ -72,38 +80,47 @@ umask 077
 
 LLM_ENV_HOST="@@LLM_ENV_HOST@@"
 
-for cmd in curl jq node mktemp; do
+for cmd in curl jq node mktemp cmp; do
     command -v "$cmd" >/dev/null 2>&1 || {
         echo "remote-setup: missing required command: $cmd" >&2
         exit 1
     }
 done
 
-workdir="$(mktemp -d)" || {
-    echo "remote-setup: could not create private configuration workspace" >&2
+echo "close Pi and OpenCode before continuing" >&2
+
+# install-agent-clients.sh's own source is embedded here (not fetched over
+# HTTP -- the design defines only /setup.sh and /config as public routes),
+# exactly like update-opencode-config.mjs below. It must be materialized
+# and sourced BEFORE create_agent_client_workdir can be called (that
+# function is defined by sourcing it) -- so it is staged to its own
+# mktemp'd file rather than into $workdir, which does not exist yet.
+lib="$(mktemp)" || {
+    echo "remote-setup: could not stage install-agent-clients.sh" >&2
     exit 1
 }
-chmod 700 "$workdir" || {
-    rm -rf -- "$workdir"
-    echo "remote-setup: could not secure private configuration workspace" >&2
+chmod 600 "$lib" || {
+    rm -f -- "$lib"
+    echo "remote-setup: could not secure staged install-agent-clients.sh" >&2
     exit 1
 }
-staged_files=()
-cleanup() {
-    local status=$?
-    local path
-    # "${staged_files[@]}" alone raises "unbound variable" under `set -u`
-    # on bash < 4.4 -- notably macOS's stock /bin/bash (3.2) -- once every
-    # element has been consumed by the staged_files=("${staged_files[@]:1}")
-    # slices below, leaving a legitimately empty array. The `-` default
-    # (`[@]-`) is the portable idiom; harmless on newer bash too.
-    for path in "${staged_files[@]-}"; do
-        [ -n "$path" ] && rm -f -- "$path"
-    done
-    rm -rf -- "$workdir"
-    exit "$status"
-}
-trap cleanup EXIT
+cat >"$lib" <<'INSTALL_LIB_EOF'
+@@INSTALL_LIB_SH@@
+INSTALL_LIB_EOF
+# shellcheck disable=SC1090 # heredoc-written above, not a static path
+source "$lib"
+
+create_agent_client_workdir
+# shellcheck disable=SC2154 # workdir/staged_files are set by create_agent_client_workdir above
+staged_files+=("$lib")
+
+# The updater's own source is embedded here too, same reasoning as above. A
+# quoted heredoc delimiter means the shell does no expansion inside the JS
+# body, so its own `$`/backtick usage is inert.
+updater="${workdir}/update-opencode-config.mjs"
+cat >"$updater" <<'OPENCODE_UPDATER_EOF'
+@@OPENCODE_UPDATER_JS@@
+OPENCODE_UPDATER_EOF
 
 # `curl ... | bash` leaves stdin attached to the script pipe, not the
 # terminal -- `read` must go to /dev/tty explicitly or the prompt below
@@ -152,271 +169,8 @@ models_file="${workdir}/models.json"
 printf '%s' "$models_json" >"$models_file"
 chmod 600 "$models_file"
 
-pi_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-pi_path="${pi_dir}/models.json"
-pi_settings_path="${pi_dir}/settings.json"
-mkdir -p "$pi_dir"
-chmod 700 "$pi_dir"
+install_agent_clients "$base_url" "$api_key_file" "$models_file" "$updater" "$lib" "false"
 
-# Same candidate-file detection setup-local-llm-agents.sh uses
-# (setup/setup-local-llm-agents.sh:149-231): every candidate that already
-# contains the "local-llm-env" provider is updated (a machine can have more
-# than one OpenCode config file); if none contains it yet, fall back to the
-# highest-priority *existing* candidate (checked in reverse,
-# opencode.jsonc -> opencode.json -> config.json, first hit wins); if none
-# exists at all, default to creating opencode.jsonc fresh. Preserves an
-# existing remote machine's own OpenCode config filename(s) instead of
-# always replacing them with a second, out-of-sync opencode.jsonc.
-opencode_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
-mkdir -p "$opencode_dir"
-chmod 700 "$opencode_dir"
-opencode_candidates=(
-    "${opencode_dir}/config.json"
-    "${opencode_dir}/opencode.json"
-    "${opencode_dir}/opencode.jsonc"
-)
-
-# The updater's own source is embedded here (not fetched over HTTP -- the
-# design defines only /setup.sh and /config as public routes). A quoted
-# heredoc delimiter means the shell does no expansion inside the JS body,
-# so its own `$`/backtick usage is inert.
-updater="${workdir}/update-opencode-config.mjs"
-cat >"$updater" <<'OPENCODE_UPDATER_EOF'
-@@OPENCODE_UPDATER_JS@@
-OPENCODE_UPDATER_EOF
-
-opencode_targets=()
-opencode_sources=()
-for candidate in "${opencode_candidates[@]}"; do
-    [ -e "$candidate" ] || continue
-    [ -f "$candidate" ] || {
-        echo "remote-setup: OpenCode configuration is not a regular file: ${candidate}" >&2
-        exit 1
-    }
-    if node "$updater" --contains-provider "$candidate"; then
-        contains_status=0
-    else
-        contains_status=$?
-    fi
-    case "$contains_status" in
-        0)
-            opencode_targets+=("$candidate")
-            opencode_sources+=("$candidate")
-            ;;
-        1) ;;
-        *)
-            echo "remote-setup: could not validate OpenCode configuration: ${candidate}" >&2
-            exit 1
-            ;;
-    esac
-done
-if [ "${#opencode_targets[@]}" -eq 0 ]; then
-    for candidate in "${opencode_candidates[2]}" "${opencode_candidates[1]}" "${opencode_candidates[0]}"; do
-        if [ -e "$candidate" ]; then
-            opencode_targets+=("$candidate")
-            opencode_sources+=("$candidate")
-            break
-        fi
-    done
-fi
-if [ "${#opencode_targets[@]}" -eq 0 ]; then
-    printf '{}\n' >"${workdir}/empty-opencode.jsonc"
-    opencode_targets+=("${opencode_candidates[2]}")
-    opencode_sources+=("${workdir}/empty-opencode.jsonc")
-fi
-
-# OpenCode's own recent/favorite/variant model-cycling state
-# ($XDG_STATE_HOME/opencode/model.json) is staged further below, once
-# every other target has staged cleanly -- see the comment there for why
-# it's only touched when it already exists.
-opencode_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
-opencode_state_path="${opencode_state_dir}/model.json"
-opencode_state_staged=""
-
-# $models_file already carries the final client-visible "id" per entry
-# ("llama-cpp/<alias>" for llama-cpp models, the bare combo name for
-# OmniRoute combos -- OmniRoute routes combos on their name directly, not
-# a provider-prefixed id, confirmed live) -- built server-side by
-# pylib.remote_setup before /config ever returned it, so no prefixing
-# happens here.
-pi_provider_file="${workdir}/pi-provider.json"
-jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
-    --slurpfile models "$models_file" \
-    '{baseUrl: $base_url, api: "openai-completions", apiKey: ($api_key | rtrimstr("\n")),
-      compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
-      models: [$models[0][] | {id: .id, contextWindow: .ctx_size, maxTokens: .client_max_output_tokens}]}' \
-    >"$pi_provider_file" || {
-    echo "remote-setup: could not build the Pi provider" >&2
-    exit 1
-}
-chmod 600 "$pi_provider_file"
-
-# Same safety bar setup/setup-local-llm-agents.sh applies to the local
-# machine's own files: an existing target must be a REGULAR file (reading a
-# FIFO with jq would block this installer forever, and a directory produces
-# an unhelpful error), and it must hold exactly ONE well-formed JSON object
-# with an object-shaped `.providers`. Plain `jq` happily reads two
-# concatenated JSON documents and writes two transformed documents back
-# out, which would leave an equally malformed configuration behind.
-pi_source="$pi_path"
-if [ -e "$pi_path" ]; then
-    [ -f "$pi_path" ] || {
-        echo "remote-setup: Pi configuration is not a regular file: ${pi_path}" >&2
-        exit 1
-    }
-    jq -e -s '
-        if length != 1 or (.[0] | type) != "object" then false
-        else ((.[0].providers // {}) | type) == "object"
-        end
-    ' "$pi_path" >/dev/null 2>&1 || {
-        echo "remote-setup: Pi configuration must contain exactly one JSON object with object providers: ${pi_path}" >&2
-        exit 1
-    }
-else
-    printf '{}\n' >"${workdir}/empty-pi.json"
-    pi_source="${workdir}/empty-pi.json"
-fi
-pi_staged="$(mktemp "${pi_dir}/.models.json.XXXXXX")"
-chmod 600 "$pi_staged"
-staged_files+=("$pi_staged")
-jq -s '
-  if length != 2 then error("Pi configuration must contain one JSON object")
-  elif (.[0] | type) != "object" then error("Pi configuration must be an object")
-  elif (.[1] | type) != "object" then error("Pi provider must be an object")
-  else
-    .[0] as $config | .[1] as $provider |
-    ($config.providers // {}) as $providers |
-    if ($providers | type) != "object" then error("Pi providers must be an object") else
-      $config | .providers = ($providers + {"local-llm-env": $provider})
-    end
-  end
-' "$pi_source" "$pi_provider_file" >"$pi_staged" || {
-    echo "remote-setup: could not update Pi configuration" >&2
-    exit 1
-}
-
-pi_settings_source="$pi_settings_path"
-if [ -e "$pi_settings_path" ]; then
-    [ -f "$pi_settings_path" ] || {
-        echo "remote-setup: Pi settings are not a regular file: ${pi_settings_path}" >&2
-        exit 1
-    }
-    jq -e -s 'length == 1 and (.[0] | type) == "object"' \
-        "$pi_settings_path" >/dev/null 2>&1 || {
-        echo "remote-setup: Pi settings must contain exactly one JSON object: ${pi_settings_path}" >&2
-        exit 1
-    }
-else
-    printf '{}\n' >"${workdir}/empty-pi-settings.json"
-    pi_settings_source="${workdir}/empty-pi-settings.json"
-fi
-pi_settings_staged="$(mktemp "${pi_dir}/.settings.json.XXXXXX")"
-chmod 600 "$pi_settings_staged"
-staged_files+=("$pi_settings_staged")
-jq --slurpfile models "$models_file" '
-    if type != "object" then error("Pi settings must be an object") else
-      .enabledModels = [$models[0][] | "local-llm-env/\(.id)"]
-    end
-' "$pi_settings_source" >"$pi_settings_staged" || {
-    echo "remote-setup: could not update Pi settings" >&2
-    exit 1
-}
-
-provider_file="${workdir}/opencode-provider.json"
-jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
-    --slurpfile models "$models_file" \
-    '{npm: "@ai-sdk/openai-compatible", name: "local-llm-env",
-      options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
-      models: (reduce $models[0][] as $model ({};
-          .[$model.id] = {name: $model.label,
-              limit: {context: $model.ctx_size, output: $model.client_max_output_tokens}}))}' \
-    >"$provider_file" || {
-    echo "remote-setup: could not build the OpenCode provider" >&2
-    exit 1
-}
-chmod 600 "$provider_file"
-
-opencode_staged=()
-for index in "${!opencode_targets[@]}"; do
-    opencode_target="${opencode_targets[$index]}"
-    opencode_source="${opencode_sources[$index]}"
-    staged="$(mktemp "${opencode_dir}/.$(basename "$opencode_target").XXXXXX")"
-    chmod 600 "$staged"
-    staged_files+=("$staged")
-    opencode_staged+=("$staged")
-    node "$updater" --replace-provider "$opencode_source" "$provider_file" "$staged" || {
-        echo "remote-setup: could not update OpenCode configuration: ${opencode_target}" >&2
-        exit 1
-    }
-done
-
-# OpenCode's favorites/recent-model state is only touched if it ALREADY
-# exists on this machine: editing an existing file needs no version check
-# at all (setup-local-llm-agents.sh only pins `opencode --version` when it
-# has to CREATE this file from scratch, which requires calling `opencode
-# debug paths` to learn the exact path OpenCode itself would use). A
-# fresh remote machine that has never actually run OpenCode yet has no
-# file to preserve favorites in, and requiring `opencode` to be installed
-# there just to create one would make the installer hard-fail on
-# machines where it's perfectly fine to skip this and let OpenCode create
-# its own default state on first use -- so a missing file is silently
-# left alone, never created.
-if [ -e "$opencode_state_path" ]; then
-    [ -f "$opencode_state_path" ] || {
-        echo "remote-setup: OpenCode model state is not a regular file: ${opencode_state_path}" >&2
-        exit 1
-    }
-    models_state_file="${workdir}/models-state.json"
-    jq '[.[] | .alias = .id]' "$models_file" >"$models_state_file" || {
-        echo "remote-setup: could not build model ids for OpenCode model state" >&2
-        exit 1
-    }
-    chmod 600 "$models_state_file"
-    opencode_state_staged="$(mktemp "${opencode_state_dir}/.model.json.XXXXXX")"
-    chmod 600 "$opencode_state_staged"
-    staged_files+=("$opencode_state_staged")
-    node "$updater" --update-model-state "$opencode_state_path" "$models_state_file" "$opencode_state_staged" || {
-        echo "remote-setup: could not update OpenCode model state" >&2
-        exit 1
-    }
-    state_check="${workdir}/checked-opencode-model.json"
-    node "$updater" --update-model-state "$opencode_state_staged" "$models_state_file" "$state_check" || {
-        echo "remote-setup: could not validate staged OpenCode model state" >&2
-        exit 1
-    }
-    cmp -s "$opencode_state_staged" "$state_check" || {
-        echo "remote-setup: staged OpenCode model state is not idempotent" >&2
-        exit 1
-    }
-    chmod 600 "$opencode_state_staged"
-fi
-
-# All targets -- Pi's models.json, Pi's settings.json, and every detected/
-# created OpenCode config -- are now staged in full. Only past this point
-# does anything get moved into place, so a failure in any of the jq/node
-# steps above (each already an explicit `exit 1` on error) leaves every
-# existing file on disk completely untouched, never a partial mix of "Pi
-# updated, OpenCode not" or vice versa.
-mv -f -- "$pi_staged" "$pi_path"
-staged_files=("${staged_files[@]:1}")
-mv -f -- "$pi_settings_staged" "$pi_settings_path"
-staged_files=("${staged_files[@]:1}")
-for index in "${!opencode_targets[@]}"; do
-    mv -f -- "${opencode_staged[$index]}" "${opencode_targets[$index]}"
-    staged_files=("${staged_files[@]:1}")
-done
-if [ -n "$opencode_state_staged" ]; then
-    mv -f -- "$opencode_state_staged" "$opencode_state_path"
-    staged_files=("${staged_files[@]:1}")
-fi
-echo "Pi configured: ${pi_path}"
-for opencode_target in "${opencode_targets[@]}"; do
-    echo "OpenCode configured: ${opencode_target}"
-done
-if [ -n "$opencode_state_staged" ]; then
-    echo "OpenCode favorites configured: ${opencode_state_path}"
-fi
-echo "Done. Model(s): $(jq -r '[.[].id] | join(", ")' "$models_file")"
 echo
 echo "OmniRoute dashboard: ${omniroute_dashboard_url}"
 echo "  Password: ${omniroute_dashboard_password}"
@@ -681,8 +435,10 @@ def build_config_response(
 
 def render_setup_script(host: str) -> str:
     updater_source = UPDATE_OPENCODE_CONFIG_PATH.read_text(encoding="utf-8")
+    lib_source = INSTALL_AGENT_CLIENTS_LIB_PATH.read_text(encoding="utf-8")
     script = SETUP_SCRIPT_TEMPLATE.replace(_HOST_PLACEHOLDER, host)
-    return script.replace(_UPDATER_JS_PLACEHOLDER, updater_source)
+    script = script.replace(_UPDATER_JS_PLACEHOLDER, updater_source)
+    return script.replace(_INSTALL_LIB_PLACEHOLDER, lib_source)
 
 
 class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):

@@ -50,6 +50,19 @@ def _use_real_opencode_updater(monkeypatch):
     )
 
 
+def _use_real_install_agent_clients_lib(monkeypatch):
+    """render_setup_script() reads INSTALL_AGENT_CLIENTS_LIB_PATH from disk
+    to embed it into the generated script, same reasoning as
+    _use_real_opencode_updater() above -- point the module at this repo's
+    real setup/lib/install-agent-clients.sh instead of the container-only
+    path."""
+    monkeypatch.setattr(
+        remote_setup_module,
+        "INSTALL_AGENT_CLIENTS_LIB_PATH",
+        REPO_ROOT / "setup" / "lib" / "install-agent-clients.sh",
+    )
+
+
 def test_parse_bearer_token_extracts_the_token():
     assert parse_bearer_token("Bearer abc123") == "abc123"
 
@@ -234,6 +247,7 @@ def test_build_config_response_shape():
 
 def test_render_setup_script_embeds_the_host(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert 'LLM_ENV_HOST="192.0.2.1:20130"' in script
     assert script.startswith("#!/usr/bin/env bash")
@@ -241,6 +255,7 @@ def test_render_setup_script_embeds_the_host(monkeypatch):
 
 def test_render_setup_script_prompts_for_the_master_key_from_the_tty(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "OMNI_ROUTER_MASTER_KEY:" in script
     assert "read -r -s -p" in script
@@ -257,6 +272,7 @@ def test_render_setup_script_does_not_use_curl_dash_f(monkeypatch):
     # (unrelated uses of -f) legitimately contain " -f " as a substring,
     # so a blanket substring check would false-positive on those.
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     for line in script.splitlines():
         if line.strip().startswith("curl"):
@@ -266,6 +282,7 @@ def test_render_setup_script_does_not_use_curl_dash_f(monkeypatch):
 
 def test_render_setup_script_captures_the_http_status_and_checks_it(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "%{http_code}" in script
     assert 'if [ "$http_status" != "200" ]' in script
@@ -278,6 +295,7 @@ def test_render_setup_script_never_passes_the_master_key_as_a_curl_argument(monk
     # must instead use a private, mode-0600 curl config file passed via
     # -K, mirroring scripts/check-server.sh's own auth_conf pattern.
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert '-H "Authorization: Bearer' not in script
     assert 'header = "Authorization: Bearer %s"' in script
@@ -292,6 +310,7 @@ def test_render_setup_script_sends_omniroute_routed_model_ids(monkeypatch):
     # /config ever returns it, so the bash template must consume .id
     # verbatim rather than re-prefixing "llama-cpp/" itself.
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "id: .id" in script
     assert ".[$model.id]" in script
@@ -299,6 +318,7 @@ def test_render_setup_script_sends_omniroute_routed_model_ids(monkeypatch):
 
 def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "<<'OPENCODE_UPDATER_EOF'" in script
     assert "OPENCODE_UPDATER_EOF" in script
@@ -310,10 +330,11 @@ def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch
 
 def test_render_setup_script_uses_staged_files_with_restrictive_permissions(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "chmod 700 \"$workdir\"" in script
     assert "chmod 600" in script
-    assert "trap cleanup EXIT" in script
+    assert "trap _iac_cleanup EXIT" in script
 
 
 def test_render_setup_script_detects_an_existing_opencode_candidate_file(monkeypatch):
@@ -325,16 +346,18 @@ def test_render_setup_script_detects_an_existing_opencode_candidate_file(monkeyp
     # config.json), and only when none exist at all does it default to
     # creating opencode.jsonc fresh.
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert (
         'opencode_candidates=(\n'
-        '    "${opencode_dir}/config.json"\n'
-        '    "${opencode_dir}/opencode.json"\n'
-        '    "${opencode_dir}/opencode.jsonc"\n'
-        ')'
+        '        "${opencode_dir}/config.json"\n'
+        '        "${opencode_dir}/opencode.json"\n'
+        '        "${opencode_dir}/opencode.jsonc"\n'
+        '    )'
     ) in script
-    assert 'node "$updater" --contains-provider "$candidate"' in script
-    assert 'for candidate in "${opencode_candidates[2]}" "${opencode_candidates[1]}" "${opencode_candidates[0]}"; do' in script
+    assert 'node "$updater_path" --contains-provider "$candidate"' in script
+    assert 'for index in 2 1 0; do' in script
+    assert 'candidate="${opencode_candidates[$index]}"' in script
     assert 'opencode_targets+=("${opencode_candidates[2]}")' in script
 
 
@@ -348,6 +371,7 @@ def test_render_setup_script_validates_opencode_candidates_are_regular_files_and
     # (real validation error) rather than treating every non-zero exit as
     # "does not contain".
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert '[ -f "$candidate" ] ||' in script
     assert 'contains_status=0' in script
@@ -363,9 +387,10 @@ def test_render_setup_script_stages_pi_and_opencode_before_moving_either_into_pl
     # files) must appear in the script BEFORE the first `mv -f --` that
     # moves any of them into place.
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     last_staging_step = script.index(
-        'node "$updater" --replace-provider "$opencode_source" "$provider_file" "$staged"'
+        'node "$updater_path" --replace-provider "$opencode_source" "$opencode_provider" "$staged_file"'
     )
     first_move = script.index('mv -f -- "$pi_staged" "$pi_path"')
     assert last_staging_step < first_move
@@ -421,6 +446,7 @@ def _start_server(handler_class):
 
 def test_setup_sh_is_served_without_auth_and_embeds_the_request_host(tmp_path, monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
     monkeypatch.setenv("MODELS_JSON", "[]")
     server, thread = _start_server(RemoteSetupHandler)
@@ -961,6 +987,7 @@ def _run_generated_setup_sh(tmp_path, monkeypatch, prepare_home=None, timeout=60
         fake_port = fake_omniroute.server_address[1]
         monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
         _use_real_opencode_updater(monkeypatch)
+        _use_real_install_agent_clients_lib(monkeypatch)
         monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-master-key")
         monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
         monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
@@ -1047,10 +1074,8 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
 
     assert "OmniRoute dashboard: http://127.0.0.1:20128" in output
     assert "dashboard-pw" in output
-    # Regression: the final summary used to read a `.alias` field that
-    # doesn't exist on the id/label model shape, silently printing
-    # "Done. Model(s): " with no names at all.
-    assert "Done. Model(s): llama-cpp/a" in output
+    assert "enabled model: llama-cpp/a (context" in output
+    assert "Installer version: " in output
 
 
 def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
@@ -1067,6 +1092,7 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     thing under test, and it is fully deterministic -- if no `--argjson`
     survives at all, no argument can carry the key."""
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("llm.local:20130")
 
     code_lines = [
@@ -1076,7 +1102,7 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     # The key only ever reaches jq through file-backed options.
     assert '--rawfile api_key "$api_key_file"' in script
     assert '--slurpfile models "$models_file"' in script
-    assert '"$pi_provider_file"' in script
+    assert '"$pi_provider"' in script
 
     # ...and the end-to-end run confirms the key still lands in the configs.
     exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
@@ -1095,6 +1121,7 @@ def test_setup_sh_cleanup_trap_survives_an_empty_staged_files_array(monkeypatch)
     "Done." output. `"${staged_files[@]-}"` is the portable, bash-3.2-safe
     idiom; assert it's actually what's rendered."""
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("llm.local:20130")
     assert 'for path in "${staged_files[@]-}"; do' in script
 
@@ -1231,7 +1258,7 @@ def test_setup_sh_updates_an_existing_opencode_favorites_state(tmp_path, monkeyp
     )
 
     assert exit_code == 0, output
-    assert "OpenCode favorites configured" in output
+    assert "configured OpenCode favorites" in output
     state = json.loads(
         (home_dir / ".local" / "state" / "opencode" / "model.json").read_text()
     )
@@ -1247,7 +1274,7 @@ def test_setup_sh_leaves_opencode_favorites_untouched_when_absent(tmp_path, monk
     exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
 
     assert exit_code == 0, output
-    assert "OpenCode favorites configured" not in output
+    assert "configured OpenCode favorites" not in output
     assert not (home_dir / ".local" / "state" / "opencode" / "model.json").exists()
 
 
@@ -1352,6 +1379,7 @@ def test_handler_sets_a_socket_timeout():
 
 def test_handler_logs_a_non_2xx_response_but_stays_quiet_on_200(capsys, monkeypatch):
     _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
     server, thread = _start_server(RemoteSetupHandler)
     try:
         port = server.server_address[1]

@@ -304,6 +304,12 @@ def test_remote_setup_service_mounts_pylib_and_a_named_data_volume():
     assert document["volumes"]["remote-setup-data"] == {}
 
 
+def test_remote_setup_mounts_the_shared_agent_client_library():
+    _, document = compose_dict(CFG)
+    volumes = document["services"]["remote-setup"]["volumes"]
+    assert any(v.endswith("/setup/lib:/app/setup/lib:ro,z") for v in volumes)
+
+
 def test_remote_setup_service_command_runs_the_module():
     _, document = compose_dict()
     assert document["services"]["remote-setup"]["command"] == [
