@@ -5082,7 +5082,7 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
     )
 
     assert failed.returncode != 0
-    assert "rerun make setup-local-llm-agents" in failed.stderr
+    assert "rerun the installer to repair partial updates" in failed.stderr
     assert "fixture-omniroute-api-key" not in failed.stdout + failed.stderr
 
     repaired, _, _, settings_path, _, state_path = run_setup_local_llm_agents(

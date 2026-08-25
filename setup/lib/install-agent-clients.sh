@@ -25,6 +25,21 @@ _iac_require_cmd() {
     done
 }
 
+_iac_validate_models_file() {
+    local models_file="$1"
+    jq -e '
+        type == "array" and length > 0 and
+        ([.[].id] | length == (unique | length)) and
+        all(.[];
+            (.id | type == "string" and length > 0) and
+            (.label | type == "string" and length > 0) and
+            (.ctx_size | type == "number" and . > 0 and floor == .) and
+            (.client_max_output_tokens | type == "number" and . > 0 and floor == .) and
+            .client_max_output_tokens <= .ctx_size)
+    ' "$models_file" >/dev/null \
+        || _iac_die "mapped model records require unique ids and valid context/output limits"
+}
+
 # create_agent_client_workdir
 #
 # Creates a private (0700) temp workspace ($workdir), initializes
@@ -123,6 +138,48 @@ _iac_stage_pi_settings() {
 #      `opencode` there just to create this file would make the installer
 #      hard-fail somewhere it is fine to let OpenCode create its own
 #      default state on first use).
+# validate_agent_client_local_state MODELS_FILE UPDATER_PATH CREATE_MISSING_OPENCODE_STATE
+#
+# Performs every check install_agent_clients() would otherwise defer until
+# after it has already made network calls of its own callers' -- validates
+# MODELS_FILE and, when an OpenCode model-state file already exists,
+# validates it via UPDATER_PATH's --validate-model-state. Entirely local
+# filesystem reads: no network access, no writes outside $workdir-free
+# scratch space.
+#
+# Callers that also perform a network reachability check before calling
+# install_agent_clients() (e.g. setup-local-llm-agents.sh's OmniRoute
+# health probe) should call this first, so a malformed local input fails
+# fast with zero network calls -- then do their network check -- then call
+# install_agent_clients() as usual. install_agent_clients() repeats this
+# same validation internally, so it stays correct even for a caller that
+# never calls this precheck at all.
+validate_agent_client_local_state() {
+    _iac_require_cmd jq node
+
+    local models_file="$1" updater_path="$2" create_missing_state="$3"
+
+    case "$create_missing_state" in
+        true|false) ;;
+        *) _iac_die "CREATE_MISSING_OPENCODE_STATE must be true or false" ;;
+    esac
+
+    _iac_validate_models_file "$models_file"
+
+    local opencode_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
+    local opencode_state_path="${opencode_state_dir}/model.json"
+    if [ -e "$opencode_state_path" ]; then
+        [ -f "$opencode_state_path" ] \
+            || _iac_die "OpenCode model state is not a regular file: ${opencode_state_path}"
+        node "$updater_path" --validate-model-state "$opencode_state_path" \
+            || _iac_die "incompatible OpenCode model state: ${opencode_state_path}"
+    fi
+    # When create_missing_state=true and no state file exists yet,
+    # install_agent_clients() still has to query the local `opencode`
+    # binary to build one from scratch -- there is no existing file to
+    # validate here, so there is nothing more to fail fast on.
+}
+
 install_agent_clients() {
     _iac_require_cmd jq node mktemp cmp
 
@@ -134,17 +191,7 @@ install_agent_clients() {
         *) _iac_die "CREATE_MISSING_OPENCODE_STATE must be true or false" ;;
     esac
 
-    jq -e '
-        type == "array" and length > 0 and
-        ([.[].id] | length == (unique | length)) and
-        all(.[];
-            (.id | type == "string" and length > 0) and
-            (.label | type == "string" and length > 0) and
-            (.ctx_size | type == "number" and . > 0 and floor == .) and
-            (.client_max_output_tokens | type == "number" and . > 0 and floor == .) and
-            .client_max_output_tokens <= .ctx_size)
-    ' "$models_file" >/dev/null \
-        || _iac_die "mapped model records require unique ids and valid context/output limits"
+    _iac_validate_models_file "$models_file"
 
     local pi_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
     local pi_path="${pi_dir}/models.json"
