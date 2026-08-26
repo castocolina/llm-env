@@ -1271,6 +1271,16 @@ def test_setup_sh_rejects_a_non_regular_pi_target_instead_of_hanging(
 
     assert exit_code == 1, output
     assert "not a regular file" in output
+    # Regression test: an earlier fix for the $lib leak on the success path
+    # (replacing create_agent_client_workdir's EXIT trap with one that also
+    # removes $lib) restored the original exit status via a bare
+    # `(exit "$lib_exit_status")`, which is itself a failing command under
+    # `set -e` whenever that status is non-zero -- aborting the trap before
+    # _iac_cleanup ran, and leaking the entire $workdir (staged API key,
+    # provider JSON, auth.conf) on every failure path instead of just
+    # leaking $lib on success. This must stay empty on a failure exit too.
+    leftover = list((tmp_path / "system-tmp").iterdir())
+    assert leftover == [], f"leaked temp file(s)/dir(s) on failure: {leftover}"
 
 
 @pytest.mark.parametrize("target", ["models.json", "settings.json"])
