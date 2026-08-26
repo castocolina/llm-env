@@ -122,13 +122,22 @@ create_agent_client_workdir
 # $lib leaks on every successful run. Since setup/lib/install-agent-clients.sh
 # must not be modified for this, $lib is kept out of $staged_files entirely
 # and instead cleaned up by replacing the trap wholesale (bash traps do not
-# chain): remove $lib first, restore the original exit status via a
-# subshell, then delegate to _iac_cleanup -- a plain global function once
+# chain): remove $lib first, restore the original exit status, then
+# delegate to _iac_cleanup -- a plain global function once
 # create_agent_client_workdir has run -- for everything else. This covers
 # every exit path: success, an _iac_die failure inside install_agent_clients,
 # and any earlier failure once this trap is installed.
+#
+# The whole script runs under `set -e`, which also applies inside an
+# already-firing EXIT trap: a bare `(exit "$lib_exit_status")` used to
+# restore $? for _iac_cleanup would itself be a "failing" command whenever
+# the original status was non-zero, aborting the trap right there and
+# skipping _iac_cleanup entirely -- leaking $workdir (which can hold the
+# staged API key and provider files) on every failure path instead of just
+# leaking $lib on the success path. `set +e` around that one restore-$?
+# step is what keeps that failing exit status from also killing the trap.
 # shellcheck disable=SC2154 # _iac_cleanup is defined by create_agent_client_workdir above
-trap 'lib_exit_status=$?; rm -f -- "$lib"; (exit "$lib_exit_status"); _iac_cleanup' EXIT
+trap 'lib_exit_status=$?; rm -f -- "$lib"; set +e; (exit "$lib_exit_status"); _iac_cleanup' EXIT
 
 # The updater's own source is embedded here too, same reasoning as above. A
 # quoted heredoc delimiter means the shell does no expansion inside the JS
