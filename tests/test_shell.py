@@ -10731,3 +10731,221 @@ install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file
     )
     assert result.returncode == 1
     assert "missing required command: opencode" in result.stdout + result.stderr
+
+
+def run_update_omniroute_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    image: str = "docker.io/diegosouzapw/omniroute:latest",
+    local_image_exists: bool = True,
+    local_version: str | None = "3.8.49",
+    remote_tag_names: tuple[str, ...] = ("latest", "3.8.50", "3.8.50-web", "3.8.49"),
+    curl_fail: bool = False,
+    pull_fail: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run update-omniroute.sh against stubbed podman/curl/stop.sh/start.sh.
+
+    remote_tag_names is written to the stubbed Docker Hub tags response in
+    the given order (Docker Hub's own `ordering=last_updated` already
+    returns newest first, so this list's order IS the "recency" order the
+    real API would return)."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f"version: 1\nomniroute:\n  image: {image!r}\n  port: 20128\n")
+    config.chmod(0o600)
+
+    bash = commands / "bash"
+    bash.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'bash %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *scripts/stop.sh) exit 0 ;;\n"
+        "  *scripts/start.sh) exit 0 ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    bash.chmod(bash.stat().st_mode | stat.S_IXUSR)
+
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    local_version_json = (
+        json.dumps({"version": local_version}) if local_version is not None else ""
+    )
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$1\" in\n"
+        "  image)\n"
+        f"    [ \"$2\" != exists ] || {'exit 0' if local_image_exists else 'exit 1'} ;;\n"
+        "  run)\n"
+        f"    printf '%s' {json.dumps(local_version_json)} ;;\n"
+        "  pull)\n"
+        f"    exit {'1' if pull_fail else '0'} ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    tags_json = json.dumps({"results": [{"name": name} for name in remote_tag_names]})
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        + ("exit 22\n" if curl_fail else f"printf '%s' {json.dumps(tags_json)}\n")
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/update-omniroute.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_update_omniroute_pulls_and_restarts_when_a_newer_version_is_published(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path, local_version="3.8.49", remote_tag_names=("3.8.50", "3.8.49")
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "3.8.49 -> 3.8.50" in result.stdout
+    recorded = calls.read_text()
+    assert "podman pull docker.io/diegosouzapw/omniroute:latest" in recorded
+    assert "bash " + str(ROOT / "scripts" / "stop.sh") in recorded
+    assert "bash " + str(ROOT / "scripts" / "start.sh") in recorded
+    # Pull happens first (the slow part, while still serving traffic), then
+    # stop, then start -- minimizes downtime to just the stop+start window.
+    pull_index = recorded.index("podman pull")
+    stop_index = recorded.index("scripts/stop.sh")
+    start_index = recorded.index("scripts/start.sh")
+    assert pull_index < stop_index < start_index
+
+
+def test_update_omniroute_does_nothing_when_already_on_the_latest_version(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path, local_version="3.8.50", remote_tag_names=("3.8.50", "3.8.49")
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already on the latest published version" in result.stdout
+    recorded = calls.read_text()
+    assert "podman pull" not in recorded
+    assert "scripts/stop.sh" not in recorded
+    assert "scripts/start.sh" not in recorded
+
+
+def test_update_omniroute_compares_versions_numerically_not_lexicographically(
+    tmp_path: pathlib.Path,
+) -> None:
+    """"3.8.9" must not be treated as newer than "3.8.48" by a naive
+    lexicographic string comparison."""
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path, local_version="3.8.48", remote_tag_names=("3.8.9",)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already on the latest published version" in result.stdout
+    assert "podman pull" not in calls.read_text()
+
+
+def test_update_omniroute_treats_a_missing_local_image_as_needing_an_update(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path,
+        local_image_exists=False,
+        local_version=None,
+        remote_tag_names=("3.8.50",),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no local image found" in result.stdout
+    assert "0.0.0 -> 3.8.50" in result.stdout
+    recorded = calls.read_text()
+    assert "podman pull" in recorded
+    # No local image to introspect -- the script must not spawn a
+    # throwaway container at all (that would itself implicitly pull),
+    # it should fall straight through to the "0.0.0" placeholder.
+    assert "podman run" not in recorded
+
+
+def test_update_omniroute_never_implicitly_pulls_during_the_version_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    check_index = recorded.index("podman run")
+    pull_indices = [i for i in range(len(recorded)) if recorded.startswith("podman pull", i)]
+    assert all(check_index < i for i in pull_indices)
+
+
+def test_update_omniroute_skips_unsupported_registries_without_failing(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path, image="ghcr.io/example/omniroute:latest"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "unsupported registry" in result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "curl" not in recorded
+    assert "podman" not in recorded
+
+
+def test_update_omniroute_dies_on_a_docker_hub_network_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(tmp_path, curl_fail=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "could not reach Docker Hub" in result.stdout + result.stderr
+    assert "podman pull" not in calls.read_text()
+
+
+def test_update_omniroute_dies_on_a_pull_failure_without_starting(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_update_omniroute_with_stubs(
+        tmp_path, local_version="3.8.49", remote_tag_names=("3.8.50",), pull_fail=True
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "could not pull" in result.stdout + result.stderr
+    recorded = calls.read_text()
+    # Pull runs before stop now -- a pull failure must leave the running
+    # service untouched, not stop it and then fail to start it back up.
+    assert "scripts/stop.sh" not in recorded
+    assert "scripts/start.sh" not in recorded

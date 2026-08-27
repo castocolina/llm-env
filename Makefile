@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore connections-backup logs validate test clean prune
+        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore connections-backup update-omniroute logs validate test clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -73,6 +73,9 @@ combo-restore:
 
 connections-backup:
 	@bash tools/run-target.sh connections-backup -- bash scripts/omniroute-connections-backup.sh $(OUTPUT)
+
+update-omniroute:
+	@bash tools/run-target.sh update-omniroute -- bash scripts/update-omniroute.sh
 
 logs:
 	@bash tools/run-target.sh logs -- bash scripts/logs.sh
