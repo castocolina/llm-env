@@ -10949,3 +10949,284 @@ def test_update_omniroute_dies_on_a_pull_failure_without_starting(
     # service untouched, not stop it and then fail to start it back up.
     assert "scripts/stop.sh" not in recorded
     assert "scripts/start.sh" not in recorded
+
+
+def run_check_provider_tokens_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    login_status: str = "200",
+    login_curl_fail: bool = False,
+    connections_json: str = '{"connections":[{"provider":"anthropic","name":"cco-cl","testStatus":"active"}]}',
+    providers_curl_fail: bool = False,
+    notify_send_available: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run check-provider-tokens.sh against a stubbed OmniRoute dashboard API."""
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "version: 1\nomniroute:\n  port: 20128\n  initial_password: test-password\n"
+    )
+    config.chmod(0o600)
+
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    curl = commands / "curl"
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *auth/login*)\n"
+        f"    {'exit 6' if login_curl_fail else f'printf %s {login_status!r}'} ;;\n"
+        "  *api/providers*)\n"
+        f"    {'exit 6' if providers_curl_fail else f'printf %s {connections_json!r}'} ;;\n"
+        "esac\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+
+    if notify_send_available:
+        notify_send = commands / "notify-send"
+        notify_send.write_text(
+            "#!/usr/bin/bash\nprintf 'notify-send %s\\n' \"$*\" >> \"$CALLS\"\n"
+        )
+        notify_send.chmod(notify_send.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/check-provider-tokens.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, calls
+
+
+def test_check_provider_tokens_reports_all_active(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_provider_tokens_with_stubs(
+        tmp_path,
+        connections_json='{"connections":[{"provider":"anthropic","name":"cco-cl","testStatus":"active"},'
+        '{"provider":"xai","name":"grok-build","testStatus":"active"}]}',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "all 2 provider connection(s) are active" in result.stdout
+
+
+def test_check_provider_tokens_flags_unhealthy_connections_and_notifies(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_check_provider_tokens_with_stubs(
+        tmp_path,
+        connections_json='{"connections":[{"provider":"anthropic","name":"cco-cl","testStatus":"active"},'
+        '{"provider":"xai","name":"grok-build","testStatus":"error","lastError":"token expired"}]}',
+    )
+    assert result.returncode == 1
+    assert "1 provider connection(s) need attention" in result.stdout + result.stderr
+    assert "xai/grok-build: error" in result.stdout + result.stderr
+    assert "token expired" in result.stdout + result.stderr
+    assert "notify-send" in calls.read_text()
+
+
+def test_check_provider_tokens_skips_notification_when_notify_send_missing(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls = run_check_provider_tokens_with_stubs(
+        tmp_path,
+        connections_json='{"connections":[{"provider":"xai","name":"grok-build","testStatus":"error"}]}',
+        notify_send_available=False,
+    )
+    assert result.returncode == 1
+    assert "1 provider connection(s) need attention" in result.stdout + result.stderr
+
+
+def test_check_provider_tokens_dies_when_omniroute_is_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls = run_check_provider_tokens_with_stubs(tmp_path, login_curl_fail=True)
+    assert result.returncode == 1
+    assert "could not reach OmniRoute" in result.stdout + result.stderr
+
+
+def test_check_provider_tokens_dies_on_login_failure(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_provider_tokens_with_stubs(tmp_path, login_status="401")
+    assert result.returncode == 1
+    assert "login failed" in result.stdout + result.stderr
+    assert "401" in result.stdout + result.stderr
+
+
+def run_enable_token_check_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    config_present: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run enable-token-check.sh against a stubbed systemctl."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    if config_present:
+        config.write_text("version: 1\n")
+
+    systemctl = commands / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/bash\nprintf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/enable-token-check.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    service_unit = home / ".config/systemd/user/llm-env-token-check.service"
+    timer_unit = home / ".config/systemd/user/llm-env-token-check.timer"
+    return result, service_unit, timer_unit
+
+
+def test_enable_token_check_writes_units_with_an_explicit_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The generated unit must set PATH explicitly -- systemd --user services
+    don't inherit the interactive shell's PATH, so tools under ~/.local/bin
+    (like yq) would otherwise resolve to nothing."""
+    result, service_unit, timer_unit = run_enable_token_check_with_stubs(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert service_unit.exists()
+    assert stat.S_IMODE(service_unit.stat().st_mode) == 0o600
+    unit_text = service_unit.read_text()
+    assert "Environment=PATH=" in unit_text
+    assert ".local/bin" in unit_text
+    assert f"ExecStart=/usr/bin/bash {ROOT / 'scripts/check-provider-tokens.sh'}" in unit_text
+    assert timer_unit.exists()
+    assert "OnCalendar=daily" in timer_unit.read_text()
+    assert "Persistent=true" in timer_unit.read_text()
+
+
+def test_enable_token_check_enables_the_timer(tmp_path: pathlib.Path) -> None:
+    result, _service_unit, _timer_unit = run_enable_token_check_with_stubs(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = None
+    for line in (tmp_path / "calls").read_text().splitlines():
+        if "daemon-reload" in line or "enable --now" in line:
+            recorded = True
+    assert recorded, (tmp_path / "calls").read_text()
+    assert "systemctl --user daemon-reload" in (tmp_path / "calls").read_text()
+    assert (
+        "systemctl --user enable --now llm-env-token-check.timer"
+        in (tmp_path / "calls").read_text()
+    )
+
+
+def test_enable_token_check_requires_existing_config(tmp_path: pathlib.Path) -> None:
+    result, service_unit, _timer_unit = run_enable_token_check_with_stubs(
+        tmp_path, config_present=False
+    )
+    assert result.returncode == 1
+    assert "run 'make setup' first" in result.stdout + result.stderr
+    assert not service_unit.exists()
+
+
+def run_disable_token_check_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    units_installed: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run disable-token-check.sh against a stubbed systemctl."""
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    calls.touch()
+    home = tmp_path / "home"
+    unit_dir = home / ".config/systemd/user"
+    unit_dir.mkdir(parents=True)
+    service_unit = unit_dir / "llm-env-token-check.service"
+    timer_unit = unit_dir / "llm-env-token-check.timer"
+    if units_installed:
+        service_unit.write_text("[Service]\n")
+        timer_unit.write_text("[Timer]\n")
+
+    systemctl = commands / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/bash\nprintf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
+
+    environment = os.environ | {
+        "CALLS": str(calls),
+        "HOME": str(home),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/disable-token-check.sh"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, service_unit, timer_unit
+
+
+def test_disable_token_check_removes_installed_units(tmp_path: pathlib.Path) -> None:
+    result, service_unit, timer_unit = run_disable_token_check_with_stubs(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not service_unit.exists()
+    assert not timer_unit.exists()
+    recorded = (tmp_path / "calls").read_text()
+    assert "systemctl --user disable --now llm-env-token-check.timer" in recorded
+    assert "systemctl --user daemon-reload" in recorded
+
+
+def test_disable_token_check_is_a_noop_when_not_installed(tmp_path: pathlib.Path) -> None:
+    result, service_unit, timer_unit = run_disable_token_check_with_stubs(
+        tmp_path, units_installed=False
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "nothing to do" in result.stdout + result.stderr
+    assert not service_unit.exists()
+    assert not timer_unit.exists()

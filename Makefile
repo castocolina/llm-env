@@ -1,5 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore connections-backup update-omniroute logs validate test clean prune
+        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore connections-backup update-omniroute \
+        check-provider-tokens enable-token-check disable-token-check logs validate test clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -76,6 +77,15 @@ connections-backup:
 
 update-omniroute:
 	@bash tools/run-target.sh update-omniroute -- bash scripts/update-omniroute.sh
+
+check-provider-tokens:
+	@bash tools/run-target.sh check-provider-tokens -- bash scripts/check-provider-tokens.sh
+
+enable-token-check:
+	@bash tools/run-target.sh enable-token-check -- bash setup/enable-token-check.sh
+
+disable-token-check:
+	@bash tools/run-target.sh disable-token-check -- bash setup/disable-token-check.sh
 
 logs:
 	@bash tools/run-target.sh logs -- bash scripts/logs.sh
