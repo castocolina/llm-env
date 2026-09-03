@@ -1,6 +1,12 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 
-const providerName = "local-llm-env";
+const providerName = "router-env";
+// Provisioned under this name before the router-env rename. Any config
+// still carrying it is migrated in place: the stale entry is stripped
+// whenever the current provider is written or the model-state favorites
+// are rewritten, so an already-provisioned remote machine ends up with
+// exactly one entry (the new name) instead of an orphaned duplicate.
+const legacyProviderName = "local-llm-env";
 const [mode, ...paths] = process.argv.slice(2);
 
 class JsoncParser {
@@ -190,6 +196,34 @@ function appendProperty(text, object, key, value) {
   return `${before}${leading}${indent}${JSON.stringify(key)}: ${renderValue(value, indent)}${trailing}${after}`;
 }
 
+function removeProperty(text, object, key) {
+  const match = property(object, key);
+  if (match === undefined) return text;
+  const index = object.properties.indexOf(match);
+  let start = match.start;
+  let end = match.comma !== undefined ? match.comma + 1 : match.value.end;
+  if (match.comma === undefined && index > 0) {
+    const previous = object.properties[index - 1];
+    if (previous.comma !== undefined) {
+      start = previous.comma;
+      end = match.value.end;
+    }
+  }
+  return text.slice(0, start) + text.slice(end);
+}
+
+function stripLegacyProvider(text) {
+  const root = readJsonc(text);
+  if (root.type !== "object") {
+    throw new Error("root configuration must be an object");
+  }
+  const providerProperty = property(root, "provider");
+  if (providerProperty === undefined || providerProperty.value.type !== "object") {
+    return text;
+  }
+  return removeProperty(text, providerProperty.value, legacyProviderName);
+}
+
 function replaceProvider(text, provider) {
   const root = readJsonc(text);
   if (root.type !== "object") {
@@ -286,7 +320,9 @@ function updateModelState(text, models) {
   return JSON.stringify({
     recent: state.recent,
     favorite: local.concat(
-      state.favorite.filter((item) => item.providerID !== providerName),
+      state.favorite.filter(
+        (item) => item.providerID !== providerName && item.providerID !== legacyProviderName,
+      ),
     ),
     variant: state.variant,
   }) + "\n";
@@ -309,7 +345,11 @@ async function main() {
       providerProperty === undefined
         ? undefined
         : property(providerProperty.value, providerName);
-    process.exitCode = localProvider === undefined ? 1 : 0;
+    const legacyProvider =
+      providerProperty === undefined
+        ? undefined
+        : property(providerProperty.value, legacyProviderName);
+    process.exitCode = localProvider === undefined && legacyProvider === undefined ? 1 : 0;
     return;
   }
   if (mode === "--validate-model-state" && paths.length === 1) {
@@ -334,11 +374,8 @@ async function main() {
   if (provider === null || Array.isArray(provider) || typeof provider !== "object") {
     throw new Error("provider must be an object");
   }
-  await writeFile(
-    outputPath,
-    replaceProvider(await readFile(inputPath, "utf8"), provider),
-    { mode: 0o600 },
-  );
+  const inputText = stripLegacyProvider(await readFile(inputPath, "utf8"));
+  await writeFile(outputPath, replaceProvider(inputText, provider), { mode: 0o600 });
 }
 
 try {

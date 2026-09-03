@@ -1783,6 +1783,7 @@ def test_omniroute_combo_context_reports_the_true_minimum(tmp_path):
                     ],
                     "min_context_window": 200_000,
                     "min_max_output_tokens": 128000,
+                    "limiting_member": "grok-cli/grok-composer-2.5-fast",
                 }
             ]
         }

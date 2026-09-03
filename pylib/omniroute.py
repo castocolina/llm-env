@@ -397,12 +397,26 @@ def compute_combo_context(
             for member in members
             if isinstance(member["max_output_tokens"], int)
         ]
+        min_context_window = min(known_windows) if known_windows else None
+        # First member (in combo-membership order) whose own context_window
+        # equals the combo's floor -- i.e. the one actually setting it, so a
+        # caller can tell the operator *why* a combo's context is what it is
+        # instead of just the number. Ties resolve to the first occurrence,
+        # deterministically, rather than leaving it ambiguous.
+        limiting_member = None
+        if min_context_window is not None:
+            limiting_member = next(
+                f"{member['provider']}/{member['model']}"
+                for member in members
+                if member["context_window"] == min_context_window
+            )
         results.append(
             {
                 "combo": name,
                 "members": members,
-                "min_context_window": min(known_windows) if known_windows else None,
+                "min_context_window": min_context_window,
                 "min_max_output_tokens": min(known_outputs) if known_outputs else None,
+                "limiting_member": limiting_member,
             }
         )
 

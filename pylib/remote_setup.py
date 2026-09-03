@@ -452,14 +452,16 @@ def _build_unified_models(
             client_max_output_tokens = ctx_size
         else:
             client_max_output_tokens = max_output
-        models.append(
-            {
-                "id": combo["combo"],
-                "label": f"{combo['combo']} (combo)",
-                "ctx_size": ctx_size,
-                "client_max_output_tokens": client_max_output_tokens,
-            }
-        )
+        model: dict[str, Any] = {
+            "id": combo["combo"],
+            "label": f"{combo['combo']} (combo)",
+            "ctx_size": ctx_size,
+            "client_max_output_tokens": client_max_output_tokens,
+        }
+        limiting_member = combo.get("limiting_member")
+        if isinstance(limiting_member, str):
+            model["limiting_model"] = limiting_member
+        models.append(model)
     return models
 
 

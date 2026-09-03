@@ -89,6 +89,9 @@ _iac_prepare_staged_file() {
 
 _iac_stage_pi() {
     local source="$1" provider="$2" staged="$3"
+    # Drops any provider still filed under router-env's pre-rename name
+    # ("local-llm-env") so an already-provisioned machine ends up with one
+    # entry (the current name) instead of an orphaned duplicate.
     jq -s '
       if length != 2 then error("Pi configuration must contain one JSON object")
       elif (.[0] | type) != "object" then error("Pi configuration must be an object")
@@ -97,7 +100,7 @@ _iac_stage_pi() {
         .[0] as $config | .[1] as $provider |
         ($config.providers // {}) as $providers |
         if ($providers | type) != "object" then error("Pi providers must be an object") else
-          $config | .providers = ($providers + {"local-llm-env": $provider})
+          $config | .providers = ((($providers | del(.["local-llm-env"]))) + {"router-env": $provider})
         end
       end
     ' "$source" "$provider" >"$staged"
@@ -107,7 +110,7 @@ _iac_stage_pi_settings() {
     local source="$1" models="$2" staged="$3"
     jq --slurpfile models "$models" '
         if type != "object" then error("Pi settings must be an object") else
-          .enabledModels = [$models[0][] | "local-llm-env/\(.id)"]
+          .enabledModels = [$models[0][] | "router-env/\(.id)"]
         end
     ' "$source" >"$staged"
 }
@@ -231,7 +234,7 @@ install_agent_clients() {
         --slurpfile models "$models_file" \
         '($models[0]) as $models | {
             npm: "@ai-sdk/openai-compatible",
-            name: "local-llm-env",
+            name: "router-env",
             options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
             models: (reduce $models[] as $model ({};
                 .[$model.id] = {
@@ -342,7 +345,7 @@ install_agent_clients() {
     _iac_prepare_staged_file "$pi_dir" "models.json"
     local pi_staged="$IAC_STAGED_FILE"
     _iac_stage_pi "$pi_source" "$pi_provider" "$pi_staged" || _iac_die "could not update Pi configuration"
-    jq -e '.providers["local-llm-env"] | type == "object"' "$pi_staged" >/dev/null \
+    jq -e '.providers["router-env"] | type == "object"' "$pi_staged" >/dev/null \
         || _iac_die "could not validate staged Pi configuration"
     chmod 600 "$pi_staged" || _iac_die "could not secure staged Pi configuration"
 
@@ -404,9 +407,13 @@ install_agent_clients() {
     if [ -n "$opencode_state_staged" ]; then
         echo "configured OpenCode favorites: ${opencode_state_path}"
     fi
-    while IFS=$'\t' read -r model_id model_ctx; do
-        echo "enabled model: ${model_id} (context ${model_ctx})"
-    done < <(jq -r '.[] | [.id, (.ctx_size | tostring)] | join("\t")' "$models_file")
+    while IFS=$'\t' read -r model_id model_ctx limiting_model; do
+        if [ -n "$limiting_model" ]; then
+            echo "enabled model: ${model_id} (context ${model_ctx} -> [from ${limiting_model}])"
+        else
+            echo "enabled model: ${model_id} (context ${model_ctx})"
+        fi
+    done < <(jq -r '.[] | [.id, (.ctx_size | tostring), (.limiting_model // "")] | join("\t")' "$models_file")
     echo "restart Pi and OpenCode to load the updated configuration"
 
     local hash_cmd=""

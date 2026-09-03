@@ -88,11 +88,15 @@ make setup-local-llm-agents
 ```
 
 The command reads the private API key and enabled models from `models.yml`,
-checks that the local server is healthy, and creates or fully refreshes the
-`local-llm-env` provider in both clients' normal profiles. It preserves all
-other providers and settings, uses `http://127.0.0.1:<port>/v1`, and writes
-each updated file with mode `0600`. It never prints the key. Run it again after
-rotating the key, changing the port, or enabling or disabling a model.
+checks that OmniRoute is healthy, and creates or fully refreshes the
+`router-env` provider in both clients' normal profiles. `router-env` points at
+OmniRoute (`http://127.0.0.1:<omniroute.port>/v1`), not llm-server directly --
+OmniRoute is the router: it can dispatch a request to this machine's own
+llm-server or to any other provider/combo you've configured in it, using
+priority and quota-aware strategies, not "local models only". It preserves
+all other providers and settings and writes each updated file with mode
+`0600`. It never prints the key. Run it again after rotating the key,
+changing the port, or enabling or disabling a model.
 
 Clean setup maps `gemma4` to yuxinlu1's Agentic Gemma 4 12B v2 Q4_K_M
 build. The model and client records use an exact 131,072-token context and
@@ -124,7 +128,7 @@ updates `favorite` and preserves `recent` and `variant`.
 Separately, OpenCode's global provider configuration merges
 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/config.json`, `opencode.json`, and
 `opencode.jsonc` in that order. The command validates every existing file
-before writing. It replaces `local-llm-env` in every file that defines the
+before writing. It replaces `router-env` in every file that defines the
 provider. If none defines it, the command adds it to the preferred existing
 file: `opencode.jsonc`, then `opencode.json`, then `config.json`. It creates
 `opencode.jsonc` only when none of those files exists.
@@ -138,9 +142,9 @@ yq -r '.models[] | select(.enabled) | .alias' ~/.config/llm-env/models.yml
 Replace the placeholders below with enabled aliases:
 
 ```bash
-pi --model local-llm-env/<alias>
-pi --models 'local-llm-env/<alias>,local-llm-env/<another-enabled-alias>'
-opencode --model local-llm-env/<alias>
+pi --model router-env/<alias>
+pi --models 'router-env/<alias>,router-env/<another-enabled-alias>'
+opencode --model router-env/<alias>
 ```
 
 `make check-with-agents` continues to use its own temporary isolated client

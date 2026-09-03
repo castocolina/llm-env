@@ -56,12 +56,12 @@ def test_docs_describe_local_client_setup_without_exposing_credentials() -> None
 
     assert "make setup-local-llm-agents" in readme
     assert "make setup-local-llm-agents" in quick_start
-    assert "http://127.0.0.1:<port>/v1" in quick_start
+    assert "http://127.0.0.1:<omniroute.port>/v1" in quick_start
     assert all(name in quick_start for name in ("config.json", "opencode.json", "opencode.jsonc"))
     assert '"apiKey": "<API_KEY>"' not in quick_start
     assert "Paste that value" not in quick_start
-    assert "pi --model local-llm-env/<alias>" in quick_start
-    assert "opencode --model local-llm-env/<alias>" in quick_start
+    assert "pi --model router-env/<alias>" in quick_start
+    assert "opencode --model router-env/<alias>" in quick_start
 
 
 def test_readme_distinguishes_routable_models_from_resident_models() -> None:

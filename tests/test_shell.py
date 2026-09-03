@@ -123,6 +123,7 @@ def test_shell_scripts_use_the_approved_directories() -> None:
     assert (SETUP_DIR / "setup-local-llm-agents.sh").is_file()
     assert (SCRIPT_DIR / "check-server.sh").is_file()
     assert (SCRIPT_DIR / "gpu-status.sh").is_file()
+    assert (SCRIPT_DIR / "set-desktop-gpu.sh").is_file()
 
 
 def test_makefile_dispatches_relocated_entrypoints() -> None:
@@ -133,6 +134,10 @@ def test_makefile_dispatches_relocated_entrypoints() -> None:
     assert "bash setup/setup-local-llm-agents.sh" in makefile
     assert "bash scripts/check-server.sh" in makefile
     assert "bash scripts/gpu-status.sh" in makefile
+    assert "bash scripts/set-desktop-gpu.sh dgpu" in makefile
+    assert "bash scripts/set-desktop-gpu.sh igpu" in makefile
+    assert "bash scripts/set-desktop-gpu.sh reset" in makefile
+    assert "bash scripts/set-desktop-gpu.sh status" in makefile
 
 
 def test_presets_helpers_read_a_generated_ini(tmp_path: pathlib.Path) -> None:
@@ -1293,22 +1298,22 @@ def test_reverse_setup_selection_drives_client_model_order(
     )
 
     assert result.returncode == 0, result.stderr
-    pi_provider = json.loads(pi_path.read_text())["providers"]["local-llm-env"]
+    pi_provider = json.loads(pi_path.read_text())["providers"]["router-env"]
     assert [model["id"] for model in pi_provider["models"]] == [
         "llama-cpp/ornith",
         "llama-cpp/gemma4",
     ]
     assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "local-llm-env/llama-cpp/ornith",
-        "local-llm-env/llama-cpp/gemma4",
+        "router-env/llama-cpp/ornith",
+        "router-env/llama-cpp/gemma4",
     ]
     opencode_provider = json.loads(opencode_paths[2].read_text())["provider"][
-        "local-llm-env"
+        "router-env"
     ]
     assert list(opencode_provider["models"]) == ["llama-cpp/ornith", "llama-cpp/gemma4"]
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
+        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
     ]
 
 
@@ -1380,6 +1385,179 @@ def run_gpu_status_with_stubs(
         check=False,
     )
     return result, config, home
+
+
+def run_set_desktop_gpu_with_stubs(
+    tmp_path: pathlib.Path,
+    action: str,
+    *,
+    config_text: str | None = "",
+    gpus_json: str = (
+        '[{"card":"card1","pci_address":"0000:03:00.0","vram_total_mib":16384,'
+        '"vram_used_mib":2048,"render_node":"renderD128","connected_outputs":[]},'
+        '{"card":"card0","pci_address":"0000:0e:00.0","vram_total_mib":512,'
+        '"vram_used_mib":51,"render_node":"renderD129","connected_outputs":[]}]'
+    ),
+    compositor_render_node: str | None = "renderD129",
+    existing_dgpu_file: str | None = None,
+    existing_igpu_file: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run set-desktop-gpu.sh against a stubbed llmenv/detect pipeline."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+
+    compositor_field = (
+        f'"compositor_render_node":"{compositor_render_node}"'
+        if compositor_render_node is not None
+        else '"compositor_render_node":null'
+    )
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true,\"path\":\"%s\"}\\n' \"$LLM_ENV_CONFIG\" ;;\n"
+        f"  *' detect')\n    printf '%s\\n' '{{\"gpus\":{gpus_json},{compositor_field}}}' ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+
+    home = tmp_path / "home"
+    env_dir = home / ".config/environment.d"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    if existing_dgpu_file is not None:
+        (env_dir / "61-llm-env-dgpu-default.conf").write_text(existing_dgpu_file)
+    if existing_igpu_file is not None:
+        (env_dir / "60-llm-env-igpu-default.conf").write_text(existing_igpu_file)
+
+    config = tmp_path / "models.yml"
+    if config_text is not None:
+        config.write_text(config_text)
+
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/set-desktop-gpu.sh", action],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, env_dir / "61-llm-env-dgpu-default.conf", env_dir / "60-llm-env-igpu-default.conf"
+
+
+def test_set_desktop_gpu_dgpu_writes_override_and_clears_igpu(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, dgpu_file, igpu_file = run_set_desktop_gpu_with_stubs(
+        tmp_path, "dgpu", existing_igpu_file="DRI_PRIME=pci-0000_0e_00_0\n"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dgpu_file.read_text() == "DRI_PRIME=pci-0000_03_00_0\n"
+    assert not igpu_file.exists()
+
+
+def test_set_desktop_gpu_igpu_writes_override_and_clears_dgpu(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, dgpu_file, igpu_file = run_set_desktop_gpu_with_stubs(
+        tmp_path, "igpu", existing_dgpu_file="DRI_PRIME=pci-0000_03_00_0\n"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert igpu_file.read_text() == "DRI_PRIME=pci-0000_0e_00_0\n"
+    assert not dgpu_file.exists()
+
+
+def test_set_desktop_gpu_dgpu_prefers_configured_pci_address(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The larger-VRAM auto-detect heuristic would pick 0000:03:00.0; an
+    explicit gpu.pci_address in models.yml must win instead."""
+    result, dgpu_file, _ = run_set_desktop_gpu_with_stubs(
+        tmp_path,
+        "dgpu",
+        config_text='gpu:\n  pci_address: "0000:0e:00.0"\n',
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dgpu_file.read_text() == "DRI_PRIME=pci-0000_0e_00_0\n"
+
+
+def test_set_desktop_gpu_reset_removes_both_overrides(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, dgpu_file, igpu_file = run_set_desktop_gpu_with_stubs(
+        tmp_path,
+        "reset",
+        existing_dgpu_file="DRI_PRIME=pci-0000_03_00_0\n",
+        existing_igpu_file="DRI_PRIME=pci-0000_0e_00_0\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not dgpu_file.exists()
+    assert not igpu_file.exists()
+
+
+def test_set_desktop_gpu_reset_is_a_noop_when_nothing_active(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_set_desktop_gpu_with_stubs(tmp_path, "reset")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no override was active" in result.stdout
+
+
+def test_set_desktop_gpu_status_reports_detected_gpus_and_compositor(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_set_desktop_gpu_with_stubs(
+        tmp_path, "status", existing_dgpu_file="DRI_PRIME=pci-0000_03_00_0\n"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0000:03:00.0" in result.stdout
+    assert "0000:0e:00.0" in result.stdout
+    assert "renderD129" in result.stdout
+    assert "dGPU forced default" in result.stdout
+
+
+def test_set_desktop_gpu_dies_with_only_one_gpu_detected(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_set_desktop_gpu_with_stubs(
+        tmp_path,
+        "dgpu",
+        gpus_json=(
+            '[{"card":"card1","pci_address":"0000:03:00.0","vram_total_mib":16384,'
+            '"vram_used_mib":2048,"render_node":"renderD128","connected_outputs":[]}]'
+        ),
+    )
+
+    assert result.returncode != 0
+    assert "only 1 GPU detected" in result.stdout + result.stderr
+
+
+def test_set_desktop_gpu_rejects_unknown_action(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_set_desktop_gpu_with_stubs(tmp_path, "sideways")
+
+    assert result.returncode != 0
+    assert "usage:" in result.stdout + result.stderr
 
 
 def run_provider_provision_with_stubs(
@@ -1686,6 +1864,32 @@ def test_combo_context_reports_members_and_minimum(tmp_path: pathlib.Path) -> No
     assert "my-coding: min_context_window=200000" in result.stdout
     assert "codex/gpt-5.6-sol-high -> 1050000" in result.stdout
     assert "grok-cli/grok-composer-2.5-fast -> 200000" in result.stdout
+
+
+def test_combo_context_annotates_the_limiting_member(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        result, _config = run_combo_context_with_stubs(
+            tmp_path,
+            omniroute_port=port,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"my-coding","members":'
+                '[{"provider":"codex","model":"gpt-5.6-sol-high","context_window":1050000},'
+                '{"provider":"grok-cli","model":"grok-composer-2.5-fast","context_window":200000}],'
+                '"min_context_window":200000,'
+                '"limiting_member":"grok-cli/grok-composer-2.5-fast"}]}\\n\''
+            ),
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "my-coding: min_context_window=200000 (limited by grok-cli/grok-composer-2.5-fast)"
+        in result.stdout
+    )
+    assert "codex/gpt-5.6-sol-high -> 1050000" in result.stdout
+    assert "grok-cli/grok-composer-2.5-fast -> 200000  <- floor" in result.stdout
 
 
 def test_combo_context_reports_no_matching_combo_cleanly(tmp_path: pathlib.Path) -> None:
@@ -4563,7 +4767,7 @@ def test_opencode_state_editor_replaces_local_favorites_and_preserves_other_stat
         "recent": [{"providerID": "other", "modelID": "recent"}],
         "favorite": [
             {"providerID": "other", "modelID": "first"},
-            {"providerID": "local-llm-env", "modelID": "stale"},
+            {"providerID": "router-env", "modelID": "stale"},
             {"providerID": "other", "modelID": "second"},
         ],
         "variant": {"other/model": "high"},
@@ -4589,13 +4793,37 @@ def test_opencode_state_editor_replaces_local_favorites_and_preserves_other_stat
     assert json.loads(output.read_text()) == {
         "recent": [{"providerID": "other", "modelID": "recent"}],
         "favorite": [
-            {"providerID": "local-llm-env", "modelID": "gemma4"},
-            {"providerID": "local-llm-env", "modelID": "ornith"},
+            {"providerID": "router-env", "modelID": "gemma4"},
+            {"providerID": "router-env", "modelID": "ornith"},
             {"providerID": "other", "modelID": "first"},
             {"providerID": "other", "modelID": "second"},
         ],
         "variant": {"other/model": "high"},
     }
+
+
+def test_opencode_state_editor_drops_legacy_provider_favorites(
+    tmp_path: pathlib.Path,
+) -> None:
+    state = {
+        "recent": [],
+        "favorite": [
+            {"providerID": "local-llm-env", "modelID": "stale"},
+            {"providerID": "other", "modelID": "kept"},
+        ],
+        "variant": {},
+    }
+    models = [
+        {"alias": "gemma4", "ctx_size": 131072, "client_max_output_tokens": 8192},
+    ]
+
+    result, output = run_opencode_state_editor(tmp_path, json.dumps(state), models)
+
+    assert result.returncode == 0, result.stderr
+    favorite = json.loads(output.read_text())["favorite"]
+    assert {"providerID": "local-llm-env", "modelID": "stale"} not in favorite
+    assert {"providerID": "router-env", "modelID": "gemma4"} in favorite
+    assert {"providerID": "other", "modelID": "kept"} in favorite
 
 
 @pytest.mark.parametrize(
@@ -4683,7 +4911,7 @@ def test_opencode_config_editor_replaces_one_provider_and_keeps_comments(
         tmp_path,
         "// keep this comment\n{\n  \"agent\": {\"review\": {\"mode\": \"subagent\"}},\n"
         "  \"provider\": {\n    // replace only this value\n"
-        "    \"local-llm-env\": {\"models\": {\"old\": {\"name\": \"old\"}}},\n"
+        "    \"router-env\": {\"models\": {\"old\": {\"name\": \"old\"}}},\n"
         "    \"other\": {\"name\": \"other\"},\n  },\n}\n",
         {
             "npm": "@ai-sdk/openai-compatible",
@@ -4702,10 +4930,63 @@ def test_opencode_config_editor_replaces_one_provider_and_keeps_comments(
     )
     assert parsed["agent"]["review"]["mode"] == "subagent"
     assert parsed["provider"]["other"] == {"name": "other"}
-    assert parsed["provider"]["local-llm-env"] == {
+    assert parsed["provider"]["router-env"] == {
         "npm": "@ai-sdk/openai-compatible",
         "models": {"ornith": {"name": "ornith"}},
     }
+
+
+def test_opencode_config_editor_migrates_legacy_provider_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, output = run_opencode_config_editor(
+        tmp_path,
+        "// keep this comment\n{\n  \"agent\": {},\n  \"provider\": {\n"
+        "    \"local-llm-env\": {\"models\": {\"old\": {\"name\": \"old\"}}},\n"
+        "    \"other\": {\"name\": \"other\"},\n  },\n}\n",
+        {
+            "npm": "@ai-sdk/openai-compatible",
+            "models": {"ornith": {"name": "ornith"}},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = output.read_text()
+    assert "// keep this comment" in text
+    parsed = json.loads(
+        re.sub(r"//[^\n]*", "", text)
+        .replace(",\n  }", "\n  }")
+        .replace(",\n}", "\n}")
+    )
+    assert "local-llm-env" not in parsed["provider"]
+    assert parsed["provider"]["other"] == {"name": "other"}
+    assert parsed["provider"]["router-env"] == {
+        "npm": "@ai-sdk/openai-compatible",
+        "models": {"ornith": {"name": "ornith"}},
+    }
+
+
+def test_opencode_config_editor_contains_provider_matches_legacy_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    config = tmp_path / "opencode.jsonc"
+    config.write_text('{"provider":{"local-llm-env":{"models":{}}}}\n')
+
+    result = subprocess.run(
+        [
+            shutil.which("node") or "node",
+            "setup/update-opencode-config.mjs",
+            "--contains-provider",
+            str(config),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert config.read_text() == '{"provider":{"local-llm-env":{"models":{}}}}\n'
 
 
 def test_opencode_config_editor_rejects_invalid_jsonc_without_output(
@@ -4744,7 +5025,7 @@ def test_opencode_config_editor_rejects_duplicate_local_provider_keys(
     tmp_path: pathlib.Path,
 ) -> None:
     config = tmp_path / "opencode.jsonc"
-    config.write_text('{"provider":{"local-llm-env":{},"local-llm-env":{}}}\n')
+    config.write_text('{"provider":{"router-env":{},"router-env":{}}}\n')
 
     result = subprocess.run(
         [
@@ -4783,7 +5064,7 @@ def test_opencode_config_editor_adds_provider_to_root_with_comments_and_trailing
     assert "// provider belongs before this brace" in text
     parsed = json.loads(re.sub(r"//[^\n]*", "", text).replace(",\n}", "\n}"))
     assert parsed["agent"] == {}
-    assert parsed["provider"]["local-llm-env"] == provider
+    assert parsed["provider"]["router-env"] == provider
 
 
 def test_opencode_config_editor_adds_provider_member_with_comments_and_trailing_comma(
@@ -4809,7 +5090,7 @@ def test_opencode_config_editor_adds_provider_member_with_comments_and_trailing_
         .replace(",\n}", "\n}")
     )
     assert parsed["provider"]["other"] == {}
-    assert parsed["provider"]["local-llm-env"] == provider
+    assert parsed["provider"]["router-env"] == provider
 
 
 def run_setup_local_llm_agents(
@@ -4962,8 +5243,8 @@ def test_setup_creates_missing_opencode_state_only_for_compatible_1_18_10(
     assert json.loads(state_path.read_text()) == {
         "recent": [],
         "favorite": [
-            {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
-            {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
+            {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
+            {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
         ],
         "variant": {},
     }
@@ -5016,8 +5297,8 @@ def test_setup_existing_state_does_not_require_version_or_path_compatibility(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
+        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
     ]
 
 
@@ -5045,7 +5326,7 @@ def test_setup_stages_every_target_before_first_replacement(
     tmp_path: pathlib.Path,
 ) -> None:
     existing_provider = (
-        '{"provider":{"local-llm-env":{"models":{"old":{"name":"old"}}}}}\n'
+        '{"provider":{"router-env":{"models":{"old":{"name":"old"}}}}}\n'
     )
     result, calls, pi_path, settings_path, opencode_paths, state_path = (
         run_setup_local_llm_agents(
@@ -5091,12 +5372,12 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
 
     assert repaired.returncode == 0, repaired.stderr
     assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "local-llm-env/llama-cpp/gemma4",
-        "local-llm-env/llama-cpp/ornith",
+        "router-env/llama-cpp/gemma4",
+        "router-env/llama-cpp/ornith",
     ]
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/gemma4"},
-        {"providerID": "local-llm-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
+        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
     ]
 
 
@@ -5111,7 +5392,7 @@ def test_setup_local_llm_agents_creates_private_provider_files(
     config_json, opencode_json, opencode_jsonc = opencode_paths
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(pi_path.read_text())["providers"]["local-llm-env"] == {
+    assert json.loads(pi_path.read_text())["providers"]["router-env"] == {
         "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
         "apiKey": "fixture-omniroute-api-key",
@@ -5126,9 +5407,9 @@ def test_setup_local_llm_agents_creates_private_provider_files(
     }
     assert not config_json.exists()
     assert not opencode_json.exists()
-    assert json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"] == {
+    assert json.loads(opencode_jsonc.read_text())["provider"]["router-env"] == {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "local-llm-env",
+        "name": "router-env",
         "options": {
             "baseURL": "http://127.0.0.1:20128/v1",
             "apiKey": "fixture-omniroute-api-key",
@@ -5176,14 +5457,35 @@ def test_setup_local_llm_agents_maps_combos_alongside_llama_cpp_models(
     _config_json, _opencode_json, opencode_jsonc = opencode_paths
 
     assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
     assert {"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000} in pi_models
     assert any(model["id"] == "llama-cpp/gemma4" for model in pi_models)
-    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"]["models"]
+    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["router-env"]["models"]
     assert opencode_models["my-coding"] == {
         "name": "my-coding (combo)",
         "limit": {"context": 200000, "output": 128000},
     }
+
+
+def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, _pi_path, _settings_path, _opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=(
+                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
+                '"min_max_output_tokens":128000,'
+                '"limiting_member":"grok-cli/grok-composer-2.5-fast"}]}\\n\''
+            ),
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "enabled model: my-coding (context 200000 -> [from grok-cli/grok-composer-2.5-fast])"
+        in result.stdout
+    )
 
 
 def test_setup_local_llm_agents_falls_back_to_capped_output_when_combo_output_unknown(
@@ -5200,7 +5502,7 @@ def test_setup_local_llm_agents_falls_back_to_capped_output_when_combo_output_un
     )
 
     assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
     assert {"id": "my-planning", "contextWindow": 500000, "maxTokens": 128000} in pi_models
 
 
@@ -5218,7 +5520,7 @@ def test_setup_local_llm_agents_skips_combos_with_no_known_context_window(
     )
 
     assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
     assert not any(model["id"] == "mystery" for model in pi_models)
 
 
@@ -5239,9 +5541,9 @@ def test_setup_local_llm_agents_omits_llama_cpp_models_when_llm_server_disabled(
     _config_json, _opencode_json, opencode_jsonc = opencode_paths
 
     assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["local-llm-env"]["models"]
+    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
     assert pi_models == [{"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000}]
-    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["local-llm-env"]["models"]
+    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["router-env"]["models"]
     assert list(opencode_models.keys()) == ["my-coding"]
 
 
@@ -5286,7 +5588,7 @@ def test_setup_local_llm_agents_secures_existing_client_directories_and_files(
 def test_setup_local_llm_agents_updates_every_global_file_that_defines_the_provider(
     tmp_path: pathlib.Path,
 ) -> None:
-    old_provider = '{"local-llm-env":{"models":{"old-model":{"name":"old"}}}}'
+    old_provider = '{"router-env":{"models":{"old-model":{"name":"old"}}}}'
     result, _, _, _, opencode_paths, _ = run_setup_local_llm_agents(
         tmp_path,
         opencode_config_json_text=f'{{"configOnly":true,"provider":{old_provider}}}\n',
@@ -5300,7 +5602,7 @@ def test_setup_local_llm_agents_updates_every_global_file_that_defines_the_provi
     for path in opencode_paths:
         text = path.read_text()
         parsed = json.loads(re.sub(r"(?m)^\s*//[^\n]*", "", text))
-        provider = parsed["provider"]["local-llm-env"]
+        provider = parsed["provider"]["router-env"]
         assert provider["models"] == {
             "llama-cpp/gemma4": {
                 "name": "gemma4",
@@ -5349,7 +5651,7 @@ def test_setup_local_llm_agents_adds_provider_to_preferred_existing_global_file(
         opencode_paths, (config_text, json_text, jsonc_text), strict=True
     ):
         if path.name == expected_name:
-            assert '"local-llm-env"' in path.read_text()
+            assert '"router-env"' in path.read_text()
         elif original is None:
             assert not path.exists()
         else:
@@ -5392,7 +5694,7 @@ def test_setup_local_llm_agents_rejects_duplicate_opencode_provider_before_creat
     tmp_path: pathlib.Path,
 ) -> None:
     duplicate_provider = (
-        '{"provider":{"local-llm-env":{},"local-llm-env":{}}}\n'
+        '{"provider":{"router-env":{},"router-env":{}}}\n'
     )
     result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
         tmp_path,
@@ -5450,7 +5752,7 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
         tmp_path,
         pi_text=(
             '{"providers":{"other":{"baseUrl":"https://example.invalid/v1"},'
-            '"local-llm-env":{"models":[{"id":"old-model"}],"stale":true}},'
+            '"router-env":{"models":[{"id":"old-model"}],"stale":true}},'
             '"otherSetting":true}\n'
         ),
     )
@@ -5461,7 +5763,7 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
     assert updated["providers"]["other"] == {
         "baseUrl": "https://example.invalid/v1"
     }
-    assert updated["providers"]["local-llm-env"] == {
+    assert updated["providers"]["router-env"] == {
         "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
         "apiKey": "fixture-omniroute-api-key",
@@ -5474,6 +5776,29 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
             {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
         ],
     }
+
+
+def test_setup_local_llm_agents_migrates_legacy_pi_provider_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, pi_path, _, _, _ = run_setup_local_llm_agents(
+        tmp_path,
+        pi_text=(
+            '{"providers":{"other":{"baseUrl":"https://example.invalid/v1"},'
+            '"local-llm-env":{"models":[{"id":"old-model"}],"stale":true}}}\n'
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    updated = json.loads(pi_path.read_text())
+    assert "local-llm-env" not in updated["providers"]
+    assert updated["providers"]["other"] == {
+        "baseUrl": "https://example.invalid/v1"
+    }
+    assert updated["providers"]["router-env"]["models"] == [
+        {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
+        {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -5490,8 +5815,8 @@ def test_setup_local_llm_agents_sets_exact_pi_cycle(
     assert result.returncode == 0, result.stderr
     settings = json.loads(settings_path.read_text())
     assert settings["enabledModels"] == [
-        "local-llm-env/llama-cpp/gemma4",
-        "local-llm-env/llama-cpp/ornith",
+        "router-env/llama-cpp/gemma4",
+        "router-env/llama-cpp/ornith",
     ]
     if settings_text and "theme" in settings_text:
         assert settings["theme"] == "dark"
@@ -5582,7 +5907,7 @@ def test_setup_local_llm_agents_migrates_missing_output_limit_before_replacement
     )
 
     assert result.returncode == 0, result.stderr
-    provider = json.loads(pi_path.read_text())["providers"]["local-llm-env"]
+    provider = json.loads(pi_path.read_text())["providers"]["router-env"]
     assert provider["models"][0]["maxTokens"] == 8192
 
 
@@ -5661,7 +5986,7 @@ def test_setup_local_llm_agents_stages_each_replacement_with_its_target(
     tmp_path: pathlib.Path,
 ) -> None:
     existing_provider = (
-        '{"provider":{"local-llm-env":{"models":{"old":{"name":"old"}}}}}\n'
+        '{"provider":{"router-env":{"models":{"old":{"name":"old"}}}}}\n'
     )
     result, calls, pi_path, settings_path, opencode_paths, state_path = run_setup_local_llm_agents(
         tmp_path,
@@ -10672,11 +10997,11 @@ install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file
     assert result.returncode == 0, result.stdout + result.stderr
 
     pi_models = json.loads((home / ".pi" / "agent" / "models.json").read_text())
-    assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "my-planning"
+    assert pi_models["providers"]["router-env"]["models"][0]["id"] == "my-planning"
     opencode_config = json.loads(
         (home / ".config" / "opencode" / "opencode.jsonc").read_text()
     )
-    assert "my-planning" in opencode_config["provider"]["local-llm-env"]["models"]
+    assert "my-planning" in opencode_config["provider"]["router-env"]["models"]
 
     assert "enabled model: my-planning (context 500000)" in result.stdout
     assert "restart Pi and OpenCode to load the updated configuration" in result.stdout
@@ -10685,6 +11010,37 @@ install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file
     # not be created, and must not be mentioned in the summary.
     assert not (home / ".local" / "state" / "opencode" / "model.json").exists()
     assert "configured OpenCode favorites" not in result.stdout
+
+
+def test_install_agent_clients_summary_shows_the_combo_limiting_model(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    api_key_file = tmp_path / "api-key"
+    api_key_file.write_text("sk-test-key")
+    models_file = tmp_path / "models.json"
+    models_file.write_text(json.dumps([
+        {"id": "my-coding", "label": "my-coding (combo)",
+         "ctx_size": 200000, "client_max_output_tokens": 128000,
+         "limiting_model": "grok-cli/grok-composer-2.5-fast"},
+    ]))
+    updater_path = ROOT / "setup" / "update-opencode-config.mjs"
+    lib_path = ROOT / "setup" / "lib" / "install-agent-clients.sh"
+
+    script = f'''
+set -euo pipefail
+export HOME="{home}"
+source "{lib_path}"
+create_agent_client_workdir
+install_agent_clients "http://127.0.0.1:20128/v1" "{api_key_file}" "{models_file}" "{updater_path}" "{lib_path}" "false"
+'''
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "enabled model: my-coding (context 200000 -> [from grok-cli/grok-composer-2.5-fast])"
+        in result.stdout
+    )
 
 
 def test_install_agent_clients_creates_missing_state_when_requested(tmp_path, monkeypatch):

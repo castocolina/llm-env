@@ -60,7 +60,8 @@ combo_models_json="$(jq '[.combos[] | select(.min_context_window != null) | {
         else
             .min_max_output_tokens
         end
-    )
+    ),
+    limiting_model: .limiting_member
 }]' <<<"$combo_context_response")"
 
 models_json="$(jq -s '.[0] + .[1]' <(printf '%s' "$llama_models_json") <(printf '%s' "$combo_models_json"))"

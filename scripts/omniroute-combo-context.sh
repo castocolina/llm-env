@@ -42,7 +42,9 @@ count="$(echo "$result" | jq '.combos | length')"
 if [ "$count" -eq 0 ]; then
     log_info "no matching combo found"
 else
-    echo "$result" | jq -r '.combos[] |
-        "\(.combo): min_context_window=\(.min_context_window // "unknown")",
-        (.members[] | "    \(.provider)/\(.model) -> \(.context_window // "unknown")")'
+    echo "$result" | jq -r '.combos[] as $combo | $combo |
+        "\(.combo): min_context_window=\(.min_context_window // "unknown")" +
+        (if .limiting_member then " (limited by \(.limiting_member))" else "" end),
+        (.members[] | "    \(.provider)/\(.model) -> \(.context_window // "unknown")" +
+            (if "\(.provider)/\(.model)" == $combo.limiting_member then "  <- floor" else "" end))'
 fi

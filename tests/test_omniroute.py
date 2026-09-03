@@ -460,6 +460,7 @@ def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
             ],
             "min_context_window": 200_000,
             "min_max_output_tokens": 262144,
+            "limiting_member": "grok-cli/grok-composer-2.5-fast",
         }
     ]
 
@@ -496,8 +497,44 @@ def test_compute_combo_context_leaves_unknown_models_out_of_the_minimum(monkeypa
             ],
             "min_context_window": None,
             "min_max_output_tokens": None,
+            "limiting_member": None,
         }
     ]
+
+
+def test_compute_combo_context_limiting_member_resolves_ties_to_first_occurrence(
+    monkeypatch,
+):
+    login = _fake_login_ok()
+    catalog = {
+        "object": "list",
+        "data": [
+            _catalog_entry("grok-cli/grok-4.6", "grok-4.6"),
+            _catalog_entry("opencode-go/kimi-k2.7-code", "kimi-k2.7-code"),
+        ],
+    }
+    combos_payload = {
+        "combos": [
+            {
+                "name": "tied-floor",
+                "models": [
+                    _combo_member("opencode-go", "kimi-k2.7-code"),
+                    _combo_member("grok-cli", "grok-4.6"),
+                ],
+            }
+        ]
+    }
+    catalog["data"][0]["context_length"] = 131072
+    catalog["data"][1]["context_length"] = 131072
+
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(login, catalog, combos_payload),
+    )
+    result = compute_combo_context("http://127.0.0.1:20128", "dashboard-pw")
+
+    assert result[0]["limiting_member"] == "opencode-go/kimi-k2.7-code"
 
 
 def test_compute_combo_context_filters_by_combo_name(monkeypatch):

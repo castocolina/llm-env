@@ -57,6 +57,18 @@ status:
 gpu-status:
 	@bash tools/run-target.sh gpu-status -- bash scripts/gpu-status.sh
 
+desktop-gpu-dgpu:
+	@bash tools/run-target.sh desktop-gpu-dgpu -- bash scripts/set-desktop-gpu.sh dgpu
+
+desktop-gpu-igpu:
+	@bash tools/run-target.sh desktop-gpu-igpu -- bash scripts/set-desktop-gpu.sh igpu
+
+desktop-gpu-reset:
+	@bash tools/run-target.sh desktop-gpu-reset -- bash scripts/set-desktop-gpu.sh reset
+
+desktop-gpu-status:
+	@bash tools/run-target.sh desktop-gpu-status -- bash scripts/set-desktop-gpu.sh status
+
 provider-provision:
 	@bash tools/run-target.sh provider-provision -- bash scripts/provider-provision.sh
 

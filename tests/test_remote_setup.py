@@ -206,6 +206,29 @@ def test_build_unified_models_includes_combos_with_known_context():
     ]
 
 
+def test_build_unified_models_includes_limiting_member_when_present():
+    result = _build_unified_models(
+        [],
+        [
+            {
+                "combo": "my-coding",
+                "min_context_window": 200000,
+                "min_max_output_tokens": 128000,
+                "limiting_member": "grok-cli/grok-composer-2.5-fast",
+            }
+        ],
+    )
+    assert result[0]["limiting_model"] == "grok-cli/grok-composer-2.5-fast"
+
+
+def test_build_unified_models_omits_limiting_model_when_absent():
+    result = _build_unified_models(
+        [],
+        [{"combo": "my-coding", "min_context_window": 200000, "min_max_output_tokens": 128000}],
+    )
+    assert "limiting_model" not in result[0]
+
+
 def test_build_unified_models_falls_back_to_capped_output_when_unknown():
     result = _build_unified_models(
         [],
@@ -363,7 +386,7 @@ def test_render_setup_script_uses_staged_files_with_restrictive_permissions(monk
 def test_render_setup_script_detects_an_existing_opencode_candidate_file(monkeypatch):
     # Mirrors setup-local-llm-agents.sh's own opencode_candidates detection
     # (setup/setup-local-llm-agents.sh:149-231): every candidate already
-    # containing the "local-llm-env" provider is targeted; only when none
+    # containing the "router-env" provider is targeted; only when none
     # do does it fall back to the highest-priority *existing* file
     # (reverse order: opencode.jsonc, then opencode.json, then
     # config.json), and only when none exist at all does it default to
@@ -746,6 +769,7 @@ def test_config_includes_omniroute_combos_alongside_llm_server_models(tmp_path, 
                     "label": "my-planning (combo)",
                     "ctx_size": 500000,
                     "client_max_output_tokens": 128000,
+                    "limiting_model": "grok-cli/grok-4.6",
                 },
             ]
         finally:
@@ -1114,14 +1138,14 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     assert exit_code == 0, output
 
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
-    assert pi_models["providers"]["local-llm-env"]["models"][0]["id"] == "llama-cpp/a"
+    assert pi_models["providers"]["router-env"]["models"][0]["id"] == "llama-cpp/a"
     pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
-    assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
+    assert pi_settings["enabledModels"] == ["router-env/llama-cpp/a"]
 
     opencode_config = json.loads(
         (home_dir / ".config" / "opencode" / "opencode.jsonc").read_text()
     )
-    assert "llama-cpp/a" in opencode_config["provider"]["local-llm-env"]["models"]
+    assert "llama-cpp/a" in opencode_config["provider"]["router-env"]["models"]
 
     pi_models_path = home_dir / ".pi" / "agent" / "models.json"
     assert (pi_models_path.stat().st_mode & 0o777) == 0o600
@@ -1205,7 +1229,7 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
     assert exit_code == 0, output
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
-    assert pi_models["providers"]["local-llm-env"]["apiKey"] == "sk-live-value"
+    assert pi_models["providers"]["router-env"]["apiKey"] == "sk-live-value"
     assert "sk-live-value" not in output
 
 
@@ -1247,10 +1271,10 @@ def test_setup_sh_merges_into_a_well_formed_existing_pi_configuration(
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
     assert pi_models["keepMe"] == 1
     assert "other" in pi_models["providers"]
-    assert "local-llm-env" in pi_models["providers"]
+    assert "router-env" in pi_models["providers"]
     pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
     assert pi_settings["theme"] == "dark"
-    assert pi_settings["enabledModels"] == ["local-llm-env/llama-cpp/a"]
+    assert pi_settings["enabledModels"] == ["router-env/llama-cpp/a"]
 
 
 @pytest.mark.parametrize("target", ["models.json", "settings.json"])
@@ -1369,7 +1393,7 @@ def test_setup_sh_updates_an_existing_opencode_favorites_state(tmp_path, monkeyp
     state = json.loads(
         (home_dir / ".local" / "state" / "opencode" / "model.json").read_text()
     )
-    assert {"providerID": "local-llm-env", "modelID": "llama-cpp/a"} in state["favorite"]
+    assert {"providerID": "router-env", "modelID": "llama-cpp/a"} in state["favorite"]
     assert {"providerID": "other", "modelID": "some-model"} in state["favorite"]
 
 
