@@ -134,8 +134,6 @@ def test_makefile_dispatches_relocated_entrypoints() -> None:
     assert "bash setup/setup-local-llm-agents.sh" in makefile
     assert "bash scripts/check-server.sh" in makefile
     assert "bash scripts/gpu-status.sh" in makefile
-    assert "bash scripts/set-desktop-gpu.sh dgpu" in makefile
-    assert "bash scripts/set-desktop-gpu.sh igpu" in makefile
     assert "bash scripts/set-desktop-gpu.sh reset" in makefile
     assert "bash scripts/set-desktop-gpu.sh status" in makefile
 
@@ -1460,45 +1458,6 @@ def run_set_desktop_gpu_with_stubs(
     return result, env_dir / "61-llm-env-dgpu-default.conf", env_dir / "60-llm-env-igpu-default.conf"
 
 
-def test_set_desktop_gpu_dgpu_writes_override_and_clears_igpu(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, dgpu_file, igpu_file = run_set_desktop_gpu_with_stubs(
-        tmp_path, "dgpu", existing_igpu_file="DRI_PRIME=pci-0000_0e_00_0\n"
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert dgpu_file.read_text() == "DRI_PRIME=pci-0000_03_00_0\n"
-    assert not igpu_file.exists()
-
-
-def test_set_desktop_gpu_igpu_writes_override_and_clears_dgpu(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, dgpu_file, igpu_file = run_set_desktop_gpu_with_stubs(
-        tmp_path, "igpu", existing_dgpu_file="DRI_PRIME=pci-0000_03_00_0\n"
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert igpu_file.read_text() == "DRI_PRIME=pci-0000_0e_00_0\n"
-    assert not dgpu_file.exists()
-
-
-def test_set_desktop_gpu_dgpu_prefers_configured_pci_address(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The larger-VRAM auto-detect heuristic would pick 0000:03:00.0; an
-    explicit gpu.pci_address in models.yml must win instead."""
-    result, dgpu_file, _ = run_set_desktop_gpu_with_stubs(
-        tmp_path,
-        "dgpu",
-        config_text='gpu:\n  pci_address: "0000:0e:00.0"\n',
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert dgpu_file.read_text() == "DRI_PRIME=pci-0000_0e_00_0\n"
-
-
 def test_set_desktop_gpu_reset_removes_both_overrides(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1534,23 +1493,16 @@ def test_set_desktop_gpu_status_reports_detected_gpus_and_compositor(
     assert "0000:03:00.0" in result.stdout
     assert "0000:0e:00.0" in result.stdout
     assert "renderD129" in result.stdout
-    assert "dGPU forced default" in result.stdout
+    assert "leftover DRI_PRIME override" in result.stdout + result.stderr
 
 
-def test_set_desktop_gpu_dies_with_only_one_gpu_detected(
+def test_set_desktop_gpu_status_reports_no_leftover_override_by_default(
     tmp_path: pathlib.Path,
 ) -> None:
-    result, _, _ = run_set_desktop_gpu_with_stubs(
-        tmp_path,
-        "dgpu",
-        gpus_json=(
-            '[{"card":"card1","pci_address":"0000:03:00.0","vram_total_mib":16384,'
-            '"vram_used_mib":2048,"render_node":"renderD128","connected_outputs":[]}]'
-        ),
-    )
+    result, _, _ = run_set_desktop_gpu_with_stubs(tmp_path, "status")
 
-    assert result.returncode != 0
-    assert "only 1 GPU detected" in result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "owned by cardwire" in result.stdout
 
 
 def test_set_desktop_gpu_rejects_unknown_action(tmp_path: pathlib.Path) -> None:
@@ -1558,6 +1510,18 @@ def test_set_desktop_gpu_rejects_unknown_action(tmp_path: pathlib.Path) -> None:
 
     assert result.returncode != 0
     assert "usage:" in result.stdout + result.stderr
+
+
+def test_set_desktop_gpu_rejects_removed_forcing_actions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """dgpu/igpu forcing was retired -- it conflicted with cardwire, which
+    already owns default/discrete GPU selection on Bazzite."""
+    for action in ("dgpu", "igpu"):
+        result, _, _ = run_set_desktop_gpu_with_stubs(tmp_path, action)
+        assert result.returncode != 0
+        assert "usage:" in result.stdout + result.stderr
+        assert "cardwire" in result.stdout + result.stderr
 
 
 def run_provider_provision_with_stubs(
