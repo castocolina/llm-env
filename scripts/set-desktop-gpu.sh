@@ -18,6 +18,19 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 require_cmd jq
+require_cmd flatpak
+
+# Old DRI_PRIME forcing also wrote Flatpak per-app overrides (e.g. for
+# Firefox/Brave/Chromium) -- those live outside ~/.config/environment.d
+# entirely and survived the removal of the forcing logic itself. Find any
+# app whose override still sets DRI_PRIME, from its actual override file.
+find_stale_flatpak_dri_prime_apps() {
+    local override_dir="${HOME}/.local/share/flatpak/overrides"
+    [ -d "$override_dir" ] || return 0
+    grep -l '^DRI_PRIME=' "$override_dir"/* 2>/dev/null | while read -r f; do
+        basename "$f"
+    done
+}
 
 usage() {
     echo "usage: $0 <reset|status>" >&2
@@ -43,8 +56,15 @@ if [ "$action" = "status" ]; then
     echo "$facts" | jq -r '.gpus[] | "  \(.pci_address)\t\(.render_node)\tVRAM \(.vram_total_mib) MiB"'
     compositor_node="$(echo "$facts" | jq -r '.compositor_render_node // "unknown"')"
     log_info "compositor is currently rendering on: ${compositor_node}"
-    if [ -f "$dgpu_file" ] || [ -f "$igpu_file" ]; then
-        log_warn "a leftover DRI_PRIME override file is present; run '$0 reset' to remove it -- GPU default/discrete selection is owned by cardwire now"
+    stale_flatpak_apps="$(find_stale_flatpak_dri_prime_apps)"
+    if [ -f "$dgpu_file" ] || [ -f "$igpu_file" ] || [ -n "$stale_flatpak_apps" ]; then
+        [ -f "$dgpu_file" ] || [ -f "$igpu_file" ] && \
+            log_warn "a leftover DRI_PRIME override file is present in ~/.config/environment.d/"
+        if [ -n "$stale_flatpak_apps" ]; then
+            log_warn "leftover per-app DRI_PRIME Flatpak overrides pin these apps to a fixed GPU, bypassing cardwire:"
+            echo "$stale_flatpak_apps" | sed 's/^/    /'
+        fi
+        log_warn "run '$0 reset' to remove all of the above -- GPU default/discrete selection is owned by cardwire now"
     else
         log_info "no leftover override present; GPU default/discrete selection is owned by cardwire (see: cardwire get)"
     fi
@@ -60,7 +80,19 @@ if [ "$action" = "reset" ]; then
             removed=1
         fi
     done
-    [ "$removed" -eq 1 ] || log_info "no override was active"
+    [ "$removed" -eq 1 ] || log_info "no environment.d override was active"
+
+    stale_flatpak_apps="$(find_stale_flatpak_dri_prime_apps)"
+    if [ -n "$stale_flatpak_apps" ]; then
+        while read -r app; do
+            [ -n "$app" ] || continue
+            flatpak override --user --unset-env=DRI_PRIME "$app"
+            log_info "removed stale DRI_PRIME override from $app"
+        done <<< "$stale_flatpak_apps"
+    else
+        log_info "no stale per-app Flatpak DRI_PRIME override was active"
+    fi
+
     log_info "log out and back in (or reboot) for the change to take effect"
     exit 0
 fi
