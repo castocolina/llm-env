@@ -591,7 +591,7 @@ def run_setup_with_numbered_selection(
     resources_case = (
         "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
         if resources_failure
-        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}'"
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}}'"
     )
     uv = commands / "uv"
     uv.write_text(
@@ -701,7 +701,8 @@ def run_setup_no_gpu(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *' resources') printf '%s\\n' "
-        "'{\"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}, "
+        "'{\"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, "
+        "\"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, "
         "\"llm_server\": {\"cpus\": 0, \"memory_mib\": 0}}' ;;\n"
         "esac\n"
     )
@@ -762,8 +763,14 @@ def test_setup_no_gpu_skips_gpu_model_and_vulkan_steps(tmp_path: pathlib.Path) -
 def test_setup_no_gpu_still_reserves_omniroute_resources(tmp_path: pathlib.Path) -> None:
     result, _calls, config = run_setup_no_gpu(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert yq_value(config, ".resources.omniroute.cpus") == "1"
-    assert yq_value(config, ".resources.omniroute.memory_mib") == "1024"
+    assert yq_value(config, ".resources.omniroute.cpus_min") == "1"
+    assert yq_value(config, ".resources.omniroute.cpus_max") == "4"
+    assert yq_value(config, ".resources.omniroute.memory_min_mib") == "1024"
+    assert yq_value(config, ".resources.omniroute.memory_max_mib") == "4096"
+    assert yq_value(config, ".resources.remote_setup.cpus_min") == "1"
+    assert yq_value(config, ".resources.remote_setup.cpus_max") == "1"
+    assert yq_value(config, ".resources.remote_setup.memory_min_mib") == "32"
+    assert yq_value(config, ".resources.remote_setup.memory_max_mib") == "64"
 
 
 def test_setup_defaults_to_gpu_enabled_when_no_gpu_env_unset(tmp_path: pathlib.Path) -> None:
@@ -798,7 +805,8 @@ def test_setup_rerun_keeps_llm_server_disabled_without_no_gpu_override(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *' resources') printf '%s\\n' "
-        "'{\"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}, "
+        "'{\"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, "
+        "\"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, "
         "\"llm_server\": {\"cpus\": 0, \"memory_mib\": 0}}' ;;\n"
         "esac\n"
     )
@@ -878,7 +886,7 @@ def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> No
         "    printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":12000,\"shortfall_mib\":3000,\"vram_feasible\":false,\"ram_feasible\":true,\"remedies\":[\"reduce ctx_size\"]}'\n"
         "    exit 1 ;;\n"
         "  *' list-devices '*) printf '%s\\n' '{\"devices\":[{\"id\":\"Vulkan0\",\"name\":\"Integrated GPU\",\"total_mib\":16384}]}' ;;\n"
-        "  *' resources') printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}' ;;\n"
+        "  *' resources') printf '%s\\n' '{\"llm_server\": {\"cpus\": 5, \"memory_mib\": 27648}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}}' ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
@@ -1220,7 +1228,18 @@ def test_setup_writes_computed_omniroute_resource_limits(tmp_path: pathlib.Path)
     result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
-    assert cfg["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
+    assert cfg["resources"]["omniroute"] == {
+        "cpus_min": 1,
+        "cpus_max": 4,
+        "memory_min_mib": 1024,
+        "memory_max_mib": 4096,
+    }
+    assert cfg["resources"]["remote_setup"] == {
+        "cpus_min": 1,
+        "cpus_max": 1,
+        "memory_min_mib": 32,
+        "memory_max_mib": 64,
+    }
 
 
 def test_setup_fails_instead_of_leaving_resources_uncapped(
@@ -4545,7 +4564,7 @@ def run_lifecycle_script(
     resources_case = (
         "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
         if resources_failure
-        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus\": 1, \"memory_mib\": 1024}}'"
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}}'"
     )
     uv = commands / "uv"
     uv.write_text(

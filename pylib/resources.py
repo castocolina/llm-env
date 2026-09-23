@@ -1,9 +1,11 @@
 """Host CPU/RAM budgeting for the compose container stack.
 
-Mirrors pylib/budget.py's shape for VRAM: fixed reservations for the host
-and for OmniRoute's own process, then whatever is left goes to llm-server.
-cpus is a whole CPU-core count usable directly as compose's `cpus:` service
-key; memory_mib is a whole-MiB integer usable as `mem_limit: <n>m`.
+Mirrors pylib/budget.py's shape for VRAM: fixed reservations for the host,
+for OmniRoute's own process, and for remote-setup's own process, then
+whatever is left goes to llm-server. cpus_min/cpus_max are whole CPU-core
+counts usable directly as compose's `cpu_shares:`/`cpus:` service keys;
+memory_min_mib/memory_max_mib are whole-MiB integers usable as
+`mem_reservation: <n>m`/`mem_limit: <n>m`.
 """
 
 from __future__ import annotations
@@ -15,9 +17,36 @@ HOST_CPU_FLOOR = 2
 HOST_MEMORY_FLOOR_MIB = 4096
 
 # OmniRoute is a lightweight Node/Next.js process, not the workload driving
-# resource needs here — it gets a flat cap, not a share of the remainder.
-OMNIROUTE_CPU_FIXED = 1
-OMNIROUTE_MEMORY_FIXED_MIB = 1024
+# resource needs here -- it gets a flat min/max range, not a share of the
+# remainder. The MIN values are what's actually reserved from the host's
+# perspective (subtracted from the floor available to llm_server below); the
+# MAX values are just a ceiling the container's cgroup cannot exceed, they
+# don't need to be pre-reserved from other consumers.
+#
+# A flat 1024 MiB cap proved too tight in practice: OmniRoute's own internal
+# resourcePressure guard (cgroup_ratio) was observed tripping and returning
+# 503s under concurrent cross-AI/tool-heavy sessions (my-coding,
+# my-plan-review combos with 11-17 tools each) while sitting at only ~700MB
+# baseline -- on a host with tens of GB free, so the cap (not host pressure)
+# was the bottleneck. A min/max range instead guarantees OmniRoute a real
+# floor while capping how far it can grow under a burst.
+OMNIROUTE_CPU_MIN = 1
+OMNIROUTE_CPU_MAX = 4
+OMNIROUTE_MEMORY_MIN_MIB = 1024
+OMNIROUTE_MEMORY_MAX_MIB = 3072
+
+# remote-setup is a small stdlib-only Python HTTP server used solely for the
+# one-time /setup.sh and /config remote-agent bootstrap flow -- observed
+# real usage is ~15MB baseline, ~41.8MB peak, essentially idle. Same
+# min/max shape as OmniRoute, scaled down to what it actually needs: 64 MiB
+# is an intentionally tight-but-sufficient cap (~22MB of headroom over the
+# observed ~41.8MB peak), not a generous one, but still capped rather than
+# left fully uncapped (its previous state) so a bug in it can't consume the
+# host floor meant for everything else.
+REMOTE_SETUP_CPU_MIN = 1
+REMOTE_SETUP_CPU_MAX = 1
+REMOTE_SETUP_MEMORY_MIN_MIB = 32
+REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
 
 class ResourceError(Exception):
@@ -33,33 +62,36 @@ def compute_resource_limits(
     cpu_ceiling_floor_pct: float = 20,
     llm_server_enabled: bool = True,
 ) -> dict[str, Any]:
-    cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED
-    memory_floor_mib = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB
+    cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN
+    memory_floor_mib = (
+        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+    )
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
-                "required to reserve the host floor and OmniRoute's fixed "
-                "allocation and still run llm-server"
+                "required to reserve the host floor and OmniRoute's/"
+                "remote-setup's fixed allocations and still run llm-server"
             )
         if host_memory_total_mib <= memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; more than "
                 f"{memory_floor_mib} MiB is required to reserve the host floor "
-                "and OmniRoute's fixed allocation and still run llm-server"
+                "and OmniRoute's/remote-setup's fixed allocations and still "
+                "run llm-server"
             )
     else:
         if host_cpu_count < cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; at least {cpu_floor} are "
-                "required to reserve the host floor and OmniRoute's fixed "
-                "allocation"
+                "required to reserve the host floor and OmniRoute's/"
+                "remote-setup's fixed allocations"
             )
         if host_memory_total_mib < memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; at least "
                 f"{memory_floor_mib} MiB is required to reserve the host floor "
-                "and OmniRoute's fixed allocation"
+                "and OmniRoute's/remote-setup's fixed allocations"
             )
 
     if llm_server_enabled:
@@ -102,8 +134,16 @@ def compute_resource_limits(
         "host_cpu_floor": HOST_CPU_FLOOR,
         "host_memory_floor_mib": HOST_MEMORY_FLOOR_MIB,
         "omniroute": {
-            "cpus": OMNIROUTE_CPU_FIXED,
-            "memory_mib": OMNIROUTE_MEMORY_FIXED_MIB,
+            "cpus_min": OMNIROUTE_CPU_MIN,
+            "cpus_max": OMNIROUTE_CPU_MAX,
+            "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
+            "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
+        },
+        "remote_setup": {
+            "cpus_min": REMOTE_SETUP_CPU_MIN,
+            "cpus_max": REMOTE_SETUP_CPU_MAX,
+            "memory_min_mib": REMOTE_SETUP_MEMORY_MIN_MIB,
+            "memory_max_mib": REMOTE_SETUP_MEMORY_MAX_MIB,
         },
         "llm_server": {
             "cpus": llm_server_cpus,

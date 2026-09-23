@@ -11,6 +11,17 @@ from typing import Any
 
 import yaml
 
+from pylib.resources import (
+    OMNIROUTE_CPU_MAX,
+    OMNIROUTE_CPU_MIN,
+    OMNIROUTE_MEMORY_MAX_MIB,
+    OMNIROUTE_MEMORY_MIN_MIB,
+    REMOTE_SETUP_CPU_MAX,
+    REMOTE_SETUP_CPU_MIN,
+    REMOTE_SETUP_MEMORY_MAX_MIB,
+    REMOTE_SETUP_MEMORY_MIN_MIB,
+)
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "llm-env" / "models.yml"
 
 REQUIRED_SECTIONS = ("server", "gpu", "runtime", "models")
@@ -48,6 +59,56 @@ def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def _validate_min_max_resources(resources: dict[str, Any], key: str) -> list[str]:
+    """Validate a resources.<key> mapping shaped {cpus_min, cpus_max,
+    memory_min_mib, memory_max_mib}, including that each min <= its max."""
+    errors: list[str] = []
+    section = resources.get(key, {})
+    if not isinstance(section, dict):
+        return [f"resources.{key} must be a mapping"]
+
+    cpus_min = section.get("cpus_min", 0)
+    if isinstance(cpus_min, bool) or not (_finite_number(cpus_min) and cpus_min >= 0):
+        errors.append(f"resources.{key}.cpus_min must be a non-negative number")
+    cpus_max = section.get("cpus_max", 0)
+    if isinstance(cpus_max, bool) or not (_finite_number(cpus_max) and cpus_max >= 0):
+        errors.append(f"resources.{key}.cpus_max must be a non-negative number")
+    if (
+        f"resources.{key}.cpus_min must be a non-negative number" not in errors
+        and f"resources.{key}.cpus_max must be a non-negative number" not in errors
+        and cpus_max != 0
+        and cpus_min > cpus_max
+    ):
+        errors.append(
+            f"resources.{key}.cpus_min ({cpus_min}) must not exceed "
+            f"resources.{key}.cpus_max ({cpus_max})"
+        )
+
+    memory_min_mib = section.get("memory_min_mib", 0)
+    if not (memory_min_mib == 0 or _positive_int(memory_min_mib)):
+        errors.append(
+            f"resources.{key}.memory_min_mib must be zero or a positive integer"
+        )
+    memory_max_mib = section.get("memory_max_mib", 0)
+    if not (memory_max_mib == 0 or _positive_int(memory_max_mib)):
+        errors.append(
+            f"resources.{key}.memory_max_mib must be zero or a positive integer"
+        )
+    if (
+        f"resources.{key}.memory_min_mib must be zero or a positive integer"
+        not in errors
+        and f"resources.{key}.memory_max_mib must be zero or a positive integer"
+        not in errors
+        and memory_max_mib != 0
+        and memory_min_mib > memory_max_mib
+    ):
+        errors.append(
+            f"resources.{key}.memory_min_mib ({memory_min_mib}) must not exceed "
+            f"resources.{key}.memory_max_mib ({memory_max_mib})"
+        )
+    return errors
+
+
 def _finite_number(value: Any) -> bool:
     return (
         isinstance(value, int) and not isinstance(value, bool)
@@ -82,8 +143,20 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             llm_server_resources.setdefault("cpu_ceiling_floor_pct", 20)
         omniroute_resources = resources.setdefault("omniroute", {})
         if isinstance(omniroute_resources, dict):
-            omniroute_resources.setdefault("cpus", 1)
-            omniroute_resources.setdefault("memory_mib", 1024)
+            omniroute_resources.setdefault("cpus_min", OMNIROUTE_CPU_MIN)
+            omniroute_resources.setdefault("cpus_max", OMNIROUTE_CPU_MAX)
+            omniroute_resources.setdefault("memory_min_mib", OMNIROUTE_MEMORY_MIN_MIB)
+            omniroute_resources.setdefault("memory_max_mib", OMNIROUTE_MEMORY_MAX_MIB)
+        remote_setup_resources = resources.setdefault("remote_setup", {})
+        if isinstance(remote_setup_resources, dict):
+            remote_setup_resources.setdefault("cpus_min", REMOTE_SETUP_CPU_MIN)
+            remote_setup_resources.setdefault("cpus_max", REMOTE_SETUP_CPU_MAX)
+            remote_setup_resources.setdefault(
+                "memory_min_mib", REMOTE_SETUP_MEMORY_MIN_MIB
+            )
+            remote_setup_resources.setdefault(
+                "memory_max_mib", REMOTE_SETUP_MEMORY_MAX_MIB
+            )
 
     omniroute = cfg.setdefault("omniroute", {})
     if isinstance(omniroute, dict):
@@ -276,23 +349,12 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         "resources.llm_server.cpu_ceiling_floor_pct must be a "
                         "finite number greater than 0 and at most 100"
                     )
-            omniroute_resources = resources.get("omniroute", {})
-            if not isinstance(omniroute_resources, dict):
-                errors.append("resources.omniroute must be a mapping")
-            else:
-                o_cpus = omniroute_resources.get("cpus", 0)
-                if isinstance(o_cpus, bool) or not (
-                    _finite_number(o_cpus) and o_cpus >= 0
-                ):
-                    errors.append(
-                        "resources.omniroute.cpus must be a non-negative number"
-                    )
-                o_memory_mib = omniroute_resources.get("memory_mib", 0)
-                if not (o_memory_mib == 0 or _positive_int(o_memory_mib)):
-                    errors.append(
-                        "resources.omniroute.memory_mib must be zero or a "
-                        "positive integer"
-                    )
+            errors.extend(
+                _validate_min_max_resources(resources, "omniroute")
+            )
+            errors.extend(
+                _validate_min_max_resources(resources, "remote_setup")
+            )
 
     if "omniroute" in cfg:
         omniroute = cfg["omniroute"]

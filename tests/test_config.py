@@ -8,6 +8,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.config as config_module
+from pylib.resources import (
+    OMNIROUTE_CPU_MAX,
+    OMNIROUTE_CPU_MIN,
+    OMNIROUTE_MEMORY_MAX_MIB,
+    OMNIROUTE_MEMORY_MIN_MIB,
+)
 from pylib.config import (
     ConfigError,
     enabled_models,
@@ -60,7 +66,18 @@ def make_cfg(**overrides):
                 "cpu_ceiling_pct": 60,
                 "cpu_ceiling_floor_pct": 20,
             },
-            "omniroute": {"cpus": 1, "memory_mib": 1024},
+            "omniroute": {
+                "cpus_min": 1,
+                "cpus_max": 4,
+                "memory_min_mib": 1024,
+                "memory_max_mib": 4096,
+            },
+            "remote_setup": {
+                "cpus_min": 1,
+                "cpus_max": 1,
+                "memory_min_mib": 32,
+                "memory_max_mib": 64,
+            },
         },
         "omniroute": {
             "image": "docker.io/diegosouzapw/omniroute:latest",
@@ -791,8 +808,17 @@ def test_validate_config_rejects_infinite_llm_server_cpus():
 
 
 def test_validate_config_rejects_infinite_omniroute_cpus():
-    cfg = make_cfg(resources={"omniroute": {"cpus": float("inf"), "memory_mib": 1024}})
-    assert "resources.omniroute.cpus must be a non-negative number" in validate_config(cfg)
+    cfg = make_cfg(
+        resources={
+            "omniroute": {
+                "cpus_min": 1,
+                "cpus_max": float("inf"),
+                "memory_min_mib": 1024,
+                "memory_max_mib": 4096,
+            }
+        }
+    )
+    assert "resources.omniroute.cpus_max must be a non-negative number" in validate_config(cfg)
 
 
 def test_migrate_config_adds_default_resources_section_when_gpu_absent():
@@ -874,7 +900,24 @@ def test_migrate_config_adds_default_resources_omniroute_section():
     cfg = make_cfg()
     del cfg["resources"]["omniroute"]
     migrated = migrate_config(cfg)
-    assert migrated["resources"]["omniroute"] == {"cpus": 1, "memory_mib": 1024}
+    assert migrated["resources"]["omniroute"] == {
+        "cpus_min": OMNIROUTE_CPU_MIN,
+        "cpus_max": OMNIROUTE_CPU_MAX,
+        "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
+        "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
+    }
+
+
+def test_migrate_config_adds_default_resources_remote_setup_section():
+    cfg = make_cfg()
+    del cfg["resources"]["remote_setup"]
+    migrated = migrate_config(cfg)
+    assert migrated["resources"]["remote_setup"] == {
+        "cpus_min": 1,
+        "cpus_max": 1,
+        "memory_min_mib": 32,
+        "memory_max_mib": 64,
+    }
 
 
 def test_config_accepts_valid_omniroute_section():
@@ -919,10 +962,13 @@ def test_config_rejects_invalid_omniroute_values(field, value, expected_error):
 @pytest.mark.parametrize(
     "omniroute_resources",
     [
-        {"cpus": -1, "memory_mib": 1024},
-        {"cpus": True, "memory_mib": 1024},
-        {"cpus": 1, "memory_mib": -1},
-        {"cpus": 1, "memory_mib": 0.5},
+        {"cpus_min": -1, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
+        {"cpus_min": True, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
+        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": -1, "memory_max_mib": 4096},
+        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 0.5, "memory_max_mib": 4096},
+        # min exceeds max on each dimension
+        {"cpus_min": 5, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
+        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 8192, "memory_max_mib": 4096},
     ],
 )
 def test_config_rejects_invalid_resources_omniroute_values(omniroute_resources):
@@ -934,6 +980,28 @@ def test_config_rejects_invalid_resources_omniroute_values(omniroute_resources):
     )
     errors = validate_config(cfg)
     assert any("resources.omniroute" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "remote_setup_resources",
+    [
+        {"cpus_min": -1, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
+        {"cpus_min": True, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
+        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": -1, "memory_max_mib": 64},
+        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 0.5, "memory_max_mib": 64},
+        {"cpus_min": 2, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
+        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 128, "memory_max_mib": 64},
+    ],
+)
+def test_config_rejects_invalid_resources_remote_setup_values(remote_setup_resources):
+    cfg = make_cfg(
+        resources={
+            "llm_server": {"cpus": 0, "memory_mib": 0},
+            "remote_setup": remote_setup_resources,
+        }
+    )
+    errors = validate_config(cfg)
+    assert any("resources.remote_setup" in error for error in errors)
 
 
 def test_migrate_config_adds_default_remote_setup_section():

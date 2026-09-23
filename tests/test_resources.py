@@ -8,32 +8,58 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pylib.resources import (
     HOST_CPU_FLOOR,
     HOST_MEMORY_FLOOR_MIB,
-    OMNIROUTE_CPU_FIXED,
-    OMNIROUTE_MEMORY_FIXED_MIB,
+    OMNIROUTE_CPU_MAX,
+    OMNIROUTE_CPU_MIN,
+    OMNIROUTE_MEMORY_MAX_MIB,
+    OMNIROUTE_MEMORY_MIN_MIB,
+    REMOTE_SETUP_CPU_MAX,
+    REMOTE_SETUP_CPU_MIN,
+    REMOTE_SETUP_MEMORY_MAX_MIB,
+    REMOTE_SETUP_MEMORY_MIN_MIB,
     ResourceError,
     compute_resource_limits,
 )
+
+# The fixed floor consumed by OmniRoute + remote-setup's MIN reservations
+# (what compute_resource_limits actually subtracts from the host before
+# handing the remainder to llm_server) -- their MAX values are ceilings
+# only, not pre-reserved from anything.
+CPU_FLOOR = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN
+MEMORY_FLOOR_MIB = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+
+
+def _omniroute_expected():
+    return {
+        "cpus_min": OMNIROUTE_CPU_MIN,
+        "cpus_max": OMNIROUTE_CPU_MAX,
+        "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
+        "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
+    }
+
+
+def _remote_setup_expected():
+    return {
+        "cpus_min": REMOTE_SETUP_CPU_MIN,
+        "cpus_max": REMOTE_SETUP_CPU_MAX,
+        "memory_min_mib": REMOTE_SETUP_MEMORY_MIN_MIB,
+        "memory_max_mib": REMOTE_SETUP_MEMORY_MAX_MIB,
+    }
 
 
 def test_llm_server_gets_remainder_after_host_floor_and_omniroute():
     result = compute_resource_limits(host_cpu_count=8, host_memory_total_mib=32768)
     assert result["host_cpu_floor"] == HOST_CPU_FLOOR
     assert result["host_memory_floor_mib"] == HOST_MEMORY_FLOOR_MIB
-    assert result["omniroute"] == {
-        "cpus": OMNIROUTE_CPU_FIXED,
-        "memory_mib": OMNIROUTE_MEMORY_FIXED_MIB,
-    }
-    assert result["llm_server"]["cpus"] == 8 - HOST_CPU_FLOOR - OMNIROUTE_CPU_FIXED
-    assert (
-        result["llm_server"]["memory_mib"]
-        == 32768 - HOST_MEMORY_FLOOR_MIB - OMNIROUTE_MEMORY_FIXED_MIB
-    )
+    assert result["omniroute"] == _omniroute_expected()
+    assert result["remote_setup"] == _remote_setup_expected()
+    assert result["llm_server"]["cpus"] == 8 - CPU_FLOOR
+    assert result["llm_server"]["memory_mib"] == 32768 - MEMORY_FLOOR_MIB
 
 
 def test_insufficient_cpu_raises():
     with pytest.raises(ResourceError):
         compute_resource_limits(
-            host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED,
+            host_cpu_count=CPU_FLOOR,
             host_memory_total_mib=32768,
         )
 
@@ -42,14 +68,14 @@ def test_insufficient_memory_raises():
     with pytest.raises(ResourceError):
         compute_resource_limits(
             host_cpu_count=8,
-            host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB,
+            host_memory_total_mib=MEMORY_FLOOR_MIB,
         )
 
 
 def test_exact_floor_plus_one_is_feasible():
     result = compute_resource_limits(
-        host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED + 1,
-        host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB + 1,
+        host_cpu_count=CPU_FLOOR + 1,
+        host_memory_total_mib=MEMORY_FLOOR_MIB + 1,
     )
     assert result["llm_server"]["cpus"] == 1
     assert result["llm_server"]["memory_mib"] == 1
@@ -68,17 +94,14 @@ def test_memory_ceiling_above_the_remainder_is_a_no_op():
     result = compute_resource_limits(
         host_cpu_count=8, host_memory_total_mib=32768, memory_ceiling_pct=100
     )
-    assert (
-        result["llm_server"]["memory_mib"]
-        == 32768 - HOST_MEMORY_FLOOR_MIB - OMNIROUTE_MEMORY_FIXED_MIB
-    )
+    assert result["llm_server"]["memory_mib"] == 32768 - MEMORY_FLOOR_MIB
 
 
 def test_memory_ceiling_does_not_affect_the_insufficient_memory_floor_check():
     with pytest.raises(ResourceError):
         compute_resource_limits(
             host_cpu_count=8,
-            host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB,
+            host_memory_total_mib=MEMORY_FLOOR_MIB,
             memory_ceiling_pct=1,
         )
 
@@ -126,7 +149,7 @@ def test_cpu_ceiling_above_the_remainder_is_a_no_op():
     result = compute_resource_limits(
         host_cpu_count=8, host_memory_total_mib=32768, cpu_ceiling_pct=100
     )
-    assert result["llm_server"]["cpus"] == 8 - HOST_CPU_FLOOR - OMNIROUTE_CPU_FIXED
+    assert result["llm_server"]["cpus"] == 8 - CPU_FLOOR
 
 
 def test_cpu_ceiling_floor_defaults_to_20_pct_when_unspecified():
@@ -154,7 +177,7 @@ def test_cpu_ceiling_never_rounds_down_to_zero_on_a_small_host():
     round to 0 (round(4 * 1 / 100) == 0), which compose.py then treats as
     "no cpus: limit at all" (fully uncapped), not "cap at 0 cores"."""
     result = compute_resource_limits(
-        host_cpu_count=4,  # cpu_floor is 3 (HOST_CPU_FLOOR=2 + OMNIROUTE_CPU_FIXED=1)
+        host_cpu_count=CPU_FLOOR + 1,  # exactly 1 usable core after the fixed floor
         host_memory_total_mib=32768,
         cpu_ceiling_pct=1,
         cpu_ceiling_floor_pct=1,
@@ -165,7 +188,7 @@ def test_cpu_ceiling_never_rounds_down_to_zero_on_a_small_host():
 @pytest.mark.parametrize("cpu_ceiling_pct", [1, 5, 10, 19])
 def test_cpu_ceiling_never_rounds_down_to_zero_across_tiny_percentages(cpu_ceiling_pct):
     result = compute_resource_limits(
-        host_cpu_count=4,
+        host_cpu_count=6,
         host_memory_total_mib=32768,
         cpu_ceiling_pct=cpu_ceiling_pct,
         cpu_ceiling_floor_pct=1,
@@ -178,19 +201,17 @@ def test_llm_server_limits_are_zeroed_when_disabled():
         host_cpu_count=8, host_memory_total_mib=32768, llm_server_enabled=False
     )
     assert result["llm_server"] == {"cpus": 0, "memory_mib": 0}
-    assert result["omniroute"] == {
-        "cpus": OMNIROUTE_CPU_FIXED,
-        "memory_mib": OMNIROUTE_MEMORY_FIXED_MIB,
-    }
+    assert result["omniroute"] == _omniroute_expected()
+    assert result["remote_setup"] == _remote_setup_expected()
 
 
 def test_disabled_llm_server_only_requires_the_host_and_omniroute_floor():
-    """Exactly HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED CPUs (no spare core for
-    llm-server) must be feasible when llm_server_enabled=False -- today's
-    enabled-path floor check raises at this exact count."""
+    """Exactly CPU_FLOOR CPUs (no spare core for llm-server) must be
+    feasible when llm_server_enabled=False -- today's enabled-path floor
+    check raises at this exact count."""
     result = compute_resource_limits(
-        host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED,
-        host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB,
+        host_cpu_count=CPU_FLOOR,
+        host_memory_total_mib=MEMORY_FLOOR_MIB,
         llm_server_enabled=False,
     )
     assert result["llm_server"] == {"cpus": 0, "memory_mib": 0}
@@ -199,14 +220,14 @@ def test_disabled_llm_server_only_requires_the_host_and_omniroute_floor():
 def test_disabled_llm_server_still_raises_below_the_host_and_omniroute_floor():
     with pytest.raises(ResourceError):
         compute_resource_limits(
-            host_cpu_count=HOST_CPU_FLOOR + OMNIROUTE_CPU_FIXED - 1,
+            host_cpu_count=CPU_FLOOR - 1,
             host_memory_total_mib=32768,
             llm_server_enabled=False,
         )
     with pytest.raises(ResourceError):
         compute_resource_limits(
             host_cpu_count=8,
-            host_memory_total_mib=HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_FIXED_MIB - 1,
+            host_memory_total_mib=MEMORY_FLOOR_MIB - 1,
             llm_server_enabled=False,
         )
 

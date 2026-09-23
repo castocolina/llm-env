@@ -56,25 +56,49 @@ log_step "Computing resource limits"
 resources_json="$(mktemp)"
 trap 'rm -f "$resources_json"' EXIT
 if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
-    omniroute_cpus="$(jq -r '.omniroute.cpus' "$resources_json")"
-    omniroute_memory_mib="$(jq -r '.omniroute.memory_mib' "$resources_json")"
+    omniroute_cpus_min="$(jq -r '.omniroute.cpus_min' "$resources_json")"
+    omniroute_cpus_max="$(jq -r '.omniroute.cpus_max' "$resources_json")"
+    omniroute_memory_min_mib="$(jq -r '.omniroute.memory_min_mib' "$resources_json")"
+    omniroute_memory_max_mib="$(jq -r '.omniroute.memory_max_mib' "$resources_json")"
+    remote_setup_cpus_min="$(jq -r '.remote_setup.cpus_min' "$resources_json")"
+    remote_setup_cpus_max="$(jq -r '.remote_setup.cpus_max' "$resources_json")"
+    remote_setup_memory_min_mib="$(jq -r '.remote_setup.memory_min_mib' "$resources_json")"
+    remote_setup_memory_max_mib="$(jq -r '.remote_setup.memory_max_mib' "$resources_json")"
     if [ "$llm_server_enabled" = "true" ]; then
         cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
         memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
         CPUS="$cpus" MEMORY_MIB="$memory_mib" \
-          OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
+          OMNIROUTE_CPUS_MIN="$omniroute_cpus_min" OMNIROUTE_CPUS_MAX="$omniroute_cpus_max" \
+          OMNIROUTE_MEMORY_MIN_MIB="$omniroute_memory_min_mib" OMNIROUTE_MEMORY_MAX_MIB="$omniroute_memory_max_mib" \
+          REMOTE_SETUP_CPUS_MIN="$remote_setup_cpus_min" REMOTE_SETUP_CPUS_MAX="$remote_setup_cpus_max" \
+          REMOTE_SETUP_MEMORY_MIN_MIB="$remote_setup_memory_min_mib" REMOTE_SETUP_MEMORY_MAX_MIB="$remote_setup_memory_max_mib" \
           yq -i '
             .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
             .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber) |
-            .resources.omniroute.cpus = (strenv(OMNIROUTE_CPUS) | tonumber) |
-            .resources.omniroute.memory_mib = (strenv(OMNIROUTE_MEMORY_MIB) | tonumber)
+            .resources.omniroute.cpus_min = (strenv(OMNIROUTE_CPUS_MIN) | tonumber) |
+            .resources.omniroute.cpus_max = (strenv(OMNIROUTE_CPUS_MAX) | tonumber) |
+            .resources.omniroute.memory_min_mib = (strenv(OMNIROUTE_MEMORY_MIN_MIB) | tonumber) |
+            .resources.omniroute.memory_max_mib = (strenv(OMNIROUTE_MEMORY_MAX_MIB) | tonumber) |
+            .resources.remote_setup.cpus_min = (strenv(REMOTE_SETUP_CPUS_MIN) | tonumber) |
+            .resources.remote_setup.cpus_max = (strenv(REMOTE_SETUP_CPUS_MAX) | tonumber) |
+            .resources.remote_setup.memory_min_mib = (strenv(REMOTE_SETUP_MEMORY_MIN_MIB) | tonumber) |
+            .resources.remote_setup.memory_max_mib = (strenv(REMOTE_SETUP_MEMORY_MAX_MIB) | tonumber)
           ' "$CONFIG_PATH"
         log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
     else
-        OMNIROUTE_CPUS="$omniroute_cpus" OMNIROUTE_MEMORY_MIB="$omniroute_memory_mib" \
+        OMNIROUTE_CPUS_MIN="$omniroute_cpus_min" OMNIROUTE_CPUS_MAX="$omniroute_cpus_max" \
+          OMNIROUTE_MEMORY_MIN_MIB="$omniroute_memory_min_mib" OMNIROUTE_MEMORY_MAX_MIB="$omniroute_memory_max_mib" \
+          REMOTE_SETUP_CPUS_MIN="$remote_setup_cpus_min" REMOTE_SETUP_CPUS_MAX="$remote_setup_cpus_max" \
+          REMOTE_SETUP_MEMORY_MIN_MIB="$remote_setup_memory_min_mib" REMOTE_SETUP_MEMORY_MAX_MIB="$remote_setup_memory_max_mib" \
           yq -i '
-            .resources.omniroute.cpus = (strenv(OMNIROUTE_CPUS) | tonumber) |
-            .resources.omniroute.memory_mib = (strenv(OMNIROUTE_MEMORY_MIB) | tonumber)
+            .resources.omniroute.cpus_min = (strenv(OMNIROUTE_CPUS_MIN) | tonumber) |
+            .resources.omniroute.cpus_max = (strenv(OMNIROUTE_CPUS_MAX) | tonumber) |
+            .resources.omniroute.memory_min_mib = (strenv(OMNIROUTE_MEMORY_MIN_MIB) | tonumber) |
+            .resources.omniroute.memory_max_mib = (strenv(OMNIROUTE_MEMORY_MAX_MIB) | tonumber) |
+            .resources.remote_setup.cpus_min = (strenv(REMOTE_SETUP_CPUS_MIN) | tonumber) |
+            .resources.remote_setup.cpus_max = (strenv(REMOTE_SETUP_CPUS_MAX) | tonumber) |
+            .resources.remote_setup.memory_min_mib = (strenv(REMOTE_SETUP_MEMORY_MIN_MIB) | tonumber) |
+            .resources.remote_setup.memory_max_mib = (strenv(REMOTE_SETUP_MEMORY_MAX_MIB) | tonumber)
           ' "$CONFIG_PATH"
     fi
 else

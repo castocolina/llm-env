@@ -26,7 +26,18 @@ CFG = {
     },
     "resources": {
         "llm_server": {"cpus": 0, "memory_mib": 0},
-        "omniroute": {"cpus": 0, "memory_mib": 0},
+        "omniroute": {
+            "cpus_min": 0,
+            "cpus_max": 0,
+            "memory_min_mib": 0,
+            "memory_max_mib": 0,
+        },
+        "remote_setup": {
+            "cpus_min": 0,
+            "cpus_max": 0,
+            "memory_min_mib": 0,
+            "memory_max_mib": 0,
+        },
     },
     "omniroute": {
         "image": "docker.io/diegosouzapw/omniroute:latest",
@@ -176,14 +187,59 @@ def test_omniroute_zero_resource_limits_are_omitted():
     omniroute = document["services"]["omniroute"]
     assert "cpus" not in omniroute
     assert "mem_limit" not in omniroute
+    assert "cpu_shares" not in omniroute
+    assert "mem_reservation" not in omniroute
 
 
 def test_omniroute_nonzero_resource_limits_are_applied():
-    cfg = {**CFG, "resources": {**CFG["resources"], "omniroute": {"cpus": 1, "memory_mib": 1024}}}
+    cfg = {
+        **CFG,
+        "resources": {
+            **CFG["resources"],
+            "omniroute": {
+                "cpus_min": 1,
+                "cpus_max": 4,
+                "memory_min_mib": 1024,
+                "memory_max_mib": 4096,
+            },
+        },
+    }
     _, document = compose_dict(cfg)
     omniroute = document["services"]["omniroute"]
-    assert omniroute["cpus"] == 1
-    assert omniroute["mem_limit"] == "1024m"
+    assert omniroute["cpus"] == 4
+    assert omniroute["mem_limit"] == "4096m"
+    assert omniroute["cpu_shares"] == 1024
+    assert omniroute["mem_reservation"] == "1024m"
+
+
+def test_remote_setup_zero_resource_limits_are_omitted():
+    _, document = compose_dict()
+    remote_setup = document["services"]["remote-setup"]
+    assert "cpus" not in remote_setup
+    assert "mem_limit" not in remote_setup
+    assert "cpu_shares" not in remote_setup
+    assert "mem_reservation" not in remote_setup
+
+
+def test_remote_setup_nonzero_resource_limits_are_applied():
+    cfg = {
+        **CFG,
+        "resources": {
+            **CFG["resources"],
+            "remote_setup": {
+                "cpus_min": 1,
+                "cpus_max": 1,
+                "memory_min_mib": 32,
+                "memory_max_mib": 64,
+            },
+        },
+    }
+    _, document = compose_dict(cfg)
+    remote_setup = document["services"]["remote-setup"]
+    assert remote_setup["cpus"] == 1
+    assert remote_setup["mem_limit"] == "64m"
+    assert remote_setup["cpu_shares"] == 1024
+    assert remote_setup["mem_reservation"] == "32m"
 
 
 def test_dollar_signs_in_secrets_are_escaped_against_compose_interpolation():

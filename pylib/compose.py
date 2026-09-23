@@ -25,6 +25,31 @@ def _dollar_escape(value: str) -> str:
     return value.replace("$", "$$")
 
 
+def _apply_resource_limits(service: dict[str, Any], resources: dict[str, Any]) -> None:
+    """Set both a reservation (min) and a limit (max) for CPU and memory.
+
+    mem_limit/mem_reservation are real non-swarm podman-compose fields
+    (--memory / --memory-reservation): a hard cap and a soft floor. cpus is
+    the hard core-count cap (--cpus). podman/docker have no absolute
+    "reserved cores" concept outside Swarm/K8s -- cpu_shares (--cpu-shares)
+    is the standard non-swarm approximation: a relative weight, default
+    baseline 1024 per "1 share unit", so cpus_min converts to
+    round(cpus_min * 1024) shares (floored at 2, docker's own minimum).
+    """
+    cpus_max = resources.get("cpus_max")
+    if cpus_max:
+        service["cpus"] = cpus_max
+    cpus_min = resources.get("cpus_min")
+    if cpus_min:
+        service["cpu_shares"] = max(2, round(cpus_min * 1024))
+    memory_max_mib = resources.get("memory_max_mib")
+    if memory_max_mib:
+        service["mem_limit"] = f"{memory_max_mib}m"
+    memory_min_mib = resources.get("memory_min_mib")
+    if memory_min_mib:
+        service["mem_reservation"] = f"{memory_min_mib}m"
+
+
 def render_compose(
     cfg: dict[str, Any],
     *,
@@ -40,6 +65,7 @@ def render_compose(
     llm_server_resources = cfg.get("resources", {}).get("llm_server", {})
     omniroute_cfg = cfg.get("omniroute", {})
     omniroute_resources = cfg.get("resources", {}).get("omniroute", {})
+    remote_setup_resources = cfg.get("resources", {}).get("remote_setup", {})
 
     models_dir = _dollar_escape(models_dir)
     presets_path = _dollar_escape(presets_path)
@@ -128,12 +154,7 @@ def render_compose(
     }
     if not llm_server_enabled:
         del omniroute_service["depends_on"]
-    omniroute_cpus = omniroute_resources.get("cpus")
-    if omniroute_cpus:
-        omniroute_service["cpus"] = omniroute_cpus
-    omniroute_memory_mib = omniroute_resources.get("memory_mib")
-    if omniroute_memory_mib:
-        omniroute_service["mem_limit"] = f"{omniroute_memory_mib}m"
+    _apply_resource_limits(omniroute_service, omniroute_resources)
 
     remote_setup_cfg = cfg.get("remote_setup", {})
     remote_setup_port = remote_setup_cfg.get("port", 20130)
@@ -209,6 +230,7 @@ def render_compose(
             "start_period": "5s",
         },
     }
+    _apply_resource_limits(remote_setup_service, remote_setup_resources)
 
     services: dict[str, Any] = {}
     if llm_server_enabled:

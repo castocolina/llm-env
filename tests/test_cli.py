@@ -1196,7 +1196,12 @@ def test_resources_cpu_ceiling_caps_llm_server_cpus(tmp_path: Path):
     payload = json.loads(result.stdout)
     if result.returncode == 0:
         host_cpu_count = payload["host"]["cpu_count"]
-        uncapped = host_cpu_count - payload["host_cpu_floor"] - payload["omniroute"]["cpus"]
+        uncapped = (
+            host_cpu_count
+            - payload["host_cpu_floor"]
+            - payload["omniroute"]["cpus_min"]
+            - payload["remote_setup"]["cpus_min"]
+        )
         expected_ceiling = max(
             1, round(host_cpu_count * 1 / 100), round(host_cpu_count * 10 / 100)
         )
@@ -1377,7 +1382,11 @@ def test_resources_respects_the_configured_memory_ceiling_floor(tmp_path: Path):
         # below the floor's derived MiB value, in which case min() keeps the
         # ordinary remainder, not the floor.
         host_total_mib = payload["host"]["memory_total_mib"]
-        memory_floor_mib = payload["host_memory_floor_mib"] + payload["omniroute"]["memory_mib"]
+        memory_floor_mib = (
+            payload["host_memory_floor_mib"]
+            + payload["omniroute"]["memory_min_mib"]
+            + payload["remote_setup"]["memory_min_mib"]
+        )
         floored_ceiling_mib = round(host_total_mib * 30 / 100)
         expected_ceiling_mib = min(host_total_mib - memory_floor_mib, floored_ceiling_mib)
         assert payload["llm_server"]["memory_mib"] == expected_ceiling_mib
