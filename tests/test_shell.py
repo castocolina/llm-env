@@ -4668,6 +4668,16 @@ def test_start_enabled_still_waits_for_health_and_provisions(
     assert "server is ready" in result.stdout
 
 
+def test_start_installs_the_omniroute_heal_timer(tmp_path: pathlib.Path) -> None:
+    """make start must (re)install the admission-lease healer timer on every
+    run, so a fresh machine gets self-healing without a separate manual
+    step (setup/enable-omniroute-heal.sh is otherwise never invoked)."""
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "setup/enable-omniroute-heal.sh" in calls.read_text()
+    assert "enable --now llm-env-omniroute-heal.timer" in calls.read_text()
+
+
 def test_start_chains_provider_provision_once_omniroute_is_ready(
     tmp_path: pathlib.Path,
 ) -> None:

@@ -131,6 +131,10 @@ fi
 
 bash "${REPO_DIR}/setup/network.sh"
 
+log_step "Ensuring the OmniRoute admission-lease healer is installed"
+bash "${REPO_DIR}/setup/enable-omniroute-heal.sh" \
+    || log_warn "could not enable the OmniRoute healer timer; run 'bash setup/enable-omniroute-heal.sh' manually"
+
 log_step "Waiting for OmniRoute"
 omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
 if wait_for_tcp_port "$omniroute_port"; then
