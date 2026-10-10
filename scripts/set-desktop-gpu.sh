@@ -62,7 +62,10 @@ if [ "$action" = "status" ]; then
             log_warn "a leftover DRI_PRIME override file is present in ~/.config/environment.d/"
         if [ -n "$stale_flatpak_apps" ]; then
             log_warn "leftover per-app DRI_PRIME Flatpak overrides pin these apps to a fixed GPU, bypassing cardwire:"
-            echo "$stale_flatpak_apps" | sed 's/^/    /'
+            while read -r app; do
+                [ -n "$app" ] || continue
+                echo "    $app"
+            done <<< "$stale_flatpak_apps"
         fi
         log_warn "run '$0 reset' to remove all of the above -- GPU default/discrete selection is owned by cardwire now"
     else

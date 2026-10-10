@@ -8,12 +8,6 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.config as config_module
-from pylib.resources import (
-    OMNIROUTE_CPU_MAX,
-    OMNIROUTE_CPU_MIN,
-    OMNIROUTE_MEMORY_MAX_MIB,
-    OMNIROUTE_MEMORY_MIN_MIB,
-)
 from pylib.config import (
     ConfigError,
     enabled_models,
@@ -24,6 +18,12 @@ from pylib.config import (
     set_model_enabled,
     sync_models_max,
     validate_config,
+)
+from pylib.resources import (
+    OMNIROUTE_CPU_MAX,
+    OMNIROUTE_CPU_MIN,
+    OMNIROUTE_MEMORY_MAX_MIB,
+    OMNIROUTE_MEMORY_MIN_MIB,
 )
 
 
