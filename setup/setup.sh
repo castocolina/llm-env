@@ -63,10 +63,21 @@ log_step "Step 2/8  Detecting GPUs"
 facts="$(llmenv detect)"
 gpu_count="$(echo "$facts" | jq '.gpus | length')"
 [ "$gpu_count" -gt 0 ] || die "no VRAM-backed GPUs detected"
-echo "$facts" | jq -r --arg green "$GREEN" --arg nc "$NC" '
+while IFS=$'\t' read -r gpu_index gpu_card gpu_pci gpu_total gpu_used gpu_render_node gpu_displays; do
+    gpu_total_display="$(format_mib "$gpu_total")"
+    gpu_used_display="$(format_mib "$gpu_used")"
+    gpu_free_display="$(format_mib "$((gpu_total - gpu_used))")"
+    gpu_displays_label="headless"
+    [ -n "$gpu_displays" ] && gpu_displays_label="displays: ${gpu_displays}"
+    printf '  %s) %s%s%s  %s  %s total  %s used  %s free  %s  %s\n' \
+        "$gpu_index" "$GREEN" "$gpu_card" "$NC" "$gpu_pci" \
+        "$gpu_total_display" "$gpu_used_display" "$gpu_free_display" \
+        "$gpu_render_node" "$gpu_displays_label"
+done < <(echo "$facts" | jq -r '
   .gpus | to_entries[] |
-  "  \(.key + 1)) \($green)\(.value.card)\($nc)  \(.value.pci_address)  \(.value.vram_total_mib) MiB total  \(.value.vram_used_mib) MiB used  \(.value.vram_total_mib - .value.vram_used_mib) MiB free  \(.value.render_node)  " +
-  (if (.value.connected_outputs | length) > 0 then "displays: \(.value.connected_outputs | join(","))" else "headless" end)'
+  [(.key + 1 | tostring), .value.card, .value.pci_address,
+   (.value.vram_total_mib | tostring), (.value.vram_used_mib | tostring),
+   .value.render_node, (.value.connected_outputs | join(","))] | @tsv')
 default_gpu="$(echo "$facts" | jq -r '.gpus | to_entries | max_by(.value.vram_total_mib) | .key + 1')"
 gpu_choice="$(ask "  GPU number [${default_gpu}]: " "$default_gpu")"
 [[ "$gpu_choice" =~ ^[1-9][0-9]*$ ]] || die "GPU selection must be a positive integer"
@@ -87,7 +98,7 @@ ceiling_floor_pct="$(yq -r '.gpu.vram_budget_ceiling_floor_pct // 20' "$CONFIG_P
 vram_budget_ceiling_mib="$(jq -n --argjson total "$vram_total" --argjson pct "$ceiling_pct" \
     --argjson floor_pct "$ceiling_floor_pct" \
     '[(($total * $pct / 100) | round), (($total * $floor_pct / 100) | round)] | max')"
-log_info "selected ${pci} with ${vram_total} MiB total, ${vram_used} MiB used, ${vram_free} MiB free"
+log_info "selected ${pci} with $(format_mib "$vram_total") total, $(format_mib "$vram_used") used, $(format_mib "$vram_free") free"
 
 log_step "Step 3/8  Selecting models"
 if [ -f "$CONFIG_PATH" ]; then

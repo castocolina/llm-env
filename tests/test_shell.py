@@ -1010,10 +1010,10 @@ def test_setup_gpu_rows_include_measured_used_and_free_vram(
     result, _, _ = run_setup_with_numbered_selection(tmp_path, "1\n1\n1\n")
 
     assert result.returncode == 0, result.stderr
-    assert "16384 MiB total" in result.stdout
-    assert "2048 MiB used" in result.stdout
-    assert "14336 MiB free" in result.stdout
-    assert "selected 0000:03:00.0 with 16384 MiB total, 2048 MiB used, 14336 MiB free" in result.stdout
+    assert "16.0 GiB total" in result.stdout
+    assert "2.0 GiB used" in result.stdout
+    assert "14.0 GiB free" in result.stdout
+    assert "selected 0000:03:00.0 with 16.0 GiB total, 2.0 GiB used, 14.0 GiB free" in result.stdout
 
 
 def test_setup_persists_a_vram_ceiling_computed_from_total_vram_at_setup_time(
@@ -2122,10 +2122,10 @@ def test_combo_restore_dies_clearly_when_omniroute_is_unreachable(
 def test_gpu_status_reports_total_used_ceiling_and_headroom(tmp_path: pathlib.Path) -> None:
     result, _, _ = run_gpu_status_with_stubs(tmp_path)
     assert result.returncode == 0
-    assert "total VRAM:         16384 MiB" in result.stdout
-    assert "used (system-wide): 2048 MiB" in result.stdout
-    assert "llm-env ceiling:    15565 MiB" in result.stdout
-    assert "budget headroom:    9000 MiB" in result.stdout
+    assert "total VRAM:         16.0 GiB" in result.stdout
+    assert "used (system-wide): 2.0 GiB" in result.stdout
+    assert "llm-env ceiling:    15.2 GiB" in result.stdout
+    assert "budget headroom:    8.8 GiB" in result.stdout
 
 
 def test_gpu_status_reports_uncapped_ceiling_as_uncapped_not_zero(tmp_path: pathlib.Path) -> None:
@@ -2197,8 +2197,8 @@ def test_gpu_status_migrates_the_config_before_reading_the_ceiling(tmp_path: pat
         check=False,
     )
     assert result.returncode == 0
-    assert "llm-env ceiling:    15565 MiB" in result.stdout
-    assert "budget headroom:    9000 MiB" in result.stdout
+    assert "llm-env ceiling:    15.2 GiB" in result.stdout
+    assert "budget headroom:    8.8 GiB" in result.stdout
 
 
 def test_gpu_status_prints_only_the_top_three_processes_by_vram(tmp_path: pathlib.Path) -> None:
@@ -2395,7 +2395,7 @@ def test_gpu_status_shows_headroom_even_when_budget_is_infeasible(tmp_path: path
         capture_output=True,
         check=False,
     )
-    assert "budget headroom:    9000 MiB" in result.stdout
+    assert "budget headroom:    8.8 GiB" in result.stdout
 
 
 def test_gpu_status_shows_headroom_unavailable_on_a_budget_error(tmp_path: pathlib.Path) -> None:
@@ -2835,6 +2835,8 @@ def run_benchmark(
     presets_missing_alias: bool = False,
     device_name: str = "Benchmark GPU",
     yq_models_json_exit: int = 0,
+    smallest_check_timeout_seconds: int | None = None,
+    hang_smallest_bench_for_seconds: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run the benchmark with controlled Vulkan streams and record Podman calls."""
     real_yq = shutil.which("yq")
@@ -2845,6 +2847,11 @@ def run_benchmark(
     calls = tmp_path / "calls"
     calls.touch()
     config = tmp_path / "models.yml"
+    smallest_timeout_line = (
+        f"    check_timeout_seconds: {smallest_check_timeout_seconds}\n"
+        if smallest_check_timeout_seconds is not None
+        else ""
+    )
     config.write_text(
         "gpu:\n"
         "  backend: vulkan\n"
@@ -2859,6 +2866,7 @@ def run_benchmark(
         "    size_bytes: 1\n"
         "    ctx_size: 4096\n"
         "    client_max_output_tokens: 512\n"
+        f"{smallest_timeout_line}"
         "  - alias: 'odd/\"alias'\n"
         "    enabled: true\n"
         "    file: biggest.gguf\n"
@@ -2920,7 +2928,9 @@ def run_benchmark(
         "case \"$*\" in\n"
         "  *'help all'*) printf '%s\\n' bench ;;\n"
         "  *'--list-devices'*) printf '%s\\n' 'Vulkan0: Benchmark GPU (16384 MiB, 16000 MiB free)' ;;\n"
-        "  *' bench '*' /models/smallest.gguf '*) printf '%s' \"$BENCHMARK_STDOUT\"; printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
+        "  *' bench '*' /models/smallest.gguf '*)\n"
+        "    if [ -n \"$HANG_SMALLEST_SECONDS\" ]; then sleep \"$HANG_SMALLEST_SECONDS\"; fi\n"
+        "    printf '%s' \"$BENCHMARK_STDOUT\"; printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
         "  *' bench '*' /models/biggest.gguf '*) printf '%s' \"$BENCHMARK_STDOUT\"; printf '%s' \"$BENCHMARK_STDERR\" >&2 ;;\n"
         "esac\n"
     )
@@ -2940,6 +2950,11 @@ def run_benchmark(
         "PRESETS_EXIT": str(presets_exit),
         "PRESETS_MISSING_ALIAS": "1" if presets_missing_alias else "0",
         "YQ_MODELS_JSON_EXIT": str(yq_models_json_exit),
+        "HANG_SMALLEST_SECONDS": (
+            str(hang_smallest_bench_for_seconds)
+            if hang_smallest_bench_for_seconds is not None
+            else ""
+        ),
     }
     result = subprocess.run(
         ["/usr/bin/make", "benchmark"],
@@ -3045,6 +3060,31 @@ def test_benchmark_fails_instead_of_skipping_all_models(
     result, _, config = run_benchmark(tmp_path, valid_benchmark_json, **kwargs)
     assert result.returncode != 0
     assert message in result.stderr
+    assert yq_value(config, ".gpu.benchmark") == "null"
+
+
+def test_benchmark_bounds_a_wedged_run_and_cleans_up_the_container(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A model's own check_timeout_seconds bounds its per-model podman run
+    (there is no other timeout on benchmark.sh's podman invocation, unlike
+    check-setup.sh/check-server.sh), and the named container is force-
+    removed afterward regardless of outcome -- this is what lets the script
+    recover from a wedged GPU/driver call on its own, without a human
+    needing to `kill -9` an orphaned container by hand."""
+    result, calls, config = run_benchmark(
+        tmp_path,
+        valid_benchmark_json,
+        smallest_check_timeout_seconds=1,
+        hang_smallest_bench_for_seconds=5,
+    )
+
+    recorded = calls.read_text()
+    assert "timeout --kill-after=15 1 podman run" in result.stdout
+    assert re.search(r"podman rm -f llm-env-bench-\d+-0", recorded)
+    # The hang is bounded to ~1s (plus podman/timeout overhead), not the
+    # full 5s the stub would otherwise sleep for, and not an indefinite hang.
+    assert result.returncode != 0
     assert yq_value(config, ".gpu.benchmark") == "null"
 
 

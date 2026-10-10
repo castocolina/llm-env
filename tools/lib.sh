@@ -42,6 +42,18 @@ redact_text() {
     printf '%s' "$1"
 }
 
+# MiB -> "N MiB" below 1024, else "X.Y GiB" -- used anywhere a memory
+# quantity is printed for a human (GPU listings, VRAM budgets), so a large
+# figure like 16384 reads as "16.0 GiB" instead of forcing a manual divide.
+format_mib() {
+    local mib="$1"
+    if [ "$mib" -ge 1024 ]; then
+        awk -v m="$mib" 'BEGIN { printf "%.1f GiB", m / 1024 }'
+    else
+        printf '%s MiB' "$mib"
+    fi
+}
+
 log_command() {
     printf 'Command: '
     redact_text "$1"

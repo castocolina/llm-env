@@ -46,19 +46,19 @@ ceiling_mib="$(yq -r '.gpu.vram_budget_ceiling_mib // 0' "$CONFIG_PATH")"
 if [ "$ceiling_mib" = "0" ]; then
     ceiling_display="uncapped"
 else
-    ceiling_display="${ceiling_mib} MiB"
+    ceiling_display="$(format_mib "$ceiling_mib")"
 fi
 
 headroom_display="unavailable"
 budget_json="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR" 2>/dev/null)" || true
 if [ -n "$budget_json" ]; then
     headroom_mib="$(echo "$budget_json" | jq -r '.available_mib // empty')"
-    [ -n "$headroom_mib" ] && headroom_display="${headroom_mib} MiB"
+    [ -n "$headroom_mib" ] && headroom_display="$(format_mib "$headroom_mib")"
 fi
 
 log_step "GPU ${pci} (${render_node})"
-echo "  total VRAM:         ${vram_total} MiB"
-echo "  used (system-wide): ${vram_used} MiB"
+echo "  total VRAM:         $(format_mib "$vram_total")"
+echo "  used (system-wide): $(format_mib "$vram_used")"
 echo "  llm-env ceiling:    ${ceiling_display}"
 echo "  budget headroom:    ${headroom_display}"
 
