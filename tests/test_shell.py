@@ -1498,7 +1498,8 @@ def test_set_desktop_gpu_reset_is_a_noop_when_nothing_active(
     result, _, _ = run_set_desktop_gpu_with_stubs(tmp_path, "reset")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "no override was active" in result.stdout
+    assert "no environment.d override was active" in result.stdout
+    assert "no stale per-app Flatpak DRI_PRIME override was active" in result.stdout
 
 
 def test_set_desktop_gpu_status_reports_detected_gpus_and_compositor(

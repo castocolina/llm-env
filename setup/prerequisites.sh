@@ -45,7 +45,7 @@ command_purpose() {
         ip) printf '%s\n' "network address inspection" ;;
         git) printf '%s\n' "source control for updates" ;;
         shellcheck) printf '%s\n' "shell script validation" ;;
-        node) printf '%s\n' "JSONC editor for OpenCode client configuration" ;;
+        node) printf '%s\n' "JSONC editor for OpenCode client configuration; also needs 'volta install node' once for tests/test_remote_setup.py to pass" ;;
         firewall-cmd) printf '%s\n' "firewall configuration for LAN access" ;;
         avahi-publish) printf '%s\n' "LAN service discovery" ;;
     esac
