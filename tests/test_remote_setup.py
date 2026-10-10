@@ -1094,9 +1094,20 @@ def _run_generated_setup_sh(
                 child_env["VOLTA_HOME"] = volta_home
 
             argv = ["bash", str(script_path), *(extra_args or [])]
-            pid, master_fd = pty.fork()
-            if pid == 0:
-                os.execvpe("bash", argv, child_env)
+            # Popen, not pty.fork(): forking this multi-threaded process
+            # (HTTP server threads are running) is deprecated. login_tty
+            # makes the pty the child's controlling terminal, which the
+            # script's /dev/tty prompt needs.
+            master_fd, slave_fd = pty.openpty()
+            launcher = "import os,sys; os.login_tty(0); os.execvpe(sys.argv[1], sys.argv[1:], os.environ)"
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-c", launcher, *argv],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=child_env,
+            )
+            os.close(slave_fd)
 
             if send_master_key:
                 os.write(master_fd, b"test-master-key\n")
@@ -1107,8 +1118,8 @@ def _run_generated_setup_sh(
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    os.kill(pid, 9)
-                    os.waitpid(pid, 0)
+                    process.kill()
+                    process.wait()
                     raise AssertionError(
                         "the generated setup.sh hung; output so far: "
                         + output.decode(errors="replace")
@@ -1123,8 +1134,8 @@ def _run_generated_setup_sh(
                 if not chunk:
                     break
                 output += chunk
-            _, status = os.waitpid(pid, 0)
-            return os.WEXITSTATUS(status), output.decode(errors="replace"), home_dir
+            os.close(master_fd)
+            return process.wait(), output.decode(errors="replace"), home_dir
         finally:
             server.shutdown()
             thread.join()
