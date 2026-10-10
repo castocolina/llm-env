@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # enable-token-check.sh — install and enable a daily systemd --user timer
 # that runs scripts/check-provider-tokens.sh and desktop-notifies (via
-# notify-send, when available) on any connection needing reauthentication.
+# notify-send, when available) on any connection that needs attention
+# (expired auth, exhausted quota, billing, or a policy block).
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh

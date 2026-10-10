@@ -11392,7 +11392,10 @@ def test_check_provider_tokens_flags_unhealthy_connections_and_notifies(
     assert "1 provider connection(s) need attention" in result.stdout + result.stderr
     assert "xai/grok-build: error" in result.stdout + result.stderr
     assert "token expired" in result.stdout + result.stderr
-    assert "notify-send" in calls.read_text()
+    notification = calls.read_text()
+    assert "OmniRoute: 1 provider connection(s) need attention" in notification
+    assert "xai/grok-build: error (token expired)" in notification
+    assert "need reauthentication" not in notification
 
 
 def test_check_provider_tokens_skips_notification_when_notify_send_missing(

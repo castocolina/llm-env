@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 # check-provider-tokens.sh — flag any OmniRoute provider connection that
-# needs re-authentication (testStatus != "active"), so a broken OAuth
-# session is caught ahead of time instead of failing a long-running job.
+# needs attention (testStatus != "active": expired auth, exhausted quota,
+# billing, or a policy block), so it's caught ahead of time instead of
+# failing a long-running job.
+#
+# Known blind spot: testStatus reflects OmniRoute's own connection-level
+# health check, which only validates the credential (see
+# `POST /api/providers/<id>/test`, "source":"local") -- it does not send a
+# real completion, so it cannot see a provider that returns HTTP 200 with an
+# error buried in the body (e.g. "Insufficient balance", "resource
+# pressure", "recharge" -- the same soft-fail patterns some combos guard
+# against via their own `responseValidation.forbiddenSubstrings`, see the
+# "my-plan-review" combo in the OmniRoute dashboard). Catching that class of
+# failure here would require sending a real, token-costing completion per
+# connection on every run; deliberately not done -- if a model looks fine
+# here but a combo run still fails on one of those substrings, that combo's
+# own forbiddenSubstrings/fallback handling is the source of truth, not
+# this script.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -51,9 +66,15 @@ summary_lines="$(printf '%s' "$unhealthy" | jq -r '
 printf '%s\n' "$summary_lines"
 
 if command -v notify-send >/dev/null 2>&1; then
-    notify_body="$(printf '%s' "$unhealthy" | jq -r '.[] | "\(.provider)/\(.name): \(.testStatus)"')"
+    # testStatus covers more than expired auth (e.g. "unavailable" for a
+    # quota/billing block, "banned" for a policy block) -- don't claim
+    # "reauthentication" for those, just surface the real status/reason.
+    notify_body="$(printf '%s' "$unhealthy" | jq -r '
+        .[] | "\(.provider)/\(.name): \(.testStatus)" +
+            (if .lastError then " (\(.lastError))" else "" end)
+    ')"
     notify-send --urgency=critical \
-        "OmniRoute: ${count} provider connection(s) need reauthentication" \
+        "OmniRoute: ${count} provider connection(s) need attention" \
         "$notify_body" \
         || log_warn "could not send a desktop notification"
 fi

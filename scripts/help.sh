@@ -21,7 +21,7 @@ echo "make desktop-gpu-reset Remove a leftover desktop default-GPU override (use
 echo "make desktop-gpu-status Show detected GPUs and which one is active"
 echo "make provider-provision Import local CLI provider sessions (Codex) into OmniRoute"
 echo "make update-omniroute Pull a newer OmniRoute image if one is published, then stop/start"
-echo "make check-provider-tokens Flag any OmniRoute provider connection needing reauthentication"
+echo "make check-provider-tokens Flag any OmniRoute provider connection needing attention (auth, quota, billing, policy)"
 echo "make enable-token-check Install a daily timer for check-provider-tokens (desktop notify)"
 echo "make disable-token-check Remove the daily provider-token-check timer"
 echo "make logs          Follow service logs"
