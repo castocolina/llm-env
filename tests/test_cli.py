@@ -3,9 +3,10 @@ import json
 import subprocess
 import sys
 import threading
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 import yaml
@@ -958,7 +959,9 @@ def test_cmd_budget_reports_infeasible_with_an_achievable_remedy_percentage(
         ],
     )
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert result == 1
@@ -1010,7 +1013,9 @@ def test_cmd_budget_reports_infeasible_and_impossible_when_no_pct_could_ever_fit
         ],
     )
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert result == 1
@@ -1074,7 +1079,9 @@ def test_cmd_budget_catches_ram_infeasibility_from_a_model_the_vram_budget_would
         ],
     )
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert result == 1
@@ -1118,7 +1125,9 @@ def test_cmd_budget_reports_infeasible_when_the_host_cant_reserve_the_fixed_floo
         ],
     )
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert result == 1
@@ -1172,7 +1181,9 @@ def test_cmd_budget_sums_ram_across_concurrently_resident_models(
         ],
     )
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
     output = json.loads(capsys.readouterr().out)
 
     assert result == 1
@@ -1241,7 +1252,9 @@ def test_cmd_budget_passes_configured_models_max(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llmenv, "compute_budget", fake_compute_budget)
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
 
     assert result == 0
     assert captured["models_max"] == 1
@@ -1275,7 +1288,9 @@ def test_budget_respects_the_configured_vram_ceiling(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llmenv, "compute_budget", fake_compute_budget)
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
 
     assert result == 0
     assert captured["vram_budget_ceiling_mib"] == 100
@@ -1309,7 +1324,9 @@ def test_budget_treats_a_configured_zero_vram_ceiling_as_uncapped(tmp_path, monk
 
     monkeypatch.setattr(llmenv, "compute_budget", fake_compute_budget)
 
-    result = llmenv.cmd_budget(SimpleNamespace(config="cfg", models_dir="models"))
+    result = llmenv.cmd_budget(
+        cast(Namespace, SimpleNamespace(config="cfg", models_dir="models"))
+    )
 
     assert result == 0
     # A configured 0 must reach compute_budget() as None (uncapped), never
@@ -1519,7 +1536,7 @@ def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
 
 
 class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
-    received: ClassVar[list[tuple[str, str, object]]] = []
+    received: ClassVar[list[tuple[str, str, dict[str, Any]]]] = []
 
     def _reply(self, payload, *, set_cookie=None):
         body = json.dumps(payload).encode()
@@ -1821,7 +1838,7 @@ def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
 
 
 class _RecordingComboBackupRestoreHandler(http.server.BaseHTTPRequestHandler):
-    received: ClassVar[list[tuple[str, str, object]]] = []
+    received: ClassVar[list[tuple[str, str, dict[str, Any] | None]]] = []
     combos: ClassVar[list[dict]] = []
     connections: ClassVar[list[dict]] = []
 
@@ -2008,7 +2025,9 @@ def test_omniroute_restore_combos_remaps_connection_id_by_live_provider_and_labe
             "restored": [{"combo": "my-planning", "action": "created"}]
         }
         posts = [r for r in _RecordingComboBackupRestoreHandler.received if r[0] == "POST"]
-        assert posts[-1][2]["models"][0]["connectionId"] == "conn-live"
+        post_body = posts[-1][2]
+        assert post_body is not None
+        assert post_body["models"][0]["connectionId"] == "conn-live"
     finally:
         server.shutdown()
         thread.join()

@@ -10,6 +10,7 @@ import shutil
 import socket
 import stat
 import subprocess
+from typing import Any
 
 import pytest
 import yaml
@@ -3039,7 +3040,7 @@ def test_make_benchmark_persists_legacy_shared_benchmark_migration(
     ],
 )
 def test_benchmark_fails_instead_of_skipping_all_models(
-    tmp_path: pathlib.Path, kwargs: dict[str, object], message: str
+    tmp_path: pathlib.Path, kwargs: dict[str, Any], message: str
 ) -> None:
     result, _, config = run_benchmark(tmp_path, valid_benchmark_json, **kwargs)
     assert result.returncode != 0
@@ -4409,7 +4410,7 @@ def test_check_setup_skips_each_enabled_inference_after_budget_failure(
 )
 def test_check_setup_fails_when_inference_prerequisite_is_unavailable(
     tmp_path: pathlib.Path,
-    kwargs: dict[str, object],
+    kwargs: dict[str, Any],
     message: str,
 ) -> None:
     result, calls, _ = run_check_setup_with_stubs(tmp_path, **kwargs)
@@ -5346,14 +5347,17 @@ def test_setup_stages_every_target_before_first_replacement(
 def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
     tmp_path: pathlib.Path,
 ) -> None:
-    kwargs = {
-        "pi_text": '{"providers":{"other":{}}}',
-        "pi_settings_text": '{"theme":"dark"}',
-        "opencode_config_json_text": '{"provider":{"other":{}}}',
-        "opencode_state_text": '{"recent":[],"favorite":[],"variant":{}}',
-    }
+    pi_text = '{"providers":{"other":{}}}'
+    pi_settings_text = '{"theme":"dark"}'
+    opencode_config_json_text = '{"provider":{"other":{}}}'
+    opencode_state_text = '{"recent":[],"favorite":[],"variant":{}}'
     failed, _, *_ = run_setup_local_llm_agents(
-        tmp_path, fail_move_number=2, **kwargs
+        tmp_path,
+        fail_move_number=2,
+        pi_text=pi_text,
+        pi_settings_text=pi_settings_text,
+        opencode_config_json_text=opencode_config_json_text,
+        opencode_state_text=opencode_state_text,
     )
 
     assert failed.returncode != 0
@@ -5361,7 +5365,11 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
     assert "fixture-omniroute-api-key" not in failed.stdout + failed.stderr
 
     repaired, _, _, settings_path, _, state_path = run_setup_local_llm_agents(
-        tmp_path, **kwargs
+        tmp_path,
+        pi_text=pi_text,
+        pi_settings_text=pi_settings_text,
+        opencode_config_json_text=opencode_config_json_text,
+        opencode_state_text=opencode_state_text,
     )
 
     assert repaired.returncode == 0, repaired.stderr
@@ -7456,7 +7464,7 @@ def run_agent_check(
             sentinel=b"oversized-source-sentinel",
         )
 
-    weather_evidence = {
+    weather_evidence: dict[str, object] = {
         "source_url": (
             "https://api.open-meteo.com/v1/forecast?latitude=-33.4489&"
             "longitude=-70.6693&current=temperature_2m,weather_code&"

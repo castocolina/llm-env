@@ -65,7 +65,9 @@ def test_build_payload_uses_the_real_router_api_key():
 
 def test_find_connection_matches_by_name():
     connections = [{"id": "1", "name": "other"}, {"id": "2", "name": CONNECTION_NAME}]
-    assert find_connection(connections)["id"] == "2"
+    found = find_connection(connections)
+    assert found is not None
+    assert found["id"] == "2"
 
 
 def test_find_connection_returns_none_when_absent():
@@ -157,7 +159,7 @@ def test_provision_raises_when_login_returns_no_session_cookie(monkeypatch):
 
 def test_provision_raises_omniroute_error_on_login_http_failure(monkeypatch):
     def fake_urlopen(request, timeout):
-        raise urllib.error.HTTPError(request.full_url, 401, "boom", None, None)
+        raise urllib.error.HTTPError(request.full_url, 401, "boom", Message(), None)
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(OmniRouteError):
@@ -170,7 +172,7 @@ def test_provision_raises_omniroute_error_on_http_failure(monkeypatch):
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
-        raise urllib.error.HTTPError(request.full_url, 500, "boom", None, None)
+        raise urllib.error.HTTPError(request.full_url, 500, "boom", Message(), None)
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(OmniRouteError):
@@ -291,7 +293,7 @@ def test_import_codex_auth_surfaces_the_servers_error_detail(monkeypatch, tmp_pa
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
         raise urllib.error.HTTPError(
-            request.full_url, 409, "Conflict", None, io.BytesIO(body)
+            request.full_url, 409, "Conflict", Message(), io.BytesIO(body)
         )
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)

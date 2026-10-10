@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import BinaryIO, Self
+from typing import Any, BinaryIO, Self, cast
 
 import pytest
 
@@ -42,6 +42,12 @@ class PollFaultProcess:
         if self.poll_calls in self._fail_calls:
             raise OSError("fixture poll failure")
         return self._process.poll()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
 
     def arm_next_poll(self) -> None:
         self._fail_calls.add(self.poll_calls + 1)
@@ -176,7 +182,7 @@ class FakeBackend:
             if not os.WIFSTOPPED(wait_status):
                 raise BoundaryError("fixture exited before signaling readiness")
             self.raw_process.send_signal(signal.SIGCONT)
-        return self.process
+        return cast(subprocess.Popen[bytes], self.process)
 
     def cgroup_path(self, unit_name: str, timeout_seconds: float) -> Path | None:
         self.cgroup_path_calls += 1
@@ -213,6 +219,7 @@ class FakeBackend:
             raise BoundaryError("fixture signal state unavailable")
 
     def cgroup_empty(self, cgroup_path: Path) -> bool:
+        assert self.unit_name is not None
         assert cgroup_path == Path("/fake-cgroup") / self.unit_name
         if self.cleanup_error or self.cleanup_errors > 0:
             self.cleanup_errors = max(0, self.cleanup_errors - 1)
@@ -308,7 +315,7 @@ def install_thread_start_failure(monkeypatch, failing_start: int) -> None:
     start_calls = 0
 
     class ControlledThread:
-        def __init__(self, *args: object, **kwargs: object) -> None:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             self._thread = real_thread(*args, **kwargs)
 
         def start(self) -> None:
@@ -368,7 +375,7 @@ def observe_cleanup(
     result = agent_runner._wait_for_cleanup(
         CgroupEventsBackend(),
         Path("/fake-cgroup/test.scope"),
-        object(),
+        cast(subprocess.Popen[bytes], object()),
         (),
         10.02,
         0.25,
@@ -998,7 +1005,7 @@ def test_cleanup_now_does_not_make_cgroup_removal_sticky(monkeypatch) -> None:
     assert agent_runner._cleanup_now(
         CgroupEventsBackend(),
         Path("/fake-cgroup/test.scope"),
-        CompletedProcess(),
+        cast(subprocess.Popen[bytes], CompletedProcess()),
         (),
     ) == (False, False)
 
@@ -1081,7 +1088,7 @@ def test_local_launcher_kill_waits_full_term_grace(monkeypatch) -> None:
     process = HungLauncher()
 
     reaped = agent_runner._reap_local_launcher(
-        process,
+        cast(subprocess.Popen[bytes], process),
         (),
         clock[0],
         grace_seconds,
@@ -1143,7 +1150,7 @@ def test_local_launcher_control_errors_return_false(
 
     assert (
         agent_runner._reap_local_launcher(
-            FailingLauncher(),
+            cast(subprocess.Popen[bytes], FailingLauncher()),
             (),
             10.0,
             0.25,
