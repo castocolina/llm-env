@@ -1087,6 +1087,11 @@ def _run_generated_setup_sh(
                 "HOME": str(home_dir),
                 "TMPDIR": str(mktemp_dir),
             }
+            # Volta's node shim resolves its toolchain from $VOLTA_HOME, which
+            # defaults to $HOME/.volta -- the isolated HOME above has none.
+            volta_home = os.environ.get("VOLTA_HOME") or str(Path.home() / ".volta")
+            if Path(volta_home).is_dir():
+                child_env["VOLTA_HOME"] = volta_home
 
             argv = ["bash", str(script_path), *(extra_args or [])]
             pid, master_fd = pty.fork()
