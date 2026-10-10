@@ -48,6 +48,13 @@ REMOTE_SETUP_CPU_MAX = 1
 REMOTE_SETUP_MEMORY_MIN_MIB = 32
 REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
+# OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
+# upstream) bounds concurrent "heavy" requests (large tool/context bodies --
+# routine for coding agents) to avoid heap amplification. The queue wait is
+# extended to 8000ms from the 2s default so a legitimate burst of concurrent
+# heavy requests serializes through the gate instead of failing immediately.
+OMNIROUTE_CHAT_ADMISSION_QUEUE_MS = 8000
+
 
 class ResourceError(Exception):
     """Raised when the host has too few resources to reserve the fixed floors."""

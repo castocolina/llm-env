@@ -162,6 +162,13 @@ def test_omniroute_service_requires_an_api_key_on_its_client_api():
     assert env["REQUIRE_API_KEY"] == "true"
 
 
+def test_omniroute_service_extends_chat_admission_queue_wait():
+    _, document = compose_dict()
+    env = document["services"]["omniroute"]["environment"]
+    assert env["OMNIROUTE_CHAT_ADMISSION_QUEUE_MS"] == "8000"
+    assert "OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT" not in env
+
+
 def test_omniroute_service_healthcheck_runs_the_bundled_script():
     _, document = compose_dict()
     healthcheck = document["services"]["omniroute"]["healthcheck"]
