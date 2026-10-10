@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-setup.sh — sync the Python dev environment (pytest, ruff, pyright).
+# dev-setup.sh — sync the Python dev environment (pytest, ruff, pyright, pytest-xdist).
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -9,4 +9,4 @@ require_cmd uv
 
 log_step "Syncing the Python dev environment"
 uv sync
-log_info "dev environment ready (.venv, pytest, ruff, pyright)"
+log_info "dev environment ready (.venv, pytest, ruff, pyright, pytest-xdist)"

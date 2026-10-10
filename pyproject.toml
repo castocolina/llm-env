@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 dependencies = ["pyyaml>=6.0"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.8", "pyright>=1.1"]
+dev = ["pytest>=8.0", "ruff>=0.8", "pyright>=1.1", "pytest-xdist>=3.5"]
 
 [tool.pyright]
 include = ["llmenv.py", "pylib"]
