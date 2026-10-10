@@ -7,3 +7,4 @@ __pycache__/
 models.yml
 .env
 .playwright-mcp/
+.codegraph/
