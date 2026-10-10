@@ -33,7 +33,7 @@ def render_presets(cfg: dict[str, Any], models_dir: str, device: str) -> str:
     runtime = cfg.get("runtime", {})
 
     parser = configparser.ConfigParser()
-    parser.optionxform = str  # preserve hyphenated keys verbatim
+    parser.optionxform = str  # type: ignore[method-assign]  # stdlib stub limitation, not a bug
 
     parser["*"] = {
         "device": device,

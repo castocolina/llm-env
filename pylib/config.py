@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import yaml
 
@@ -55,7 +55,7 @@ class ConfigError(Exception):
     """Raised when the configuration cannot be read or is structurally invalid."""
 
 
-def _positive_int(value: Any) -> bool:
+def _positive_int(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
@@ -413,6 +413,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         elif alias in seen:
             errors.append(f"duplicate model alias: {alias}")
         else:
+            assert isinstance(alias, str)
             seen.add(alias)
         if "enabled" in model and not isinstance(model["enabled"], bool):
             errors.append(f"model {model_name} enabled must be a Boolean")

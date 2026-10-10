@@ -17,7 +17,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Literal, Protocol
+from typing import IO, BinaryIO, Literal, Protocol
 
 DEFAULT_RUNTIME_SECONDS = 300.0
 DEFAULT_GRACE_SECONDS = 10.0
@@ -298,7 +298,7 @@ def _open_private_output(path: Path) -> BinaryIO:
         raise BoundaryError(f"could not wrap private output {path}") from exc
 
 
-def _close_streams(streams: Sequence[BinaryIO | None]) -> bool:
+def _close_streams(streams: Sequence[IO[bytes] | None]) -> bool:
     close_succeeded = True
     for stream in streams:
         if stream is None:

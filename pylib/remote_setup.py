@@ -608,7 +608,7 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         )
         self._write_json(200, response)
 
-    def log_message(self, format_string, *args):
+    def log_message(self, format, *args):
         """Log only what an operator would need to see in
         `podman logs remote-setup`: failed master-key attempts (401),
         OmniRoute outages (502), misconfiguration (503) and internal
@@ -618,14 +618,14 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         status = self._last_status
         if status is not None and 200 <= status < 300:
             return
-        super().log_message(format_string, *args)
+        super().log_message(format, *args)
 
-    def log_error(self, format_string, *args):
+    def log_error(self, format, *args):
         """Always logged, never gated: log_error() fires for problems the
         base class handles before any send_response() ran (a timed-out or
         malformed request line), so self._last_status would still hold the
         PREVIOUS request's status on a kept-alive connection."""
-        http.server.BaseHTTPRequestHandler.log_message(self, format_string, *args)
+        http.server.BaseHTTPRequestHandler.log_message(self, format, *args)
 
 
 def install_termination_handlers(server: http.server.HTTPServer) -> None:
