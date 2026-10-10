@@ -160,7 +160,10 @@ def restore_combos(
     matching its (provider, label) -- see _remap_combo_connection_ids -- since
     a raw backed-up connectionId is almost certainly stale by restore time.
     """
-    backup = json.loads(input_path.read_text())
+    try:
+        backup = json.loads(input_path.read_text())
+    except json.JSONDecodeError as err:
+        raise OmniRouteError(f"{input_path} is not valid JSON") from err
     combos = backup.get("combos") if isinstance(backup, dict) else None
     if not isinstance(combos, list):
         raise OmniRouteError("unexpected backup file shape")

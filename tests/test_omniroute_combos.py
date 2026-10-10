@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from email.message import Message
 from pathlib import Path
@@ -183,6 +184,13 @@ def test_restore_combos_updates_existing_combos_with_overwrite(tmp_path, monkeyp
 
     assert result == [{"combo": "my-planning", "action": "updated"}]
     assert puts == [{"name": "my-planning", "strategy": "priority", "description": "updated"}]
+
+
+def test_restore_combos_raises_on_malformed_json(tmp_path):
+    input_path = tmp_path / "corrupt.json"
+    input_path.write_text("{broken json")
+    with pytest.raises(OmniRouteError, match=re.escape(f"{input_path} is not valid JSON")):
+        restore_combos("http://127.0.0.1:20128", "dashboard-pw", input_path)
 
 
 def test_restore_combos_raises_on_unexpected_backup_shape(tmp_path, monkeypatch):
