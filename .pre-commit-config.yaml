@@ -1,0 +1,17 @@
+repos:
+  - repo: local
+    hooks:
+      - id: validate
+        name: shellcheck + ruff + pyright
+        entry: bash tools/validate.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: test
+        name: pytest (full suite)
+        entry: bash tools/test.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+

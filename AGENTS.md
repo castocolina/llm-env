@@ -31,6 +31,7 @@ make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
 make key-reset                 # Rotate the server API key
 make prune                     # Delete downloaded model files (not removed by clean)
 make dev-setup                 # Install dev-only tooling
+uv tool install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push  # one-time: enable the git hooks below
 make validate                  # shellcheck + ruff + pyright
 make test                      # Python test suite
 make clean                     # Remove everything
