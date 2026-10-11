@@ -49,6 +49,24 @@ DEFAULT_OMNIROUTE_IMAGE = "docker.io/diegosouzapw/omniroute:latest"
 DEFAULT_OMNIROUTE_PORT = 20128
 DEFAULT_REMOTE_SETUP_IMAGE = "docker.io/library/python:3.13-alpine"
 DEFAULT_REMOTE_SETUP_PORT = 20130
+DEFAULT_SYSTEM_ONE_IMAGE = "localhost/llm-env-system-one:rocm"
+DEFAULT_SYSTEM_ONE_PORT = 8010
+# Mirrors laya.router canonical names (english | multilingual | typed-decisions).
+LAYA_MODEL_ALIASES = {
+    "en": "english", "laya": "english", "default": "english",
+    "multi": "multilingual", "ml": "multilingual", "laya-multilingual": "multilingual",
+    "typed": "typed-decisions", "typed_decisions": "typed-decisions",
+    "laya-typed-decisions": "typed-decisions", "decisions": "typed-decisions",
+}
+
+
+def canonical_laya_model_name(token: str) -> str:
+    key = token.strip().lower()
+    if key in LAYA_MODEL_ALIASES:
+        return LAYA_MODEL_ALIASES[key]
+    if key in ("english", "multilingual", "typed-decisions"):
+        return key
+    raise ValueError(token)
 
 
 class ConfigError(Exception):
@@ -172,6 +190,15 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     llm_server = cfg.setdefault("llm_server", {})
     if isinstance(llm_server, dict):
         llm_server.setdefault("enabled", True)
+
+    system_one = cfg.setdefault("system_one", {})
+    if isinstance(system_one, dict):
+        system_one.setdefault("enabled", False)
+        system_one.setdefault("port", DEFAULT_SYSTEM_ONE_PORT)
+        system_one.setdefault("image", DEFAULT_SYSTEM_ONE_IMAGE)
+        # Measured: english-only preload ~2992 MiB VRAM (rocm7.2) vs ~5.8 GiB for all three.
+        system_one.setdefault("models", "english")
+        system_one.setdefault("vram_reserve_mib", 4096)
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -391,6 +418,38 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                     errors.append("llm_server.enabled must be a Boolean")
                 else:
                     llm_server_enabled = llm_server["enabled"]
+
+    if "system_one" in cfg:
+        system_one = cfg["system_one"]
+        if not isinstance(system_one, dict):
+            errors.append("section system_one must be a mapping")
+        else:
+            if not isinstance(system_one.get("enabled", False), bool):
+                errors.append("system_one.enabled must be a Boolean")
+            if not _positive_int(system_one.get("port", DEFAULT_SYSTEM_ONE_PORT)):
+                errors.append("system_one.port must be a positive integer")
+            for key in ("image", "models"):
+                value = system_one.get(key, "x")
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"system_one.{key} must be a non-empty string")
+            if not _positive_int(system_one.get("vram_reserve_mib", 4096)):
+                errors.append("system_one.vram_reserve_mib must be a positive integer")
+            models_raw = system_one.get("models", "english")
+            if isinstance(models_raw, str):
+                parts = [p.strip() for p in models_raw.split(",")]
+                if not parts or any(not p for p in parts):
+                    errors.append("system_one.models must be a comma-separated list with no empty members")
+                else:
+                    seen: set[str] = set()
+                    for part in parts:
+                        try:
+                            canonical = canonical_laya_model_name(part)
+                        except ValueError:
+                            errors.append(f"system_one.models contains unknown checkpoint name: {part}")
+                            continue
+                        if canonical in seen:
+                            errors.append(f"system_one.models lists {canonical} more than once")
+                        seen.add(canonical)
 
     models = cfg["models"]
     if not isinstance(models, list) or not models:

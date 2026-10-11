@@ -1102,3 +1102,45 @@ def test_config_relaxes_models_max_bound_when_llm_server_disabled():
     cfg = make_cfg(llm_server={"enabled": False})
     cfg["runtime"]["models_max"] = 99
     assert validate_config(cfg) == []
+
+
+@pytest.fixture
+def valid_cfg(): return make_cfg(system_one={"enabled": False, "port": 8010, "image": "localhost/llm-env-system-one:rocm", "models": "english", "vram_reserve_mib": 4096})
+
+def test_migrate_config_adds_disabled_system_one_defaults():
+    cfg = migrate_config({})
+    assert cfg["system_one"] == {
+        "enabled": False,
+        "port": 8010,
+        "image": "localhost/llm-env-system-one:rocm",
+        "models": "english",
+        "vram_reserve_mib": 4096,
+    }
+
+def test_migrate_config_keeps_existing_system_one_values():
+    cfg = migrate_config({"system_one": {"enabled": True, "port": 9000}})
+    assert cfg["system_one"]["enabled"] is True
+    assert cfg["system_one"]["port"] == 9000
+
+def test_validate_config_rejects_bad_system_one(valid_cfg):
+    valid_cfg["system_one"] = {"enabled": "yes", "port": 0, "image": "", "models": "", "vram_reserve_mib": -1}
+    errors = validate_config(valid_cfg)
+    assert "system_one.enabled must be a Boolean" in errors
+    assert "system_one.port must be a positive integer" in errors
+    assert "system_one.image must be a non-empty string" in errors
+    assert "system_one.models must be a non-empty string" in errors
+    assert "system_one.vram_reserve_mib must be a positive integer" in errors
+
+
+def test_validate_config_rejects_unknown_or_malformed_system_one_models(valid_cfg):
+    valid_cfg["system_one"]["models"] = "english,not-a-model"
+    errors = validate_config(valid_cfg)
+    assert any("system_one.models" in e and "not-a-model" in e for e in errors)
+
+    valid_cfg["system_one"]["models"] = "english,,multilingual"
+    errors = validate_config(valid_cfg)
+    assert any("empty" in e.lower() for e in errors)
+
+    valid_cfg["system_one"]["models"] = "english,english"
+    errors = validate_config(valid_cfg)
+    assert any("more than once" in e for e in errors)

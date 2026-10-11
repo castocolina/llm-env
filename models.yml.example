@@ -35,6 +35,16 @@ runtime:
 llm_server:
   enabled: true
 
+# Opt-in local System One decision server (Laya, Jev-compatible
+# POST /v1/systemone) on the AMD GPU via ROCm. Set during `make setup`
+# (Step 1) or via LLM_ENV_SYSTEM_ONE=1. Loopback-only, no auth.
+system_one:
+  enabled: false
+  port: 8010
+  image: localhost/llm-env-system-one:rocm
+  models: english          # LAYA_MODELS: english | multilingual | typed-decisions (comma list)
+  vram_reserve_mib: 4096   # subtracted from llm-server's VRAM budget when enabled
+
 resources:
   llm_server:
     cpus: 0
