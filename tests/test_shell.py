@@ -8192,12 +8192,52 @@ jq -cn --argjson evidence "$evidence" '{type:"message_end",message:{role:"assist
 """
 
 
+def _make_help_output() -> str:
+    result = subprocess.run(
+        ["make", "help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def test_make_help_lists_check_with_agents() -> None:
-    assert "make check-with-agents" in (SCRIPT_DIR / "help.sh").read_text()
+    assert "make check-with-agents" in _make_help_output()
 
 
 def test_make_help_lists_prune() -> None:
-    assert "make prune" in (SCRIPT_DIR / "help.sh").read_text()
+    assert "make prune" in _make_help_output()
+
+
+def test_make_help_lists_backup_targets() -> None:
+    help_text = _make_help_output()
+    assert "make backup" in help_text
+    assert "make combo-backup" in help_text
+    assert "make connections-backup" in help_text
+    assert "make combo-restore" in help_text
+
+
+def test_makefile_unknown_target_shows_help() -> None:
+    result = subprocess.run(
+        ["make", "this-target-does-not-exist"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Unknown target 'this-target-does-not-exist'" in combined
+    assert "make prune" in combined
+
+
+def test_makefile_dispatches_backup() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert "bash scripts/omniroute-backup.sh" in makefile
+    assert (SCRIPT_DIR / "omniroute-backup.sh").is_file()
 
 
 def test_agent_check_fails_when_no_supported_client_is_installed(

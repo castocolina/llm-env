@@ -1,5 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context combo-backup combo-restore connections-backup update-omniroute \
+        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context backup \
+        combo-backup combo-restore connections-backup update-omniroute \
         check-provider-tokens enable-token-check disable-token-check logs validate test clean prune
 
 help:
@@ -72,6 +73,9 @@ fix-codex-context:
 combo-context:
 	@bash tools/run-target.sh combo-context -- bash scripts/omniroute-combo-context.sh $(COMBO)
 
+backup:
+	@bash tools/run-target.sh backup -- bash scripts/omniroute-backup.sh
+
 combo-backup:
 	@bash tools/run-target.sh combo-backup -- bash scripts/omniroute-combo-backup.sh $(OUTPUT)
 
@@ -107,3 +111,9 @@ clean:
 
 prune:
 	@bash tools/run-target.sh prune -- bash scripts/prune.sh
+
+# Unknown targets: show help instead of make's bare "No rule to make target".
+%:
+	@printf '%s\n' "Unknown target '$@'. Available targets:" >&2
+	@$(MAKE) --no-print-directory help
+	@false
