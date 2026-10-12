@@ -231,6 +231,11 @@ die() { log_error "$*"; exit 1; }
 [[ "$LLM_ENV_HEALTH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
     || die "LLM_ENV_HEALTH_TIMEOUT_SECONDS must be a positive integer, got: ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}"
 
+# Weights are on disk after make setup; this bounds load-to-GPU only.
+LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS="${LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS:-120}"
+[[ "$LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || die "LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS must be a positive integer, got: ${LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS}"
+
 require_cmd() {
     for cmd in "$@"; do
         command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"

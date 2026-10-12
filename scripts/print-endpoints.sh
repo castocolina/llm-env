@@ -44,6 +44,13 @@ echo "  Local:   http://127.0.0.1:${omniroute_port}"
 echo "  Network: http://${ip}:${omniroute_port}"
 echo "  mDNS:    http://${mdns}.local:${omniroute_port}"
 echo "  Password: ${BOLD}${omniroute_password}${NC}"
+if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH")" = "true" ]; then
+    system_one_port="$(yq -r '.system_one.port' "$CONFIG_PATH")"
+    echo
+    echo "  ${BOLD}System One (Laya)${NC}"
+    echo "  Local:   http://127.0.0.1:${system_one_port}/v1/systemone  (loopback only, no auth)"
+    echo "  Skill:   GSD_PATH_JEV=1 JEV_BACKEND=laya JEV_LAYA_URL=http://127.0.0.1:${system_one_port} GSD_PATH_JEV_TIMEOUT_SECONDS=20"
+fi
 echo
 echo "  ${BOLD}Remote agent setup${NC}"
 echo "  Local:   http://127.0.0.1:${remote_setup_port}"

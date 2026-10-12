@@ -147,7 +147,7 @@ def build_proc_with_fd(
 def test_processes_on_render_node_finds_a_matching_pid(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=524288)
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 512}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 512}]
 
 
 def test_processes_on_render_node_ignores_other_render_nodes(tmp_path):
@@ -168,7 +168,7 @@ def test_processes_on_render_node_sums_multiple_fds_for_one_pid(tmp_path):
     )
     (proc / "3021" / "fd" / "8").symlink_to(proc.parent / "dev" / "dri" / "renderD128")
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 768}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 768}]
 
 
 def test_processes_on_render_node_dedupes_same_drm_client_id_across_fds(tmp_path):
@@ -187,7 +187,7 @@ def test_processes_on_render_node_dedupes_same_drm_client_id_across_fds(tmp_path
     )
     (proc / "3021" / "fd" / "8").symlink_to(proc.parent / "dev" / "dri" / "renderD128")
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 512}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 512}]
 
 
 def test_processes_on_render_node_sums_sub_mib_fds_without_losing_precision(tmp_path):
@@ -200,7 +200,7 @@ def test_processes_on_render_node_sums_sub_mib_fds_without_losing_precision(tmp_
     )
     (proc / "3021" / "fd" / "8").symlink_to(proc.parent / "dev" / "dri" / "renderD128")
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 1}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 1}]
 
 
 def test_processes_on_render_node_treats_single_token_vram_as_raw_bytes(tmp_path):
@@ -213,27 +213,27 @@ def test_processes_on_render_node_treats_single_token_vram_as_raw_bytes(tmp_path
         "drm-driver:\tamdgpu\ndrm-memory-vram:\t1048576\n"
     )
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 1}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 1}]
 
 
 def test_processes_on_render_node_treats_missing_fdinfo_as_zero(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=None)
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 0}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 0}]
 
 
 def test_processes_on_render_node_treats_malformed_fdinfo_as_zero(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=524288)
     (proc / "3021" / "fdinfo" / "7").write_text("drm-driver:\tamdgpu\nno-vram-line-here:\t1\n")
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 0}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 0}]
 
 
 def test_processes_on_render_node_falls_back_to_comm_when_exe_unreadable(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128")
     (proc / "3021" / "exe").unlink()
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "vram_mib": 512}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 512}]
 
 
 def test_processes_on_render_node_skips_pid_with_unreadable_comm(tmp_path):

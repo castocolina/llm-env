@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-require_cmd uv jq yq systemctl curl
+require_cmd uv jq yq systemctl curl podman
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 
@@ -18,6 +18,22 @@ ensure_omniroute_secrets
 # here: jq/yq's `//` treats `false` itself as falsy and would silently
 # coerce a disabled config back to enabled.
 llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
+
+system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+if [ "$system_one_enabled" = "true" ]; then
+    system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
+    system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
+    podman image exists "$system_one_image" || die "system-one image missing; run 'make setup'"
+    podman volume exists llm-env-system-one-cache \
+        || die "system-one weights cache missing; run 'make setup'"
+    if ! podman run --rm \
+            -e LAYA_REVISION=reviewed -e "LAYA_MODELS=${system_one_models}" \
+            -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
+            -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
+            --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py verify; then
+        die "system-one weights incomplete for configured models; run 'make setup'"
+    fi
+fi
 
 if [ "$llm_server_enabled" = "true" ]; then
     models_max="$(yq -r '.runtime.models_max' "$CONFIG_PATH")"
@@ -127,6 +143,18 @@ if [ "$llm_server_enabled" = "true" ]; then
         exit 1
     fi
     log_info "server is ready"
+fi
+
+if [ "$system_one_enabled" = "true" ]; then
+    log_step "Waiting for System One"
+    system_one_port="$(yq -r '.system_one.port' "$CONFIG_PATH")"
+    if ! LLM_ENV_HEALTH_TIMEOUT_SECONDS="$LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS" \
+            wait_for_health "$system_one_port"; then
+        log_error "System One did not become healthy within ${LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS}s"
+        echo "  Logs: podman compose -f ${COMPOSE_FILE} logs system-one"
+        exit 1
+    fi
+    log_info "System One is ready"
 fi
 
 bash "${REPO_DIR}/setup/network.sh"

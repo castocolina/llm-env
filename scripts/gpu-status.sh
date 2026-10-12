@@ -25,7 +25,8 @@ require_cmd yq jq
 migrate_config_file || die "configuration migration failed"
 
 llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
-if [ "$llm_server_enabled" != "true" ]; then
+system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+if [ "$llm_server_enabled" != "true" ] && [ "$system_one_enabled" != "true" ]; then
     log_info "llm-server is disabled (llm_server.enabled: false); no GPU is in use"
     exit 0
 fi
@@ -73,7 +74,9 @@ echo "  budget headroom:    ${headroom_display}"
 # would ever match.
 exclude_names='["llama-server","conmon","podman"]'
 top3="$(llmenv processes-on-render-node --render-node "$render_node" | jq --argjson exclude "$exclude_names" '
-    [.processes[] | select(.comm as $c | ($exclude | any(. == $c)) | not)]
+    [.processes[]
+      | select(.comm as $c | ($exclude | any(. == $c)) | not)
+      | select(((.cmdline // "") | contains("laya-serve")) | not)]
     | sort_by(-.vram_mib)
     | .[:3]
 ')"

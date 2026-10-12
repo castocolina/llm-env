@@ -2443,6 +2443,25 @@ def test_gpu_status_exits_cleanly_when_llm_server_disabled(tmp_path: pathlib.Pat
     assert "llm-server is disabled" in result.stdout
 
 
+def test_gpu_status_reports_the_gpu_when_only_system_one_is_enabled(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(
+        tmp_path,
+        config_text=(
+            "llm_server:\n  enabled: false\n"
+            "system_one:\n  enabled: true\n"
+            "gpu:\n  pci_address: \"0000:03:00.0\"\n  vram_budget_ceiling_mib: 15565\n"
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no GPU is in use" not in result.stdout + result.stderr
+    assert "0000:03:00.0" in result.stdout
+
+
+def test_gpu_status_does_not_offer_to_migrate_system_one(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(tmp_path, config_text="llm_server:\n  enabled: false\nsystem_one:\n  enabled: true\ngpu:\n  pci_address: \"0000:03:00.0\"\n  vram_budget_ceiling_mib: 15565\n", processes_json='{"processes":[{"pid":9,"comm":"python","exe":"python","cmdline":"laya-serve","vram_mib":4000}]}')
+    assert result.returncode == 0 and "no other processes using the dGPU" in result.stdout and "Move these" not in result.stdout
+
+
 def test_gpu_status_dies_clearly_when_detect_fails(tmp_path: pathlib.Path) -> None:
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -4770,6 +4789,7 @@ def run_lifecycle_script(
         "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16304,\"vram_used_mib\":0,\"render_node\":\"renderD128\",\"vendor\":\"0x1002\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' gfx-arch '*) printf '%s\\n' 'gfx1201' ;;\n"
         "esac\n"
+        "case \"$*\" in *' rocr-index '*) printf '0\\n' ;; esac\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
         "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
@@ -4777,10 +4797,20 @@ def run_lifecycle_script(
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     podman = commands / "podman"
-    podman.write_text("#!/usr/bin/bash\nprintf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n")
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; esac\n"
+        "exit 0\n"
+    )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
     curl = commands / "curl"
-    curl.write_text("#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n")
+    curl.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *'/health'*) [ \"${CURL_HEALTH_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
+        "exit 0\n"
+    )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
     systemctl = commands / "systemctl"
     systemctl.write_text(
@@ -4914,6 +4944,96 @@ def test_start_chains_provider_provision_once_omniroute_is_ready(
     assert "scripts/provider-provision.sh" in calls.read_text()
     # No ~/.codex/auth.json exists in this sandbox's synthetic $HOME.
     assert "no local Codex session" in result.stdout
+
+
+def test_start_dies_when_system_one_image_missing(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+        env_overrides={"PODMAN_IMAGE_MISSING": "1"},
+    )
+    assert result.returncode != 0
+    assert "system-one image missing; run 'make setup'" in result.stderr
+    assert "scripts/system-one-build.sh" not in calls.read_text()
+
+
+def test_start_dies_when_system_one_weights_cache_missing(tmp_path: pathlib.Path) -> None:
+    result, _config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+        env_overrides={"PODMAN_VOLUME_MISSING": "1"},
+    )
+    assert result.returncode != 0
+    assert "system-one weights" in result.stderr.lower() or "make setup" in result.stderr
+
+
+def test_start_dies_when_system_one_weights_incomplete(tmp_path: pathlib.Path) -> None:
+    result, _config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+        env_overrides={"PODMAN_WEIGHTS_INCOMPLETE": "1"},
+    )
+    assert result.returncode != 0
+    assert "weights" in result.stderr.lower()
+
+
+def test_start_waits_for_system_one_health_when_image_present(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+        env_overrides={"LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS": "1"},
+    )
+    recorded = calls.read_text()
+    assert "system-one-build.sh" not in recorded
+    assert "podman image exists localhost/llm-env-system-one:rocm" in recorded
+    assert "Waiting for System One" in result.stdout + result.stderr
+    assert "curl" in recorded and "/health" in recorded
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_start_exits_when_system_one_health_never_succeeds(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True, llm_server_enabled=False,
+        env_overrides={"LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS": "1", "CURL_HEALTH_FAIL": "1"},
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "System One did not become healthy within 1s" in text
+    assert "podman compose -f" in text and "logs system-one" in text
+    assert "/health" in calls.read_text()
+
+
+def test_start_skips_system_one_when_disabled(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "llm-env-system-one" not in calls.read_text()
+    assert "System One" not in result.stdout
+
+
+def _print_endpoints(tmp_path: pathlib.Path, system_one_yaml: str):
+    real = {name: shutil.which(name) for name in ("yq", "jq", "ip")}
+    assert all(real.values())
+    commands = tmp_path / "bin"
+    commands.mkdir(parents=True)
+    for name, path in real.items():
+        stub = commands / name
+        stub.write_text(f"#!/usr/bin/bash\nexec {path} \"$@\"\n")
+        stub.chmod(0o755)
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("server:\n  port: 8000\n  mdns_name: llm\n  api_key: fixture-api-key\nllm_server:\n  enabled: false\nomniroute:\n  port: 20128\n  initial_password: fixture-omniroute-password\nremote_setup:\n  port: 20130\nmodels:\n  - alias: a\n    enabled: true\n" + system_one_yaml)
+    return subprocess.run(["/usr/bin/bash", "scripts/print-endpoints.sh"], cwd=ROOT, env=os.environ | {"HOME": str(home), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False)
+
+
+def test_print_endpoints_system_one_follows_the_flag(tmp_path: pathlib.Path) -> None:
+    enabled = "system_one:\n  enabled: true\n  port: 8010\n"
+    on = _print_endpoints(tmp_path / "on", enabled)
+    off = _print_endpoints(tmp_path / "off", enabled.replace("true", "false"))
+    assert on.returncode == 0, on.stderr
+    assert "http://127.0.0.1:8010/v1/systemone" in on.stdout
+    assert "GSD_PATH_JEV=1 JEV_BACKEND=laya JEV_LAYA_URL=http://127.0.0.1:8010 GSD_PATH_JEV_TIMEOUT_SECONDS=20" in on.stdout
+    assert off.returncode == 0, off.stderr
+    text = off.stdout + off.stderr
+    assert "v1/systemone" not in text
+    assert "JEV_BACKEND=laya" not in text and "GSD_PATH_JEV" not in text
+    assert "JEV_LAYA_URL" not in text
 
 
 def run_opencode_config_editor(

@@ -259,8 +259,21 @@ def processes_on_render_node(render_node: str, proc_root: Path = Path("/proc")) 
         except OSError:
             exe = comm
 
+        try:
+            cmdline = (
+                (pid_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode().strip()
+            )
+        except OSError:
+            cmdline = ""
+
         results.append(
-            {"pid": int(pid_dir.name), "comm": comm, "exe": exe, "vram_mib": vram_bytes // MIB}
+            {
+                "pid": int(pid_dir.name),
+                "comm": comm,
+                "exe": exe,
+                "cmdline": cmdline,
+                "vram_mib": vram_bytes // MIB,
+            }
         )
 
     return results
