@@ -124,6 +124,48 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+  # Rendered only when system_one.enabled is true. No depends_on: Laya is
+  # not gated on llm-server or OmniRoute, and OmniRoute does not proxy
+  # /v1/systemone. Loopback-only — not published on the LAN.
+  system-one:
+    image: localhost/llm-env-system-one:rocm
+    container_name: system-one
+    devices:
+    - /dev/kfd
+    - /dev/dri:/dev/dri
+    group_add:
+    - keep-groups
+    security_opt:
+    - label=disable
+    cpus: 2
+    mem_limit: 4608m
+    volumes:
+    # Named volume, podman-managed: Laya weights (~0.8 GB) at
+    # /home/laya/.cache/huggingface. Survives stop, crash, and reboot.
+    # `make clean` deletes this named volume (podman name
+    # llm-env-system-one-cache), unlike the model bind mounts, which
+    # `make clean` keeps. The next `make setup` re-downloads the weights.
+    - system-one-cache:/home/laya/.cache/huggingface
+    ports:
+    - 127.0.0.1:8010:8000
+    environment:
+      LAYA_MODELS: english
+      LAYA_REVISION: reviewed
+      # Index of the KFD node for the configured render node (rocr_visible_index).
+      ROCR_VISIBLE_DEVICES: '0'
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
 volumes:
   omniroute-data: {}
   remote-setup-data: {}
+  system-one-cache:
+    name: llm-env-system-one-cache

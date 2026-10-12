@@ -20,6 +20,9 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/remote_setup.py` | HTTP server for the master-key-gated remote-machine installer (`/setup.sh`, `/config`) |
 | `scripts/print-endpoints.sh` | Local/Network/mDNS URLs and credentials for llm-server, OmniRoute, and remote-setup; shared by `setup/network.sh` (post-`make start`) and `scripts/status.sh` |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
+| `scripts/system-one-build.sh` | Build the local System One (Laya) image from `docker/system-one` |
+| `scripts/system-one-cache-check.py` | Prefetch and verify Laya weights in the `llm-env-system-one-cache` volume |
+| `docker/system-one/Dockerfile` | System One image: `torch==2.14.1` from the rocm7.2 index and `laya[serve]==0.4.2` |
 | `scripts/check-setup.sh` | Offline validation |
 | `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
@@ -55,8 +58,12 @@ directly for the same view: `podman compose -f
 ~/.config/llm-env/docker-compose.yml logs -f`, `podman compose -f
 ~/.config/llm-env/docker-compose.yml ps`.
 
-The compose file also runs `omniroute`, network-joined to `llm-server` and
-gated on its `service_healthy` condition. `scripts/start.sh` calls `llmenv
+When both `llm_server.enabled` and `system_one.enabled` are true the stack
+is four services — `llm-server`, `omniroute`, `remote-setup`, and
+`system-one`. The compose file also runs `omniroute`, network-joined to
+`llm-server` and gated on its `service_healthy` condition. `system-one`
+has no `depends_on`. OmniRoute does not proxy `/v1/systemone`. `scripts/start.sh`
+calls `llmenv`
 omniroute provision` once both containers are reachable, which idempotently
 creates or updates a provider connection named `llm-env-local` pointing at
 `http://llm-server:<port>/v1` (`llm-server` is the compose service's
@@ -112,15 +119,23 @@ setup-local-llm-agents` now points Pi/OpenCode at OmniRoute (model ids
 prefixed `llama-cpp/`) with a scoped key obtained through `llmenv
 omniroute issue-key` -- a distinct `llm-env-local-agents` key cached at
 `<config-dir>/omniroute-api-key.json` (removed by `make clean`), never
-the dashboard password and never the raw `server.api_key`.
+the dashboard password and never the raw `server.api_key`. `remote-setup`
+is the third service; `system-one` is the fourth when
+`system_one.enabled` is true, still with no `depends_on`, and OmniRoute
+still does not proxy `/v1/systemone`.
 
 When `models.yml`'s `llm_server.enabled` is `false`, the `llm-server`
-compose service is omitted entirely (`pylib/compose.py`), `make setup`
-skips GPU detection, model selection/download/validation, and Vulkan/VRAM
-steps, and `make start` skips the VRAM budget check and llm-server health
-wait, bringing up only `omniroute` and `remote-setup`. This is the
-"OmniRoute + remote-setup only" mode for a machine with no GPU that exists
-purely to route to other machines' `llm-server` instances on the LAN.
+compose service is omitted entirely (`pylib/compose.py`). `make setup`
+skips model selection, download, and validation, and the Vulkan and VRAM
+steps; `make start` skips the VRAM budget check and the llm-server health
+wait. GPU detection is skipped only when `system_one.enabled` is also
+false. When System One is on, detection still runs so the render node can
+feed `rocr_visible_index`. llama.cpp model, Vulkan, and VRAM steps stay
+skipped. `check-setup` skips the Model files GGUF section in that mode.
+With both flags false the stack is only `omniroute` and `remote-setup` —
+the "OmniRoute + remote-setup only" mode for a machine with no GPU that
+exists purely to route to other machines' `llm-server` instances on the
+LAN.
 
 ### Topology and what survives a restart
 
@@ -131,6 +146,8 @@ purely to route to other machines' `llm-server` instances on the LAN.
  host:8000 ─────▶│  llm-server  ◀──DNS "llm-server"──  omniroute  ◀─DNS "omniroute"──  remote-setup │
  (LLAMA_ARG_PORT) │  (llama.cpp)                        (router)                       (installer)   │
                  │      ▲                                    ▲                              ▲        │
+ 127.0.0.1:8010 ▶│  system-one (Laya; no depends_on; OmniRoute does not proxy /v1/systemone)│
+ (loopback only) │      ▲                                                                   │
                  └──────┼────────────────────────────────────┼──────────────────────────────┼────────┘
                         │                                    │                              │
               bind mount (ro)                        named volume                    bind mount (ro):
@@ -139,10 +156,15 @@ purely to route to other machines' `llm-server` instances on the LAN.
        (host directories -- not podman-managed)        connections, everything you    named volume:
                                                         configure in the dashboard)    remote-setup-data:/app/data
                                                                                         (cached scoped API key)
+                        │
+              named volume
+       system-one-cache:/home/laya/.cache/huggingface
+       (podman name llm-env-system-one-cache)
 
  omniroute is also published at host:0.0.0.0:20128 (dashboard + /v1/*), and
  remote-setup at host:0.0.0.0:20130 (/setup.sh, /config) -- both genuinely
- LAN-reachable now, not loopback-only.
+ LAN-reachable now, not loopback-only. system-one is published only at
+ 127.0.0.1:8010 and is not on those LAN arrows.
 ```
 
 See `docker-compose.yml.example` for the full annotated compose shape this
@@ -151,22 +173,27 @@ reference; the real file is generated, see below).
 
 **What survives what:**
 
-| Event | `llm-server`/`omniroute`/`remote-setup` containers | `omniroute-data` volume | `remote-setup-data` volume | bind-mounted models/presets |
-| --- | --- | --- | --- | --- |
-| `podman kill`/crash, then `restart:` policy relaunches | recreated | untouched | untouched | untouched (host files) |
-| `make stop` / `systemctl --user stop llm-server.service` (`podman compose down`, no `-v`) | removed, volumes detached | **kept** | **kept** | untouched |
-| `make start` (`podman compose up -d` again) | recreated | reattached, same data | reattached, same data | untouched |
-| host reboot (`start_at_boot` unit, or manual `make start` after) | recreated | **kept** | **kept** | untouched |
-| `make clean` (`podman compose down -v`) | removed | **destroyed** — explicitly warned before confirming | **destroyed** — explicitly warned before confirming | untouched (models are never deleted) |
+| Event | `llm-server`/`omniroute`/`remote-setup` containers | `system-one` container | `omniroute-data` volume | `remote-setup-data` volume | `llm-env-system-one-cache` volume | bind-mounted models/presets |
+| --- | --- | --- | --- | --- | --- | --- |
+| `podman kill`/crash, then `restart:` policy relaunches | recreated | recreated | untouched | untouched | untouched | untouched (host files) |
+| `make stop` / `systemctl --user stop llm-server.service` (`podman compose down`, no `-v`) | removed, volumes detached | removed, volume detached | **kept** | **kept** | **kept** | untouched |
+| `make start` (`podman compose up -d` again) | recreated | recreated | reattached, same data | reattached, same data | reattached, same data | untouched |
+| host reboot (`start_at_boot` unit, or manual `make start` after) | recreated | recreated | **kept** | **kept** | **kept** | untouched |
+| `make clean` (`podman compose down -v`, then `podman volume rm` of the Laya cache) | removed | removed | **destroyed** — explicitly warned before confirming | **destroyed** — explicitly warned before confirming | **destroyed** — next `make setup` re-downloads the weights | untouched (models are never deleted) |
 
 In short: anything you configure by hand in the OmniRoute dashboard (extra
 provider connections, settings) lives in the `omniroute-data` named volume,
-and the cached scoped API key `remote-setup` hands to remote machines lives
-in the `remote-setup-data` named volume — both survive every normal
-lifecycle operation — stopping, starting, rebooting the host, or a
-container crashing and being restarted. Either is only lost if you run
+the cached scoped API key `remote-setup` hands to remote machines lives
+in the `remote-setup-data` named volume, and Laya's weights live in the
+third named volume, `llm-env-system-one-cache` (compose key
+`system-one-cache`, mounted at `/home/laya/.cache/huggingface`). All three
+survive every normal lifecycle operation — stopping, starting, rebooting
+the host, or a container crashing and being restarted — the same way
+`omniroute-data` and `remote-setup-data` do. Each is only lost if you run
 `make clean`, or manually `podman volume rm omniroute-data
-remote-setup-data` / `podman compose down -v`.
+remote-setup-data llm-env-system-one-cache` / `podman compose down -v`.
+`make clean` destroys `llm-env-system-one-cache`; the next `make setup`
+re-downloads the weights. Bind-mounted models and presets stay untouched.
 
 To provision more than the one `llm-env-local` connection this repo sets up
 automatically, either add it by hand in the dashboard (persists in the

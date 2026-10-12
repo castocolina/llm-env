@@ -43,9 +43,22 @@ else
     images_to_remove="${images_to_remove}, and the configured remote_setup.image if present"
 fi
 
+configured_system_one_image=""
+if [ -f "$CONFIG_PATH" ]; then
+    configured_system_one_image="$(yq -r '.system_one.image // ""' "$CONFIG_PATH")" \
+        || die "could not read system_one.image from ${CONFIG_PATH}; config may be corrupt"
+fi
+if [ -n "$configured_system_one_image" ] && [ "$configured_system_one_image" != null ]; then
+    images_to_remove="${images_to_remove}, ${configured_system_one_image}"
+else
+    configured_system_one_image=""
+    images_to_remove="${images_to_remove}, and the configured system_one.image if present"
+fi
+
 echo "This removes:"
 echo "  compose stack   ${COMPOSE_FILE}"
 echo "  compose volumes (including omniroute-data and remote-setup-data; OmniRoute's stored connections/password and the cached remote-setup API key)"
+echo "  Laya weights    llm-env-system-one-cache (~0.8 GB; removed by make clean and re-downloaded on the next make setup; unlike llama.cpp model files, which make clean keeps and make prune deletes)"
 echo "  unit            ${WRAPPER_UNIT_PATH}"
 echo "  config          ${CONFIG_PATH}"
 echo "  local OmniRoute API key cache  $(dirname "$CONFIG_PATH")/omniroute-api-key.json"
@@ -79,4 +92,8 @@ fi
 if [ -n "$configured_remote_setup_image" ]; then
     podman rmi -f "$configured_remote_setup_image" 2>/dev/null || true
 fi
+if [ -n "$configured_system_one_image" ] && [ "$configured_system_one_image" != null ]; then
+    podman rmi -f "$configured_system_one_image" 2>/dev/null || true
+fi
+podman volume rm -f llm-env-system-one-cache 2>/dev/null || true
 log_info "cleanup complete"

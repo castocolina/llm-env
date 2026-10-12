@@ -13,6 +13,7 @@ in `models.yml`.
 make help                    # List all targets
 make prerequisites           # Confirm and install Bazzite/Fedora host tools
 make setup                   # Interactive configuration (GPU inference is opt-in)
+make system-one-build        # Build the local System One (Laya) GPU image
 make start                   # Start the server (or omniroute + remote-setup only)
 make stop                    # Stop the server
 make restart                 # Stop then start

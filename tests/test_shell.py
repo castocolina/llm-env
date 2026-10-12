@@ -4932,6 +4932,17 @@ def run_lifecycle_script(
     return result, config, calls
 
 
+def test_clean_removes_the_system_one_image(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/clean.sh", system_one_enabled=True, llm_server_enabled=False,  # daemon-reload stub exits 66 unless LLM_SERVER_ENABLED=false (tests/test_shell.py:4632)
+        env_overrides={"LLM_ENV_ASSUME_YES": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "podman rmi -f localhost/llm-env-system-one:rocm" in recorded
+    assert "podman volume rm -f llm-env-system-one-cache" in recorded
+
+
 def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_path: pathlib.Path) -> None:
     result, _config, calls = run_lifecycle_script(
         tmp_path, "scripts/system-one-build.sh", system_one_enabled=True
