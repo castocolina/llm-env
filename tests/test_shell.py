@@ -4506,6 +4506,7 @@ def run_lifecycle_script(
     omniroute_port: int | None = None,
     resources_failure: bool = False,
     llm_server_enabled: bool = True,
+    system_one_enabled: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -4532,8 +4533,12 @@ def run_lifecycle_script(
         "  sleep_idle_seconds: 300\n"
         "  start_at_boot: false\n"
         "gpu:\n"
-        "  pci_address: ''\n"
-        "  backend: cpu\n"
+        + (
+            '  pci_address: "0000:03:00.0"\n'
+            if system_one_enabled
+            else "  pci_address: ''\n"
+        )
+        + "  backend: cpu\n"
         "  image: example.invalid/llama:latest\n"
         "  device_name: ''\n"
         "  vram_total_mib: 0\n"
@@ -4566,6 +4571,12 @@ def run_lifecycle_script(
             if sampling_temperature is not None
             else ""
         )
+        + "system_one:\n"
+        f"  enabled: {str(system_one_enabled).lower()}\n"
+        "  port: 8010\n"
+        "  image: localhost/llm-env-system-one:rocm\n"
+        "  models: english\n"
+        "  vram_reserve_mib: 4096\n"
     )
     config.chmod(config_mode)
 
@@ -4612,6 +4623,10 @@ def run_lifecycle_script(
     uv.write_text(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16304,\"vram_used_mib\":0,\"render_node\":\"renderD128\",\"vendor\":\"0x1002\",\"connected_outputs\":[]}]}' ;;\n"
+        "  *' gfx-arch '*) printf '%s\\n' 'gfx1201' ;;\n"
+        "esac\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
         "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
@@ -4644,6 +4659,7 @@ def run_lifecycle_script(
         "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
         "MDNS_UNIT": str(home / ".config/systemd/user/llm-server-mdns.service"),
         "LLM_SERVER_ENABLED": "true" if llm_server_enabled else "false",
+        "SYSTEM_ONE_ENABLED": "true" if system_one_enabled else "false",
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
@@ -4658,6 +4674,20 @@ def run_lifecycle_script(
         check=False,
     )
     return result, config, calls
+
+
+def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/system-one-build.sh", system_one_enabled=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
+    dockerfile = (ROOT / "docker/system-one/Dockerfile").read_text()
+    assert "ARG TORCH_INDEX=rocm7.2" in dockerfile and "rocm7.14" not in dockerfile
+
+
+def test_makefile_exposes_system_one_build() -> None:
+    assert "system-one-build:" in (ROOT / "Makefile").read_text()
 
 
 def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.Path) -> None:

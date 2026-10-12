@@ -1,4 +1,4 @@
-.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark \
+.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build \
         key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context backup \
         combo-backup combo-restore connections-backup update-omniroute \
         check-provider-tokens enable-token-check disable-token-check logs validate test clean prune
@@ -39,6 +39,9 @@ check-with-agents:
 
 benchmark:
 	@bash tools/run-target.sh benchmark -- bash scripts/benchmark.sh
+
+system-one-build:
+	@bash tools/run-target.sh system-one-build -- bash scripts/system-one-build.sh
 
 key-reset:
 	@bash tools/run-target.sh key-reset -- bash scripts/key-reset.sh
