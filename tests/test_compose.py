@@ -579,3 +579,11 @@ def test_system_one_service_has_fixed_limits():
 def test_system_one_admits_64_in_flight():
     env = system_one_document({**CFG, "system_one": SYSTEM_ONE})["services"]["system-one"]["environment"]
     assert env["LAYA_MAX_CONCURRENT"] == "64"
+
+
+def test_system_one_renders_idle_unload_seconds():
+    default_env = system_one_document({**CFG, "system_one": SYSTEM_ONE})["services"]["system-one"]["environment"]
+    assert default_env["LAYA_IDLE_UNLOAD_SECONDS"] == "600"
+    off = {**CFG, "system_one": {**SYSTEM_ONE, "idle_unload_seconds": 0}}
+    env = system_one_document(off)["services"]["system-one"]["environment"]
+    assert env["LAYA_IDLE_UNLOAD_SECONDS"] == "0"

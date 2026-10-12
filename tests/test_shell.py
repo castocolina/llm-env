@@ -1560,9 +1560,23 @@ def run_gpu_status_with_stubs(
         "\"vram_used_mib\":51,\"render_node\":\"renderD129\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":9000,\"required_mib\":6000,\"feasible\":true}' ;;\n"
         f"  *' processes-on-render-node '*) printf '%s\\n' '{processes_json}' ;;\n"
+        "  *' process-vram '*)\n"
+        "    [ -n \"${SYSTEM_ONE_VRAM:-}\" ] || exit 1\n"
+        "    printf '%s\\n' \"$SYSTEM_ONE_VRAM\" ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *'{{.State.Pid}}'*)\n"
+        "    [ -n \"${SYSTEM_ONE_PID:-}\" ] || exit 1\n"
+        "    printf '%s\\n' \"$SYSTEM_ONE_PID\" ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
 
     real_yq = shutil.which("yq")
     assert real_yq is not None
@@ -2507,6 +2521,20 @@ def test_gpu_status_reports_the_gpu_when_only_system_one_is_enabled(tmp_path: pa
     assert result.returncode == 0, result.stdout + result.stderr
     assert "no GPU is in use" not in result.stdout + result.stderr
     assert "0000:03:00.0" in result.stdout
+
+
+def test_gpu_status_shows_system_one_vram_next_to_its_reservation(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_gpu_status_with_stubs(
+        tmp_path,
+        config_text=(
+            "llm_server:\n  enabled: false\n"
+            "system_one:\n  enabled: true\n  vram_reserve_mib: 5120\n"
+            'gpu:\n  pci_address: "0000:03:00.0"\n  vram_budget_ceiling_mib: 15565\n'
+        ),
+        extra_env={"SYSTEM_ONE_PID": "4242", "SYSTEM_ONE_VRAM": "4245"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "system-one VRAM:    4245 MiB (reserved 5120 MiB)" in result.stdout
 
 
 def test_gpu_status_does_not_offer_to_migrate_system_one(tmp_path: pathlib.Path) -> None:
@@ -5035,6 +5063,7 @@ def run_lifecycle_script(
         "  *' gfx-arch '*) printf '%s\\n' 'gfx1201' ;;\n"
         "esac\n"
         "case \"$*\" in *' rocr-index '*) printf '0\\n' ;; esac\n"
+        "case \"$*\" in *' process-vram '*) printf '%s\\n' \"${SYSTEM_ONE_VRAM:-4245}\" ;; esac\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
         "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
@@ -5046,7 +5075,7 @@ def run_lifecycle_script(
         "#!/usr/bin/bash\n"
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; esac\n"
-        "case \"$*\" in *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
+        "case \"$*\" in *'{{.State.Pid}}'*) printf '%s\\n' \"${SYSTEM_ONE_PID:-4242}\" ;; *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
         "case \"$*\" in *'printenv LAYA_MAX_CONCURRENT'*) printf '%s\\n' 64 ;; esac\n"
         "case \"$*\" in *'cpu.stat'*) printf '%s\\n' 'usage_usec 1000000' ;; esac\n"
         "case \"$*\" in *'memory.current'*) printf '%s\\n' 2500000000 ;; esac\n"
@@ -5183,8 +5212,10 @@ def test_system_one_benchmark_prints_phase_rows(tmp_path: pathlib.Path) -> None:
             "CURL_SYSTEMONE_TIME": "0.013",
             "BENCH_INSTANT_SLEEP": "1",
             "LLM_ENV_DRM_ROOT": str(tmp_path / "drm"),
-            "LLM_ENV_KEEP_CHECK_ARTIFACTS": "1",
+            "LLM_ENV_KEEP_CHECK_ARTIFACTS": "",
             "TMPDIR": str(tmp_path),
+            "SYSTEM_ONE_PID": "4242",
+            "SYSTEM_ONE_VRAM": "4245",
         },
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -5206,10 +5237,15 @@ def test_system_one_benchmark_prints_phase_rows(tmp_path: pathlib.Path) -> None:
     assert "8010" not in script
     assert "renderD128" not in script
     assert "127.0.0.1:8123/v1/systemone" in calls.read_text()
-    copies = list(tmp_path.glob("llm-env-benchmark.*/system-one-benchmark-*.txt"))
-    assert len(copies) == 1
-    assert "10 sequential" in copies[0].read_text()
-    assert "non200=" in copies[0].read_text()
+    assert "proc=4245MiB" in result.stdout
+    saved = [line for line in result.stdout.splitlines() if line.startswith("saved ")]
+    assert saved == [f"saved {next(tmp_path.glob('system-one-benchmark-*.txt'))}"]
+    copy = pathlib.Path(saved[0].removeprefix("saved "))
+    assert copy.is_file()
+    assert "10 sequential" in copy.read_text()
+    assert "non200=" in copy.read_text()
+    assert "proc=4245MiB" in copy.read_text()
+    assert not list(tmp_path.glob("llm-env-benchmark.*"))
 
 
 def test_makefile_exposes_system_one_benchmark() -> None:
@@ -7460,6 +7496,9 @@ def run_check_server(
     llm_server_enabled: bool = True,
     system_one_enabled: bool = False,
     system_one_wrong_choice: bool = False,
+    system_one_vram: str | None = None,
+    system_one_pid: str = "",
+    system_one_vram_reserve_mib: int = 5120,
     omniroute_providers_body: str = '{"connections":[{"name":"llm-env-local","isActive":true}]}',
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
@@ -7497,6 +7536,7 @@ def run_check_server(
             + "system_one:\n"
             "  enabled: true\n"
             "  port: 8010\n"
+            f"  vram_reserve_mib: {system_one_vram_reserve_mib}\n"
         )
 
     curl = commands / "curl"
@@ -7628,10 +7668,26 @@ def run_check_server(
         "    }\n"
         "    printf '{\"api_key\": \"%s\"}\\n' \"$OMNIROUTE_API_KEY\"\n"
         "    ;;\n"
+        "  *' process-vram '*)\n"
+        "    [ -n \"${SYSTEM_ONE_VRAM:-}\" ] || exit 1\n"
+        "    printf '%s\\n' \"$SYSTEM_ONE_VRAM\"\n"
+        "    ;;\n"
         "  *) exit 64 ;;\n"
         "esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *'{{.State.Pid}}'*)\n"
+        "    [ -n \"${SYSTEM_ONE_PID:-}\" ] || exit 1\n"
+        "    printf '%s\\n' \"$SYSTEM_ONE_PID\"\n"
+        "    ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
 
     completion_responses = completion_responses or {}
     completion_statuses = completion_statuses or {}
@@ -7676,6 +7732,8 @@ def run_check_server(
             '{"status":"ok","device":"cuda"}' if system_one_enabled else '{"status":"ok"}'
         ),
         "SYSTEM_ONE_WRONG_CHOICE": "1" if system_one_wrong_choice else "0",
+        "SYSTEM_ONE_PID": system_one_pid,
+        "SYSTEM_ONE_VRAM": system_one_vram or "",
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-server.sh"],
@@ -8090,6 +8148,47 @@ def test_check_server_system_one_fails_when_choice_is_wrong(tmp_path: pathlib.Pa
     )
     text = result.stdout + result.stderr
     assert result.returncode != 0 and "Verdict: FAIL stage=answer identity=system-one choice billing" in text
+
+
+def test_check_server_system_one_vram_passes_within_reserve(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ok", "ornith": "ok"},
+        system_one_enabled=True,
+        llm_server_enabled=False,
+        system_one_pid="4242",
+        system_one_vram="4245",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Verdict: PASS identity=system-one VRAM" in result.stdout
+
+
+def test_check_server_system_one_vram_warns_above_reserve_without_failing(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ok", "ornith": "ok"},
+        system_one_enabled=True,
+        llm_server_enabled=False,
+        system_one_pid="4242",
+        system_one_vram="6000",
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode == 0, text
+    assert "Verdict: WARN identity=system-one VRAM" in result.stderr
+    assert "Verdict: FAIL" not in text
+
+
+def test_check_server_system_one_vram_skips_when_unreadable(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ok", "ornith": "ok"},
+        system_one_enabled=True,
+        llm_server_enabled=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Verdict: SKIP identity=system-one VRAM" in result.stderr
 
 
 def run_agent_check(

@@ -50,6 +50,7 @@ from pylib.detect import (
     detect,
     gfx_arch,
     host_resources,
+    process_vram_mib,
     processes_on_render_node,
     rocr_visible_index,
 )
@@ -117,6 +118,14 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
 def cmd_processes_on_render_node(args: argparse.Namespace) -> int:
     return emit({"processes": processes_on_render_node(args.render_node)})
+
+
+def cmd_process_vram(args: argparse.Namespace) -> int:
+    mib = process_vram_mib(args.pid, args.pci)
+    if mib is None:
+        return 1
+    print(mib)
+    return 0
 
 
 def cmd_rocr_index(args: argparse.Namespace) -> int:
@@ -590,6 +599,11 @@ def build_parser() -> argparse.ArgumentParser:
     processes_parser = sub.add_parser("processes-on-render-node")
     processes_parser.add_argument("--render-node", required=True)
     processes_parser.set_defaults(func=cmd_processes_on_render_node)
+
+    process_vram = sub.add_parser("process-vram")
+    process_vram.add_argument("--pid", type=positive_int, required=True)
+    process_vram.add_argument("--pci", required=True)
+    process_vram.set_defaults(func=cmd_process_vram)
 
     list_devices = sub.add_parser("list-devices")
     list_devices.add_argument("--listing-file")

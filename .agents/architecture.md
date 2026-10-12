@@ -21,7 +21,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/print-endpoints.sh` | Local/Network/mDNS URLs and credentials for llm-server, OmniRoute, and remote-setup; shared by `setup/network.sh` (post-`make start`) and `scripts/status.sh` |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/system-one-build.sh` | Build the local System One (Laya) image from `docker/system-one` |
-| `scripts/system-one-benchmark.sh` | Load profile of the running System One server (idle, sequential, concurrent, 2× admission). Writes a timestamped table into the same diagnostic directory as `scripts/benchmark.sh` |
+| `scripts/system-one-benchmark.sh` | Load profile of the running System One server (idle, sequential, concurrent, 2× admission). Writes a timestamped table under `$TMPDIR`, prints that path, and keeps the file. Each phase reports the laya-serve process's VRAM beside whole-dGPU VRAM |
 | `scripts/system-one-cache-check.py` | Prefetch and verify Laya weights in the `llm-env-system-one-cache` volume |
 | `docker/system-one/Dockerfile` | System One image: `torch==2.14.1` from the rocm7.2 index and `laya[serve]==0.4.2` |
 | `scripts/check-setup.sh` | Offline validation |
@@ -69,7 +69,11 @@ The service sets `HF_HUB_OFFLINE=1` and `LAYA_MAX_LOADED` to the number of
 names in `system_one.models`, so an unprepared checkpoint fails instead of
 downloading at runtime. Both checkpoints are loaded by default. Measured
 steady VRAM is about 4.26 GB, so the default `vram_reserve_mib` is 5120;
-`migrate_config` fills that key only when it is missing. `english` alone
+`migrate_config` fills that key only when it is missing. `system_one.idle_unload_seconds`
+(default 600, also filled only when missing; `0` never unloads) is
+`LAYA_IDLE_UNLOAD_SECONDS`: after that many idle seconds Laya drops
+checkpoints and frees about 3.7 GB of VRAM; the next request reloads in
+about 0.4 s. `english` alone
 saves only about 200 MiB, but non-English and short or accented English inputs are routed to
 `multilingual` and return HTTP 500. Changing `system_one.models` needs
 `make setup` again so the weights are prefetched. The container reserves

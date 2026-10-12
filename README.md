@@ -38,7 +38,10 @@ make check-server
   the default `vram_reserve_mib` is 5120. `english` alone saves only about
   200 MiB, and non-English or short English inputs then fail with HTTP 500.
   Changing `system_one.models` needs `make setup` again. Beyond 64 requests
-  in flight, Laya returns HTTP 503 and `Retry-After: 1` (no queue).
+  in flight, Laya returns HTTP 503 and `Retry-After: 1` (no queue). After
+  10 idle minutes (`system_one.idle_unload_seconds`, default 600; `0` never
+  unloads) Laya drops its checkpoints and frees about 3.7 GB of VRAM. The
+  next request reloads them in about 0.4 s.
 
 ## Configuration
 

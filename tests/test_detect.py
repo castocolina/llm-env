@@ -12,6 +12,7 @@ from pylib.detect import (
     gfx_arch,
     host_resources,
     list_gpus,
+    process_vram_mib,
     processes_on_render_node,
     rocr_visible_index,
 )
@@ -149,6 +150,50 @@ def test_processes_on_render_node_replaces_non_utf8_cmdline_bytes(tmp_path):
     (proc / "3021" / "cmdline").write_bytes(b"firefox\x00\xff\xfe")
     result = processes_on_render_node("renderD128", proc)
     assert result[0]["cmdline"] == "firefox \ufffd\ufffd"
+
+
+def test_process_vram_mib_sums_kib_on_the_matching_pci_address(tmp_path):
+    proc = build_proc_with_fd(
+        tmp_path, "3021", "python", "renderD128", fd_name="7", vram_kib=512, client_id="1"
+    )
+    (proc / "3021" / "fdinfo" / "8").write_text(
+        "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t2\ndrm-memory-vram:\t512 KiB\n"
+    )
+    assert process_vram_mib(3021, "0000:03:00.0", proc) == 1
+
+
+def test_process_vram_mib_ignores_a_different_pci_address(tmp_path):
+    proc = build_proc_with_fd(tmp_path, "3021", "python", "renderD128", vram_kib=524288)
+    assert process_vram_mib(3021, "0000:0e:00.0", proc) == 0
+
+
+def test_process_vram_mib_counts_one_drm_client_once(tmp_path):
+    proc = build_proc_with_fd(
+        tmp_path, "3021", "python", "renderD128", fd_name="7", vram_kib=524288, client_id="1"
+    )
+    (proc / "3021" / "fdinfo" / "8").write_text(
+        "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t1\ndrm-memory-vram:\t524288 KiB\n"
+    )
+    assert process_vram_mib(3021, "0000:03:00.0", proc) == 512
+
+
+def test_process_vram_mib_is_none_when_the_pid_is_missing(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    assert process_vram_mib(1, "0000:03:00.0", proc) is None
+
+
+def test_process_vram_mib_is_none_when_fdinfo_is_unreadable(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "9").mkdir(parents=True)
+    (proc / "9" / "fdinfo").write_text("not a directory\n")
+    assert process_vram_mib(9, "0000:03:00.0", proc) is None
+
+
+def test_process_vram_mib_is_zero_when_fdinfo_has_no_matching_fds(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "9" / "fdinfo").mkdir(parents=True)
+    assert process_vram_mib(9, "0000:03:00.0", proc) == 0
 
 
 def test_processes_on_render_node_finds_a_matching_pid(tmp_path):

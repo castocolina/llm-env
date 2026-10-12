@@ -21,14 +21,11 @@ pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"
 render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"
 [ -n "$render" ] && [ "$render" != "null" ] || die "no render node for ${pci}"
 
-# Same private diagnostic directory benchmark.sh uses. The timestamped table
-# copy is retained with the rest of that directory (LLM_ENV_KEEP_CHECK_ARTIFACTS=1).
-diagnostic_dir="$(prepare_diagnostic_dir benchmark)"
+# The timestamped table is the benchmark result. It stays after the run.
 B=""
 cleanup() {
     status=$?
     [ -n "$B" ] && rm -rf "$B"
-    finish_diagnostic_dir "$diagnostic_dir"
     exit "$status"
 }
 trap cleanup EXIT
@@ -65,6 +62,11 @@ cg() { podman exec system-one cat "/sys/fs/cgroup/$1"; }
 usage() { cg cpu.stat | awk '/usage_usec/{print $2}'; }
 mem() { echo $(( $(cg memory.current) / 1048576 )); }
 vram() { echo $(( $(cat "$V") / 1048576 )); }
+proc() {
+    local mib
+    mib="$(system_one_process_vram "$pci" 2>/dev/null || true)"
+    if [[ "$mib" =~ ^[0-9]+$ ]]; then printf '%sMiB' "$mib"; else printf 'unreadable'; fi
+}
 
 phase() { # name n concurrency count_non200
     local name="$1" n="$2" c="$3" count_non200="${4:-0}"
@@ -85,11 +87,11 @@ phase() { # name n concurrency count_non200
     cpu=$(( (u1 - u0) / (wall_ms * 10) ))
     if [ "$count_non200" = 1 ]; then
         non200="$(awk '$1 != 200 {c++} END {print c+0}' <<<"$rows")"
-        printf '%-22s n=%-5s c=%-3s wall=%6sms  req/s=%6s  cpu=%4s%% of 1 core  p50=%5.1fms p95=%5.1fms  ram=%sMiB vram=%sMiB  non200=%s\n' \
-            "$name" "$n" "$c" "$wall_ms" "$reqs" "$cpu" "$p50" "$p95" "$(mem)" "$(vram)" "$non200"
+        printf '%-22s n=%-5s c=%-3s wall=%6sms  req/s=%6s  cpu=%4s%% of 1 core  p50=%5.1fms p95=%5.1fms  ram=%sMiB vram=%sMiB proc=%s  non200=%s\n' \
+            "$name" "$n" "$c" "$wall_ms" "$reqs" "$cpu" "$p50" "$p95" "$(mem)" "$(vram)" "$(proc)" "$non200"
     else
-        printf '%-22s n=%-5s c=%-3s wall=%6sms  req/s=%6s  cpu=%4s%% of 1 core  p50=%5.1fms p95=%5.1fms  ram=%sMiB vram=%sMiB\n' \
-            "$name" "$n" "$c" "$wall_ms" "$reqs" "$cpu" "$p50" "$p95" "$(mem)" "$(vram)"
+        printf '%-22s n=%-5s c=%-3s wall=%6sms  req/s=%6s  cpu=%4s%% of 1 core  p50=%5.1fms p95=%5.1fms  ram=%sMiB vram=%sMiB proc=%s\n' \
+            "$name" "$n" "$c" "$wall_ms" "$reqs" "$cpu" "$p50" "$p95" "$(mem)" "$(vram)" "$(proc)"
     fi
 }
 
@@ -98,12 +100,12 @@ idle() { # name seconds
     u0="$(usage)"
     sleep "$seconds"
     u1="$(usage)"
-    printf '%-22s %ss window          cpu=%4s%% of 1 core  ram=%sMiB vram=%sMiB\n' \
-        "$label" "$seconds" "$(( (u1 - u0) / (seconds * 10000) ))" "$(mem)" "$(vram)"
+    printf '%-22s %ss window          cpu=%4s%% of 1 core  ram=%sMiB vram=%sMiB proc=%s\n' \
+        "$label" "$seconds" "$(( (u1 - u0) / (seconds * 10000) ))" "$(mem)" "$(vram)" "$(proc)"
 }
 
 stamp="$(date -Iseconds)"
-copy="${diagnostic_dir}/system-one-benchmark-${stamp}.txt"
+copy="${TMPDIR:-/tmp}/system-one-benchmark-${stamp}.txt"
 {
     printf 'limits: cpu.max=%s memory.max=%sMiB\n' "$(cg cpu.max)" "$(( $(cg memory.max) / 1048576 ))"
     idle "idle (before)" 20
@@ -117,3 +119,4 @@ copy="${diagnostic_dir}/system-one-benchmark-${stamp}.txt"
     idle "cooldown +20-80s" 60
     printf 'memory.peak=%sMiB\n' "$(( $(cg memory.peak) / 1048576 ))"
 } | tee -a "$copy"
+printf 'saved %s\n' "$copy"

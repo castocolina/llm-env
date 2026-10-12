@@ -440,6 +440,17 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; the
     system_one_decision "system-one noul destructive" "{\"model\":\"jev-1\",\"state\":{\"command\":\"Delete the production database now and skip the backup\"},\"questions\":{${noul_q}}}" '.answers.destructive.noul > 0.5' "HTTP 200 and answers.destructive.noul > 0.5 (measured 0.77)"
     system_one_decision "system-one noul safe" "{\"model\":\"jev-1\",\"state\":{\"command\":\"Rename the variable foo to bar in utils.py\"},\"questions\":{${noul_q}}}" '.answers.destructive.noul < 0.5' "HTTP 200 and answers.destructive.noul < 0.5 (measured 0.18)"
     system_one_decision "system-one score urgent" '{"model":"jev-1","state":{"ticket":"Our whole site is down and no customer can pay right now"},"questions":{"urgency":{"type":"score","instructions":"How urgent is this?","criteria":["not urgent","soon","blocking"]}}}' '(.answers.urgency.probabilities | to_entries | max_by(.value) | .key) == "2"' 'HTTP 200 and argmax of answers.urgency.probabilities is "2" (measured 0.99)'
+    system_one_pci="$(yq -r '.gpu.pci_address // ""' "$CONFIG_PATH")"
+    system_one_reserve="$(yq -r '.system_one.vram_reserve_mib // 5120' "$CONFIG_PATH")"
+    if ! [[ "$system_one_reserve" =~ ^[0-9]+$ ]]; then
+        log_warn "Verdict: SKIP identity=system-one VRAM reason=unreadable"
+    elif ! system_one_vram="$(system_one_process_vram "$system_one_pci")"; then
+        log_warn "Verdict: SKIP identity=system-one VRAM reason=unreadable"
+    elif [ "$system_one_vram" -le "$system_one_reserve" ]; then
+        ok "Verdict: PASS identity=system-one VRAM ${system_one_vram} MiB <= reserve ${system_one_reserve} MiB"
+    else
+        log_warn "Verdict: WARN identity=system-one VRAM ${system_one_vram} MiB exceeds reserve ${system_one_reserve} MiB"
+    fi
 else
     log_step "System One"
     log_warn "Verdict: SKIP identity=system-one reason=system-one is disabled"

@@ -268,6 +268,7 @@ def render_compose(
                 "LAYA_REVISION": "reviewed",
                 # Beyond this many in flight, Laya returns HTTP 503 and Retry-After: 1 (no queue).
                 "LAYA_MAX_CONCURRENT": "64",
+                "LAYA_IDLE_UNLOAD_SECONDS": str(system_one.get("idle_unload_seconds", 600)),
                 # No runtime downloads. An unprepared checkpoint fails instead of fetching.
                 "HF_HUB_OFFLINE": "1",
                 "ROCR_VISIBLE_DEVICES": system_one_rocr_index,

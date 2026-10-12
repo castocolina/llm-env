@@ -62,6 +62,14 @@ echo "  total VRAM:         $(format_mib "$vram_total")"
 echo "  used (system-wide): $(format_mib "$vram_used")"
 echo "  llm-env ceiling:    ${ceiling_display}"
 echo "  budget headroom:    ${headroom_display}"
+if [ "$system_one_enabled" = "true" ]; then
+    system_one_reserve="$(yq -r '.system_one.vram_reserve_mib // 5120' "$CONFIG_PATH")"
+    if system_one_vram="$(system_one_process_vram "$pci")"; then
+        echo "  system-one VRAM:    ${system_one_vram} MiB (reserved ${system_one_reserve} MiB)"
+    else
+        echo "  system-one VRAM:    unreadable (reserved ${system_one_reserve} MiB)"
+    fi
+fi
 
 # Approximate, by-name best-effort exclusion of this codebase's own
 # dGPU-consuming stack -- comm names are matched literally, so a

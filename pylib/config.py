@@ -199,6 +199,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         # Measured 2026-10-12 (RX 9070 XT, english+multilingual): ~4.26 GB steady VRAM.
         system_one.setdefault("models", "english,multilingual")
         system_one.setdefault("vram_reserve_mib", 5120)
+        # 0 disables unload. Laya 0.4.2 drops checkpoints after this many idle seconds.
+        system_one.setdefault("idle_unload_seconds", 600)
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -434,6 +436,15 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                     errors.append(f"system_one.{key} must be a non-empty string")
             if not _positive_int(system_one.get("vram_reserve_mib", 5120)):
                 errors.append("system_one.vram_reserve_mib must be a positive integer")
+            idle_unload_seconds = system_one.get("idle_unload_seconds", 600)
+            if (
+                isinstance(idle_unload_seconds, bool)
+                or not isinstance(idle_unload_seconds, int)
+                or idle_unload_seconds < 0
+            ):
+                errors.append(
+                    "system_one.idle_unload_seconds must be a non-negative integer"
+                )
             models_raw = system_one.get("models", "english")
             if isinstance(models_raw, str):
                 parts = [p.strip() for p in models_raw.split(",")]

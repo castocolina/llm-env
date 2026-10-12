@@ -202,6 +202,47 @@ def _parse_fdinfo(text: str) -> tuple[int, str | None]:
     return vram_bytes, client_id
 
 
+def _drm_pdev(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith("drm-pdev:"):
+            value = line.split(":", 1)[1].strip()
+            return value or None
+    return None
+
+
+def process_vram_mib(
+    pid: int, pci_address: str, proc_root: Path = Path("/proc")
+) -> int | None:
+    """This process's VRAM MiB on pci_address, from /proc/<pid>/fdinfo.
+
+    Sums drm-memory-vram on fds whose drm-pdev matches. Fds that share a
+    drm-client-id are one DRM client and count once. None when that
+    process's fdinfo cannot be read.
+    """
+    fdinfo = Path(proc_root) / str(pid) / "fdinfo"
+    try:
+        entries = list(fdinfo.iterdir())
+    except OSError:
+        return None
+    pci = pci_address.strip()
+    total = 0
+    seen_client_ids: set[str] = set()
+    for entry in entries:
+        try:
+            text = entry.read_text()
+        except OSError:
+            continue
+        if _drm_pdev(text) != pci:
+            continue
+        fd_vram_bytes, client_id = _parse_fdinfo(text)
+        if client_id is not None:
+            if client_id in seen_client_ids:
+                continue
+            seen_client_ids.add(client_id)
+        total += fd_vram_bytes
+    return total // MIB
+
+
 def processes_on_render_node(render_node: str, proc_root: Path = Path("/proc")) -> list[dict]:
     """Return every process with an open fd on render_node, with its VRAM use.
 

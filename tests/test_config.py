@@ -1115,12 +1115,18 @@ def test_migrate_config_adds_disabled_system_one_defaults():
         "image": "localhost/llm-env-system-one:rocm",
         "models": "english,multilingual",
         "vram_reserve_mib": 5120,
+        "idle_unload_seconds": 600,
     }
 
 
 def test_migrate_config_keeps_an_explicit_vram_reserve():
     cfg = migrate_config({"system_one": {"vram_reserve_mib": 4096}})
     assert cfg["system_one"]["vram_reserve_mib"] == 4096
+
+
+def test_migrate_config_keeps_an_explicit_idle_unload_seconds():
+    cfg = migrate_config({"system_one": {"idle_unload_seconds": 0}})
+    assert cfg["system_one"]["idle_unload_seconds"] == 0
 
 def test_migrate_config_keeps_existing_system_one_values():
     cfg = migrate_config({"system_one": {"enabled": True, "port": 9000}})
@@ -1154,3 +1160,21 @@ def test_validate_config_rejects_unknown_or_malformed_system_one_models(valid_cf
     valid_cfg["system_one"]["models"] = "english,english"
     errors = validate_config(valid_cfg)
     assert any("more than once" in e for e in errors)
+
+
+def test_validate_config_rejects_bad_idle_unload_seconds(valid_cfg):
+    valid_cfg["system_one"]["idle_unload_seconds"] = -1
+    assert (
+        "system_one.idle_unload_seconds must be a non-negative integer"
+        in validate_config(valid_cfg)
+    )
+    valid_cfg["system_one"]["idle_unload_seconds"] = True
+    assert (
+        "system_one.idle_unload_seconds must be a non-negative integer"
+        in validate_config(valid_cfg)
+    )
+
+
+def test_validate_config_accepts_idle_unload_seconds_zero(valid_cfg):
+    valid_cfg["system_one"]["idle_unload_seconds"] = 0
+    assert validate_config(valid_cfg) == []

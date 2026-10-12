@@ -245,6 +245,16 @@ require_cmd() {
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 
+# Prints the system-one container's VRAM MiB on $1 (a PCI address), or returns 1.
+system_one_process_vram() {
+    local pci="$1" pid mib
+    pid="$(podman inspect --format '{{.State.Pid}}' system-one 2>/dev/null)" || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    mib="$(llmenv process-vram --pid "$pid" --pci "$pci")" || return 1
+    [[ "$mib" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$mib"
+}
+
 migrate_config_file() {
     local response
     if ! response="$(llmenv --config "$CONFIG_PATH" migrate-config)"; then

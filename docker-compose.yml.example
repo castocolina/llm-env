@@ -159,6 +159,9 @@ services:
       LAYA_MAX_LOADED: '1'
       # Beyond this many in flight, Laya returns HTTP 503 and Retry-After: 1 (no queue).
       LAYA_MAX_CONCURRENT: '64'
+      # 0 = never unload. Default 600: free ~3.7 GB VRAM after 10 idle minutes.
+      # The next request reloads in ~0.4 s.
+      LAYA_IDLE_UNLOAD_SECONDS: '600'
       LAYA_REVISION: reviewed
       # No runtime downloads; an unprepared checkpoint fails instead.
       HF_HUB_OFFLINE: '1'
