@@ -33,10 +33,11 @@ make check-server
   [Remote setup](#remote-setup).
 - Can run with no local GPU at all — OmniRoute + the remote installer only,
   routing to models elsewhere. See [GPU-optional mode](#gpu-optional-mode).
-- Optional System One (Laya) decisions on an AMD ROCm GPU. Non-English input
-  needs `multilingual` in `system_one.models` and about 3 GB more
-  `vram_reserve_mib` per extra checkpoint. Changing `system_one.models`
-  needs `make setup` again.
+- Optional System One (Laya) decisions on an AMD ROCm GPU. `english` and
+  `multilingual` are loaded by default and fit in the 4096 MiB
+  `vram_reserve_mib`. `english` alone saves only about 200 MiB, and
+  non-English or short English inputs then fail with HTTP 500. Changing
+  `system_one.models` needs `make setup` again.
 
 ## Configuration
 

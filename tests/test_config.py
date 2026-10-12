@@ -1113,7 +1113,7 @@ def test_migrate_config_adds_disabled_system_one_defaults():
         "enabled": False,
         "port": 8010,
         "image": "localhost/llm-env-system-one:rocm",
-        "models": "english",
+        "models": "english,multilingual",
         "vram_reserve_mib": 4096,
     }
 
@@ -1121,6 +1121,11 @@ def test_migrate_config_keeps_existing_system_one_values():
     cfg = migrate_config({"system_one": {"enabled": True, "port": 9000}})
     assert cfg["system_one"]["enabled"] is True
     assert cfg["system_one"]["port"] == 9000
+    assert cfg["system_one"]["models"] == "english,multilingual"
+
+def test_migrate_config_keeps_an_explicit_system_one_models_value():
+    cfg = migrate_config({"system_one": {"models": "english"}})
+    assert cfg["system_one"]["models"] == "english"
 
 def test_validate_config_rejects_bad_system_one(valid_cfg):
     valid_cfg["system_one"] = {"enabled": "yes", "port": 0, "image": "", "models": "", "vram_reserve_mib": -1}

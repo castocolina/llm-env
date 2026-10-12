@@ -150,9 +150,9 @@ services:
     - 127.0.0.1:8010:8000
     environment:
       LAYA_MODELS: english
-      # Count of names in system_one.models. Non-English input needs
-      # multilingual in that list and ~3 GB more vram_reserve_mib per extra
-      # checkpoint; changing the list needs `make setup` again.
+      # Count of names in system_one.models. english,multilingual fits in
+      # 4096 MiB; english alone saves ~200 MiB but non-English and short
+      # English inputs return HTTP 500. Changing the list needs `make setup`.
       LAYA_MAX_LOADED: '1'
       LAYA_REVISION: reviewed
       # No runtime downloads; an unprepared checkpoint fails instead.

@@ -196,8 +196,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         system_one.setdefault("enabled", False)
         system_one.setdefault("port", DEFAULT_SYSTEM_ONE_PORT)
         system_one.setdefault("image", DEFAULT_SYSTEM_ONE_IMAGE)
-        # Measured: english-only preload ~2992 MiB VRAM (rocm7.2) vs ~5.8 GiB for all three.
-        system_one.setdefault("models", "english")
+        # Measured 2026-10-12 (RX 9070 XT, rocm7.2): both ~3170 MiB; english alone saves ~200 MiB.
+        system_one.setdefault("models", "english,multilingual")
         system_one.setdefault("vram_reserve_mib", 4096)
 
     gpu = cfg.get("gpu")

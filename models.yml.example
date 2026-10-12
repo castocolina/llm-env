@@ -42,8 +42,8 @@ system_one:
   enabled: false
   port: 8010
   image: localhost/llm-env-system-one:rocm
-  models: english          # LAYA_MODELS: english | multilingual | typed-decisions (comma list). Non-English input needs multilingual here. Changing this list needs `make setup` again.
-  vram_reserve_mib: 4096   # subtracted from llm-server's VRAM budget when enabled; add ~3 GB per extra checkpoint
+  models: english,multilingual  # LAYA_MODELS: english | multilingual | typed-decisions (comma list). Both fit in vram_reserve_mib. english alone saves ~200 MiB but non-English and short English inputs return HTTP 500. Changing this list needs `make setup` again.
+  vram_reserve_mib: 4096   # subtracted from llm-server's VRAM budget when enabled
 
 resources:
   llm_server:

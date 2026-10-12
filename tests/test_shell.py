@@ -5053,6 +5053,7 @@ def run_lifecycle_script(
         "#!/usr/bin/bash\n"
         "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *'/health'*) [ \"${CURL_HEALTH_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
+        "case \"$*\" in *'/v1/systemone'*) [ \"${CURL_SYSTEMONE_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
         "exit 0\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
@@ -5277,6 +5278,27 @@ def test_start_skips_system_one_when_disabled(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "llm-env-system-one" not in calls.read_text()
     assert "System One" not in result.stdout
+    assert "/v1/systemone" not in calls.read_text()
+
+
+def test_start_warms_up_system_one_after_health(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "http://127.0.0.1:8010/v1/systemone" in recorded
+    assert "charged twice" in recorded
+
+
+def test_start_continues_when_system_one_warm_up_fails(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", system_one_enabled=True,
+        env_overrides={"CURL_SYSTEMONE_FAIL": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/v1/systemone" in calls.read_text()
+    assert "System One warm-up request failed" in result.stderr
 
 
 def _print_endpoints(tmp_path: pathlib.Path, system_one_yaml: str):

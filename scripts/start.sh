@@ -155,6 +155,14 @@ if [ "$system_one_enabled" = "true" ]; then
         exit 1
     fi
     log_info "System One is ready"
+    # First decision after start pays GPU warm-up (~1.6s); a failure must not fail start.
+    warmup_body='{"model":"jev-1","state":{"ticket":"I was charged twice this month, please refund me"},"questions":{"team":{"type":"choice","instructions":"Which team should handle this ticket?","criteria":{"billing":"charges, invoices, refunds","technical":"bugs, crashes, outages","other":"everything else"}}}}'
+    if ! curl -fsS --max-time 10 -o /dev/null \
+            -H "Content-Type: application/json" \
+            --data-raw "$warmup_body" \
+            "http://127.0.0.1:${system_one_port}/v1/systemone" 2>/dev/null; then
+        log_warn "System One warm-up request failed"
+    fi
 fi
 
 bash "${REPO_DIR}/setup/network.sh"

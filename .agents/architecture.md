@@ -66,11 +66,12 @@ has no `depends_on`. OmniRoute does not proxy `/v1/systemone`. Laya 0.4.2
 routes non-English and non-Latin text to the `multilingual` checkpoint.
 The service sets `HF_HUB_OFFLINE=1` and `LAYA_MAX_LOADED` to the number of
 names in `system_one.models`, so an unprepared checkpoint fails instead of
-downloading at runtime. Non-English input needs `multilingual` in
-`system_one.models` and about 3 GB more `vram_reserve_mib` per extra
-checkpoint. Changing `system_one.models` needs `make setup` again so the
-weights are prefetched. `scripts/start.sh` calls `llmenv omniroute provision`
-once both containers are reachable, which idempotently
+downloading at runtime. Both checkpoints are loaded by default and fit in
+the 4096 MiB `vram_reserve_mib`. `english` alone saves only about 200 MiB,
+but non-English and short or accented English inputs are routed to
+`multilingual` and return HTTP 500. Changing `system_one.models` needs
+`make setup` again so the weights are prefetched. `scripts/start.sh` calls
+`llmenv omniroute provision` once both containers are reachable, which idempotently
 creates or updates a provider connection named `llm-env-local` pointing at
 `http://llm-server:<port>/v1` (`llm-server` is the compose service's
 `container_name`, which is also its DNS name on the shared podman network)

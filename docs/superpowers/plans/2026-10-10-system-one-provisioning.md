@@ -19,7 +19,7 @@
 | GPU pin (VERIFIED LIVE 2026-10-11) | `--device /dev/kfd --device /dev/dri/renderD128` → torch `No CUDA GPUs are available`. Working pin (2026-10-11 live `podman run`, corroborated by the run comment in `docker/laya-rocm/Dockerfile`: `--device /dev/kfd --device /dev/dri --group-add keep-groups --security-opt label=disable`): `/dev/kfd` and `/dev/dri:/dev/dri` plus `ROCR_VISIBLE_DEVICES=<index>`. llm-server only maps `/dev/dri:/dev/dri` (`pylib/compose.py:80`) and has no `/dev/kfd`. Index = position of the KFD node whose `properties` has `drm_render_minor <minor>`, among `/sys/class/kfd/kfd/topology/nodes/` with `gpu_id` != 0, in node-number order. This host: renderD128 → 0 (RX 9070 XT), renderD129 → 1 (iGPU). Computed in pylib (`rocr_visible_index`), not shell. |
 | Health | `GET /health` → `{"status":"ok","device":"cuda",...}` (ROCm torch reports HIP as `cuda`) |
 | Latency (warm, 1 question) | ~12 ms; 10 questions/request ~19 ms; 8 concurrent ~84 req/s |
-| VRAM, all 3 checkpoints | ~5.8 GiB (2026-10-10). `LAYA_MODELS=english` on the rocm7.2 image: ~2992 MiB (2026-10-11, RX 9070 XT, `ROCR_VISIBLE_DEVICES=0`) |
+| VRAM, all 3 checkpoints | ~5.8 GiB (2026-10-10). `LAYA_MODELS=english` on the rocm7.2 image: ~2992 MiB (2026-10-11, RX 9070 XT, `ROCR_VISIBLE_DEVICES=0`). `english,multilingual`: ~3170 MiB total (2026-10-12, same GPU; multilingual adds ~200 MiB). Default is both; they fit in `vram_reserve_mib` 4096. `english` alone saves ~200 MiB but non-English and short/accented English inputs are routed to `multilingual` and return HTTP 500 under `HF_HUB_OFFLINE=1`. |
 | RAM (RSS) | ~3.5 GB |
 | Idle CPU | Not Laya. torch `2.14.1+rocm7.14` bundles ROCR 1.21; `rocr::core::Runtime::AsyncEventsLoop` busy-spins one core after the first GPU kernel (gdb backtrace on the busy thread; `import torch` / `cuda.init()` = 0%, first GPU `x*2` = 99%). None of `HSA_ENABLE_INTERRUPT=0/1`, `HSA_ENABLE_SDMA=0`, `AMD_DIRECT_DISPATCH=0`, `GPU_MAX_HW_QUEUES=1`, `HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0`, `HIP_HOST_COHERENT=0`, `HIP_FORCE_DEV_KERNARG=1` helps. Upstream: https://github.com/ROCm/rocm-systems/issues/12674 , https://github.com/ROCm/TheRock/issues/7051 (fixed on rocm-systems main by PR #7898, not in any 7.14 release). Fix, measured 2026-10-11: `torch==2.14.1` from `https://download.pytorch.org/whl/rocm7.2` (HIP 7.2.53211, ROCR 1.18) — idle 0% (three 10 s samples after inference), decision p50 12.3 ms / max 15 ms (20 requests), same probabilities as rocm7.14. Laya CPU mode was 108 ms p50 at 0% idle — not chosen; fallback only if a future ROCm regresses. Regression gate is Task 10 (no env-var hunting). |
 | Decisions (english, one request each) | Shape `{"model":"jev-1","state":{...},"questions":{"<id>":{...}}}`. choice billing p 0.98 (charged twice); choice technical p 0.95 (settings crash); noul 0.77 (delete production database); noul 0.18 (rename foo→bar); score argmax `"2"` p 0.99 (site down). Bodies are Task 8. Never batch questions — Laya reads the whole state per question. |
@@ -32,7 +32,7 @@
 - Image tag `localhost/llm-env-system-one:rocm`; Dockerfile pins `torch==2.14.1` from `https://download.pytorch.org/whl/rocm7.2` (`ARG TORCH_INDEX=rocm7.2`) and `laya[serve]==0.4.2` plus `huggingface_hub==2.2.0` (the weights check imports it). `ARG GPU_ARCH` has no default; the pip-install `RUN` starts with `test -n "${GPU_ARCH}"`. `scripts/system-one-build.sh` passes `--label llm-env.gpu-arch=<arch>` and `--build-arg GPU_ARCH=<arch>` from KFD `gfx_target_version` via `gfx_arch`; if the arch cannot be read the build dies (no default). The image then deletes per-arch kernel files under `site-packages/torch` and `triton` whose path does not contain that arch, its family dir (last character replaced by `x`), or `gfx<major>-generic`.
 - AMD ROCm only. `make setup` refuses to enable System One when `/dev/kfd` is absent.
 - Host port binds `127.0.0.1` only (Laya runs without auth here). Default host port `8010`; container port `8000`.
-- `LAYA_MODELS=english` by default (`system_one.models`).
+- `LAYA_MODELS=english,multilingual` by default (`system_one.models`). An existing explicit `models` value is preserved. `vram_reserve_mib` stays 4096.
 - Makefile target bodies ≤ 3 lines and delegate to a `.sh` (AGENTS.md).
 - Host Python only as `uv run llmenv.py <subcommand>` (`llmenv()` in `tools/lib.sh` is that). Ad-hoc `uv run python3 -c` or a Python heredoc in a shell step is not allowed; Python a step needs is an `llmenv.py` subcommand or one that already exists. `python3` inside the System One image is the image entrypoint, not this rule. All output in English.
 - After any `.sh` edit: `make validate`. Every task that edits a `.py` file runs `make validate && make test` before its commit. A targeted `uv run pytest` is only the red step.
@@ -72,7 +72,7 @@ def test_migrate_config_adds_disabled_system_one_defaults():
         "enabled": False,
         "port": 8010,
         "image": "localhost/llm-env-system-one:rocm",
-        "models": "english",
+        "models": "english,multilingual",
         "vram_reserve_mib": 4096,
     }
 
@@ -143,8 +143,8 @@ In `migrate_config`, after the `llm_server` block:
         system_one.setdefault("enabled", False)
         system_one.setdefault("port", DEFAULT_SYSTEM_ONE_PORT)
         system_one.setdefault("image", DEFAULT_SYSTEM_ONE_IMAGE)
-        # Measured: english-only preload ~2992 MiB VRAM (rocm7.2) vs ~5.8 GiB for all three.
-        system_one.setdefault("models", "english")
+        # Measured 2026-10-12 (RX 9070 XT, rocm7.2): both ~3170 MiB; english alone saves ~200 MiB.
+        system_one.setdefault("models", "english,multilingual")
         system_one.setdefault("vram_reserve_mib", 4096)
 ```
 
@@ -194,7 +194,7 @@ system_one:
   enabled: false
   port: 8010
   image: localhost/llm-env-system-one:rocm
-  models: english          # LAYA_MODELS: english | multilingual | typed-decisions (comma list)
+  models: english,multilingual  # LAYA_MODELS: english | multilingual | typed-decisions (comma list). Both fit in vram_reserve_mib. english alone saves ~200 MiB but non-English and short English inputs return HTTP 500.
   vram_reserve_mib: 4096   # subtracted from llm-server's VRAM budget when enabled
 ```
 
@@ -1276,6 +1276,14 @@ if [ "$system_one_enabled" = "true" ]; then
         exit 1
     fi
     log_info "System One is ready"
+    # First decision after start pays GPU warm-up (~1.6s); a failure must not fail start.
+    warmup_body='{"model":"jev-1","state":{"ticket":"I was charged twice this month, please refund me"},"questions":{"team":{"type":"choice","instructions":"Which team should handle this ticket?","criteria":{"billing":"charges, invoices, refunds","technical":"bugs, crashes, outages","other":"everything else"}}}}'
+    if ! curl -fsS --max-time 10 -o /dev/null \
+            -H "Content-Type: application/json" \
+            --data-raw "$warmup_body" \
+            "http://127.0.0.1:${system_one_port}/v1/systemone" 2>/dev/null; then
+        log_warn "System One warm-up request failed"
+    fi
 fi
 ```
 
