@@ -316,6 +316,8 @@ def cmd_budget(args: argparse.Namespace) -> int:
             llm_server_resources.get("memory_ceiling_floor_pct", 30),
             llm_server_resources.get("cpu_ceiling_pct", 60),
             llm_server_resources.get("cpu_ceiling_floor_pct", 20),
+            system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
+            llm_server_enabled=cfg.get("llm_server", {}).get("enabled", True),
         )
         ram_available_mib = resource_limits["llm_server"]["memory_mib"]
     except ResourceError as exc:
@@ -354,6 +356,8 @@ def cmd_budget(args: argparse.Namespace) -> int:
             memory_ceiling_floor_pct=llm_server_resources.get("memory_ceiling_floor_pct", 30),
             cpu_ceiling_pct=llm_server_resources.get("cpu_ceiling_pct", 60),
             cpu_ceiling_floor_pct=llm_server_resources.get("cpu_ceiling_floor_pct", 20),
+            system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
+            llm_server_enabled=cfg.get("llm_server", {}).get("enabled", True),
         )
         absolute_max_mib = absolute_max_limits["llm_server"]["memory_mib"]
         # Built without ever putting a possessive "'s" directly after a
@@ -402,6 +406,7 @@ def cmd_resources(args: argparse.Namespace) -> int:
         llm_server_resources["cpu_ceiling_pct"],
         llm_server_resources["cpu_ceiling_floor_pct"],
         llm_server_enabled=llm_server_enabled,
+        system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
     )
     return emit({"host": host, **limits})
 

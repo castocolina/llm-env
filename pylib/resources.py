@@ -48,6 +48,9 @@ REMOTE_SETUP_CPU_MAX = 1
 REMOTE_SETUP_MEMORY_MIN_MIB = 32
 REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
+SYSTEM_ONE_CPUS = 2  # 2 cores is plenty at ~12 ms/request; RSS was ~3.5 GB
+SYSTEM_ONE_MEMORY_MIB = 4608
+
 # OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
 # upstream) bounds concurrent "heavy" requests (large tool/context bodies --
 # routine for coding agents) to avoid heap amplification. The queue wait is
@@ -60,6 +63,16 @@ class ResourceError(Exception):
     """Raised when the host has too few resources to reserve the fixed floors."""
 
 
+def _floor_words(system_one_enabled: bool) -> str:
+    words = "the host floor and OmniRoute's/remote-setup's fixed allocations"
+    if system_one_enabled:
+        words += (
+            f" and System One's reservation ({SYSTEM_ONE_CPUS} CPUs, "
+            f"{SYSTEM_ONE_MEMORY_MIB} MiB)"
+        )
+    return words
+
+
 def compute_resource_limits(
     host_cpu_count: int,
     host_memory_total_mib: int,
@@ -68,37 +81,39 @@ def compute_resource_limits(
     cpu_ceiling_pct: float = 100,
     cpu_ceiling_floor_pct: float = 20,
     llm_server_enabled: bool = True,
+    system_one_enabled: bool = False,
 ) -> dict[str, Any]:
     cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN
     memory_floor_mib = (
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
     )
+    if system_one_enabled:
+        cpu_floor += SYSTEM_ONE_CPUS
+        memory_floor_mib += SYSTEM_ONE_MEMORY_MIB
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
-                "required to reserve the host floor and OmniRoute's/"
-                "remote-setup's fixed allocations and still run llm-server"
+                f"required to reserve {_floor_words(system_one_enabled)} and still "
+                "run llm-server"
             )
         if host_memory_total_mib <= memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; more than "
-                f"{memory_floor_mib} MiB is required to reserve the host floor "
-                "and OmniRoute's/remote-setup's fixed allocations and still "
-                "run llm-server"
+                f"{memory_floor_mib} MiB is required to reserve "
+                f"{_floor_words(system_one_enabled)} and still run llm-server"
             )
     else:
         if host_cpu_count < cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; at least {cpu_floor} are "
-                "required to reserve the host floor and OmniRoute's/"
-                "remote-setup's fixed allocations"
+                f"required to reserve {_floor_words(system_one_enabled)}"
             )
         if host_memory_total_mib < memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; at least "
-                f"{memory_floor_mib} MiB is required to reserve the host floor "
-                "and OmniRoute's/remote-setup's fixed allocations"
+                f"{memory_floor_mib} MiB is required to reserve "
+                f"{_floor_words(system_one_enabled)}"
             )
 
     if llm_server_enabled:
@@ -155,5 +170,9 @@ def compute_resource_limits(
         "llm_server": {
             "cpus": llm_server_cpus,
             "memory_mib": llm_server_memory_mib,
+        },
+        "system_one": {
+            "cpus": SYSTEM_ONE_CPUS if system_one_enabled else 0,
+            "memory_mib": SYSTEM_ONE_MEMORY_MIB if system_one_enabled else 0,
         },
     }

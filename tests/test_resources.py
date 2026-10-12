@@ -16,6 +16,8 @@ from pylib.resources import (
     REMOTE_SETUP_CPU_MIN,
     REMOTE_SETUP_MEMORY_MAX_MIB,
     REMOTE_SETUP_MEMORY_MIN_MIB,
+    SYSTEM_ONE_CPUS,
+    SYSTEM_ONE_MEMORY_MIB,
     ResourceError,
     compute_resource_limits,
 )
@@ -238,3 +240,26 @@ def test_llm_server_enabled_defaults_to_true():
         host_cpu_count=8, host_memory_total_mib=32768, llm_server_enabled=True
     )
     assert enabled_default == enabled_explicit
+
+
+def test_system_one_reservation_shrinks_llm_server_remainder():
+    base = compute_resource_limits(16, 32768)
+    with_one = compute_resource_limits(16, 32768, system_one_enabled=True)
+    memory_floor_mib = (
+        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+    )
+    assert with_one["system_one"] == {"cpus": SYSTEM_ONE_CPUS, "memory_mib": SYSTEM_ONE_MEMORY_MIB}
+    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIB
+    assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - SYSTEM_ONE_MEMORY_MIB
+
+
+def test_system_one_reservation_absent_when_disabled():
+    assert compute_resource_limits(16, 32768)["system_one"] == {"cpus": 0, "memory_mib": 0}
+
+
+def test_system_one_resource_error_names_its_reservation():
+    message = r"System One's reservation \(2 CPUs, 4608 MiB\)"
+    # (cpus, memory_mib, llm_server_enabled) — one call per ResourceError branch
+    for cpus, memory, llm in ((6, 32768, True), (16, 9760, True), (5, 32768, False), (16, 9759, False)):
+        with pytest.raises(ResourceError, match=message):
+            compute_resource_limits(cpus, memory, system_one_enabled=True, llm_server_enabled=llm)

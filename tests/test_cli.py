@@ -1139,6 +1139,49 @@ def test_cmd_budget_reports_infeasible_when_the_host_cant_reserve_the_fixed_floo
     )
 
 
+def test_cmd_budget_system_one_lowers_ram_available_mib(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
+    cfg.setdefault("resources", {}).setdefault("llm_server", {})["memory_ceiling_pct"] = 100
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(
+        llmenv,
+        "detect",
+        lambda: {
+            "compositor_render_node": "renderD128",
+            "gpus": [
+                {
+                    "pci_address": "0000:03:00.0",
+                    "render_node": "renderD129",
+                    "vram_total_mib": 16304,
+                    "vram_used_mib": 0,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 16, "memory_total_mib": 32768}
+    )
+    monkeypatch.setattr(
+        llmenv,
+        "_model_costs",
+        lambda c, p: [{"alias": "a", "weights_mib": 100, "ram_weights_mib": 0, "kv_mib": 0}],
+    )
+    ns = cast(Namespace, SimpleNamespace(config="cfg", models_dir="m"))
+    llmenv.cmd_budget(ns)
+    off = json.loads(capsys.readouterr().out)["ram_available_mib"]
+    cfg["system_one"] = {
+        "enabled": True,
+        "port": 8010,
+        "image": "localhost/llm-env-system-one:rocm",
+        "models": "english",
+        "vram_reserve_mib": 4096,
+    }
+    llmenv.cmd_budget(ns)
+    assert json.loads(capsys.readouterr().out)["ram_available_mib"] < off
+
+
 def test_cmd_budget_sums_ram_across_concurrently_resident_models(
     tmp_path, monkeypatch, capsys
 ):

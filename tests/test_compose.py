@@ -555,3 +555,10 @@ def test_system_one_requires_a_rocr_index():
             presets_path="/p",
             repo_root="/r",
         )
+
+
+def test_system_one_service_has_fixed_limits():
+    document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
+    service = document["services"]["system-one"]
+    assert service["cpus"] == 2
+    assert service["mem_limit"] == "4608m"
