@@ -34,10 +34,11 @@ make check-server
 - Can run with no local GPU at all — OmniRoute + the remote installer only,
   routing to models elsewhere. See [GPU-optional mode](#gpu-optional-mode).
 - Optional System One (Laya) decisions on an AMD ROCm GPU. `english` and
-  `multilingual` are loaded by default and fit in the 4096 MiB
-  `vram_reserve_mib`. `english` alone saves only about 200 MiB, and
-  non-English or short English inputs then fail with HTTP 500. Changing
-  `system_one.models` needs `make setup` again.
+  `multilingual` are loaded by default. Steady VRAM is about 4.26 GB, so
+  the default `vram_reserve_mib` is 5120. `english` alone saves only about
+  200 MiB, and non-English or short English inputs then fail with HTTP 500.
+  Changing `system_one.models` needs `make setup` again. Beyond 64 requests
+  in flight, Laya returns HTTP 503 and `Retry-After: 1` (no queue).
 
 ## Configuration
 

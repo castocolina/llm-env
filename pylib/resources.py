@@ -48,8 +48,11 @@ REMOTE_SETUP_CPU_MAX = 1
 REMOTE_SETUP_MEMORY_MIN_MIB = 32
 REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
-SYSTEM_ONE_CPUS = 2  # 2 cores is plenty at ~12 ms/request; RSS was ~3.5 GB
-SYSTEM_ONE_MEMORY_MIB = 4608
+SYSTEM_ONE_CPUS = 2  # hard cap; 16 clients used ~1.3 cores
+SYSTEM_ONE_MEMORY_MIB = 4608  # hard cap; memory.peak was 3155 MiB
+# Host floor counts these mins, same as OmniRoute. Steady RSS is ~2.4 GB; idle CPU is ~0.
+SYSTEM_ONE_CPUS_MIN = 1
+SYSTEM_ONE_MEMORY_MIN_MIB = 2560
 
 # OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
 # upstream) bounds concurrent "heavy" requests (large tool/context bodies --
@@ -67,8 +70,8 @@ def _floor_words(system_one_enabled: bool) -> str:
     words = "the host floor and OmniRoute's/remote-setup's fixed allocations"
     if system_one_enabled:
         words += (
-            f" and System One's reservation ({SYSTEM_ONE_CPUS} CPUs, "
-            f"{SYSTEM_ONE_MEMORY_MIB} MiB)"
+            f" and System One's reservation ({SYSTEM_ONE_CPUS_MIN} CPUs, "
+            f"{SYSTEM_ONE_MEMORY_MIN_MIB} MiB)"
         )
     return words
 
@@ -88,8 +91,8 @@ def compute_resource_limits(
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
     )
     if system_one_enabled:
-        cpu_floor += SYSTEM_ONE_CPUS
-        memory_floor_mib += SYSTEM_ONE_MEMORY_MIB
+        cpu_floor += SYSTEM_ONE_CPUS_MIN
+        memory_floor_mib += SYSTEM_ONE_MEMORY_MIN_MIB
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(

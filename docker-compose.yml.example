@@ -138,7 +138,9 @@ services:
     security_opt:
     - label=disable
     cpus: 2
+    cpu_shares: 1024
     mem_limit: 4608m
+    mem_reservation: 2560m
     volumes:
     # Named volume, podman-managed: Laya weights (~0.8 GB) at
     # /home/laya/.cache/huggingface. Survives stop, crash, and reboot.
@@ -150,10 +152,13 @@ services:
     - 127.0.0.1:8010:8000
     environment:
       LAYA_MODELS: english
-      # Count of names in system_one.models. english,multilingual fits in
-      # 4096 MiB; english alone saves ~200 MiB but non-English and short
-      # English inputs return HTTP 500. Changing the list needs `make setup`.
+      # Count of names in system_one.models. english,multilingual is ~4.26 GB
+      # steady VRAM (default vram_reserve_mib 5120). english alone saves
+      # ~200 MiB but non-English and short English inputs return HTTP 500.
+      # Changing the list needs `make setup`.
       LAYA_MAX_LOADED: '1'
+      # Beyond this many in flight, Laya returns HTTP 503 and Retry-After: 1 (no queue).
+      LAYA_MAX_CONCURRENT: '64'
       LAYA_REVISION: reviewed
       # No runtime downloads; an unprepared checkpoint fails instead.
       HF_HUB_OFFLINE: '1'

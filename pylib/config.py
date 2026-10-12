@@ -196,9 +196,9 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         system_one.setdefault("enabled", False)
         system_one.setdefault("port", DEFAULT_SYSTEM_ONE_PORT)
         system_one.setdefault("image", DEFAULT_SYSTEM_ONE_IMAGE)
-        # Measured 2026-10-12 (RX 9070 XT, rocm7.2): both ~3170 MiB; english alone saves ~200 MiB.
+        # Measured 2026-10-12 (RX 9070 XT, english+multilingual): ~4.26 GB steady VRAM.
         system_one.setdefault("models", "english,multilingual")
-        system_one.setdefault("vram_reserve_mib", 4096)
+        system_one.setdefault("vram_reserve_mib", 5120)
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -432,7 +432,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 value = system_one.get(key, "x")
                 if not isinstance(value, str) or not value.strip():
                     errors.append(f"system_one.{key} must be a non-empty string")
-            if not _positive_int(system_one.get("vram_reserve_mib", 4096)):
+            if not _positive_int(system_one.get("vram_reserve_mib", 5120)):
                 errors.append("system_one.vram_reserve_mib must be a positive integer")
             models_raw = system_one.get("models", "english")
             if isinstance(models_raw, str):

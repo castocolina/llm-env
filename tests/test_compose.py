@@ -572,3 +572,10 @@ def test_system_one_service_has_fixed_limits():
     service = document["services"]["system-one"]
     assert service["cpus"] == 2
     assert service["mem_limit"] == "4608m"
+    assert service["cpu_shares"] == 1024
+    assert service["mem_reservation"] == "2560m"
+
+
+def test_system_one_admits_64_in_flight():
+    env = system_one_document({**CFG, "system_one": SYSTEM_ONE})["services"]["system-one"]["environment"]
+    assert env["LAYA_MAX_CONCURRENT"] == "64"

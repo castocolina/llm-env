@@ -248,9 +248,21 @@ def test_system_one_reservation_shrinks_llm_server_remainder():
     memory_floor_mib = (
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
     )
+    # Caps stay on the service; the host floor subtracts the reservation, same as OmniRoute's min.
     assert with_one["system_one"] == {"cpus": SYSTEM_ONE_CPUS, "memory_mib": SYSTEM_ONE_MEMORY_MIB}
-    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIB
-    assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - SYSTEM_ONE_MEMORY_MIB
+    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - 2560
+    assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - 1
+    assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - 2560
+
+
+def test_system_one_host_floor_uses_the_reservation_not_the_cap():
+    cpu = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN + 1
+    memory = (
+        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB + 2560
+    )
+    compute_resource_limits(cpu + 1, memory + 1, system_one_enabled=True)
+    with pytest.raises(ResourceError, match=r"System One's reservation \(1 CPUs, 2560 MiB\)"):
+        compute_resource_limits(cpu, memory + 1, system_one_enabled=True)
 
 
 def test_system_one_reservation_absent_when_disabled():
@@ -258,8 +270,17 @@ def test_system_one_reservation_absent_when_disabled():
 
 
 def test_system_one_resource_error_names_its_reservation():
-    message = r"System One's reservation \(2 CPUs, 4608 MiB\)"
+    message = r"System One's reservation \(1 CPUs, 2560 MiB\)"
+    cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN + 1
+    memory_floor = (
+        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB + 2560
+    )
     # (cpus, memory_mib, llm_server_enabled) — one call per ResourceError branch
-    for cpus, memory, llm in ((6, 32768, True), (16, 9760, True), (5, 32768, False), (16, 9759, False)):
+    for cpus, memory, llm in (
+        (cpu_floor, 32768, True),
+        (16, memory_floor, True),
+        (cpu_floor - 1, 32768, False),
+        (16, memory_floor - 1, False),
+    ):
         with pytest.raises(ResourceError, match=message):
             compute_resource_limits(cpus, memory, system_one_enabled=True, llm_server_enabled=llm)

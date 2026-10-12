@@ -21,6 +21,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/print-endpoints.sh` | Local/Network/mDNS URLs and credentials for llm-server, OmniRoute, and remote-setup; shared by `setup/network.sh` (post-`make start`) and `scripts/status.sh` |
 | `scripts/stop.sh` / `scripts/clean.sh` | Lifecycle |
 | `scripts/system-one-build.sh` | Build the local System One (Laya) image from `docker/system-one` |
+| `scripts/system-one-benchmark.sh` | Load profile of the running System One server (idle, sequential, concurrent, 2× admission). Writes a timestamped table into the same diagnostic directory as `scripts/benchmark.sh` |
 | `scripts/system-one-cache-check.py` | Prefetch and verify Laya weights in the `llm-env-system-one-cache` volume |
 | `docker/system-one/Dockerfile` | System One image: `torch==2.14.1` from the rocm7.2 index and `laya[serve]==0.4.2` |
 | `scripts/check-setup.sh` | Offline validation |
@@ -66,11 +67,15 @@ has no `depends_on`. OmniRoute does not proxy `/v1/systemone`. Laya 0.4.2
 routes non-English and non-Latin text to the `multilingual` checkpoint.
 The service sets `HF_HUB_OFFLINE=1` and `LAYA_MAX_LOADED` to the number of
 names in `system_one.models`, so an unprepared checkpoint fails instead of
-downloading at runtime. Both checkpoints are loaded by default and fit in
-the 4096 MiB `vram_reserve_mib`. `english` alone saves only about 200 MiB,
-but non-English and short or accented English inputs are routed to
+downloading at runtime. Both checkpoints are loaded by default. Measured
+steady VRAM is about 4.26 GB, so the default `vram_reserve_mib` is 5120;
+`migrate_config` fills that key only when it is missing. `english` alone
+saves only about 200 MiB, but non-English and short or accented English inputs are routed to
 `multilingual` and return HTTP 500. Changing `system_one.models` needs
-`make setup` again so the weights are prefetched. `scripts/start.sh` calls
+`make setup` again so the weights are prefetched. The container reserves
+1 CPU and 2560 MiB (`cpu_shares` / `mem_reservation`) and caps at 2 CPUs and
+4608 MiB. `LAYA_MAX_CONCURRENT` is 64; beyond 64 requests in flight Laya
+returns HTTP 503 and `Retry-After: 1` (no queue). `scripts/start.sh` calls
 `llmenv omniroute provision` once both containers are reachable, which idempotently
 creates or updates a provider connection named `llm-env-local` pointing at
 `http://llm-server:<port>/v1` (`llm-server` is the compose service's

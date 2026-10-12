@@ -4913,6 +4913,7 @@ def run_lifecycle_script(
     resources_failure: bool = False,
     llm_server_enabled: bool = True,
     system_one_enabled: bool = False,
+    system_one_port: int = 8010,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -4979,7 +4980,7 @@ def run_lifecycle_script(
         )
         + "system_one:\n"
         f"  enabled: {str(system_one_enabled).lower()}\n"
-        "  port: 8010\n"
+        f"  port: {system_one_port}\n"
         "  image: localhost/llm-env-system-one:rocm\n"
         "  models: english\n"
         "  vram_reserve_mib: 4096\n"
@@ -5045,6 +5046,13 @@ def run_lifecycle_script(
         "#!/usr/bin/bash\n"
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; esac\n"
+        "case \"$*\" in *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
+        "case \"$*\" in *'printenv LAYA_MAX_CONCURRENT'*) printf '%s\\n' 64 ;; esac\n"
+        "case \"$*\" in *'cpu.stat'*) printf '%s\\n' 'usage_usec 1000000' ;; esac\n"
+        "case \"$*\" in *'memory.current'*) printf '%s\\n' 2500000000 ;; esac\n"
+        "case \"$*\" in *'memory.peak'*) printf '%s\\n' 3300000000 ;; esac\n"
+        "case \"$*\" in *'memory.max'*) printf '%s\\n' 4831838208 ;; esac\n"
+        "case \"$*\" in *'cpu.max'*) printf '%s\\n' '200000 100000' ;; esac\n"
         "exit 0\n"
     )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
@@ -5053,10 +5061,17 @@ def run_lifecycle_script(
         "#!/usr/bin/bash\n"
         "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *'/health'*) [ \"${CURL_HEALTH_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
-        "case \"$*\" in *'/v1/systemone'*) [ \"${CURL_SYSTEMONE_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
+        "case \"$*\" in *'/v1/systemone'*) [ -n \"${CURL_SYSTEMONE_TIME:-}\" ] && printf '%s %s\\n' \"${CURL_SYSTEMONE_CODE:-200}\" \"$CURL_SYSTEMONE_TIME\"; [ \"${CURL_SYSTEMONE_FAIL:-}\" = 1 ] && exit 1 ;; esac\n"
         "exit 0\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+    sleep_cmd = commands / "sleep"
+    sleep_cmd.write_text(
+        "#!/usr/bin/bash\n"
+        "[ \"${BENCH_INSTANT_SLEEP:-}\" = 1 ] && exit 0\n"
+        "exec /usr/bin/sleep \"$@\"\n"
+    )
+    sleep_cmd.chmod(sleep_cmd.stat().st_mode | stat.S_IXUSR)
     systemctl = commands / "systemctl"
     systemctl.write_text(
         "#!/usr/bin/bash\n"
@@ -5135,6 +5150,73 @@ def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_
 
 def test_makefile_exposes_system_one_build() -> None:
     assert "system-one-build:" in (ROOT / "Makefile").read_text()
+
+
+def test_system_one_benchmark_dies_when_disabled(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_lifecycle_script(
+        tmp_path, "scripts/system-one-benchmark.sh", system_one_enabled=False
+    )
+    assert result.returncode != 0
+    assert "System One is disabled" in result.stderr
+
+
+def test_system_one_benchmark_dies_when_not_running(tmp_path: pathlib.Path) -> None:
+    result, _, _ = run_lifecycle_script(
+        tmp_path, "scripts/system-one-benchmark.sh", system_one_enabled=True
+    )
+    assert result.returncode != 0
+    assert "System One is not running; run make start" in result.stderr
+    assert "10 sequential" not in result.stdout
+
+
+def test_system_one_benchmark_prints_phase_rows(tmp_path: pathlib.Path) -> None:
+    drm = tmp_path / "drm" / "renderD128" / "device"
+    drm.mkdir(parents=True)
+    (drm / "mem_info_vram_used").write_text(str(4442 * 1024 * 1024))
+    result, _, calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/system-one-benchmark.sh",
+        system_one_enabled=True,
+        system_one_port=8123,
+        env_overrides={
+            "PODMAN_SYSTEM_ONE_RUNNING": "1",
+            "CURL_SYSTEMONE_TIME": "0.013",
+            "BENCH_INSTANT_SLEEP": "1",
+            "LLM_ENV_DRM_ROOT": str(tmp_path / "drm"),
+            "LLM_ENV_KEEP_CHECK_ARTIFACTS": "1",
+            "TMPDIR": str(tmp_path),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for label in (
+        "idle (before)",
+        "10 sequential",
+        "100 sequential",
+        "1000 sequential",
+        "1000 concurrent x8",
+        "2000 concurrent x16",
+        "128 concurrent 2x",
+        "non200=",
+        "cooldown +0-20s",
+        "cooldown +20-80s",
+        "memory.peak=",
+    ):
+        assert label in result.stdout
+    script = (ROOT / "scripts/system-one-benchmark.sh").read_text()
+    assert "8010" not in script
+    assert "renderD128" not in script
+    assert "127.0.0.1:8123/v1/systemone" in calls.read_text()
+    copies = list(tmp_path.glob("llm-env-benchmark.*/system-one-benchmark-*.txt"))
+    assert len(copies) == 1
+    assert "10 sequential" in copies[0].read_text()
+    assert "non200=" in copies[0].read_text()
+
+
+def test_makefile_exposes_system_one_benchmark() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert "system-one-benchmark:" in makefile
+    assert "bash scripts/system-one-benchmark.sh" in makefile
+    assert '_help_line "system-one-benchmark"' in (ROOT / "scripts/help.sh").read_text()
 
 
 def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.Path) -> None:

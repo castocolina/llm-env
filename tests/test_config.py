@@ -1114,8 +1114,13 @@ def test_migrate_config_adds_disabled_system_one_defaults():
         "port": 8010,
         "image": "localhost/llm-env-system-one:rocm",
         "models": "english,multilingual",
-        "vram_reserve_mib": 4096,
+        "vram_reserve_mib": 5120,
     }
+
+
+def test_migrate_config_keeps_an_explicit_vram_reserve():
+    cfg = migrate_config({"system_one": {"vram_reserve_mib": 4096}})
+    assert cfg["system_one"]["vram_reserve_mib"] == 4096
 
 def test_migrate_config_keeps_existing_system_one_values():
     cfg = migrate_config({"system_one": {"enabled": True, "port": 9000}})
