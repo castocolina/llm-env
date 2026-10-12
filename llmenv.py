@@ -256,6 +256,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
         else 0
     )
     runtime = cfg["runtime"]
+    system_one = cfg.get("system_one", {})
     result = compute_budget(
         vram_total_mib=gpu["vram_total_mib"],
         compositor_used_mib=compositor_used,
@@ -268,6 +269,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
         # configured `0` into the same "uncapped" sentinel compute_budget()
         # already understands, instead of letting a literal 0 through.
         vram_budget_ceiling_mib=cfg["gpu"].get("vram_budget_ceiling_mib") or None,
+        extra_reserved_mib=system_one["vram_reserve_mib"] if system_one.get("enabled") else 0,
     )
     result["compositor_on_this_gpu"] = compositor_used > 0
     result["models_max"] = cfg["runtime"]["models_max"]

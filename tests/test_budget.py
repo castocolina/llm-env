@@ -269,3 +269,11 @@ def test_quantization_remedy_suppressed_when_already_q8_0():
     assert any("q8_0" in r and "cache_type_k" in r for r in default["remedies"])
     assert not [r for r in quantized["remedies"] if "cache_type_k" in r]
     assert quantized["cache_type_k"] == "q8_0"
+
+
+def test_extra_reserved_mib_reduces_available():
+    costs = [{"alias": "m", "weights_mib": 1000, "kv_mib": 100}]
+    base = compute_budget(vram_total_mib=16384, compositor_used_mib=0, reserve_floor_mib=1024, model_costs=costs, models_max=1)
+    reserved = compute_budget(vram_total_mib=16384, compositor_used_mib=0, reserve_floor_mib=1024, model_costs=costs, models_max=1, extra_reserved_mib=4096)
+    assert reserved["available_mib"] == base["available_mib"] - 4096
+    assert reserved["extra_reserved_mib"] == 4096

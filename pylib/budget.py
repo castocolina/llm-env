@@ -109,6 +109,7 @@ def compute_budget(
     cache_type_k: str = "f16",
     cache_type_v: str = "f16",
     vram_budget_ceiling_mib: int | None = None,
+    extra_reserved_mib: int = 0,
 ) -> dict[str, Any]:
     if models_max < 1 or models_max > len(model_costs):
         raise BudgetError("models_max must select at least one and no more than all models")
@@ -117,7 +118,8 @@ def compute_budget(
         else min(vram_total_mib, vram_budget_ceiling_mib)
     )
     reserve = max(compositor_used_mib, reserve_floor_mib)
-    available = ceiling_mib - reserve - SPIKE_HEADROOM_MIB
+    # Not folded into `reserve`: that is max(compositor, floor), which would swallow it.
+    available = ceiling_mib - reserve - extra_reserved_mib - SPIKE_HEADROOM_MIB
     models = []
     for cost in model_costs:
         required = cost["weights_mib"] + cost["kv_mib"] + RUNTIME_OVERHEAD_MIB
@@ -169,6 +171,7 @@ def compute_budget(
     return {
         "vram_total_mib": vram_total_mib,
         "reserve_mib": reserve,
+        "extra_reserved_mib": extra_reserved_mib,
         "spike_headroom_mib": SPIKE_HEADROOM_MIB,
         "runtime_overhead_mib_per_model": RUNTIME_OVERHEAD_MIB,
         "available_mib": available,
