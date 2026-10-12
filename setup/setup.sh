@@ -7,6 +7,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 ASSUME_YES="${LLM_ENV_ASSUME_YES:-0}"
 NO_GPU="${LLM_ENV_NO_GPU:-0}"
+SYSTEM_ONE="${LLM_ENV_SYSTEM_ONE:-}"
+KFD_PATH="${LLM_ENV_KFD_PATH:-/dev/kfd}"
 
 bash "${REPO_DIR}/setup/prerequisites.sh" --check || die "missing prerequisites; run 'make prerequisites'"
 
@@ -57,7 +59,26 @@ LLM_SERVER_ENABLED="$llm_server_enabled" yq -i \
     '.llm_server.enabled = (strenv(LLM_SERVER_ENABLED) == "true")' "$CONFIG_PATH"
 log_info "llm-server (local GPU inference): ${llm_server_enabled}"
 
-if [ "$llm_server_enabled" = "true" ]; then
+# Same persisted-default rule as the llm-server prompt above.
+system_one_default="n"
+[ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ] && system_one_default="y"
+[ "$SYSTEM_ONE" = "1" ] && system_one_default="y"
+[ "$SYSTEM_ONE" = "0" ] && system_one_default="n"
+system_one_answer="$(ask "Enable local System One decisions (Laya on ROCm)? [y/N]: " "$system_one_default")"
+case "$system_one_answer" in
+    [yY]*) system_one_enabled=true ;;
+    *) system_one_enabled=false ;;
+esac
+DRI_PATH="${LLM_ENV_DRI_PATH:-/dev/dri}"
+if [ "$system_one_enabled" != "true" ]; then
+    SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+elif [ ! -e "$KFD_PATH" ]; then
+    SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+    die "System One requires an AMD GPU with ROCm (/dev/kfd); not found at ${KFD_PATH}"
+fi
+log_info "system-one (local Laya decisions): ${system_one_enabled}"
+
+if [ "$llm_server_enabled" = "true" ] || [ "$system_one_enabled" = "true" ]; then
 
 log_step "Step 2/8  Detecting GPUs"
 facts="$(llmenv detect)"
@@ -99,6 +120,39 @@ vram_budget_ceiling_mib="$(jq -n --argjson total "$vram_total" --argjson pct "$c
     --argjson floor_pct "$ceiling_floor_pct" \
     '[(($total * $pct / 100) | round), (($total * $floor_pct / 100) | round)] | max')"
 log_info "selected ${pci} with $(format_mib "$vram_total") total, $(format_mib "$vram_used") used, $(format_mib "$vram_free") free"
+# Step 2's vram_total and vram_budget_ceiling_mib. Step 6 rewrites the same values when llm-server is on. System-One-only (Step 6 skipped) keeps this write.
+PCI_ADDRESS="$pci" VRAM_TOTAL_MIB="$vram_total" VRAM_BUDGET_CEILING_MIB="$vram_budget_ceiling_mib" yq -i '.gpu.pci_address = strenv(PCI_ADDRESS) | .gpu.vram_total_mib = (strenv(VRAM_TOTAL_MIB) | tonumber) | .gpu.vram_budget_ceiling_mib = (strenv(VRAM_BUDGET_CEILING_MIB) | tonumber)' "$CONFIG_PATH"
+if [ "$system_one_enabled" = "true" ]; then
+    gpu_vendor="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .vendor // empty')"
+    if [ -z "$gpu_vendor" ]; then
+        gpu_vendor="$(cat "/sys/bus/pci/devices/${pci}/vendor" 2>/dev/null || echo missing)"
+    fi
+    if [ "$gpu_vendor" != "0x1002" ]; then
+        SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+        die "System One requires an AMD ROCm GPU at ${pci}; vendor is ${gpu_vendor}"
+    fi
+    system_one_render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"
+    if [ -z "$system_one_render" ] || [ ! -r "${DRI_PATH}/${system_one_render}" ]; then
+        SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+        die "System One: configured GPU ${pci} has no readable render node (${DRI_PATH}/...); re-run make setup"
+    fi
+    system_one_off() { SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"; die "$1"; }
+    log_step "System One image and weights"
+    system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
+    system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
+    podman image exists "$system_one_image" || bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
+    log_step "Prefetching Laya weights (${system_one_models}) into llm-env-system-one-cache"
+    # :z relabels the script bind for Fedora SELinux.
+    podman run --rm \
+        -e LAYA_REVISION=reviewed \
+        -e "LAYA_MODELS=${system_one_models}" \
+        -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
+        -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
+        --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py prefetch \
+        || system_one_off "System One weight prefetch failed"
+    SYSTEM_ONE_ENABLED=true yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+fi
+if [ "$llm_server_enabled" = "true" ]; then
 
 log_step "Step 3/8  Selecting models"
 if [ -f "$CONFIG_PATH" ]; then
@@ -205,6 +259,13 @@ else
     fi
     jq -r '.remedies // [] | .[] | "    - \(.)"' "$budget_json"
     die "budget infeasible for models_max=$(jq -r '.models_max // "?"' "$budget_json"); adjust the config and retry"
+fi
+else
+    log_step "Step 3/8  Selecting models"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 4/8  Downloading models"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 5/8  Validating model files"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 6/8  Preparing Vulkan"; log_info "(skipped -- llm-server disabled)"
+    log_step "Step 7/8  Checking the VRAM budget"; log_info "(skipped -- llm-server disabled)"
 fi
 
 else

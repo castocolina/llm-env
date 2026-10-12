@@ -76,6 +76,14 @@ def test_list_gpus_is_sorted_by_card_name(tmp_path):
     assert [g["card"] for g in list_gpus(build_drm(tmp_path))] == ["card0", "card1"]
 
 
+def test_list_gpus_reads_device_vendor_and_missing_vendor_file(tmp_path):
+    drm = build_drm(tmp_path)
+    (drm / "card1" / "device").resolve().joinpath("vendor").write_text("0x1002\n")
+    gpus = {g["card"]: g for g in list_gpus(drm)}
+    assert gpus["card1"]["vendor"] == "0x1002"
+    assert gpus["card0"]["vendor"] == ""
+
+
 def build_proc(root: Path, comm: str, render_node: str) -> Path:
     proc = root / "proc"
     pid_dir = proc / "3021"

@@ -99,6 +99,9 @@ def list_gpus(drm_root: Path = Path("/sys/class/drm")) -> list[dict[str, Any]]:
                 "vram_total_mib": total // MIB,
                 "vram_used_mib": _read_int_optional(device / "mem_info_vram_used") // MIB,
                 "connected_outputs": sorted(outputs_by_card.get(entry.name, [])),
+                "vendor": (device / "vendor").read_text().strip()
+                if (device / "vendor").is_file()
+                else "",
             }
         )
 

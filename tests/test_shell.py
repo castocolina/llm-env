@@ -669,9 +669,9 @@ def run_setup_with_numbered_selection(
         cwd=ROOT,
         env=environment,
         # A leading blank line answers Step 1's "enable llm-server?" prompt
-        # with its default (Y), so every pre-existing `selection` string
-        # keeps driving Steps 2-8's prompts exactly as before.
-        input="\n" + selection,
+        # with its default (Y). The following n declines System One, so every
+        # pre-existing `selection` string still drives GPU, model, and Vulkan.
+        input="\nn\n" + selection,
         text=True,
         capture_output=True,
         check=False,
@@ -684,23 +684,45 @@ def run_setup_no_gpu(
     *,
     no_gpu_env: str = "1",
     config_text: str | None = None,
+    system_one_env: str | None = None,
+    kfd_path: str | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
-    """Run setup with LLM_ENV_NO_GPU set, stubbing only what Steps 1 and 8 need
-    -- Steps 2-7 must be skipped entirely, so no GPU/model/Vulkan stubs exist."""
+    """Run setup with LLM_ENV_NO_GPU set.
+
+    Steps 2-7 stay skipped unless System One is enabled, which stubs detect
+    and the System One image build so those paths stay off the host GPU.
+    """
     real_yq = shutil.which("yq")
     assert real_yq is not None
 
     commands = tmp_path / "bin"
     commands.mkdir()
     calls = tmp_path / "calls"
-    for name in ("ip", "git", "shellcheck", "curl", "podman"):
+    for name in ("ip", "git", "shellcheck", "curl"):
         _mock_command(commands, name)
+
+    bash = commands / "bash"
+    bash.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'bash %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "if [ \"${SYSTEM_ONE_BUILD_FAIL:-}\" = 1 ] && [[ \"$*\" == *system-one-build.sh* ]]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        "exec /usr/bin/bash \"$@\"\n"
+    )
+    bash.chmod(bash.stat().st_mode | stat.S_IXUSR)
 
     uv = commands / "uv"
     uv.write_text(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
+        "  *' detect'*)\n"
+        "    vendor=\"${DETECT_GPU_VENDOR:-0x1002}\"\n"
+        "    printf '%s\\n' \"{\\\"gpus\\\":[{\\\"card\\\":\\\"card1\\\",\\\"pci_address\\\":\\\"0000:03:00.0\\\",\\\"vram_total_mib\\\":16304,\\\"vram_used_mib\\\":0,\\\"render_node\\\":\\\"renderD129\\\",\\\"vendor\\\":\\\"${vendor}\\\",\\\"connected_outputs\\\":[]}]}\"\n"
+        "    ;;\n"
+        "  *' gfx-arch '*) printf '%s\\n' 'gfx1201' ;;\n"
         "  *' resources') printf '%s\\n' "
         "'{\"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, "
         "\"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, "
@@ -713,32 +735,65 @@ def run_setup_no_gpu(
     yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
     yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
 
-    config = tmp_path / "models.yml"
-    config.write_text(
-        config_text
-        or (
-            "gpu: {}\n"
-            "runtime:\n"
-            "  models_max: 0\n"
-            "models: []\n"
-        )
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;;\n"
+        "esac\n"
+        "exit 0\n"
     )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+
+    config = tmp_path / "models.yml"
+    written = config_text or (
+        "gpu: {}\n"
+        "runtime:\n"
+        "  models_max: 0\n"
+        "models: []\n"
+    )
+    if not written.endswith("\n"):
+        written += "\n"
+    written += (
+        "system_one:\n"
+        "  enabled: false\n"
+        "  port: 8010\n"
+        "  image: localhost/llm-env-system-one:rocm\n"
+        "  models: english\n"
+        "  vram_reserve_mib: 4096\n"
+    )
+    config.write_text(written)
+    dri = tmp_path / "dri"
+    dri.mkdir()
+    (dri / "renderD129").touch()
     environment = os.environ | {
         "CALLS": str(calls),
         "CONFIG_PATH_TEST": str(config),
         "HOME": str(tmp_path / "home"),
         "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_DRI_PATH": str(dri),
         "LLM_ENV_MODELS_DIR": str(tmp_path / "models"),
         "LLM_ENV_NO_GPU": no_gpu_env,
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_UV": shutil.which("uv") or "uv",
         "REAL_YQ": real_yq,
     }
+    if system_one_env is not None:
+        environment["LLM_ENV_SYSTEM_ONE"] = system_one_env
+    else:
+        environment.pop("LLM_ENV_SYSTEM_ONE", None)
+    if kfd_path is not None:
+        environment["LLM_ENV_KFD_PATH"] = kfd_path
+    else:
+        environment.pop("LLM_ENV_KFD_PATH", None)
+    if env_overrides:
+        environment.update(env_overrides)
     result = subprocess.run(
         ["/usr/bin/bash", "setup/setup.sh"],
         cwd=ROOT,
         env=environment,
-        input="\n",
+        input="n\ny\n1\n" if system_one_env == "1" else "\n\n",
         text=True,
         capture_output=True,
         check=False,
@@ -852,6 +907,94 @@ def test_setup_rerun_keeps_llm_server_disabled_without_no_gpu_override(
     assert "detect" not in recorded
 
 
+def test_setup_persists_system_one_disabled_by_default(tmp_path: pathlib.Path) -> None:
+    result, _calls, config = run_setup_no_gpu(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".system_one.enabled") == "false"
+
+
+def test_setup_refuses_system_one_without_kfd(tmp_path: pathlib.Path) -> None:
+    result, _calls, config = run_setup_no_gpu(
+        tmp_path, system_one_env="1", kfd_path=str(tmp_path / "no-kfd")
+    )
+    assert result.returncode != 0
+    assert "requires an AMD GPU with ROCm (/dev/kfd)" in result.stderr
+    assert yq_value(config, ".system_one.enabled") == "false"
+
+
+def test_setup_refuses_system_one_when_selected_gpu_not_rocm(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, _calls, config = run_setup_no_gpu(
+        tmp_path,
+        system_one_env="1",
+        kfd_path=str(kfd),
+        env_overrides={"DETECT_GPU_VENDOR": "0x10de"},
+    )
+    assert result.returncode != 0
+    assert "AMD ROCm GPU" in result.stderr
+    assert yq_value(config, ".system_one.enabled") == "false"
+
+
+def test_setup_system_one_runs_gpu_detection_even_without_llm_server(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, config = run_setup_no_gpu(tmp_path, system_one_env="1", kfd_path=str(kfd))
+    # Detection is stubbed; the assertion is that setup reached the detect path.
+    assert "detect" in (calls.read_text() if calls.exists() else "")
+    assert "Step 3/8  Selecting models" in result.stdout
+    assert "(skipped -- llm-server disabled)" in result.stdout
+    assert (yq_value(config, ".gpu.vram_total_mib"), yq_value(config, ".gpu.vram_budget_ceiling_mib")) == ("16304", "15489")
+
+
+def test_setup_builds_system_one_image_when_missing(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, _config = run_setup_no_gpu(
+        tmp_path, system_one_env="1", kfd_path=str(kfd),
+        env_overrides={"PODMAN_IMAGE_MISSING": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "system-one-build.sh" in calls.read_text() and "podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm" in calls.read_text()
+
+
+def test_setup_leaves_system_one_disabled_when_build_fails(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, _calls, config = run_setup_no_gpu(
+        tmp_path, system_one_env="1", kfd_path=str(kfd),
+        env_overrides={"PODMAN_IMAGE_MISSING": "1", "SYSTEM_ONE_BUILD_FAIL": "1"},
+    )
+    assert result.returncode != 0
+    assert yq_value(config, ".system_one.enabled") == "false"
+
+
+def test_setup_skips_system_one_build_when_image_present(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, _config = run_setup_no_gpu(tmp_path, system_one_env="1", kfd_path=str(kfd))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/system-one-build.sh" not in calls.read_text()
+
+
+def test_setup_prefetches_system_one_weights_when_enabled(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    _result, calls, _config = run_setup_no_gpu(tmp_path, system_one_env="1", kfd_path=str(kfd))
+    recorded = calls.read_text()
+    assert "llm-env-system-one-cache:/home/laya/.cache/huggingface" in recorded
+    assert "podman run" in recorded and "LAYA_MODELS=english" in recorded and "localhost/llm-env-system-one:rocm" in recorded
+    assert "system-one-cache-check.py:ro,z" in recorded
+    assert yq_value(_config, ".system_one.enabled") == "true"
+
+
+def test_setup_skips_system_one_build_and_prefetch_when_disabled(tmp_path: pathlib.Path) -> None:
+    _result, calls, _config = run_setup_no_gpu(tmp_path)
+    recorded = calls.read_text()
+    assert "scripts/system-one-build.sh" not in recorded
+    assert "llm-env-system-one-cache" not in recorded
+
+
 def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> None:
     """Step 7 must stop setup on an infeasible budget, the same way
     scripts/start.sh already stops `make start` -- a config that reports
@@ -933,7 +1076,7 @@ def test_setup_fails_when_the_budget_is_infeasible(tmp_path: pathlib.Path) -> No
         ["/usr/bin/bash", "setup/setup.sh"],
         cwd=ROOT,
         env=environment,
-        input="1\n1\n1\n",
+        input="1\nn\n1\n1\n",
         text=True,
         capture_output=True,
         check=False,

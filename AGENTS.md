@@ -52,6 +52,9 @@ make clean                     # Remove everything
   remote installer only (no local llama.cpp instance). Persisted as
   `llm_server.enabled` in `models.yml`; flip it and re-run `make setup`/
   `make start` to change modes later.
+- `LLM_ENV_SYSTEM_ONE=1|0` — seed `make setup`'s System One prompt for
+  unattended runs. Persisted as `system_one.enabled` in `models.yml`.
+  Requires `/dev/kfd` (AMD ROCm).
 
 ## Rules
 
