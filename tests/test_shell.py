@@ -4951,6 +4951,19 @@ def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_
     assert f"podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
     dockerfile = (ROOT / "docker/system-one/Dockerfile").read_text()
     assert "ARG TORCH_INDEX=rocm7.2" in dockerfile and "rocm7.14" not in dockerfile
+    runs: list[str] = []
+    pending = ""
+    for line in dockerfile.splitlines():
+        pending += line.strip()
+        if pending.endswith("\\"):
+            pending = pending[:-1] + " "
+            continue
+        if pending.startswith("RUN "):
+            runs.append(pending[4:])
+        pending = ""
+    install = [run for run in runs if "pip install" in run]
+    assert len(install) == 1
+    assert "find " in install[0] and "-delete" in install[0]
 
 
 def test_makefile_exposes_system_one_build() -> None:

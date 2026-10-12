@@ -10,10 +10,11 @@ ARG GPU_ARCH=gfx1201
 ENV PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false \
     TORCH_DISABLE_NATIVE_JIT=1 LAYA_DEVICE=cuda LAYA_PRELOAD=1 \
     HF_HOME=/home/laya/.cache/huggingface
-RUN pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/${TORCH_INDEX} \
-    && pip install "laya[serve]==${LAYA_VERSION}"
 # Drop per-arch kernels for every arch except GPU_ARCH, its family dir (last char → x), and gfx<major>-generic.
-RUN family="${GPU_ARCH%?}x" && major="${GPU_ARCH#gfx}" && major="${major%??}" && generic="gfx${major}-generic" \
+# Same RUN as the install: a later RUN would leave the deleted files in the lower layer.
+RUN pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/${TORCH_INDEX} \
+    && pip install "laya[serve]==${LAYA_VERSION}" \
+    && family="${GPU_ARCH%?}x" && major="${GPU_ARCH#gfx}" && major="${major%??}" && generic="gfx${major}-generic" \
     && site=/usr/local/lib/python3.11/site-packages \
     && find "$site/torch" "$site/triton" -type f -path '*gfx*' \
          ! -path "*${GPU_ARCH}*" ! -path "*${family}*" ! -path "*${generic}*" -delete \
