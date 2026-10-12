@@ -53,4 +53,7 @@ def verify() -> None:
     print("weights ok")
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] not in ("prefetch", "verify"):
+        print(f"usage: {sys.argv[0]} prefetch|verify", file=sys.stderr)
+        sys.exit(2)
     {"prefetch": prefetch, "verify": verify}[sys.argv[1]]()

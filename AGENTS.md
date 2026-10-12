@@ -14,6 +14,7 @@ make help                    # List all targets
 make prerequisites           # Confirm and install Bazzite/Fedora host tools
 make setup                   # Interactive configuration (GPU inference is opt-in)
 make system-one-build        # Build the local System One (Laya) GPU image
+make system-one-benchmark    # Benchmark the running System One server and record the load table
 make start                   # Start the server (or omniroute + remote-setup only)
 make stop                    # Stop the server
 make restart                 # Stop then start
@@ -30,6 +31,7 @@ make show-secrets              # Print endpoints/credentials without starting an
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
 make key-reset                 # Rotate the server API key
+make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
 make dev-setup                 # Install dev-only tooling
 uv tool install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push  # one-time: enable the git hooks below
@@ -56,6 +58,9 @@ make clean                     # Remove everything
 - `LLM_ENV_SYSTEM_ONE=1|0` — seed `make setup`'s System One prompt for
   unattended runs. Persisted as `system_one.enabled` in `models.yml`.
   Requires `/dev/kfd` (AMD ROCm).
+- `LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS` — seconds `make start` waits
+  for System One to become healthy (default 120; positive integer). Weights
+  are on disk after `make setup`; this bounds load-to-GPU only.
 
 ## Rules
 

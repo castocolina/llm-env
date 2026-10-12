@@ -7,7 +7,7 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-require_cmd awk curl date jq podman seq tee xargs yq
+require_cmd awk curl date jq podman seq tee xargs yq uv
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 migrate_config_file || die "configuration migration failed"
 [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH")" = "true" ] || die "System One is disabled"

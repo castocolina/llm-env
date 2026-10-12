@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-require_cmd podman yq
+require_cmd podman yq uv jq
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
 migrate_config_file || die "configuration migration failed"
 image="$(yq -r '.system_one.image' "$CONFIG_PATH")"; [ -n "$image" ] && [ "$image" != null ] || die "system_one.image is empty; run 'make setup'"
