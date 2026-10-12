@@ -406,6 +406,45 @@ while IFS= read -r model_b64; do
 done < "$enabled_models_file"
 fi
 
+if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; then
+    system_one_base="http://127.0.0.1:$(yq -r '.system_one.port' "$CONFIG_PATH")"
+    log_step "System One"
+    request_record "system-one health" \
+        "curl --silent --show-error --max-time 10 ${system_one_base}/health" \
+        "" "HTTP status: 200 and device=cuda" -- \
+        curl --silent --show-error --max-time 10 "${system_one_base}/health"
+    log_block "Expectation" "$REQUEST_EXPECTATION"
+    if request_failed 200 "system-one health"; then
+        :
+    elif [ "$(jq -r '.device' < "$REQUEST_BODY_FILE")" != cuda ]; then
+        close_diagnostic_capture 1
+        bad "Verdict: FAIL stage=device identity=system-one health reason=not on GPU"
+    else
+        close_diagnostic_capture 0
+        ok "Verdict: PASS identity=system-one health on GPU"
+    fi
+    system_one_decision() { # $1 identity, $2 body, $3 jq -e predicate, $4 expectation. One request; never batch questions.
+        request_record "$1" "curl --silent --show-error --max-time 10 -H 'Content-Type: application/json' --data-raw '${2}' ${system_one_base}/v1/systemone" "$2" "$4" -- \
+            curl --silent --show-error --max-time 10 -H "Content-Type: application/json" --data-raw "$2" "${system_one_base}/v1/systemone"
+        log_block "Expectation" "$REQUEST_EXPECTATION"
+        if request_failed 200 "$1"; then :
+        elif ! jq -e "$3" < "$REQUEST_BODY_FILE" >/dev/null; then
+            close_diagnostic_capture 1
+            bad "Verdict: FAIL stage=answer identity=${1} expected=${4}"
+        else close_diagnostic_capture 0; ok "Verdict: PASS identity=${1}"; fi
+    }
+    choice_q='"team":{"type":"choice","instructions":"Which team should handle this ticket?","criteria":{"billing":"charges, invoices, refunds","technical":"bugs, crashes, outages","other":"everything else"}}'
+    noul_q='"destructive":{"type":"noul","instructions":"Is this action destructive or irreversible?"}'
+    system_one_decision "system-one choice billing" "{\"model\":\"jev-1\",\"state\":{\"ticket\":\"I was charged twice this month, please refund me\"},\"questions\":{${choice_q}}}" '.answers.team.choice == "billing"' "HTTP 200 and answers.team.choice == billing (measured p 0.98)"
+    system_one_decision "system-one choice technical" "{\"model\":\"jev-1\",\"state\":{\"ticket\":\"The app crashes every time I open the settings page\"},\"questions\":{${choice_q}}}" '.answers.team.choice == "technical"' "HTTP 200 and answers.team.choice == technical (measured p 0.95)"
+    system_one_decision "system-one noul destructive" "{\"model\":\"jev-1\",\"state\":{\"command\":\"Delete the production database now and skip the backup\"},\"questions\":{${noul_q}}}" '.answers.destructive.noul > 0.5' "HTTP 200 and answers.destructive.noul > 0.5 (measured 0.77)"
+    system_one_decision "system-one noul safe" "{\"model\":\"jev-1\",\"state\":{\"command\":\"Rename the variable foo to bar in utils.py\"},\"questions\":{${noul_q}}}" '.answers.destructive.noul < 0.5' "HTTP 200 and answers.destructive.noul < 0.5 (measured 0.18)"
+    system_one_decision "system-one score urgent" '{"model":"jev-1","state":{"ticket":"Our whole site is down and no customer can pay right now"},"questions":{"urgency":{"type":"score","instructions":"How urgent is this?","criteria":["not urgent","soon","blocking"]}}}' '(.answers.urgency.probabilities | to_entries | max_by(.value) | .key) == "2"' 'HTTP 200 and argmax of answers.urgency.probabilities is "2" (measured 0.99)'
+else
+    log_step "System One"
+    log_warn "Verdict: SKIP identity=system-one reason=system-one is disabled"
+fi
+
 echo
 log_step "Results: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

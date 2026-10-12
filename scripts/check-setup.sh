@@ -84,7 +84,7 @@ record_section_skip() {
     local identity="$1" reason="$2"
 
     log_identity "$identity"
-    log_command "not run: llm-server is disabled"
+    log_command "${3:-not run: llm-server is disabled}"
     log_block "Input" ""
     log_block "Command stdout" ""
     log_block "Exit status" "SKIP"
@@ -224,6 +224,54 @@ else
     record_section_skip "container image" "llm-server is disabled"
 fi
 
+system_one_amd_gpu() {
+    uv run "${REPO_DIR}/llmenv.py" detect | jq -e --arg p "$1" \
+        '.gpus[] | select(.pci_address == $p and .vendor == "0x1002" and .render_node != "")'
+}
+
+system_one_rocr_matches() {
+    local detected expected
+    detected="$(uv run "${REPO_DIR}/llmenv.py" detect | jq -r --arg p "$1" '.gpus[] | select(.pci_address == $p) | .render_node')"
+    expected="$(uv run "${REPO_DIR}/llmenv.py" rocr-index --render-node "$detected")"
+    [ -n "$detected" ] && [ "$expected" = "$(yq -r '.services["system-one"].environment.ROCR_VISIBLE_DEVICES' "$COMPOSE_FILE")" ]
+}
+
+system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)"
+log_step "System One"
+if [ "$system_one_enabled" = "true" ]; then
+    system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
+    kfd_path="${LLM_ENV_KFD_PATH:-/dev/kfd}"
+    pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"
+    record_command "ROCm device" "test -r ${kfd_path}" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" test -r "$kfd_path" || true
+    record_command "ROCm GPU" \
+        "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address == \$p and .vendor == \"0x1002\" and .render_node != \"\")'" \
+        "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        system_one_amd_gpu "$pci" || true
+    if [ ! -f "$COMPOSE_FILE" ]; then record_section_skip "system-one ROCR index" "compose not rendered yet (run make start)" "not run: compose not rendered yet (run make start)"
+    else record_command "system-one ROCR index" \
+        "llmenv rocr-index for the detected render node equals ROCR_VISIBLE_DEVICES in ${COMPOSE_FILE}" \
+        "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        system_one_rocr_matches "$pci" || true; fi
+    record_command "system-one image" "podman image exists ${system_one_image}" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        podman image exists "$system_one_image" || true
+    record_command "system-one weights cache" "podman volume exists llm-env-system-one-cache" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        podman volume exists llm-env-system-one-cache || true
+    system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
+    record_command "system-one weights present" \
+        "podman run --rm -e LAYA_REVISION=reviewed -e LAYA_MODELS=${system_one_models} -v llm-env-system-one-cache:/home/laya/.cache/huggingface -v ${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z --entrypoint python3 ${system_one_image} /opt/system-one-cache-check.py verify" \
+        "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        podman run --rm \
+            -e LAYA_REVISION=reviewed -e "LAYA_MODELS=${system_one_models}" \
+            -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
+            -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
+            --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py verify || true
+else
+    log_warn "Verdict: SKIP reason=system-one is disabled"
+fi
+
 log_step "Compose file"
 record_command "compose file syntax" \
     "podman compose -f ${COMPOSE_FILE} config" "" \
@@ -231,10 +279,14 @@ record_command "compose file syntax" \
     podman compose -f "$COMPOSE_FILE" config || true
 
 log_step "Model files"
-record_command "GGUF validation" \
-    "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} validate-gguf --models-dir ${MODELS_DIR}" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-    uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" || true
+if [ "$llm_server_enabled" != "false" ]; then
+    record_command "GGUF validation" \
+        "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} validate-gguf --models-dir ${MODELS_DIR}" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" validate-gguf --models-dir "$MODELS_DIR" || true
+else
+    record_section_skip "GGUF validation" "llm-server is disabled"
+fi
 
 if [ "$llm_server_enabled" != "false" ]; then
     log_step "VRAM budget"

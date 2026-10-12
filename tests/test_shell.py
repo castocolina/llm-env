@@ -4238,16 +4238,22 @@ def run_check_setup_with_stubs(
     render_node: str | None = "renderD128",
     verbose: bool = False,
     llm_server_enabled: bool = True,
+    system_one_enabled: bool = False,
+    real_gguf: bool = False,
+    rocr_index: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
+    real_uv = shutil.which("uv")
     assert real_yq is not None
+    assert real_uv is not None
 
     detected_gpu = json.dumps(
         {
             "gpus": [
                 {
                     "pci_address": "0000:03:00.0",
+                    "vendor": "0x1002",
                     **({"render_node": render_node} if render_node is not None else {}),
                 }
             ]
@@ -4279,8 +4285,11 @@ def run_check_setup_with_stubs(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
+        "  *' rocr-index '*) printf '%s\\n' \"$ROCR_INDEX\" ;;\n"
         "  *' detect'*) printf '%s\\n' \"$DETECTED_GPU\" ;;\n"
-        "  *' validate-gguf'*) printf '%s\\n' '{\"results\":[]}' ;;\n"
+        "  *' validate-gguf'*)\n"
+        "    if [ \"$REAL_GGUF\" = 1 ]; then exec \"$REAL_UV\" \"$@\"; fi\n"
+        "    printf '%s\\n' '{\"results\":[]}' ;;\n"
         "  *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"models_max\":2}'; exit \"$BUDGET_EXIT\" ;;\n"
         "  *' presets '*)\n"
         "    for argument in \"$@\"; do\n"
@@ -4364,6 +4373,28 @@ def run_check_setup_with_stubs(
         "    n_gpu_layers: 17\n"
         "    n_cpu_moe: 12\n"
     )
+    if system_one_enabled:
+        config.write_text(
+            config.read_text()
+            + "system_one:\n"
+            "  enabled: true\n"
+            "  port: 8010\n"
+            "  image: localhost/llm-env-system-one:rocm\n"
+            "  models: english\n"
+            "  vram_reserve_mib: 4096\n"
+        )
+        (tmp_path / "kfd").touch()
+        compose_file = tmp_path / "home" / ".config" / "llm-env" / "docker-compose.yml"
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text(
+            "services:\n"
+            "  system-one:\n"
+            "    devices:\n"
+            "      - /dev/kfd\n"
+            "      - /dev/dri:/dev/dri\n"
+            "    environment:\n"
+            '      ROCR_VISIBLE_DEVICES: "0"\n'
+        )
     models_dir = tmp_path / "models"
     environment = os.environ | {
         "CALLS": str(calls),
@@ -4382,7 +4413,12 @@ def run_check_setup_with_stubs(
         "PRESETS_MISSING_ALIAS": "1" if presets_missing_alias else "0",
         "YQ_MODELS_JSON_EXIT": str(yq_models_json_exit),
         "DETECTED_GPU": detected_gpu,
-    } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
+        "REAL_UV": real_uv,
+        "REAL_GGUF": "1" if real_gguf else "0",
+        "ROCR_INDEX": rocr_index,
+    } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {}) | (
+        {"LLM_ENV_KFD_PATH": str(tmp_path / "kfd")} if system_one_enabled else {}
+    )
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-setup.sh"],
         cwd=ROOT,
@@ -4640,19 +4676,66 @@ def test_check_setup_skips_gpu_and_model_sections_when_llm_server_disabled(
 ) -> None:
     """When llm_server.enabled is false, GPU/model/inference sections must
     report SKIP rather than running or failing, while Tooling, Configuration,
-    Compose file, and Model files (GGUF validation) still run."""
+    and Compose file still run. Model files is skipped."""
     result, calls, _ = run_check_setup_with_stubs(tmp_path, llm_server_enabled=False)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 5
+    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 6
     recorded = calls.read_text()
     assert "detect" not in recorded
     assert "podman image exists" not in recorded
     assert " cli " not in recorded
     assert "Verdict: PASS identity=tooling command uv" in result.stdout
-    assert "Verdict: PASS identity=GGUF validation" in result.stdout
     assert "Verdict: PASS identity=compose file syntax" in result.stdout
     assert "Results:" in result.stdout
+
+
+def test_check_setup_skips_system_one_when_disabled(tmp_path: pathlib.Path) -> None:
+    result, _calls, _ = run_check_setup_with_stubs(tmp_path)
+    assert "Verdict: SKIP reason=system-one is disabled" in result.stdout + result.stderr
+
+
+def test_check_setup_checks_kfd_and_image_when_system_one_enabled(tmp_path: pathlib.Path) -> None:
+    result, calls, _ = run_check_setup_with_stubs(
+        tmp_path, system_one_enabled=True, llm_server_enabled=False,
+    )
+    recorded = calls.read_text()
+    assert "podman image exists localhost/llm-env-system-one:rocm" in recorded
+    assert "identity=ROCm device" in result.stdout + result.stderr
+
+
+def test_check_setup_checks_system_one_weights_cache_when_enabled(tmp_path: pathlib.Path) -> None:
+    _result, calls, _ = run_check_setup_with_stubs(
+        tmp_path, system_one_enabled=True, llm_server_enabled=False,
+    )
+    recorded = calls.read_text()
+    assert "podman volume exists llm-env-system-one-cache" in recorded
+    assert "system-one-cache-check.py:ro,z" in recorded
+    assert "verify" in recorded
+
+
+def test_check_setup_fails_system_one_when_rocr_index_mismatches(tmp_path: pathlib.Path) -> None:
+    result, _calls, _ = run_check_setup_with_stubs(
+        tmp_path,
+        system_one_enabled=True,
+        llm_server_enabled=False,
+        rocr_index="1",
+    )
+    assert result.returncode != 0
+    assert "rocr" in (result.stdout + result.stderr).lower()
+
+
+def test_check_setup_skips_model_files_when_llm_server_disabled_and_gguf_absent(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls, models_dir = run_check_setup_with_stubs(
+        tmp_path, llm_server_enabled=False, real_gguf=True,
+    )
+    assert not (models_dir / "first.gguf").exists()
+    assert not (models_dir / "second.gguf").exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "validate-gguf" not in calls.read_text()
+    assert result.stderr.count("Verdict: SKIP reason=llm-server is disabled") == 6
 
 
 def run_lifecycle_script(
@@ -7081,6 +7164,8 @@ def run_check_server(
     omniroute_api_key: str = "sk-fixture-omniroute-scoped-key",
     omniroute_issue_key_exit: int = 0,
     llm_server_enabled: bool = True,
+    system_one_enabled: bool = False,
+    system_one_wrong_choice: bool = False,
     omniroute_providers_body: str = '{"connections":[{"name":"llm-env-local","isActive":true}]}',
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
@@ -7112,6 +7197,13 @@ def run_check_server(
         "    client_max_output_tokens: 8192\n"
         "    check_timeout_seconds: 600\n"
     )
+    if system_one_enabled:
+        config.write_text(
+            config.read_text()
+            + "system_one:\n"
+            "  enabled: true\n"
+            "  port: 8010\n"
+        )
 
     curl = commands / "curl"
     curl.write_text(
@@ -7141,8 +7233,22 @@ def run_check_server(
         "write_response() {\n"
         "  if [ -n \"$body_file\" ]; then printf '%s\\n' \"$1\" > \"$body_file\"; else printf '%s\\n' \"$1\"; fi\n"
         "}\n"
+        "laya_answer() { # $1 = \"\\\"<id>\\\":{...}\" — usage/routing envelope is the appendix\n"
+        "  write_response \"{\\\"model\\\":\\\"laya-rl-agent\\\",\\\"answers\\\":{$1},\\\"usage\\\":{\\\"input_tokens\\\":120,\\\"output_tokens\\\":0,\\\"state_tokens\\\":13,\\\"state_tokens_dropped\\\":0,\\\"truncated\\\":false,\\\"truncated_questions\\\":[]},\\\"routing\\\":{\\\"model\\\":\\\"english\\\",\\\"repo\\\":\\\"convaiinnovations/laya\\\",\\\"reason\\\":\\\"English Latin text\\\"}}\"\n"
+        "}\n"
         "case \"$url\" in\n"
-        "  */health) write_response '{\"status\":\"ok\"}'; printf '200' ;;\n"
+        "  */v1/systemone)\n"
+        "    choice=billing; [ \"${SYSTEM_ONE_WRONG_CHOICE:-0}\" = 1 ] && choice=other\n"
+        "    case \"$data\" in\n"
+        "      *charged\\ twice*) laya_answer \"\\\"team\\\":{\\\"type\\\":\\\"choice\\\",\\\"choice\\\":\\\"${choice}\\\",\\\"probabilities\\\":{\\\"billing\\\":0.98,\\\"technical\\\":0.01,\\\"other\\\":0.01},\\\"answer_confidence\\\":0.98,\\\"action\\\":{\\\"act_probability\\\":1.0}}\" ;;\n"
+        "      *crashes\\ every\\ time*) laya_answer \"\\\"team\\\":{\\\"type\\\":\\\"choice\\\",\\\"choice\\\":\\\"technical\\\",\\\"probabilities\\\":{\\\"billing\\\":0.02,\\\"technical\\\":0.95,\\\"other\\\":0.03},\\\"answer_confidence\\\":0.95,\\\"action\\\":{\\\"act_probability\\\":1.0}}\" ;;\n"
+        "      *production\\ database*) laya_answer \"\\\"destructive\\\":{\\\"type\\\":\\\"noul\\\",\\\"noul\\\":0.77,\\\"action\\\":{\\\"act_probability\\\":1.0}}\" ;;\n"
+        "      *foo\\ to\\ bar*) laya_answer \"\\\"destructive\\\":{\\\"type\\\":\\\"noul\\\",\\\"noul\\\":0.18,\\\"action\\\":{\\\"act_probability\\\":1.0}}\" ;;\n"
+        "      *whole\\ site\\ is\\ down*) laya_answer \"\\\"urgency\\\":{\\\"type\\\":\\\"score\\\",\\\"legend\\\":{\\\"0\\\":\\\"not urgent\\\",\\\"1\\\":\\\"soon\\\",\\\"2\\\":\\\"blocking\\\"},\\\"probabilities\\\":{\\\"0\\\":0.0,\\\"1\\\":0.01,\\\"2\\\":0.99},\\\"action\\\":{\\\"act_probability\\\":1.0}}\" ;;\n"
+        "      *) write_response '{\"error\":\"unmatched systemone case\"}'; printf '500'; exit 0 ;;\n"
+        "    esac\n"
+        "    printf '200' ;;\n"
+        "  */health) write_response \"$HEALTH_BODY\"; printf '200' ;;\n"
         "  */v1/models) write_response \"$MODEL_LIST_BODY\"; printf '200' ;;\n"
         "  http://127.0.0.1:20128/api/auth/login)\n"
         "    [ -n \"$cookie_write\" ] && printf 'omniroute-session-cookie\\n' > \"$cookie_write\"\n"
@@ -7272,6 +7378,10 @@ def run_check_server(
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_JQ": real_jq,
         "REAL_YQ": real_yq,
+        "HEALTH_BODY": (
+            '{"status":"ok","device":"cuda"}' if system_one_enabled else '{"status":"ok"}'
+        ),
+        "SYSTEM_ONE_WRONG_CHOICE": "1" if system_one_wrong_choice else "0",
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-server.sh"],
@@ -7655,6 +7765,37 @@ def test_check_server_skips_the_local_connection_lookup_when_llm_server_is_missi
     )
     assert "Verdict: FAIL stage=connection lookup" not in result.stdout
     assert "Results:" in result.stdout
+
+
+def test_check_server_system_one_passes_when_stubbed(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ok", "ornith": "ok"},
+        system_one_enabled=True,
+        llm_server_enabled=False,
+    )
+    text = result.stdout + result.stderr
+    for identity in (
+        "system-one health",
+        "system-one choice billing",
+        "system-one choice technical",
+        "system-one noul destructive",
+        "system-one noul safe",
+        "system-one score urgent",
+    ):
+        assert f"Verdict: PASS identity={identity}" in text
+
+
+def test_check_server_system_one_fails_when_choice_is_wrong(tmp_path: pathlib.Path) -> None:
+    result, _calls = run_check_server(
+        tmp_path,
+        {"gemma4": "ok", "ornith": "ok"},
+        system_one_enabled=True,
+        llm_server_enabled=False,
+        system_one_wrong_choice=True,
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "Verdict: FAIL stage=answer identity=system-one choice billing" in text
 
 
 def run_agent_check(
