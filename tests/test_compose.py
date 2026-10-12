@@ -494,3 +494,64 @@ def test_omniroute_depends_on_key_ordering_preserved_when_enabled():
     depends_on_idx = omniroute_keys.index("depends_on")
     restart_idx = omniroute_keys.index("restart")
     assert stop_grace_period_idx < depends_on_idx < restart_idx
+
+
+SYSTEM_ONE = {
+    "enabled": True,
+    "port": 8010,
+    "image": "localhost/llm-env-system-one:rocm",
+    "models": "english",
+    "vram_reserve_mib": 4096,
+}
+
+
+def system_one_document(cfg):
+    text = render_compose(
+        cfg,
+        models_dir="/m",
+        presets_path="/p",
+        repo_root="/r",
+        system_one_rocr_index="0",
+    )
+    return yaml.safe_load(text)
+
+
+def test_system_one_service_absent_by_default():
+    _, document = compose_dict()
+    assert "system-one" not in document["services"]
+
+
+def test_system_one_service_rendered_when_enabled():
+    document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
+    service = document["services"]["system-one"]
+    assert service["image"] == "localhost/llm-env-system-one:rocm"
+    assert service["container_name"] == "system-one"
+    assert service["devices"] == ["/dev/kfd", "/dev/dri:/dev/dri"]
+    assert service["environment"]["ROCR_VISIBLE_DEVICES"] == "0"
+    assert service["group_add"] == ["keep-groups"]
+    assert service["security_opt"] == ["label=disable"]
+    assert service["ports"] == ["127.0.0.1:8010:8000"]
+    assert service["environment"]["LAYA_MODELS"] == "english"
+    assert "system-one-cache:/home/laya/.cache/huggingface" in service["volumes"]
+    assert document["volumes"]["system-one-cache"] == {"name": "llm-env-system-one-cache"}
+    assert service["healthcheck"]["start_period"] == "120s"
+
+
+def test_system_one_is_independent_of_llm_server():
+    cfg = {**CFG, "llm_server": {"enabled": False}, "system_one": SYSTEM_ONE}
+    document = system_one_document(cfg)
+    assert "llm-server" not in document["services"]
+    assert "system-one" in document["services"]
+    assert "depends_on" not in document["services"]["omniroute"]
+
+
+def test_system_one_requires_a_rocr_index():
+    import pytest
+
+    with pytest.raises(ValueError, match="ROCR_VISIBLE_DEVICES"):
+        render_compose(
+            {**CFG, "system_one": SYSTEM_ONE},
+            models_dir="/m",
+            presets_path="/p",
+            repo_root="/r",
+        )

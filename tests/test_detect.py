@@ -9,9 +9,11 @@ from pylib.detect import (
     DetectError,
     compositor_render_node,
     detect,
+    gfx_arch,
     host_resources,
     list_gpus,
     processes_on_render_node,
+    rocr_visible_index,
 )
 
 MIB = 1024 * 1024
@@ -317,3 +319,37 @@ def test_host_resources_no_processor_entries_raises(tmp_path):
     (proc / "meminfo").write_text("MemTotal:       1000 kB\n")
     with pytest.raises(DetectError):
         host_resources(proc)
+
+
+def test_rocr_visible_index_orders_gpu_nodes(tmp_path):
+    nodes = tmp_path / "nodes"
+    for name, gpu_id, minor, gfx in (
+        ("0", "0", "0", "0"),
+        ("1", "23609", "128", "120001"),
+        ("2", "58620", "129", "100306"),
+    ):
+        (nodes / name).mkdir(parents=True)
+        (nodes / name / "gpu_id").write_text(gpu_id + "\n")
+        (nodes / name / "properties").write_text(
+            f"drm_render_minor {minor}\ngfx_target_version {gfx}\n"
+        )
+    assert rocr_visible_index(128, nodes) == 0 and rocr_visible_index(129, nodes) == 1
+    assert gfx_arch("renderD128", nodes) == "gfx1201" and gfx_arch("renderD129", nodes) == "gfx1036"
+
+
+def test_rocr_visible_index_missing_drm_render_minor_raises(tmp_path):
+    node = tmp_path / "nodes" / "1"
+    node.mkdir(parents=True)
+    (node / "gpu_id").write_text("1\n")
+    (node / "properties").write_text("gpu_id 1\n")
+    with pytest.raises(ValueError, match="drm_render_minor"):
+        rocr_visible_index(128, node.parent)
+
+
+def test_gfx_arch_missing_version_raises(tmp_path):
+    node = tmp_path / "nodes" / "1"
+    node.mkdir(parents=True)
+    (node / "gpu_id").write_text("1\n")
+    (node / "properties").write_text("drm_render_minor 128\n")
+    with pytest.raises(ValueError, match="gfx_target_version"):
+        gfx_arch("renderD128", node.parent)

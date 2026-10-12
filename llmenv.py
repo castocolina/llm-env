@@ -45,7 +45,14 @@ from pylib.config import (
     set_model_enabled,
     sync_models_max,
 )
-from pylib.detect import DetectError, detect, host_resources, processes_on_render_node
+from pylib.detect import (
+    DetectError,
+    detect,
+    gfx_arch,
+    host_resources,
+    processes_on_render_node,
+    rocr_visible_index,
+)
 from pylib.dotenv import read_env_file
 from pylib.gguf import (
     GgufError,
@@ -110,6 +117,29 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
 def cmd_processes_on_render_node(args: argparse.Namespace) -> int:
     return emit({"processes": processes_on_render_node(args.render_node)})
+
+
+def cmd_rocr_index(args: argparse.Namespace) -> int:
+    try:
+        index = rocr_visible_index(
+            int(args.render_node.removeprefix("renderD")),
+            Path("/sys/class/kfd/kfd/topology/nodes"),
+        )
+    except (ValueError, OSError) as error:
+        print(str(error), file=sys.stderr)  # OSError: missing KFD topology
+        return 1
+    print(index)
+    return 0
+
+
+def cmd_gfx_arch(args: argparse.Namespace) -> int:
+    try:
+        arch = gfx_arch(args.render_node, Path("/sys/class/kfd/kfd/topology/nodes"))
+    except (ValueError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(arch)
+    return 0
 
 
 def parse_device_listing(text: str) -> list[dict[str, int | str]]:
@@ -436,14 +466,18 @@ def cmd_presets(args: argparse.Namespace) -> int:
 def cmd_render_compose(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     env_vars = read_env_file(Path(args.env_file)) if args.env_file else {}
-    write_compose(
-        cfg,
-        models_dir=args.models_dir,
-        presets_path=args.presets_path,
-        repo_root=args.repo_root,
-        omni_router_master_key=env_vars.get("OMNI_ROUTER_MASTER_KEY", ""),
-        path=Path(args.output),
-    )
+    try:
+        write_compose(
+            cfg,
+            models_dir=args.models_dir,
+            presets_path=args.presets_path,
+            repo_root=args.repo_root,
+            omni_router_master_key=env_vars.get("OMNI_ROUTER_MASTER_KEY", ""),
+            path=Path(args.output),
+            system_one_rocr_index=args.system_one_rocr_index,
+        )
+    except ValueError as error:
+        return fail(str(error))
     return emit({"written": str(args.output)})
 
 
@@ -538,6 +572,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("detect").set_defaults(func=cmd_detect)
 
+    rocr = sub.add_parser("rocr-index")
+    rocr.add_argument("--render-node", required=True)
+    rocr.set_defaults(func=cmd_rocr_index)
+
+    gfx = sub.add_parser("gfx-arch")
+    gfx.add_argument("--render-node", required=True)
+    gfx.set_defaults(func=cmd_gfx_arch)
+
     processes_parser = sub.add_parser("processes-on-render-node")
     processes_parser.add_argument("--render-node", required=True)
     processes_parser.set_defaults(func=cmd_processes_on_render_node)
@@ -607,6 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_compose.add_argument("--repo-root", required=True)
     render_compose.add_argument("--env-file", default=None)
     render_compose.add_argument("--output", required=True)
+    render_compose.add_argument("--system-one-rocr-index", default="")
     render_compose.set_defaults(func=cmd_render_compose)
 
     models = sub.add_parser("models")

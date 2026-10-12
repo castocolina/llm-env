@@ -64,9 +64,18 @@ else
 fi
 
 log_step "Rendering the compose file"
+system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+system_one_rocr_index=""
+if [ "$system_one_enabled" = "true" ]; then
+    pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"
+    render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"
+    [ -n "$render" ] || die "system_one: configured GPU ${pci} has no render node; run 'make setup'"
+    system_one_rocr_index="$(llmenv rocr-index --render-node "$render")" || die "System One: cannot map ${render} to a ROCm device; see message above"
+fi
 llmenv --config "$CONFIG_PATH" render-compose \
     --models-dir "$MODELS_DIR" --presets-path "$presets_path" \
     --repo-root "$REPO_DIR" --env-file "${REPO_DIR}/.env" \
+    --system-one-rocr-index "$system_one_rocr_index" \
     --output "$COMPOSE_FILE" >/dev/null
 log_info "wrote ${COMPOSE_FILE}"
 

@@ -302,3 +302,64 @@ def detect(
         "gpus": list_gpus(drm_root),
         "compositor_render_node": compositor_render_node(proc_root),
     }
+
+
+def rocr_visible_index(render_minor: int, nodes_root: Path) -> int:
+    gpus: list[int] = []
+    nodes = sorted(
+        (p for p in Path(nodes_root).iterdir() if p.name.isdigit()),
+        key=lambda p: int(p.name),
+    )
+    for node in nodes:
+        if (node / "gpu_id").read_text().strip() == "0":
+            continue
+        minor = next(
+            (
+                int(b)
+                for a, b in (
+                    ln.split() for ln in (node / "properties").read_text().splitlines()
+                )
+                if a == "drm_render_minor"
+            ),
+            None,
+        )
+        if minor is None:
+            raise ValueError(f"no KFD GPU node with drm_render_minor (node {node.name})")
+        gpus.append(minor)
+    if render_minor not in gpus:
+        raise ValueError(f"no KFD GPU node with drm_render_minor {render_minor}")
+    return gpus.index(render_minor)
+
+
+def gfx_arch(render_node: str, kfd_root: Path) -> str:
+    want = str(int(str(render_node).removeprefix("renderD")))
+    version = None
+    for node in sorted(
+        (p for p in Path(kfd_root).iterdir() if p.name.isdigit()),
+        key=lambda p: int(p.name),
+    ):
+        if (node / "gpu_id").read_text().strip() == "0":
+            continue
+        fields = {
+            a: b
+            for a, b in (
+                ln.split() for ln in (node / "properties").read_text().splitlines()
+            )
+        }
+        if fields.get("drm_render_minor") != want:
+            continue
+        raw = fields.get("gfx_target_version")
+        if raw is None:
+            raise ValueError(f"no gfx_target_version on KFD node {node.name}")
+        version = int(raw)
+        break
+    if version is None:
+        raise ValueError(f"no KFD GPU node with drm_render_minor {want}")
+    major, rem = divmod(version, 10000)
+    minor, step = divmod(rem, 100)
+    # shortcut: minor/step are one hex digit (0–15); reject wider KFD values
+    if minor > 15 or step > 15:
+        raise ValueError(
+            f"gfx_target_version {version} minor/step need more than one hex digit"
+        )
+    return f"gfx{major}{minor:x}{step:x}"

@@ -59,6 +59,7 @@ def render_compose(
     presets_path: str,
     repo_root: str,
     omni_router_master_key: str = "",
+    system_one_rocr_index: str = "",
 ) -> str:
     server = cfg["server"]
     gpu = cfg["gpu"]
@@ -238,15 +239,54 @@ def render_compose(
     }
     _apply_resource_limits(remote_setup_service, remote_setup_resources)
 
+    system_one = cfg.get("system_one", {})
+    system_one_service: dict[str, Any] | None = None
+    if system_one.get("enabled", False):
+        if system_one_rocr_index == "":
+            raise ValueError(
+                "system_one is enabled but ROCR_VISIBLE_DEVICES was not resolved"
+            )
+        system_one_service = {
+            "image": _dollar_escape(system_one["image"]),
+            "container_name": "system-one",
+            "devices": ["/dev/kfd", "/dev/dri:/dev/dri"],
+            "group_add": ["keep-groups"],
+            "security_opt": ["label=disable"],
+            "volumes": ["system-one-cache:/home/laya/.cache/huggingface"],
+            "ports": [f"127.0.0.1:{system_one['port']}:8000"],
+            "environment": {
+                "LAYA_MODELS": _dollar_escape(system_one["models"]),
+                "LAYA_REVISION": "reviewed",
+                "ROCR_VISIBLE_DEVICES": system_one_rocr_index,
+            },
+            "healthcheck": {
+                # slim image has no curl
+                "test": [
+                    "CMD",
+                    "python3",
+                    "-c",
+                    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+                ],
+                "interval": "10s",
+                "timeout": "5s",
+                "retries": 5,
+                # weights prefetched in make setup; start_period covers load-to-GPU only
+                "start_period": "120s",
+            },
+            "restart": "unless-stopped",
+        }
+
     services: dict[str, Any] = {}
     if llm_server_enabled:
         services["llm-server"] = service
     services["omniroute"] = omniroute_service
     services["remote-setup"] = remote_setup_service
-    document = {
-        "services": services,
-        "volumes": {"omniroute-data": {}, "remote-setup-data": {}},
-    }
+    if system_one_service is not None:
+        services["system-one"] = system_one_service
+    volumes: dict[str, Any] = {"omniroute-data": {}, "remote-setup-data": {}}
+    if system_one_service is not None:
+        volumes["system-one-cache"] = {"name": "llm-env-system-one-cache"}
+    document = {"services": services, "volumes": volumes}
     return HEADER_COMMENT + yaml.safe_dump(
         document, sort_keys=False, default_flow_style=False
     )
@@ -260,6 +300,7 @@ def write_compose(
     repo_root: str,
     omni_router_master_key: str = "",
     path: Path,
+    system_one_rocr_index: str = "",
 ) -> None:
     """Publish the compose document atomically and never world-readable.
 
@@ -281,6 +322,7 @@ def write_compose(
         presets_path=presets_path,
         repo_root=repo_root,
         omni_router_master_key=omni_router_master_key,
+        system_one_rocr_index=system_one_rocr_index,
     )
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=".docker-compose.", suffix=".tmp"
