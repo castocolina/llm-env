@@ -13,5 +13,5 @@ pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"; [ -n "$pci" ] && [ "$pci" != n
 render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"; [ -n "$render" ] && [ "$render" != null ] || die "system-one build: no render node for ${pci}; cannot determine GPU arch"
 arch="$(llmenv gfx-arch --render-node "$render")" && [ -n "$arch" ] || die "system-one build: cannot read gfx arch for ${render} (KFD gfx_target_version); refusing to guess"
 log_step "Building ${image} for ${arch} (large ROCm image; first build takes several minutes)"
-podman build --build-arg "GPU_ARCH=${arch}" -t "$image" "${REPO_DIR}/docker/system-one"
+podman build --label "llm-env.gpu-arch=${arch}" --build-arg "GPU_ARCH=${arch}" -t "$image" "${REPO_DIR}/docker/system-one"
 log_info "built ${image}"

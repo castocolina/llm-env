@@ -248,11 +248,16 @@ if [ "$system_one_enabled" = "true" ]; then
         "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address == \$p and .vendor == \"0x1002\" and .render_node != \"\")'" \
         "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
         system_one_amd_gpu "$pci" || true
-    if [ ! -f "$COMPOSE_FILE" ]; then record_section_skip "system-one ROCR index" "compose not rendered yet (run make start)" "not run: compose not rendered yet (run make start)"
-    else record_command "system-one ROCR index" \
-        "llmenv rocr-index for the detected render node equals ROCR_VISIBLE_DEVICES in ${COMPOSE_FILE}" \
-        "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        system_one_rocr_matches "$pci" || true; fi
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        record_section_skip "system-one ROCR index" "compose not rendered yet (run make start)" "not run: compose not rendered yet (run make start)"
+    elif [ "$(yq -r '.services["system-one"].environment.ROCR_VISIBLE_DEVICES' "$COMPOSE_FILE")" = "null" ]; then
+        record_section_skip "system-one ROCR index" "compose not rendered with system-one yet (run make start)" "not run: compose not rendered with system-one yet (run make start)"
+    else
+        record_command "system-one ROCR index" \
+            "llmenv rocr-index for the detected render node equals ROCR_VISIBLE_DEVICES in ${COMPOSE_FILE}" \
+            "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+            system_one_rocr_matches "$pci" || true
+    fi
     record_command "system-one image" "podman image exists ${system_one_image}" "" \
         "exit status: 0" "" 0 "Command stdout" "Command stderr" \
         podman image exists "$system_one_image" || true

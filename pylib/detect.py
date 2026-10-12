@@ -261,7 +261,11 @@ def processes_on_render_node(render_node: str, proc_root: Path = Path("/proc")) 
 
         try:
             cmdline = (
-                (pid_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode().strip()
+                (pid_dir / "cmdline")
+                .read_bytes()
+                .replace(b"\x00", b" ")
+                .decode(errors="replace")
+                .strip()
             )
         except OSError:
             cmdline = ""

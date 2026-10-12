@@ -72,7 +72,7 @@ esac
 DRI_PATH="${LLM_ENV_DRI_PATH:-/dev/dri}"
 if [ "$system_one_enabled" != "true" ]; then
     SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
-elif [ ! -e "$KFD_PATH" ]; then
+elif [ ! -r "$KFD_PATH" ]; then
     SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
     die "System One requires an AMD GPU with ROCm (/dev/kfd); not found at ${KFD_PATH}"
 fi
@@ -140,7 +140,15 @@ if [ "$system_one_enabled" = "true" ]; then
     log_step "System One image and weights"
     system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
     system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
-    podman image exists "$system_one_image" || bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
+    system_one_arch="$(llmenv gfx-arch --render-node "$system_one_render")" || system_one_off "System One: cannot read gfx arch for ${system_one_render}"
+    system_one_image_arch=""
+    if podman image exists "$system_one_image"; then
+        system_one_image_arch="$(podman image inspect --format '{{index .Labels "llm-env.gpu-arch"}}' "$system_one_image" 2>/dev/null || true)"
+    fi
+    # Missing or stale arch label: the image was built for a different GPU.
+    if [ "$system_one_image_arch" != "$system_one_arch" ]; then
+        bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
+    fi
     log_step "Prefetching Laya weights (${system_one_models}) into llm-env-system-one-cache"
     # :z relabels the script bind for Fedora SELinux.
     podman run --rm \

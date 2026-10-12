@@ -29,7 +29,7 @@
 ## Global Constraints
 
 - `system_one.enabled` defaults to `false`; every shell read is `yq -r '.system_one.enabled'` + string compare — never `// true`/`// false` (yq's `//` treats `false` as falsy; see `scripts/start.sh:16-20`).
-- Image tag `localhost/llm-env-system-one:rocm`; Dockerfile pins `torch==2.14.1` from `https://download.pytorch.org/whl/rocm7.2` (`ARG TORCH_INDEX=rocm7.2`) and `laya[serve]==0.4.2`. `scripts/system-one-build.sh` passes `--build-arg GPU_ARCH=<arch>` from KFD `gfx_target_version` via `gfx_arch`; if the arch cannot be read the build dies (no default). The image then deletes per-arch kernel files under `site-packages/torch` and `triton` whose path does not contain that arch, its family dir (last character replaced by `x`), or `gfx<major>-generic`.
+- Image tag `localhost/llm-env-system-one:rocm`; Dockerfile pins `torch==2.14.1` from `https://download.pytorch.org/whl/rocm7.2` (`ARG TORCH_INDEX=rocm7.2`) and `laya[serve]==0.4.2` plus `huggingface_hub==2.2.0` (the weights check imports it). `ARG GPU_ARCH` has no default; the pip-install `RUN` starts with `test -n "${GPU_ARCH}"`. `scripts/system-one-build.sh` passes `--label llm-env.gpu-arch=<arch>` and `--build-arg GPU_ARCH=<arch>` from KFD `gfx_target_version` via `gfx_arch`; if the arch cannot be read the build dies (no default). The image then deletes per-arch kernel files under `site-packages/torch` and `triton` whose path does not contain that arch, its family dir (last character replaced by `x`), or `gfx<major>-generic`.
 - AMD ROCm only. `make setup` refuses to enable System One when `/dev/kfd` is absent.
 - Host port binds `127.0.0.1` only (Laya runs without auth here). Default host port `8010`; container port `8000`.
 - `LAYA_MODELS=english` by default (`system_one.models`).
@@ -232,7 +232,7 @@ def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_
         tmp_path, "scripts/system-one-build.sh", system_one_enabled=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
+    assert f"podman build --label llm-env.gpu-arch=gfx1201 --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
     dockerfile = (ROOT / "docker/system-one/Dockerfile").read_text()
     assert "ARG TORCH_INDEX=rocm7.2" in dockerfile and "rocm7.14" not in dockerfile
 
@@ -285,14 +285,15 @@ ARG TORCH_VERSION=2.14.1
 # shortcut: ROCR 1.21 AsyncEventsLoop busy-spins one core after the first GPU kernel (https://github.com/ROCm/rocm-systems/issues/12674, https://github.com/ROCm/TheRock/issues/7051); move back to the newest index once a release carries rocm-systems PR #7898; re-run the idle check.
 ARG TORCH_INDEX=rocm7.2
 ARG LAYA_VERSION=0.4.2
-ARG GPU_ARCH=gfx1201
+ARG GPU_ARCH
 ENV PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false \
     TORCH_DISABLE_NATIVE_JIT=1 LAYA_DEVICE=cuda LAYA_PRELOAD=1 \
     HF_HOME=/home/laya/.cache/huggingface
 # Drop per-arch kernels for every arch except GPU_ARCH, its family dir (last char → x), and gfx<major>-generic.
 # Same RUN as the install: a later RUN would leave the deleted files in the lower layer.
-RUN pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/${TORCH_INDEX} \
-    && pip install "laya[serve]==${LAYA_VERSION}" \
+RUN test -n "${GPU_ARCH}" \
+    && pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/${TORCH_INDEX} \
+    && pip install "laya[serve]==${LAYA_VERSION}" "huggingface_hub==2.2.0" \
     && family="${GPU_ARCH%?}x" && major="${GPU_ARCH#gfx}" && major="${major%??}" && generic="gfx${major}-generic" \
     && site=/usr/local/lib/python3.11/site-packages \
     && find "$site/torch" "$site/triton" -type f -path '*gfx*' \
@@ -326,7 +327,7 @@ pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"; [ -n "$pci" ] && [ "$pci" != n
 render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"; [ -n "$render" ] && [ "$render" != null ] || die "system-one build: no render node for ${pci}; cannot determine GPU arch"
 arch="$(llmenv gfx-arch --render-node "$render")" && [ -n "$arch" ] || die "system-one build: cannot read gfx arch for ${render} (KFD gfx_target_version); refusing to guess"
 log_step "Building ${image} for ${arch} (large ROCm image; first build takes several minutes)"
-podman build --build-arg "GPU_ARCH=${arch}" -t "$image" "${REPO_DIR}/docker/system-one"
+podman build --label "llm-env.gpu-arch=${arch}" --build-arg "GPU_ARCH=${arch}" -t "$image" "${REPO_DIR}/docker/system-one"
 log_info "built ${image}"
 ```
 
@@ -500,7 +501,9 @@ def gfx_arch(render_node: str, kfd_root: Path) -> str:
             "ports": [f"127.0.0.1:{system_one['port']}:8000"],
             "environment": {
                 "LAYA_MODELS": _dollar_escape(system_one["models"]),
+                "LAYA_MAX_LOADED": str(len([part for part in system_one["models"].split(",") if part.strip()])),
                 "LAYA_REVISION": "reviewed",
+                "HF_HUB_OFFLINE": "1",
                 "ROCR_VISIBLE_DEVICES": system_one_rocr_index,
             },
             "healthcheck": {
@@ -568,7 +571,7 @@ system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
 system_one_rocr_index=""
 if [ "$system_one_enabled" = "true" ]; then
     pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"
-    render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"
+    render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')" || die "System One: GPU detection failed; cannot resolve a render node for ${pci}"
     [ -n "$render" ] || die "system_one: configured GPU ${pci} has no render node; run 'make setup'"
     system_one_rocr_index="$(llmenv rocr-index --render-node "$render")" || die "System One: cannot map ${render} to a ROCm device; see message above"
 fi
@@ -852,7 +855,7 @@ def test_setup_builds_system_one_image_when_missing(tmp_path: pathlib.Path) -> N
         env_overrides={"PODMAN_IMAGE_MISSING": "1"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "system-one-build.sh" in calls.read_text() and "podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm" in calls.read_text()
+    assert "system-one-build.sh" in calls.read_text() and "podman build --label llm-env.gpu-arch=gfx1201 --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm" in calls.read_text()
 
 
 def test_setup_leaves_system_one_disabled_when_build_fails(tmp_path: pathlib.Path) -> None:
@@ -998,7 +1001,7 @@ esac
 DRI_PATH="${LLM_ENV_DRI_PATH:-/dev/dri}"
 if [ "$system_one_enabled" != "true" ]; then
     SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
-elif [ ! -e "$KFD_PATH" ]; then
+elif [ ! -r "$KFD_PATH" ]; then
     SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
     die "System One requires an AMD GPU with ROCm (/dev/kfd); not found at ${KFD_PATH}"
 fi
@@ -1026,7 +1029,14 @@ if [ "$llm_server_enabled" = "true" ] || [ "$system_one_enabled" = "true" ]; the
         log_step "System One image and weights"
         system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
         system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
-        podman image exists "$system_one_image" || bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
+        system_one_arch="$(llmenv gfx-arch --render-node "$system_one_render")" || system_one_off "System One: cannot read gfx arch for ${system_one_render}"
+        system_one_image_arch=""
+        if podman image exists "$system_one_image"; then
+            system_one_image_arch="$(podman image inspect --format '{{index .Labels "llm-env.gpu-arch"}}' "$system_one_image" 2>/dev/null || true)"
+        fi
+        if [ "$system_one_image_arch" != "$system_one_arch" ]; then
+            bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
+        fi
         log_step "Prefetching Laya weights (${system_one_models}) into llm-env-system-one-cache"
         # :z relabels the script bind for Fedora SELinux.
         podman run --rm \
@@ -1473,11 +1483,16 @@ if [ "$system_one_enabled" = "true" ]; then
         "uv run ${REPO_DIR}/llmenv.py detect | jq -e --arg p ${pci} '.gpus[] | select(.pci_address == \$p and .vendor == \"0x1002\" and .render_node != \"\")'" \
         "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
         system_one_amd_gpu "$pci" || true
-    if [ ! -f "$COMPOSE_FILE" ]; then record_section_skip "system-one ROCR index" "compose not rendered yet (run make start)" "not run: compose not rendered yet (run make start)"
-    else record_command "system-one ROCR index" \
-        "llmenv rocr-index for the detected render node equals ROCR_VISIBLE_DEVICES in ${COMPOSE_FILE}" \
-        "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-        system_one_rocr_matches "$pci" || true; fi
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        record_section_skip "system-one ROCR index" "compose not rendered yet (run make start)" "not run: compose not rendered yet (run make start)"
+    elif [ "$(yq -r '.services["system-one"].environment.ROCR_VISIBLE_DEVICES' "$COMPOSE_FILE")" = "null" ]; then
+        record_section_skip "system-one ROCR index" "compose not rendered with system-one yet (run make start)" "not run: compose not rendered with system-one yet (run make start)"
+    else
+        record_command "system-one ROCR index" \
+            "llmenv rocr-index for the detected render node equals ROCR_VISIBLE_DEVICES in ${COMPOSE_FILE}" \
+            "" "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+            system_one_rocr_matches "$pci" || true
+    fi
     record_command "system-one image" "podman image exists ${system_one_image}" "" \
         "exit status: 0" "" 0 "Command stdout" "Command stderr" \
         podman image exists "$system_one_image" || true

@@ -262,7 +262,12 @@ def render_compose(
             "ports": [f"127.0.0.1:{system_one['port']}:8000"],
             "environment": {
                 "LAYA_MODELS": _dollar_escape(system_one["models"]),
+                "LAYA_MAX_LOADED": str(
+                    len([part for part in system_one["models"].split(",") if part.strip()])
+                ),
                 "LAYA_REVISION": "reviewed",
+                # No runtime downloads. An unprepared checkpoint fails instead of fetching.
+                "HF_HUB_OFFLINE": "1",
                 "ROCR_VISIBLE_DEVICES": system_one_rocr_index,
             },
             "healthcheck": {

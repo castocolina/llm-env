@@ -68,7 +68,7 @@ system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
 system_one_rocr_index=""
 if [ "$system_one_enabled" = "true" ]; then
     pci="$(yq -r '.gpu.pci_address' "$CONFIG_PATH")"
-    render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')"
+    render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')" || die "System One: GPU detection failed; cannot resolve a render node for ${pci}"
     [ -n "$render" ] || die "system_one: configured GPU ${pci} has no render node; run 'make setup'"
     system_one_rocr_index="$(llmenv rocr-index --render-node "$render")" || die "System One: cannot map ${render} to a ROCm device; see message above"
 fi

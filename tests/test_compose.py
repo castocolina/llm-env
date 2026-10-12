@@ -532,9 +532,19 @@ def test_system_one_service_rendered_when_enabled():
     assert service["security_opt"] == ["label=disable"]
     assert service["ports"] == ["127.0.0.1:8010:8000"]
     assert service["environment"]["LAYA_MODELS"] == "english"
+    assert service["environment"]["HF_HUB_OFFLINE"] == "1"
+    assert service["environment"]["LAYA_MAX_LOADED"] == "1"
     assert "system-one-cache:/home/laya/.cache/huggingface" in service["volumes"]
     assert document["volumes"]["system-one-cache"] == {"name": "llm-env-system-one-cache"}
     assert service["healthcheck"]["start_period"] == "120s"
+
+
+def test_system_one_max_loaded_matches_the_configured_model_count():
+    cfg = {**CFG, "system_one": {**SYSTEM_ONE, "models": "english,multilingual"}}
+    env = system_one_document(cfg)["services"]["system-one"]["environment"]
+    assert env["LAYA_MODELS"] == "english,multilingual"
+    assert env["LAYA_MAX_LOADED"] == "2"
+    assert env["HF_HUB_OFFLINE"] == "1"
 
 
 def test_system_one_is_independent_of_llm_server():

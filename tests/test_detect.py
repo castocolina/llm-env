@@ -144,6 +144,13 @@ def build_proc_with_fd(
     return proc
 
 
+def test_processes_on_render_node_replaces_non_utf8_cmdline_bytes(tmp_path):
+    proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=524288)
+    (proc / "3021" / "cmdline").write_bytes(b"firefox\x00\xff\xfe")
+    result = processes_on_render_node("renderD128", proc)
+    assert result[0]["cmdline"] == "firefox \ufffd\ufffd"
+
+
 def test_processes_on_render_node_finds_a_matching_pid(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=524288)
     result = processes_on_render_node("renderD128", proc)

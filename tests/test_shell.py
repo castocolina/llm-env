@@ -741,6 +741,7 @@ def run_setup_no_gpu(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;;\n"
+        "  *'image inspect'*) printf '%s\\n' \"${IMAGE_GPU_ARCH-gfx1201}\" ;;\n"
         "esac\n"
         "exit 0\n"
     )
@@ -955,7 +956,7 @@ def test_setup_builds_system_one_image_when_missing(tmp_path: pathlib.Path) -> N
         env_overrides={"PODMAN_IMAGE_MISSING": "1"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "system-one-build.sh" in calls.read_text() and "podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm" in calls.read_text()
+    assert "system-one-build.sh" in calls.read_text() and f"podman build --label llm-env.gpu-arch=gfx1201 --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
 
 
 def test_setup_leaves_system_one_disabled_when_build_fails(tmp_path: pathlib.Path) -> None:
@@ -975,6 +976,57 @@ def test_setup_skips_system_one_build_when_image_present(tmp_path: pathlib.Path)
     result, calls, _config = run_setup_no_gpu(tmp_path, system_one_env="1", kfd_path=str(kfd))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "scripts/system-one-build.sh" not in calls.read_text()
+
+
+def test_setup_rebuilds_system_one_image_when_gpu_arch_label_differs(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, _config = run_setup_no_gpu(
+        tmp_path,
+        system_one_env="1",
+        kfd_path=str(kfd),
+        env_overrides={"IMAGE_GPU_ARCH": "gfx1100"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/system-one-build.sh" in calls.read_text()
+
+
+def test_setup_rebuilds_system_one_image_when_gpu_arch_label_missing(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, _config = run_setup_no_gpu(
+        tmp_path,
+        system_one_env="1",
+        kfd_path=str(kfd),
+        env_overrides={"IMAGE_GPU_ARCH": ""},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/system-one-build.sh" in calls.read_text()
+
+
+def test_setup_skips_system_one_build_when_gpu_arch_label_matches(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, calls, _config = run_setup_no_gpu(
+        tmp_path,
+        system_one_env="1",
+        kfd_path=str(kfd),
+        env_overrides={"IMAGE_GPU_ARCH": "gfx1201"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scripts/system-one-build.sh" not in calls.read_text()
+
+
+def test_setup_refuses_system_one_when_kfd_is_not_readable(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    kfd.chmod(0)
+    result, _calls, config = run_setup_no_gpu(
+        tmp_path, system_one_env="1", kfd_path=str(kfd)
+    )
+    assert result.returncode != 0
+    assert "requires an AMD GPU with ROCm (/dev/kfd)" in result.stderr
+    assert yq_value(config, ".system_one.enabled") == "false"
 
 
 def test_setup_prefetches_system_one_weights_when_enabled(tmp_path: pathlib.Path) -> None:
@@ -3962,6 +4014,93 @@ def test_render_unit_never_adds_the_rocm_kernel_device(tmp_path: pathlib.Path) -
     assert "/dev/kfd" not in container.read_text()
 
 
+def test_render_unit_dies_when_system_one_gpu_detection_fails(tmp_path: pathlib.Path) -> None:
+    real_yq = shutil.which("yq")
+    real_uv = shutil.which("uv")
+    assert real_yq is not None and real_uv is not None
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("podman", "systemctl"):
+        command = commands / name
+        command.write_text("#!/usr/bin/bash\nexit 0\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *' detect'*) exit 1 ;;\n"
+        "  *) exec \"$REAL_UV\" \"$@\" ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    yq = commands / "yq"
+    yq.write_text("#!/usr/bin/bash\nexec \"$REAL_YQ\" \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8000\n"
+        "  api_key: key\n"
+        "  sleep_idle_seconds: 300\n"
+        "  start_at_boot: false\n"
+        "llm_server:\n"
+        "  enabled: false\n"
+        "gpu:\n"
+        "  backend: vulkan\n"
+        "  image: example.invalid/llama:latest\n"
+        "  device_name: ''\n"
+        "  pci_address: '0000:03:00.0'\n"
+        "  vram_total_mib: 8192\n"
+        "  reserve_mode: auto\n"
+        "  reserve_floor_mib: 1024\n"
+        "runtime:\n"
+        "  models_max: 1\n"
+        "  parallel_slots: 1\n"
+        "  ubatch_size: 512\n"
+        "  flash_attn: true\n"
+        "  cache_type_k: q8_0\n"
+        "  cache_type_v: q8_0\n"
+        "models:\n"
+        "  - alias: test\n"
+        "    label: Test\n"
+        "    parameters: 1B\n"
+        "    quantization: Q4_K_M\n"
+        "    enabled: true\n"
+        "    file: test.gguf\n"
+        "    url: https://example.invalid/test.gguf\n"
+        "    size_bytes: 1\n"
+        "    vram_budget: 10%\n"
+        "    ctx_size: 8192\n"
+        "    client_max_output_tokens: 8192\n"
+        "    n_gpu_layers: 99\n"
+        "system_one:\n"
+        "  enabled: true\n"
+        "  port: 8010\n"
+        "  image: localhost/llm-env-system-one:rocm\n"
+        "  models: english\n"
+        "  vram_reserve_mib: 4096\n"
+    )
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/render-unit.sh"],
+        cwd=ROOT,
+        env=os.environ | {
+            "HOME": str(tmp_path / "home"),
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
+            "PATH": f"{commands}:/usr/bin:/bin",
+            "REAL_UV": real_uv,
+            "REAL_YQ": real_yq,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "System One: GPU detection failed" in result.stderr
+
+
 def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Path) -> None:
     result, wrapper_unit = run_render_unit_with_legacy_rocm_config(tmp_path)
     compose_file = wrapper_unit.parent.parent.parent / "llm-env/docker-compose.yml"
@@ -4241,6 +4380,7 @@ def run_check_setup_with_stubs(
     system_one_enabled: bool = False,
     real_gguf: bool = False,
     rocr_index: str = "0",
+    system_one_service_in_compose: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run offline setup validation with controlled command output."""
     real_yq = shutil.which("yq")
@@ -4386,15 +4526,18 @@ def run_check_setup_with_stubs(
         (tmp_path / "kfd").touch()
         compose_file = tmp_path / "home" / ".config" / "llm-env" / "docker-compose.yml"
         compose_file.parent.mkdir(parents=True, exist_ok=True)
-        compose_file.write_text(
-            "services:\n"
-            "  system-one:\n"
-            "    devices:\n"
-            "      - /dev/kfd\n"
-            "      - /dev/dri:/dev/dri\n"
-            "    environment:\n"
-            '      ROCR_VISIBLE_DEVICES: "0"\n'
-        )
+        if system_one_service_in_compose:
+            compose_file.write_text(
+                "services:\n"
+                "  system-one:\n"
+                "    devices:\n"
+                "      - /dev/kfd\n"
+                "      - /dev/dri:/dev/dri\n"
+                "    environment:\n"
+                '      ROCR_VISIBLE_DEVICES: "0"\n'
+            )
+        else:
+            compose_file.write_text("services:\n  omniroute: {}\n")
     models_dir = tmp_path / "models"
     environment = os.environ | {
         "CALLS": str(calls),
@@ -4714,6 +4857,24 @@ def test_check_setup_checks_system_one_weights_cache_when_enabled(tmp_path: path
     assert "verify" in recorded
 
 
+def test_check_setup_skips_rocr_when_compose_has_no_system_one_service(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, _ = run_check_setup_with_stubs(
+        tmp_path,
+        system_one_enabled=True,
+        llm_server_enabled=False,
+        system_one_service_in_compose=False,
+    )
+    output = result.stdout + result.stderr
+    assert (
+        "Verdict: SKIP reason=compose not rendered with system-one yet (run make start)"
+        in output
+    )
+    assert "Verdict: FAIL" not in output
+    assert result.returncode == 0, output
+
+
 def test_check_setup_fails_system_one_when_rocr_index_mismatches(tmp_path: pathlib.Path) -> None:
     result, _calls, _ = run_check_setup_with_stubs(
         tmp_path,
@@ -4948,9 +5109,11 @@ def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_
         tmp_path, "scripts/system-one-build.sh", system_one_enabled=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"podman build --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
+    assert f"podman build --label llm-env.gpu-arch=gfx1201 --build-arg GPU_ARCH=gfx1201 -t localhost/llm-env-system-one:rocm {ROOT}/docker/system-one" in calls.read_text()
     dockerfile = (ROOT / "docker/system-one/Dockerfile").read_text()
     assert "ARG TORCH_INDEX=rocm7.2" in dockerfile and "rocm7.14" not in dockerfile
+    assert "ARG GPU_ARCH=" not in dockerfile
+    assert "\nARG GPU_ARCH\n" in dockerfile
     runs: list[str] = []
     pending = ""
     for line in dockerfile.splitlines():
@@ -4963,6 +5126,9 @@ def test_system_one_build_builds_the_configured_image_from_the_repo_context(tmp_
         pending = ""
     install = [run for run in runs if "pip install" in run]
     assert len(install) == 1
+    assert install[0].startswith('test -n "${GPU_ARCH}"')
+    assert "huggingface_hub==2.2.0" in install[0]
+    assert "laya[serve]==" in install[0]
     assert "find " in install[0] and "-delete" in install[0]
 
 
