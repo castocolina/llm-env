@@ -109,7 +109,7 @@ Any other machine on the LAN can configure its own Pi/OpenCode sessions
 against this host's OmniRoute gateway with one command:
 
 ```bash
-curl http://<this-host>.local:<remote-setup-port>/setup.sh | bash
+curl -sS http://<this-host>.local:<remote-setup-port>/setup.sh | bash
 ```
 
 It prompts for `OMNI_ROUTER_MASTER_KEY` (set in this repo's `.env`) and, once

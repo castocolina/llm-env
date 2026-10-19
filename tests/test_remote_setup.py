@@ -304,7 +304,7 @@ def test_render_setup_script_prompts_for_the_master_key_from_the_tty(monkeypatch
     _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
     assert "OMNI_ROUTER_MASTER_KEY:" in script
-    assert "read -r -s -p" in script
+    assert "read -r -s" in script
     # Under `curl ... | bash`, stdin is the script pipe, not the terminal --
     # reading from /dev/tty explicitly is required for the prompt to
     # actually reach the user instead of silently reading EOF.
@@ -1028,6 +1028,7 @@ def _run_generated_setup_sh(
     home_dir=None,
     extra_args=None,
     send_master_key=True,
+    master_key_input=b"test-master-key\n",
 ):
     """Fetch the real /setup.sh from a live RemoteSetupHandler (backed by a
     fake OmniRoute) and execute it with bash in an isolated $HOME, typing
@@ -1110,7 +1111,7 @@ def _run_generated_setup_sh(
             os.close(slave_fd)
 
             if send_master_key:
-                os.write(master_fd, b"test-master-key\n")
+                os.write(master_fd, master_key_input)
             # A regression that makes the installer *hang* (jq reading a
             # FIFO) must surface as a test failure, not a stuck suite.
             output = b""
@@ -1575,3 +1576,71 @@ def test_install_termination_handlers_shuts_the_server_down_on_sigterm():
         if thread.is_alive():
             server.shutdown()
             thread.join()
+
+
+def _seed_cached_key(value):
+    def prepare(home_dir):
+        cache_dir = home_dir / ".cache" / "llm-env"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "master-key").write_text(value)
+
+    return prepare
+
+
+def test_setup_sh_asks_again_when_the_saved_master_key_is_rejected(tmp_path, monkeypatch):
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path, monkeypatch, prepare_home=_seed_cached_key("stale-key")
+    )
+    assert exit_code == 0, output
+    assert "saved master key was rejected" in output
+    assert "OMNI_ROUTER_MASTER_KEY:" in output
+    cache_path = home_dir / ".cache" / "llm-env" / "master-key"
+    assert cache_path.read_text() == "test-master-key"
+
+
+def test_setup_sh_does_not_cache_a_master_key_the_server_rejected(tmp_path, monkeypatch):
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path, monkeypatch, master_key_input=b"typo\n"
+    )
+    assert exit_code == 1
+    assert "invalid or missing master key (HTTP 401)" in output
+    assert not (home_dir / ".cache" / "llm-env" / "master-key").exists()
+
+
+def test_setup_sh_treats_an_empty_cached_or_typed_key_as_missing(tmp_path, monkeypatch):
+    exit_code, output, home_dir = _run_generated_setup_sh(
+        tmp_path,
+        monkeypatch,
+        prepare_home=_seed_cached_key(""),
+        master_key_input=b"\ntest-master-key\n",
+    )
+    assert exit_code == 0, output
+    assert "HTTP 401" not in output
+    assert (home_dir / ".cache" / "llm-env" / "master-key").read_text() == "test-master-key"
+
+
+def test_setup_sh_prints_nothing_until_curl_has_closed_the_pipe(monkeypatch):
+    """Piped into bash, the script is run while curl is still drawing its
+    progress meter: nothing may be printed until the writer closes the pipe."""
+    _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
+    for cmd in ("bash", "curl", "jq", "node"):
+        if shutil.which(cmd) is None:
+            pytest.skip(f"{cmd} not available on this host")
+    script = render_setup_script("192.0.2.1:20130")
+    process = subprocess.Popen(
+        ["bash", "-s"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "HOME": "/nonexistent"},
+    )
+    assert process.stdin is not None and process.stderr is not None
+    process.stdin.write(script.encode())
+    process.stdin.flush()
+    readable, _, _ = select.select([process.stderr], [], [], 1.0)
+    assert not readable, "script printed before the pipe was closed"
+    process.stdin.close()
+    err = process.stderr.read()
+    process.wait(timeout=30)
+    assert b"close Pi and OpenCode before continuing" in err

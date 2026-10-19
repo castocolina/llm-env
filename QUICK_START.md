@@ -48,7 +48,7 @@ Prints the exact one-liner for another machine to configure its own
 Pi/OpenCode sessions against this host's OmniRoute gateway:
 
 ```bash
-curl http://<this-host>.local:<remote-setup-port>/setup.sh | bash
+curl -sS http://<this-host>.local:<remote-setup-port>/setup.sh | bash
 ```
 
 It prompts for `OMNI_ROUTER_MASTER_KEY` (from this repo's `.env`) and never

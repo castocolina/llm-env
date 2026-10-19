@@ -11572,7 +11572,7 @@ def test_network_sh_prints_the_firewall_warning_and_the_remote_setup_one_liner(
     )
     assert "sudo firewall-cmd --permanent --add-port=20128/tcp --add-port=20130/tcp" in combined
     assert "the OmniRoute container only binds 127.0.0.1" not in combined
-    assert "curl http://" in result.stdout
+    assert "curl -sS http://" in result.stdout
     assert ":20130/setup.sh | bash" in result.stdout
 
 
@@ -11708,7 +11708,7 @@ def test_network_sh_skips_the_llm_server_firewall_prompt_when_disabled(
     assert "sudo firewall-cmd --permanent --add-port=20128/tcp --add-port=20130/tcp" in combined
 
     # Verify that print-endpoints.sh output is present
-    assert "curl http://" in result.stdout
+    assert "curl -sS http://" in result.stdout
     assert ":20130/setup.sh | bash" in result.stdout
 
 
@@ -11780,7 +11780,7 @@ def test_print_endpoints_omits_the_llm_server_section_when_disabled(
     )
     assert "OmniRoute" in result.stdout
     assert "fixture-omniroute-password" in result.stdout
-    assert "curl http://" in result.stdout
+    assert "curl -sS http://" in result.stdout
     assert ":20130/setup.sh | bash" in result.stdout
 
 
@@ -11845,8 +11845,8 @@ def test_status_prints_the_same_endpoint_banner_as_network_sh(
     assert "fixture-api-key" in result.stdout
     assert "fixture-omniroute-password" in result.stdout
     assert "mDNS:    http://llm.local:20130" in result.stdout
-    assert "curl http://llm.local:20130/setup.sh | bash" in result.stdout
-    assert "curl http://" in result.stdout and ":20130/setup.sh | bash" in result.stdout
+    assert "curl -sS http://llm.local:20130/setup.sh | bash" in result.stdout
+    assert "curl -sS http://" in result.stdout and ":20130/setup.sh | bash" in result.stdout
 
 
 def test_status_skips_the_endpoint_banner_when_unconfigured(
@@ -11879,7 +11879,7 @@ def test_status_skips_the_endpoint_banner_when_unconfigured(
 
     assert result.returncode == 0, result.stderr
     assert "run 'make setup' first" in result.stdout + result.stderr
-    assert "curl http://" not in result.stdout
+    assert "curl -sS http://" not in result.stdout
 
 
 def test_install_agent_clients_writes_expected_files_and_summary(tmp_path):

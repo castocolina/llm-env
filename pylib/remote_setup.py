@@ -78,6 +78,17 @@ SETUP_SCRIPT_TEMPLATE = r'''#!/usr/bin/env bash
 set -euo pipefail
 umask 077
 
+# Under `curl ... | bash` bash starts executing with the first bytes curl
+# delivers, so anything printed meanwhile lands in the middle of curl's
+# progress meter. Everything lives in main(), which bash cannot run until
+# the whole definition has arrived; main() then waits for curl to close the
+# pipe (and finish its meter) before printing anything.
+main() {
+if [ -p /dev/stdin ]; then
+    cat >/dev/null
+    printf '\n' >&2
+fi
+
 LLM_ENV_HOST="@@LLM_ENV_HOST@@"
 
 for cmd in curl jq node mktemp cmp; do
@@ -164,41 +175,72 @@ master_key_cache="${master_key_cache_dir}/master-key"
 
 # `curl ... | bash` leaves stdin attached to the script pipe, not the
 # terminal -- `read` must go to /dev/tty explicitly or the prompt below
-# silently reads EOF instead of actually asking the user.
-if [ "$rm_key" -eq 1 ]; then
-    rm -f -- "$master_key_cache"
-    read -r -s -p "OMNI_ROUTER_MASTER_KEY: " master_key < /dev/tty
-    echo
-elif [ -f "$master_key_cache" ] && \
-     [ "$(find "$master_key_cache" -mtime -7 2>/dev/null)" = "$master_key_cache" ]; then
-    master_key="$(cat "$master_key_cache")"
-else
-    read -r -s -p "OMNI_ROUTER_MASTER_KEY: " master_key < /dev/tty
-    echo
-    mkdir -p "$master_key_cache_dir"
-    chmod 700 "$master_key_cache_dir"
-    printf '%s' "$master_key" >"$master_key_cache"
-    chmod 600 "$master_key_cache"
-fi
+# silently reads EOF instead of actually asking the user. The prompt starts
+# on its own line so curl's progress meter (which rewrites its line with \r)
+# cannot swallow it, and an empty answer asks again instead of being sent.
+prompt_master_key() {
+    master_key=""
+    while [ -z "$master_key" ]; do
+        printf '\nOMNI_ROUTER_MASTER_KEY: ' >/dev/tty 2>/dev/null || {
+            echo "remote-setup: no terminal to ask for the master key" >&2
+            exit 1
+        }
+        IFS= read -r -s master_key </dev/tty || master_key=""
+        printf '\n' >/dev/tty
+    done
+}
 
 # A bearer token on the curl command line would be visible to every other
 # local user via `ps`/`/proc/<pid>/cmdline` for as long as curl runs --
 # mirrors scripts/check-server.sh's own auth_conf pattern (a private,
 # mode-0600 curl config file passed via -K, never -H on the command line).
 auth_conf="${workdir}/auth.conf"
-printf 'header = "Authorization: Bearer %s"\n' "$master_key" >"$auth_conf"
-chmod 600 "$auth_conf"
-
 response_file="${workdir}/config-response.json"
-http_status="$(curl -sS -K "$auth_conf" -o "$response_file" -w '%{http_code}' \
-    "http://${LLM_ENV_HOST}/config")" || {
-    echo "remote-setup: could not reach http://${LLM_ENV_HOST}/config" >&2
-    exit 1
+fetch_config() {
+    printf 'header = "Authorization: Bearer %s"\n' "$master_key" >"$auth_conf"
+    chmod 600 "$auth_conf"
+    http_status="$(curl -sS -K "$auth_conf" -o "$response_file" -w '%{http_code}' \
+        "http://${LLM_ENV_HOST}/config")" || {
+        echo "remote-setup: could not reach http://${LLM_ENV_HOST}/config" >&2
+        exit 1
+    }
 }
+
+from_cache=0
+if [ "$rm_key" -eq 1 ]; then
+    rm -f -- "$master_key_cache"
+    prompt_master_key
+elif [ -f "$master_key_cache" ] && \
+     [ "$(find "$master_key_cache" -mtime -7 2>/dev/null)" = "$master_key_cache" ] && \
+     master_key="$(cat "$master_key_cache")" && [ -n "$master_key" ]; then
+    from_cache=1
+else
+    rm -f -- "$master_key_cache"
+    prompt_master_key
+fi
+
+fetch_config
+# The saved key can be stale (rotated, or saved wrong earlier): a rejection
+# is a reason to ask again, not only the 7-day expiry.
+if [ "$http_status" = "401" ] && [ "$from_cache" -eq 1 ]; then
+    echo "remote-setup: the saved master key was rejected; enter it again" >&2
+    rm -f -- "$master_key_cache"
+    from_cache=0
+    prompt_master_key
+    fetch_config
+fi
 if [ "$http_status" != "200" ]; then
     error="$(jq -r '.error // "request failed"' "$response_file" 2>/dev/null || echo "request failed")"
     echo "remote-setup: ${error} (HTTP ${http_status})" >&2
     exit 1
+fi
+
+# Saved only once the server accepted it, so a mistyped key is never reused.
+if [ "$rm_key" -eq 0 ] && [ "$from_cache" -eq 0 ]; then
+    mkdir -p "$master_key_cache_dir"
+    chmod 700 "$master_key_cache_dir"
+    printf '%s' "$master_key" >"$master_key_cache"
+    chmod 600 "$master_key_cache"
 fi
 
 config_json="$(cat "$response_file")"
@@ -230,6 +272,8 @@ echo "  Password: ${omniroute_dashboard_password}"
 echo "  (this is the OmniRoute ADMIN password -- full access to add/remove"
 echo "  provider connections and revoke API keys, not just chat access."
 echo "  Keep it as private as the master key.)"
+}
+main "$@"
 '''
 
 
