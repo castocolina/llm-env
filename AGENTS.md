@@ -90,6 +90,22 @@ Never hardcode a value that can be measured. GPU device, VRAM totals, and
 compositor usage are all detected at runtime. Benchmarking uses Vulkan only;
 an unsuccessful Vulkan benchmark configures CPU fallback and exits nonzero.
 
+### Scratch vs Durable Artifacts
+
+- `.pi/` is local agent metadata and is gitignored by default. Any important
+  shared exception requires explicit justification and approval; none is
+  needed for the current session's agent definitions.
+- Durable Superpowers designs, plans, specs, research, and review docs live
+  ONLY under `docs/superpowers/`.
+- Ephemeral artifacts — investigation reports, prompts, fixtures, logs,
+  snapshots, diffs, session handoffs, and scratch assets generated for a
+  task — must be created under the repository's `./tmp/` (already ignored),
+  not scattered in `.claude/`, `.superpowers/`, or host `/tmp/` and other
+  external state. This applies to NEW task artifacts.
+- Checked-in product test fixtures are durable code/test assets, not
+  ephemeral. They stay in their proper tests/docker paths and must not be
+  moved into `./tmp/`.
+
 ## Detailed Instructions
 
 - [Architecture](.agents/architecture.md)
