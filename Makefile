@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark \
-        key-reset show-secrets enable-boot disable-boot status gpu-status provider-provision fix-codex-context combo-context backup \
+        key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context backup \
         combo-backup combo-restore connections-backup update-omniroute \
         check-provider-tokens enable-token-check disable-token-check logs validate test clean prune
 
@@ -70,8 +70,11 @@ desktop-gpu-reset:
 desktop-gpu-status:
 	@bash tools/run-target.sh desktop-gpu-status -- bash scripts/set-desktop-gpu.sh status
 
-provider-provision:
-	@bash tools/run-target.sh provider-provision -- bash scripts/provider-provision.sh
+codex-provision:
+	@bash tools/run-target.sh codex-provision -- bash scripts/provider-provision.sh
+
+# Compatibility alias — Codex-only; prefer `make codex-provision`.
+provider-provision: codex-provision
 
 fix-codex-context:
 	@bash tools/run-target.sh fix-codex-context -- bash scripts/omniroute-fix-context.sh

@@ -13,6 +13,7 @@ grow.
 
 from __future__ import annotations
 
+import base64
 import http.cookies
 import json
 import urllib.error
@@ -21,6 +22,15 @@ from pathlib import Path
 from typing import Any
 
 CONNECTION_NAME = "llm-env-local"
+
+# Friendly OmniRoute connection names for known Codex ChatGPT emails.
+# Import never picks a name by guessing the first "cco-cl" row — it matches
+# the local auth.json email (JWT) to an existing connection, or uses this map /
+# a derived name when creating a new one.
+CODEX_EMAIL_CONNECTION_NAMES = {
+    "castocolina.cl@gmail.com": "cco-cl",
+    "castocolina.dev@gmail.com": "cco-dev",
+}
 
 # OpenAI's own GPT-5.6 spec (raw context window: 1,050,000 tokens) is shared
 # identically across the "sol"/"terra"/"luna" branded variants and the bare
@@ -190,12 +200,124 @@ def provision(base_url: str, dashboard_password: str, port: int, api_key: str) -
     return {"action": "updated", "id": provider_id}
 
 
+def codex_auth_email(auth_json: dict[str, Any]) -> str | None:
+    """Return the ChatGPT account email from a Codex auth.json, if present.
+
+    Codex stores the signed-in identity in the OIDC id_token (JWT). We only
+    decode the payload claims — no signature verification — to decide which
+    OmniRoute connection this session belongs to.
+    """
+    tokens = auth_json.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    id_token = tokens.get("id_token")
+    if not isinstance(id_token, str) or id_token.count(".") != 2:
+        return None
+    payload_b64 = id_token.split(".")[1]
+    pad = "=" * (-len(payload_b64) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + pad))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    email = payload.get("email")
+    if isinstance(email, str) and "@" in email:
+        return email.strip().lower()
+    return None
+
+
+def _codex_name_owned_by_other_email(
+    connections: list[dict[str, Any]], name: str, email: str
+) -> dict[str, Any] | None:
+    email_l = email.lower()
+    for connection in connections:
+        if connection.get("provider") != "codex" or connection.get("name") != name:
+            continue
+        other = connection.get("email")
+        if isinstance(other, str) and other.lower() != email_l:
+            return connection
+    return None
+
+
+def resolve_codex_import_name(
+    connections: list[dict[str, Any]],
+    email: str,
+    *,
+    name_override: str | None = None,
+) -> str:
+    """Pick the OmniRoute connection name for a Codex import.
+
+    Prefer an existing codex connection whose email matches the local session.
+    Never reuse a display name that already belongs to a different email
+    (that was the cco-cl collision bug). Optional name_override is only used
+    when creating/updating without an email match, and is rejected on conflict.
+    """
+    email_l = email.lower()
+    for connection in connections:
+        if connection.get("provider") != "codex":
+            continue
+        conn_email = connection.get("email")
+        if not (isinstance(conn_email, str) and conn_email.lower() == email_l):
+            continue
+        name = connection.get("name")
+        if not (isinstance(name, str) and name):
+            break
+        # OmniRoute's import overwrites by display name, not by connection id.
+        # If two codex rows share a name (the old cco-cl bug), refuse rather
+        # than risk updating the wrong account's tokens.
+        conflict = _codex_name_owned_by_other_email(connections, name, email_l)
+        if conflict is not None:
+            raise OmniRouteError(
+                f"Codex account {email_l!r} is labeled {name!r}, but that name "
+                f"also belongs to {conflict.get('email')!r}. Rename one of "
+                "these connections in the OmniRoute dashboard so each email "
+                "has a unique name, then retry."
+            )
+        return name
+
+    if name_override:
+        conflict = _codex_name_owned_by_other_email(connections, name_override, email_l)
+        if conflict is not None:
+            raise OmniRouteError(
+                f"connection name {name_override!r} already belongs to "
+                f"{conflict.get('email')!r}; will not overwrite with {email_l!r}"
+            )
+        return name_override
+
+    candidates: list[str] = []
+    preferred = CODEX_EMAIL_CONNECTION_NAMES.get(email_l)
+    if preferred:
+        candidates.append(preferred)
+    local_part = email_l.split("@", 1)[0].replace(".", "-")
+    derived = f"codex-{local_part}"
+    if derived not in candidates:
+        candidates.append(derived)
+
+    for candidate in candidates:
+        conflict = _codex_name_owned_by_other_email(connections, candidate, email_l)
+        if conflict is None:
+            return candidate
+    raise OmniRouteError(
+        f"no safe OmniRoute connection name for Codex account {email_l!r}; "
+        "rename the conflicting connection in the dashboard and retry"
+    )
+
+
 def import_codex_auth(
-    base_url: str, dashboard_password: str, auth_json_path: Path, name: str
+    base_url: str,
+    dashboard_password: str,
+    auth_json_path: Path,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Import a local Codex CLI session (~/.codex/auth.json) into OmniRoute
     as a named provider connection, creating it on first run and updating
     the same connection's tokens on every later run (overwriteExisting).
+
+    Matches the target connection by the ChatGPT email in the local id_token
+    whenever possible, so a local session for account A never overwrites
+    OmniRoute tokens for account B that happens to share a display name
+    (e.g. two rows both labeled "cco-cl").
 
     Bypasses Codex's normal OAuth loopback flow entirely -- there is no
     browser callback involved, so this works whether OmniRoute is reached
@@ -211,11 +333,26 @@ def import_codex_auth(
         raise OmniRouteError(f"no Codex session at {auth_json_path}") from exc
     except json.JSONDecodeError as exc:
         raise OmniRouteError(f"{auth_json_path} is not valid JSON") from exc
+    if not isinstance(auth_json, dict):
+        raise OmniRouteError(f"{auth_json_path} must contain a JSON object")
+
+    email = codex_auth_email(auth_json)
+    if email is None:
+        raise OmniRouteError(
+            f"no ChatGPT email in {auth_json_path} id_token; "
+            "re-authenticate Codex locally and retry"
+        )
 
     session_token = _login(base_url, dashboard_password)
+    listing = _request("GET", f"{base_url}/api/providers", session_token)
+    connections = _extract_providers(listing)
+    resolved_name = resolve_codex_import_name(
+        connections, email, name_override=name
+    )
+
     payload = {
         "source": {"kind": "json", "json": auth_json},
-        "name": name,
+        "name": resolved_name,
         "overwriteExisting": True,
     }
     result = _request(
@@ -227,7 +364,8 @@ def import_codex_auth(
     return {
         "action": "created" if result.get("created") else "updated",
         "id": connection.get("id"),
-        "name": connection.get("name"),
+        "name": connection.get("name") or resolved_name,
+        "email": email,
     }
 
 

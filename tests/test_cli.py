@@ -1591,6 +1591,13 @@ class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        self.received.append(("GET", self.path, {}))
+        if self.path == "/api/providers":
+            self._reply({"connections": []})
+            return
+        self.send_error(404)
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
@@ -1605,6 +1612,14 @@ class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _cli_id_token_with_email(email: str) -> str:
+    import base64
+
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(json.dumps({"email": email}).encode()).decode().rstrip("=")
+    return f"{header}.{payload}.sig"
+
+
 def test_omniroute_import_codex_posts_the_local_auth_file(tmp_path):
     _RecordingCodexImportHandler.received = []
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingCodexImportHandler)
@@ -1614,28 +1629,32 @@ def test_omniroute_import_codex_posts_the_local_auth_file(tmp_path):
         config = _write_omniroute_test_config(
             tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
         )
+        id_token = _cli_id_token_with_email("castocolina.cl@gmail.com")
         auth_path = tmp_path / "codex-auth.json"
-        auth_path.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"id_token": "x"}}))
+        auth_path.write_text(
+            json.dumps({"auth_mode": "chatgpt", "tokens": {"id_token": id_token}})
+        )
         result = run(
             "--config", str(config),
             "omniroute", "import-codex",
             "--auth-path", str(auth_path),
-            "--name", "cco-cl",
         )
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == {
             "action": "created",
             "id": "codex-id",
             "name": "cco-cl",
+            "email": "castocolina.cl@gmail.com",
         }
-        method, path, body = _RecordingCodexImportHandler.received[1]
+        # login POST, providers GET, then import POST
+        method, path, body = _RecordingCodexImportHandler.received[2]
         assert method == "POST"
         assert path == "/api/providers/codex-auth/import"
         assert body["name"] == "cco-cl"
         assert body["overwriteExisting"] is True
         assert body["source"] == {
             "kind": "json",
-            "json": {"auth_mode": "chatgpt", "tokens": {"id_token": "x"}},
+            "json": {"auth_mode": "chatgpt", "tokens": {"id_token": id_token}},
         }
     finally:
         server.shutdown()

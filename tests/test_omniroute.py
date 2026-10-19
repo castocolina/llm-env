@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import sys
@@ -222,55 +223,165 @@ def test_provision_raises_when_existing_connection_has_no_id(monkeypatch):
         provision("http://127.0.0.1:20128", "dashboard-pw", 8000, "api-key")
 
 
-def test_import_codex_auth_creates_a_named_connection(monkeypatch, tmp_path):
+def _id_token_with_email(email: str) -> str:
+    """Minimal unsigned JWT whose payload carries email (header.payload.sig)."""
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"email": email}).encode()
+    ).decode().rstrip("=")
+    return f"{header}.{payload}.sig"
+
+
+def test_codex_auth_email_reads_the_id_token_claim():
+    assert (
+        omniroute_module.codex_auth_email(
+            {"tokens": {"id_token": _id_token_with_email("Casto@Example.com")}}
+        )
+        == "casto@example.com"
+    )
+    assert omniroute_module.codex_auth_email({"tokens": {}}) is None
+
+
+def test_resolve_codex_import_name_matches_existing_connection_by_email():
+    connections = [
+        {"provider": "codex", "name": "cco-cl", "email": "castocolina.cl@gmail.com"},
+        {"provider": "codex", "name": "cco-dev", "email": "castocolina.dev@gmail.com"},
+    ]
+    assert (
+        omniroute_module.resolve_codex_import_name(
+            connections, "castocolina.dev@gmail.com"
+        )
+        == "cco-dev"
+    )
+    assert (
+        omniroute_module.resolve_codex_import_name(
+            connections, "castocolina.cl@gmail.com"
+        )
+        == "cco-cl"
+    )
+
+
+def test_resolve_codex_import_name_refuses_shared_display_name():
+    connections = [
+        {"provider": "codex", "name": "cco-cl", "email": "castocolina.cl@gmail.com"},
+        {"provider": "codex", "name": "cco-cl", "email": "castocolina.dev@gmail.com"},
+    ]
+    with pytest.raises(OmniRouteError, match="also belongs to"):
+        omniroute_module.resolve_codex_import_name(
+            connections, "castocolina.dev@gmail.com"
+        )
+
+
+def test_resolve_codex_import_name_refuses_to_reuse_name_owned_by_other_email():
+    connections = [
+        {"provider": "codex", "name": "cco-cl", "email": "castocolina.cl@gmail.com"},
+    ]
+    # Known alias for .dev is cco-dev (free); override cco-cl must be rejected.
+    assert (
+        omniroute_module.resolve_codex_import_name(
+            connections, "castocolina.dev@gmail.com"
+        )
+        == "cco-dev"
+    )
+    with pytest.raises(OmniRouteError, match="already belongs to"):
+        omniroute_module.resolve_codex_import_name(
+            connections,
+            "castocolina.dev@gmail.com",
+            name_override="cco-cl",
+        )
+
+
+def test_import_codex_auth_updates_the_email_matched_connection(monkeypatch, tmp_path):
     login = _fake_login_ok()
     calls = []
     auth_path = tmp_path / "auth.json"
-    auth_path.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"id_token": "x"}}))
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"id_token": _id_token_with_email("castocolina.dev@gmail.com")},
+            }
+        )
+    )
 
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
         calls.append((request.get_method(), request.full_url, request.data))
-        return FakeResponse({"created": True, "connection": {"id": "new-id", "name": "cco-cl"}})
+        if request.full_url.endswith("/api/providers") and request.get_method() == "GET":
+            return FakeResponse(
+                {
+                    "connections": [
+                        {
+                            "id": "cl-id",
+                            "provider": "codex",
+                            "name": "cco-cl",
+                            "email": "castocolina.cl@gmail.com",
+                        },
+                        {
+                            "id": "dev-id",
+                            "provider": "codex",
+                            "name": "cco-dev",
+                            "email": "castocolina.dev@gmail.com",
+                        },
+                    ]
+                }
+            )
+        return FakeResponse(
+            {"created": False, "connection": {"id": "dev-id", "name": "cco-dev"}}
+        )
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
-    result = import_codex_auth(
-        "http://127.0.0.1:20128", "dashboard-pw", auth_path, name="cco-cl"
-    )
-    assert result == {"action": "created", "id": "new-id", "name": "cco-cl"}
-    assert calls[0][0] == "POST"
-    assert calls[0][1] == "http://127.0.0.1:20128/api/providers/codex-auth/import"
-    posted = json.loads(calls[0][2])
-    assert posted["name"] == "cco-cl"
-    assert posted["overwriteExisting"] is True
-    assert posted["source"] == {
-        "kind": "json",
-        "json": {"auth_mode": "chatgpt", "tokens": {"id_token": "x"}},
+    result = import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path)
+    assert result == {
+        "action": "updated",
+        "id": "dev-id",
+        "name": "cco-dev",
+        "email": "castocolina.dev@gmail.com",
     }
+    assert calls[0][0] == "GET"
+    assert calls[0][1] == "http://127.0.0.1:20128/api/providers"
+    assert calls[1][0] == "POST"
+    assert calls[1][1] == "http://127.0.0.1:20128/api/providers/codex-auth/import"
+    posted = json.loads(calls[1][2])
+    assert posted["name"] == "cco-dev"
+    assert posted["overwriteExisting"] is True
 
 
-def test_import_codex_auth_reports_update_on_rerun(monkeypatch, tmp_path):
+def test_import_codex_auth_creates_with_preferred_alias_when_no_email_match(
+    monkeypatch, tmp_path
+):
     login = _fake_login_ok()
+    calls = []
     auth_path = tmp_path / "auth.json"
-    auth_path.write_text(json.dumps({"tokens": {}}))
+    auth_path.write_text(
+        json.dumps(
+            {"tokens": {"id_token": _id_token_with_email("castocolina.cl@gmail.com")}}
+        )
+    )
 
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
-        return FakeResponse({"created": False, "connection": {"id": "same-id", "name": "cco-cl"}})
+        calls.append((request.get_method(), request.full_url, request.data))
+        if request.full_url.endswith("/api/providers") and request.get_method() == "GET":
+            return FakeResponse({"connections": []})
+        return FakeResponse(
+            {"created": True, "connection": {"id": "new-id", "name": "cco-cl"}}
+        )
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
-    result = import_codex_auth(
-        "http://127.0.0.1:20128", "dashboard-pw", auth_path, name="cco-cl"
-    )
-    assert result == {"action": "updated", "id": "same-id", "name": "cco-cl"}
+    result = import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path)
+    assert result["action"] == "created"
+    assert result["name"] == "cco-cl"
+    assert result["email"] == "castocolina.cl@gmail.com"
+    assert json.loads(calls[1][2])["name"] == "cco-cl"
 
 
 def test_import_codex_auth_raises_when_auth_file_is_missing(tmp_path):
     with pytest.raises(OmniRouteError, match="no Codex session"):
         import_codex_auth(
-            "http://127.0.0.1:20128", "dashboard-pw", tmp_path / "missing.json", name="cco-cl"
+            "http://127.0.0.1:20128", "dashboard-pw", tmp_path / "missing.json"
         )
 
 
@@ -278,7 +389,14 @@ def test_import_codex_auth_raises_when_auth_file_is_not_json(tmp_path):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("not json")
     with pytest.raises(OmniRouteError, match="not valid JSON"):
-        import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path, name="cco-cl")
+        import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path)
+
+
+def test_import_codex_auth_raises_when_id_token_has_no_email(tmp_path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"id_token": "not.a.jwt"}}))
+    with pytest.raises(OmniRouteError, match="no ChatGPT email"):
+        import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path)
 
 
 def test_import_codex_auth_surfaces_the_servers_error_detail(monkeypatch, tmp_path):
@@ -286,19 +404,25 @@ def test_import_codex_auth_surfaces_the_servers_error_detail(monkeypatch, tmp_pa
     as an actionable message, not just a bare status code."""
     login = _fake_login_ok()
     auth_path = tmp_path / "auth.json"
-    auth_path.write_text(json.dumps({"tokens": {}}))
+    auth_path.write_text(
+        json.dumps(
+            {"tokens": {"id_token": _id_token_with_email("castocolina.cl@gmail.com")}}
+        )
+    )
     body = json.dumps({"error": "Re-authenticate this account before exporting."}).encode()
 
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
+        if request.full_url.endswith("/api/providers") and request.get_method() == "GET":
+            return FakeResponse({"connections": []})
         raise urllib.error.HTTPError(
             request.full_url, 409, "Conflict", Message(), io.BytesIO(body)
         )
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(OmniRouteError, match="Re-authenticate this account"):
-        import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path, name="cco-cl")
+        import_codex_auth("http://127.0.0.1:20128", "dashboard-pw", auth_path)
 
 
 def _catalog_entry(model_id, root, owned_by="codex"):

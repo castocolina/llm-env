@@ -23,7 +23,8 @@ make check-server            # Online API contract validation
 make check-with-agents       # Live Pi/OpenCode weather and USD-to-CLP checks
 make benchmark                # Measure Vulkan throughput; CPU fallback exits nonzero
 make gpu-status                # Show which process (if any) holds the GPU
-make provider-provision        # Import local CLI provider sessions (Codex) into OmniRoute
+make codex-provision           # Import local Codex CLI session into OmniRoute (match by account email)
+make provider-provision        # Alias for codex-provision (Codex-only)
 make enable-boot              # Start at boot (opt-in)
 make disable-boot             # Disable start at boot
 make status                   # Show service status and print endpoints/credentials

@@ -641,7 +641,15 @@ def build_parser() -> argparse.ArgumentParser:
         ],
     )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
-    omniroute_parser.add_argument("--name", default="cco-cl")
+    omniroute_parser.add_argument(
+        "--name",
+        default=None,
+        help=(
+            "optional OmniRoute connection display name for Codex import; "
+            "when omitted, match an existing codex connection by ChatGPT email "
+            "from the local auth.json id_token"
+        ),
+    )
     omniroute_parser.add_argument(
         "--combo", default=None, help="limit combo-context to a single combo name"
     )

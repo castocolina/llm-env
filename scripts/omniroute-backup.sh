@@ -2,7 +2,7 @@
 # omniroute-backup.sh — back up combos and provider-connection metadata together.
 #
 # Use before make clean / make prune. Credentials are NOT included (OmniRoute's
-# providers API never returns them); re-auth via make provider-provision / the
+# providers API never returns them); re-auth via make codex-provision / the
 # dashboard after restore. Combo restore remaps connectionIds by (provider, name).
 #
 # Writes both files under ~/.config/llm-env/combo-backups/ with a shared stamp:

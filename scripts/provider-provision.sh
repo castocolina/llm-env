@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# provider-provision.sh — import local CLI-tool auth sessions into OmniRoute
-# as named provider connections, bypassing each tool's normal OAuth flow
-# (which requires a loopback callback the OmniRoute container can't receive
-# without SSH port-forwarding). Currently: Codex CLI (~/.codex/auth.json ->
-# the "cco-cl" connection).
+# provider-provision.sh — import the local Codex CLI session (~/.codex/auth.json)
+# into OmniRoute, matched by the ChatGPT account email in the id_token.
+#
+# This is Codex-only (not a generic "sync all local providers" tool). The make
+# target is also exposed as `codex-provision`; `provider-provision` remains as
+# a compatibility alias.
 #
 # Safe to run standalone against an already-running OmniRoute
-# (`make provider-provision`, no server restart needed), or chained after
+# (`make codex-provision`, no server restart needed), or chained after
 # `make start` once OmniRoute's own health check has passed -- creates the
-# connection on first run, updates its tokens on every later run.
+# connection on first run, updates tokens for the matching email on later runs.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -29,10 +30,16 @@ log_info "OmniRoute is ready"
 
 codex_auth_path="${HOME}/.codex/auth.json"
 if [ -f "$codex_auth_path" ]; then
-    log_step "Importing Codex session (cco-cl)"
-    if result="$(llmenv --config "$CONFIG_PATH" omniroute import-codex --auth-path "$codex_auth_path" --name cco-cl)"; then
+    log_step "Importing local Codex session (match by account email)"
+    if result="$(llmenv --config "$CONFIG_PATH" omniroute import-codex --auth-path "$codex_auth_path")"; then
         action="$(echo "$result" | jq -r '.action')"
-        log_info "Codex connection cco-cl ${action}"
+        name="$(echo "$result" | jq -r '.name')"
+        email="$(echo "$result" | jq -r '.email // empty')"
+        if [ -n "$email" ]; then
+            log_info "Codex connection ${name} (${email}) ${action}"
+        else
+            log_info "Codex connection ${name} ${action}"
+        fi
     else
         echo "$result" | jq -r '.error // "import failed"' >&2
         log_warn "Codex import failed; connect it manually via the OmniRoute dashboard"

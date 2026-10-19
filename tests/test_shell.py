@@ -1759,11 +1759,15 @@ def run_provider_provision_with_stubs(
     *,
     omniroute_port: int | None,
     codex_auth_json: str | None = None,
-    import_codex_case: str = 'printf \'{"action":"updated","id":"x","name":"cco-cl"}\\n\'',
+    import_codex_case: str = (
+        'printf \'{"action":"updated","id":"x","name":"cco-dev",'
+        '"email":"castocolina.dev@gmail.com"}\\n\''
+    ),
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
-    """Run provider-provision.sh against a stubbed llmenv pipeline. Pass a
-    real listening socket's port as omniroute_port to simulate "reachable";
-    omit codex_auth_json to simulate no local Codex session."""
+    """Run provider-provision.sh (make codex-provision) against a stubbed
+    llmenv pipeline. Pass a real listening socket's port as omniroute_port to
+    simulate "reachable"; omit codex_auth_json to simulate no local Codex
+    session."""
     commands = tmp_path / "bin"
     commands.mkdir(exist_ok=True)
 
@@ -1842,7 +1846,8 @@ def test_provider_provision_imports_a_local_codex_session(tmp_path: pathlib.Path
         )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Codex connection cco-cl updated" in result.stdout
+    assert "Codex connection cco-dev (castocolina.dev@gmail.com) updated" in result.stdout
+    assert "match by account email" in result.stdout
 
 
 def test_provider_provision_warns_but_succeeds_when_codex_import_fails(
