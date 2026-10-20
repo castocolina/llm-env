@@ -12010,6 +12010,9 @@ def run_update_omniroute_with_stubs(
     local_image_exists: bool = True,
     local_version: str | None = "3.8.49",
     remote_tag_names: tuple[str, ...] = ("latest", "3.8.50", "3.8.50-web", "3.8.49"),
+    local_digest: str = "sha256:local",
+    tag_digest: str = "sha256:local",
+    tag_endpoint_fail: bool = False,
     curl_fail: bool = False,
     pull_fail: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
@@ -12070,7 +12073,10 @@ def run_update_omniroute_with_stubs(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$1\" in\n"
         "  image)\n"
-        f"    [ \"$2\" != exists ] || {'exit 0' if local_image_exists else 'exit 1'} ;;\n"
+        "    case \"$2\" in\n"
+        f"      exists) {'exit 0' if local_image_exists else 'exit 1'} ;;\n"
+        f"      inspect) printf '%s' {json.dumps(local_digest)} ;;\n"
+        "    esac ;;\n"
         "  run)\n"
         f"    printf '%s' {json.dumps(local_version_json)} ;;\n"
         "  pull)\n"
@@ -12079,12 +12085,31 @@ def run_update_omniroute_with_stubs(
     )
     podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
 
+    # The stubbed curl answers both Docker Hub endpoints by URL shape: the
+    # single-tag endpoint (".../tags/<tag>", queried for the tag's manifest
+    # digest) and the tags listing (".../tags?page_size=...", queried for the
+    # latest published release version).
+    tag = image.rsplit(":", 1)[-1] if ":" in image else "latest"
     tags_json = json.dumps({"results": [{"name": name} for name in remote_tag_names]})
+    tag_json = json.dumps({"digest": tag_digest})
     curl = commands / "curl"
     curl.write_text(
         "#!/usr/bin/bash\n"
         "printf 'curl %s\\n' \"$*\" >> \"$CALLS\"\n"
-        + ("exit 22\n" if curl_fail else f"printf '%s' {json.dumps(tags_json)}\n")
+        "case \"$*\" in\n"
+        f"  *\"tags/{tag}\")\n"
+        + (
+            "    exit 22 ;;\n"
+            if (curl_fail or tag_endpoint_fail)
+            else f"    printf '%s' {json.dumps(tag_json)} ;;\n"
+        )
+        + "  *)\n"
+        + (
+            "    exit 22 ;;\n"
+            if curl_fail
+            else f"    printf '%s' {json.dumps(tags_json)} ;;\n"
+        )
+        + "esac\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
 
@@ -12106,116 +12131,35 @@ def run_update_omniroute_with_stubs(
     return result, calls
 
 
-def test_update_omniroute_pulls_and_restarts_when_a_newer_version_is_published(
+def test_update_omniroute_defers_without_any_lifecycle_or_registry_mutation(
     tmp_path: pathlib.Path,
 ) -> None:
     result, calls = run_update_omniroute_with_stubs(
-        tmp_path, local_version="3.8.49", remote_tag_names=("3.8.50", "3.8.49")
+        tmp_path, tag_digest="sha256:repointed"
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "3.8.49 -> 3.8.50" in result.stdout
-    recorded = calls.read_text()
-    assert "podman pull docker.io/diegosouzapw/omniroute:latest" in recorded
-    assert "bash " + str(ROOT / "scripts" / "stop.sh") in recorded
-    assert "bash " + str(ROOT / "scripts" / "start.sh") in recorded
-    # Pull happens first (the slow part, while still serving traffic), then
-    # stop, then start -- minimizes downtime to just the stop+start window.
-    pull_index = recorded.index("podman pull")
-    stop_index = recorded.index("scripts/stop.sh")
-    start_index = recorded.index("scripts/start.sh")
-    assert pull_index < stop_index < start_index
+    assert result.returncode == 75, result.stdout + result.stderr
+    assert "deferred" in (result.stdout + result.stderr).lower()
+    assert "dependency-bearing" in (result.stdout + result.stderr).lower()
+    assert calls.read_text() == ""
 
 
-def test_update_omniroute_does_nothing_when_already_on_the_latest_version(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"tag_digest": "sha256:repointed"},
+        {"image": "ghcr.io/example/omniroute:latest"},
+        {"local_image_exists": False},
+        {"curl_fail": True},
+        {"pull_fail": True},
+    ],
+)
+def test_update_omniroute_all_paths_defer_before_external_commands(
+    tmp_path: pathlib.Path, options: dict[str, Any]
 ) -> None:
-    result, calls = run_update_omniroute_with_stubs(
-        tmp_path, local_version="3.8.50", remote_tag_names=("3.8.50", "3.8.49")
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "already on the latest published version" in result.stdout
-    recorded = calls.read_text()
-    assert "podman pull" not in recorded
-    assert "scripts/stop.sh" not in recorded
-    assert "scripts/start.sh" not in recorded
-
-
-def test_update_omniroute_compares_versions_numerically_not_lexicographically(
-    tmp_path: pathlib.Path,
-) -> None:
-    """"3.8.9" must not be treated as newer than "3.8.48" by a naive
-    lexicographic string comparison."""
-    result, calls = run_update_omniroute_with_stubs(
-        tmp_path, local_version="3.8.48", remote_tag_names=("3.8.9",)
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "already on the latest published version" in result.stdout
-    assert "podman pull" not in calls.read_text()
-
-
-def test_update_omniroute_treats_a_missing_local_image_as_needing_an_update(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, calls = run_update_omniroute_with_stubs(
-        tmp_path,
-        local_image_exists=False,
-        local_version=None,
-        remote_tag_names=("3.8.50",),
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "no local image found" in result.stdout
-    assert "0.0.0 -> 3.8.50" in result.stdout
-    recorded = calls.read_text()
-    assert "podman pull" in recorded
-    # No local image to introspect -- the script must not spawn a
-    # throwaway container at all (that would itself implicitly pull),
-    # it should fall straight through to the "0.0.0" placeholder.
-    assert "podman run" not in recorded
-
-
-def test_update_omniroute_never_implicitly_pulls_during_the_version_check(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, calls = run_update_omniroute_with_stubs(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
-    recorded = calls.read_text()
-    check_index = recorded.index("podman run")
-    pull_indices = [i for i in range(len(recorded)) if recorded.startswith("podman pull", i)]
-    assert all(check_index < i for i in pull_indices)
-
-
-def test_update_omniroute_skips_unsupported_registries_without_failing(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, calls = run_update_omniroute_with_stubs(
-        tmp_path, image="ghcr.io/example/omniroute:latest"
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "unsupported registry" in result.stdout + result.stderr
-    recorded = calls.read_text()
-    assert "curl" not in recorded
-    assert "podman" not in recorded
-
-
-def test_update_omniroute_dies_on_a_docker_hub_network_failure(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, calls = run_update_omniroute_with_stubs(tmp_path, curl_fail=True)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "could not reach Docker Hub" in result.stdout + result.stderr
-    assert "podman pull" not in calls.read_text()
-
-
-def test_update_omniroute_dies_on_a_pull_failure_without_starting(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, calls = run_update_omniroute_with_stubs(
-        tmp_path, local_version="3.8.49", remote_tag_names=("3.8.50",), pull_fail=True
-    )
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "could not pull" in result.stdout + result.stderr
-    recorded = calls.read_text()
-    # Pull runs before stop now -- a pull failure must leave the running
-    # service untouched, not stop it and then fail to start it back up.
-    assert "scripts/stop.sh" not in recorded
-    assert "scripts/start.sh" not in recorded
+    result, calls = run_update_omniroute_with_stubs(tmp_path, **options)
+    assert result.returncode == 75, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert "dependency-bearing" in output
+    assert "300-second" in output and "10800-second" in output
+    assert calls.read_text() == ""
