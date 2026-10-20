@@ -108,4 +108,6 @@ an unsuccessful Vulkan benchmark configures CPU fallback and exits nonzero.
 
 ## Detailed Instructions
 
+- Retain all plans, including dormant and superseded plans; delete a plan only with explicit user approval.
+- Work directly in the current checkout unless isolation is necessary; if a worktree is necessary, use `.claude/worktrees/`.
 - [Architecture](.agents/architecture.md)
