@@ -521,6 +521,23 @@ def test_system_one_service_absent_by_default():
     assert "system-one" not in document["services"]
 
 
+def test_system_one_uses_fresh_local_observer_image_when_provided(monkeypatch):
+    monkeypatch.setenv("LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE", "localhost/system-one-observer:current")
+    document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
+    assert document["services"]["system-one"]["image"] == "localhost/system-one-observer:current"
+
+
+def test_system_one_uses_existing_internal_phoenix_network_without_changing_default():
+    document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
+    service = document["services"]["system-one"]
+    assert service["networks"] == ["default", "phoenix-trace"]
+    assert service["environment"]["LAYA_PHOENIX_URL"] == "http://phoenix:6006/v1/projects/laya/spans"
+    assert document["networks"]["default"] == {}
+    assert document["networks"]["phoenix-trace"] == {
+        "name": "llm-env-phoenix_internal", "external": True
+    }
+
+
 def test_system_one_service_rendered_when_enabled():
     document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
     service = document["services"]["system-one"]

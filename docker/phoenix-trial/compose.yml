@@ -1,0 +1,41 @@
+services:
+  phoenix:
+    image: docker.io/arizephoenix/phoenix:20.23.0@sha256:c542e7de1dc1fdd0f938de337d44ebefa7266e91391eed6e7978523d7f6e1f2f
+    ports: ["127.0.0.1:${PHOENIX_TRIAL_PORT:?}:6006"]
+    environment:
+      PHOENIX_HOST: "0.0.0.0"
+      PHOENIX_PORT: "6006"
+      PHOENIX_WORKING_DIR: /mnt/data
+      PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: "${PHOENIX_TRIAL_RETENTION_DAYS:?}"
+      PHOENIX_ALLOW_EXTERNAL_RESOURCES: "false"
+      PHOENIX_TELEMETRY_ENABLED: "false"
+      PHOENIX_ALLOWED_PROVIDERS: NONE
+      PHOENIX_ALLOWED_SANDBOX_PROVIDERS: NONE
+      PHOENIX_ENABLE_MCP_SERVER: "false"
+      PHOENIX_ENABLE_PROMETHEUS: "false"
+      PHOENIX_ENABLE_AUTH: "false"
+    volumes: ["data:/mnt/data"]
+    networks: [trial]
+    labels:
+      llm-env.scope: phoenix-trial
+      llm-env.project: "${PHOENIX_TRIAL_PROJECT:?}"
+  sender:
+    image: "${PHOENIX_TRIAL_SENDER_IMAGE:?}"
+    profiles: [tools]
+    environment:
+      UV_OFFLINE: "1"
+      UV_PYTHON_DOWNLOADS: never
+    networks: [trial]
+    labels:
+      llm-env.scope: phoenix-trial
+      llm-env.project: "${PHOENIX_TRIAL_PROJECT:?}"
+networks:
+  trial:
+    internal: true
+    labels:
+      llm-env.scope: phoenix-trial
+      llm-env.project: "${PHOENIX_TRIAL_PROJECT:?}"
+volumes:
+  data:
+    external: true
+    name: "${PHOENIX_TRIAL_VOLUME:?}"

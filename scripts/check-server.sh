@@ -408,6 +408,8 @@ fi
 
 if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; then
     system_one_base="http://127.0.0.1:$(yq -r '.system_one.port' "$CONFIG_PATH")"
+    system_one_probe="llm-env-check-${BASHPID}-$(date +%s%N)"
+    system_one_response_model=""
     log_step "System One"
     request_record "system-one health" \
         "curl --silent --show-error --max-time 10 ${system_one_base}/health" \
@@ -424,14 +426,20 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; the
         ok "Verdict: PASS identity=system-one health on GPU"
     fi
     system_one_decision() { # $1 identity, $2 body, $3 jq -e predicate, $4 expectation. One request; never batch questions.
-        request_record "$1" "curl --silent --show-error --max-time 10 -H 'Content-Type: application/json' --data-raw '${2}' ${system_one_base}/v1/systemone" "$2" "$4" -- \
-            curl --silent --show-error --max-time 10 -H "Content-Type: application/json" --data-raw "$2" "${system_one_base}/v1/systemone"
+        local probe_body
+        probe_body="$(jq -c --arg marker "$system_one_probe" '.state.llm_env_probe = $marker' <<< "$2")"
+        request_record "$1" "curl --silent --show-error --max-time 10 -H 'Content-Type: application/json' --data-raw '${probe_body}' ${system_one_base}/v1/systemone" "$probe_body" "$4" -- \
+            curl --silent --show-error --max-time 10 -H "Content-Type: application/json" --data-raw "$probe_body" "${system_one_base}/v1/systemone"
         log_block "Expectation" "$REQUEST_EXPECTATION"
         if request_failed 200 "$1"; then :
         elif ! jq -e "$3" < "$REQUEST_BODY_FILE" >/dev/null; then
             close_diagnostic_capture 1
             bad "Verdict: FAIL stage=answer identity=${1} expected=${4}"
-        else close_diagnostic_capture 0; ok "Verdict: PASS identity=${1}"; fi
+        else
+            system_one_response_model="$(jq -r '.model // empty' "$REQUEST_BODY_FILE")"
+            close_diagnostic_capture 0
+            ok "Verdict: PASS identity=${1}"
+        fi
     }
     choice_q='"team":{"type":"choice","instructions":"Which team should handle this ticket?","criteria":{"billing":"charges, invoices, refunds","technical":"bugs, crashes, outages","other":"everything else"}}'
     noul_q='"destructive":{"type":"noul","instructions":"Is this action destructive or irreversible?"}'
@@ -454,6 +462,58 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; the
 else
     log_step "System One"
     log_warn "Verdict: SKIP identity=system-one reason=system-one is disabled"
+fi
+
+if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; then
+    phoenix_base="$(bash "${REPO_DIR}/scripts/phoenix.sh" endpoint)"
+    phoenix_spans="$(mktemp "${diagnostic_dir}/phoenix-laya-spans.XXXXXX")"
+    log_step "Phoenix Laya history"
+    if ! curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS \
+        "$phoenix_base/readyz" >/dev/null 2>&1; then
+        bad "Verdict: FAIL stage=Phoenix readiness reason=/readyz is not ready"
+    else
+        phoenix_verified=0
+        phoenix_deadline=$((SECONDS + 10))
+        phoenix_error="newly collected Laya request not found within the bounded readback window"
+        while ((SECONDS < phoenix_deadline)); do
+            phoenix_remaining=$((phoenix_deadline - SECONDS))
+            ((phoenix_remaining <= 5)) || phoenix_remaining=5
+            if ! curl --noproxy '*' --connect-timeout 2 --max-time "$phoenix_remaining" \
+                --max-filesize 8388608 -fsS \
+                "$phoenix_base/v1/projects/laya/spans?limit=1000&sort=id&order=desc" \
+                -o "$phoenix_spans" 2>/dev/null || ! jq -e '
+                  (.data | type == "array") and has("next_cursor") and
+                  (.next_cursor == null or (.next_cursor | type == "string"))
+                ' "$phoenix_spans" >/dev/null 2>&1; then
+                phoenix_error="bounded laya spans API query failed or was malformed"
+                break
+            fi
+            if [[ -n "$system_one_response_model" ]] && jq -e \
+                --arg marker "$system_one_probe" --arg model "$system_one_response_model" '
+                  any(.data[];
+                    .status_code == "OK" and .attributes["laya.http_status"] == 200 and
+                    (try (.attributes["input.value"] | fromjson | .state.llm_env_probe == $marker) catch false) and
+                    (try (.attributes["output.value"] | fromjson |
+                      .model == $model and (.answers | type == "object") and (.answers | length > 0)) catch false))
+                ' "$phoenix_spans" >/dev/null 2>&1; then
+                phoenix_verified=1
+                break
+            fi
+            sleep 0.2
+        done
+        if [[ "$phoenix_verified" == 1 ]]; then
+            laya_summary="$(jq -r '
+              "records_in_page=" + (.data | length | tostring) +
+              " completeness=" + (if .next_cursor == null then "complete" else "incomplete (bounded first page)" end)
+            ' "$phoenix_spans")"
+            ok "Verdict: PASS identity=Phoenix history newly collected Laya request verified project=laya ${laya_summary}"
+        else
+            bad "Verdict: FAIL stage=Phoenix history reason=${phoenix_error}"
+        fi
+    fi
+else
+    log_step "Phoenix Laya history"
+    log_warn "Verdict: SKIP identity=Phoenix history reason=System One is disabled"
 fi
 
 echo

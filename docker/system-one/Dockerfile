@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 libd
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g 10001 laya && useradd -u 10001 -g laya -m laya \
     && mkdir -p "$HF_HOME" && chown -R laya:laya /home/laya
+COPY --chown=10001:10001 phoenix_observer.py /opt/laya-phoenix-observer.py
 USER laya
 EXPOSE 8000
-CMD ["laya-serve"]
+CMD ["python3", "/opt/laya-phoenix-observer.py"]

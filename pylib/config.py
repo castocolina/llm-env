@@ -16,6 +16,10 @@ from pylib.resources import (
     OMNIROUTE_CPU_MIN,
     OMNIROUTE_MEMORY_MAX_MIB,
     OMNIROUTE_MEMORY_MIN_MIB,
+    PHOENIX_CPUS_MAX,
+    PHOENIX_CPUS_MIN,
+    PHOENIX_MEMORY_MAX_MIB,
+    PHOENIX_MEMORY_MIN_MIB,
     REMOTE_SETUP_CPU_MAX,
     REMOTE_SETUP_CPU_MIN,
     REMOTE_SETUP_MEMORY_MAX_MIB,
@@ -175,6 +179,15 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             remote_setup_resources.setdefault(
                 "memory_max_mib", REMOTE_SETUP_MEMORY_MAX_MIB
             )
+        # Phoenix is not part of the rendered main-stack compose file (it
+        # owns a separate compose project); its policy constants live here
+        # so setup/start persist the same values phoenix.sh renders.
+        phoenix_resources = resources.setdefault("phoenix", {})
+        if isinstance(phoenix_resources, dict):
+            phoenix_resources.setdefault("cpus_min", PHOENIX_CPUS_MIN)
+            phoenix_resources.setdefault("cpus_max", PHOENIX_CPUS_MAX)
+            phoenix_resources.setdefault("memory_min_mib", PHOENIX_MEMORY_MIN_MIB)
+            phoenix_resources.setdefault("memory_max_mib", PHOENIX_MEMORY_MAX_MIB)
 
     omniroute = cfg.setdefault("omniroute", {})
     if isinstance(omniroute, dict):
@@ -384,6 +397,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.extend(
                 _validate_min_max_resources(resources, "remote_setup")
             )
+            errors.extend(_validate_min_max_resources(resources, "phoenix"))
 
     if "omniroute" in cfg:
         omniroute = cfg["omniroute"]

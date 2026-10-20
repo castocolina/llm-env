@@ -1,6 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context backup \
-        combo-backup combo-restore connections-backup update-omniroute logs validate test clean prune
+        combo-backup combo-restore connections-backup update-omniroute logs validate test test-phoenix clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -110,6 +110,10 @@ clean:
 
 prune:
 	@bash tools/run-target.sh prune -- bash scripts/prune.sh
+
+test-phoenix:
+	@bash tools/run-target.sh test-phoenix -- bash scripts/test-phoenix.sh
+
 
 # Unknown targets: show help instead of make's bare "No rule to make target".
 %:

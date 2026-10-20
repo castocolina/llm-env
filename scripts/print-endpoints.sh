@@ -50,6 +50,8 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH")" = "true" ]; then
     echo "  ${BOLD}System One (Laya)${NC}"
     echo "  Local:   http://127.0.0.1:${system_one_port}/v1/systemone  (loopback only, no auth)"
     echo "  Skill:   GSD_PATH_JEV=1 JEV_BACKEND=laya JEV_LAYA_URL=http://127.0.0.1:${system_one_port} GSD_PATH_JEV_TIMEOUT_SECONDS=20"
+    phoenix_url="$(bash "$(dirname "${BASH_SOURCE[0]}")/phoenix.sh" endpoint)"
+    echo "  Phoenix: ${phoenix_url}/projects (real Laya history, project laya)"
 fi
 echo
 echo "  ${BOLD}Remote agent setup${NC}"

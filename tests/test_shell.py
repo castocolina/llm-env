@@ -10,6 +10,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -5031,6 +5032,10 @@ def run_lifecycle_script(
     avahi_publish.write_text("#!/usr/bin/bash\nexit 0\n")
     avahi_publish.chmod(avahi_publish.stat().st_mode | stat.S_IXUSR)
 
+    ss = commands / "ss"
+    ss.write_text("#!/usr/bin/bash\nprintf 'ss %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n")
+    ss.chmod(ss.stat().st_mode | stat.S_IXUSR)
+
     for name in ("loginctl", "ip"):
         command = commands / name
         command.write_text(
@@ -5057,7 +5062,7 @@ def run_lifecycle_script(
     resources_case = (
         "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
         if resources_failure
-        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}}'"
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, \"phoenix\": {\"cpus_min\": 0.25, \"cpus_max\": 2, \"memory_min_mib\": 256, \"memory_max_mib\": 1024}}'"
     )
     uv = commands / "uv"
     uv.write_text(
@@ -5079,7 +5084,8 @@ def run_lifecycle_script(
     podman.write_text(
         "#!/usr/bin/bash\n"
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
-        "case \"$*\" in *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; esac\n"
+        "case \"$*\" in *'network inspect --format {{.Internal}}'*) printf 'true\\n'; exit 0 ;; esac\n"
+        "case \"$*\" in *'image exists localhost/llm-env-system-one-phoenix:'*) exit 1 ;; *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; *'volume inspect --format'*) [ \"${PHOENIX_VOLUME_EXISTS:-}\" = 1 ] && printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\"}' || exit 1 ;; *'network inspect --format'*) [ \"${PHOENIX_NETWORK_EXISTS:-}\" = 1 ] && printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\"}' || exit 1 ;; *'network inspect'*) [ \"${PHOENIX_NETWORK_EXISTS:-}\" = 1 ] || exit 1 ;; esac\n"
         "case \"$*\" in *'{{.State.Pid}}'*) printf '%s\\n' \"${SYSTEM_ONE_PID:-4242}\" ;; *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
         "case \"$*\" in *'printenv LAYA_MAX_CONCURRENT'*) printf '%s\\n' 64 ;; esac\n"
         "case \"$*\" in *'cpu.stat'*) printf '%s\\n' 'usage_usec 1000000' ;; esac\n"
@@ -5131,6 +5137,7 @@ def run_lifecycle_script(
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
         "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+        "PHOENIX_NETWORK_EXISTS": "1" if system_one_enabled else "0",
     } | (env_overrides or {})
     result = subprocess.run(
         ["/usr/bin/bash", script],
@@ -5258,6 +5265,18 @@ def test_makefile_exposes_system_one_benchmark() -> None:
     assert "system-one-benchmark:" in makefile
     assert "bash scripts/system-one-benchmark.sh" in makefile
     assert '_help_line "system-one-benchmark"' in (ROOT / "scripts/help.sh").read_text()
+
+
+def test_start_disabled_transition_stops_existing_phoenix_volume(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", llm_server_enabled=False,
+        env_overrides={"PHOENIX_VOLUME_EXISTS": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "scripts/phoenix.sh stop" in recorded
+    assert "podman compose" in recorded and " down" in recorded
+    assert "down -v" not in recorded and "volume rm" not in recorded
 
 
 def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.Path) -> None:
@@ -5404,27 +5423,29 @@ def test_start_skips_system_one_when_disabled(tmp_path: pathlib.Path) -> None:
     assert "/v1/systemone" not in calls.read_text()
 
 
-def test_start_warms_up_system_one_after_health(tmp_path: pathlib.Path) -> None:
+def test_start_does_not_send_a_fake_system_one_warmup_request(tmp_path: pathlib.Path) -> None:
     result, _config, calls = run_lifecycle_script(
         tmp_path, "scripts/start.sh", system_one_enabled=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = calls.read_text()
-    assert "http://127.0.0.1:8010/v1/systemone" in recorded
-    assert "charged twice" in recorded
+    assert "http://127.0.0.1:8010/v1/systemone" not in recorded
+    assert "charged twice" not in recorded
 
 
-def test_start_continues_when_system_one_warm_up_fails(tmp_path: pathlib.Path) -> None:
+def test_start_does_not_send_a_fake_warmup_even_if_curl_would_fail(tmp_path: pathlib.Path) -> None:
     result, _config, calls = run_lifecycle_script(
         tmp_path, "scripts/start.sh", system_one_enabled=True,
         env_overrides={"CURL_SYSTEMONE_FAIL": "1"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "/v1/systemone" in calls.read_text()
-    assert "System One warm-up request failed" in result.stderr
+    assert "/v1/systemone" not in calls.read_text()
+    assert "System One warm-up request failed" not in result.stderr
 
 
-def _print_endpoints(tmp_path: pathlib.Path, system_one_yaml: str):
+def _print_endpoints(
+    tmp_path: pathlib.Path, system_one_yaml: str, *, phoenix_port: str | None = None
+):
     real = {name: shutil.which(name) for name in ("yq", "jq", "ip")}
     assert all(real.values())
     commands = tmp_path / "bin"
@@ -5437,7 +5458,39 @@ def _print_endpoints(tmp_path: pathlib.Path, system_one_yaml: str):
     config = home / ".config/llm-env/models.yml"
     config.parent.mkdir(parents=True)
     config.write_text("server:\n  port: 8000\n  mdns_name: llm\n  api_key: fixture-api-key\nllm_server:\n  enabled: false\nomniroute:\n  port: 20128\n  initial_password: fixture-omniroute-password\nremote_setup:\n  port: 20130\nmodels:\n  - alias: a\n    enabled: true\n" + system_one_yaml)
-    return subprocess.run(["/usr/bin/bash", "scripts/print-endpoints.sh"], cwd=ROOT, env=os.environ | {"HOME": str(home), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False)
+    environment = os.environ | {"HOME": str(home), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"}
+    if phoenix_port is not None:
+        environment["LLM_ENV_PHOENIX_PORT"] = phoenix_port
+    return subprocess.run(["/usr/bin/bash", "scripts/print-endpoints.sh"], cwd=ROOT, env=environment, stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False)
+
+
+def test_phoenix_endpoint_uses_validated_custom_host_port(tmp_path: pathlib.Path) -> None:
+    real_yq = shutil.which("yq")
+    assert real_yq
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    (commands / "yq").symlink_to(real_yq)
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("system_one:\n  enabled: true\n")
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/phoenix.sh", "endpoint"], cwd=ROOT,
+        env=os.environ | {"HOME": str(home), "LLM_ENV_CONFIG": str(config),
+                          "LLM_ENV_PHOENIX_PORT": "6421", "PATH": f"{commands}:/usr/bin:/bin"},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "http://127.0.0.1:6421"
+
+
+def test_print_endpoints_uses_effective_custom_phoenix_port(tmp_path: pathlib.Path) -> None:
+    result = _print_endpoints(
+        tmp_path, "system_one:\n  enabled: true\n  port: 8010\n", phoenix_port="6421"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "http://127.0.0.1:6421/projects" in result.stdout
+    assert "http://127.0.0.1:6006/projects" not in result.stdout
 
 
 def test_print_endpoints_system_one_follows_the_flag(tmp_path: pathlib.Path) -> None:
@@ -7504,6 +7557,7 @@ def run_check_server(
     system_one_vram: str | None = None,
     system_one_pid: str = "",
     system_one_vram_reserve_mib: int = 5120,
+    phoenix_history_stale: bool = False,
     omniroute_providers_body: str = '{"connections":[{"name":"llm-env-local","isActive":true}]}',
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Run the online contract check with deterministic API command stubs."""
@@ -7588,6 +7642,11 @@ def run_check_server(
         "    esac\n"
         "    printf '200' ;;\n"
         "  */health) write_response \"$HEALTH_BODY\"; printf '200' ;;\n"
+        "  */readyz) write_response '{}'; printf '200' ;;\n"
+        "  */v1/projects/laya/spans*)\n"
+        "    payload=\"$(jq -rsc '[.[] | select(.url | endswith(\"/v1/systemone\"))] | last | .payload // \"\"' \"$CALLS\")\"\n"
+        "    [ \"${PHOENIX_HISTORY_STALE:-0}\" = 1 ] && payload='{\"state\":{\"llm_env_probe\":\"old-request\"}}'\n"
+        "    write_response \"$(jq -cn --arg payload \"$payload\" '{data:[{context:{trace_id:\"fixture-trace\"},start_time:\"2026-10-19T00:00:00Z\",end_time:\"2026-10-19T00:00:01Z\",status_code:\"OK\",attributes:{\"laya.http_status\":200,\"input.value\":$payload,\"output.value\":({model:\"laya-rl-agent\",answers:{urgency:{type:\"score\"}}}|tojson)}}],next_cursor:null}')\"; printf '200' ;;\n"
         "  */v1/models) write_response \"$MODEL_LIST_BODY\"; printf '200' ;;\n"
         "  http://127.0.0.1:20128/api/auth/login)\n"
         "    [ -n \"$cookie_write\" ] && printf 'omniroute-session-cookie\\n' > \"$cookie_write\"\n"
@@ -7737,6 +7796,7 @@ def run_check_server(
             '{"status":"ok","device":"cuda"}' if system_one_enabled else '{"status":"ok"}'
         ),
         "SYSTEM_ONE_WRONG_CHOICE": "1" if system_one_wrong_choice else "0",
+        "PHOENIX_HISTORY_STALE": "1" if phoenix_history_stale else "0",
         "SYSTEM_ONE_PID": system_one_pid,
         "SYSTEM_ONE_VRAM": system_one_vram or "",
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {})
@@ -7749,6 +7809,28 @@ def run_check_server(
         check=False,
     )
     return result, calls
+
+
+def test_check_server_requires_laya_history_after_real_system_one_checks(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, calls = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"}, system_one_enabled=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Phoenix history" in result.stdout
+    assert "laya" in result.stdout
+    assert "completeness=" in result.stdout
+    assert any("/v1/projects/laya/spans" in line for line in calls.read_text().splitlines())
+
+
+def test_check_server_rejects_old_history_without_this_runs_laya_request(tmp_path):
+    result, _ = run_check_server(
+        tmp_path, {"gemma4": "ready", "ornith": "ready"},
+        llm_server_enabled=False, system_one_enabled=True, phoenix_history_stale=True,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "newly collected" in result.stdout + result.stderr
 
 
 def test_check_server_requires_normalized_ready_for_every_enabled_model(
@@ -11185,6 +11267,14 @@ def test_makefile_restart_chains_two_recursive_make_calls() -> None:
     assert "restart:\n\t@$(MAKE) --no-print-directory stop\n\t@$(MAKE) --no-print-directory start\n" in makefile
 
 
+def test_logs_follow_main_and_phoenix_projects_with_owned_process_cleanup() -> None:
+    logs_text = (ROOT / "scripts/logs.sh").read_text()
+    assert "setsid" in logs_text
+    assert "llm-env-phoenix" in logs_text
+    assert 'kill -- "-$pid"' in logs_text
+    assert "wait" in logs_text
+
+
 def test_status_and_logs_scripts_reference_unit_name_and_compose_file_from_lib(tmp_path: pathlib.Path) -> None:
     status_text = (ROOT / "scripts/status.sh").read_text()
     logs_text = (ROOT / "scripts/logs.sh").read_text()
@@ -12163,3 +12253,516 @@ def test_update_omniroute_all_paths_defer_before_external_commands(
     assert "dependency-bearing" in output
     assert "300-second" in output and "10800-second" in output
     assert calls.read_text() == ""
+
+
+def test_normal_help_exposes_one_real_phoenix_acceptance_target_only():
+    makefile = (ROOT / "Makefile").read_text()
+    help_script = (ROOT / "scripts" / "help.sh").read_text()
+    assert "test-phoenix:" in makefile
+    assert "bash scripts/test-phoenix.sh" in makefile
+    assert '_help_line "test-phoenix"' in help_script
+    assert "phoenix-trial-" not in makefile
+    assert "phoenix-trial-" not in help_script
+
+
+def run_phoenix_trial(
+    tmp_path: pathlib.Path,
+    action: str,
+    *,
+    failure: str = "",
+    overrides: dict[str, str | None] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run Phoenix lifecycle against closed-world command stubs only."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "calls.log"
+    calls.unlink(missing_ok=True)
+    podman = bin_dir / "podman"
+    podman.write_text(
+        """#!/usr/bin/bash
+printf 'podman %s\\n' "$*" >> "$CALLS"
+if [[ "$1 $2" == 'pull docker.io/arizephoenix/phoenix:20.23.0@sha256:'* && "$FAILURE" == pull-fails ]]; then exit 1; fi
+if [[ "$1" == compose && " $* " == *' up -d phoenix '* ]]; then
+    for fd in /proc/$$/fd/*; do target=$(readlink "$fd" || true); [[ "$target" == *lifecycle.lock ]] && exit 98; done
+fi
+if [[ " $* " == *' sender verify '* || " $* " == *' sender seed '* ]]; then
+    expected=$(cat)
+    if [[ "$FAILURE" == invalid-successreceipt ]]; then printf '%s\\n' '{"status":"verified","run_id":"wrong"}'; exit 0; fi
+    jq -n --arg run_id "$(jq -r '.run_id' <<< "$expected")" \
+        --argjson summary "$(jq -cS '.summary' <<< "$expected")" \
+        --argjson ids "$(jq -cS '[.spans[].context.span_id] | sort' <<< "$expected")" \
+        '{schema_version:1,status:"verified",project:"laya-phoenix-trial",run_id:$run_id,summary:$summary,verified_span_ids:$ids}'
+fi
+if [[ "$1" == run && " $* " == *' volume-bytes '* ]]; then printf '%s\\n' '{"bytes":123}'; fi
+if [[ " $* " == *' run --rm -T sender seed '* ]] && [[ "$FAILURE" == response-lost ]]; then
+    printf '%s\\n' '{"error":"Phoenix POST outcome is uncertain (_TransientTransportError); use read-only verify"}'
+    exit 1
+fi
+if [[ "$1 $2" == 'image exists' && "$FAILURE" == missing-sender ]]; then exit 1; fi
+if [[ "$1 $2" == 'volume inspect' ]]; then
+    if [[ "$FAILURE" == unowned-volume ]]; then printf '%s\\n' '{"llm-env.scope":"other","llm-env.project":"other"}';
+    else printf '%s\\n' '{"llm-env.scope":"phoenix-trial","llm-env.project":"llm-env-phoenix-trial"}'; fi
+fi
+if [[ "$1 $2" == 'network inspect' ]]; then printf '%s\\n' '{"llm-env.scope":"phoenix-trial","llm-env.project":"llm-env-phoenix-trial"}'; fi
+if [[ "$1 $2" == 'image inspect' ]]; then
+    if [[ "$FAILURE" == unowned-image ]]; then printf '%s\\n' '{"llm-env.scope":"other","llm-env.project":"other"}';
+    else printf '%s\\n' '{"llm-env.scope":"phoenix-trial","llm-env.project":"llm-env-phoenix-trial"}'; fi
+fi
+if [[ "$1 $2" == 'ps -aq' && "$FAILURE" == unowned-container ]]; then printf '%s\\n' 'unowned-container'; fi
+if [[ "$1" == ps && " $* " == *' -q '* ]]; then printf '%s\\n' 'trial-container-id'; fi
+if [[ "$1" == inspect && " $* " == *' --format '* ]]; then
+    if [[ "$FAILURE" == unowned-container ]]; then printf '%s\\n' '{"llm-env.scope":"other","llm-env.project":"other","com.docker.compose.project":"other","com.docker.compose.service":"phoenix"}';
+    else printf '%s\\n' '{"llm-env.scope":"phoenix-trial","llm-env.project":"llm-env-phoenix-trial","com.docker.compose.project":"llm-env-phoenix-trial","com.docker.compose.service":"phoenix"}'; fi
+fi
+if [[ "$1" == inspect && " $* " != *' --format '* ]]; then
+    n=$(grep -c '^podman inspect [^-]' "$CALLS" || true)
+    id=trial-before; [[ $n -lt 2 ]] || id=trial-after
+    volume=llm-env-phoenix-trial-data
+    [[ $n -lt 2 || "$FAILURE" != volume-drift ]] || volume=other-data
+    printf '[{"Id":"%s","Config":{"Labels":{"llm-env.scope":"phoenix-trial","llm-env.project":"llm-env-phoenix-trial","com.docker.compose.project":"llm-env-phoenix-trial","com.docker.compose.service":"phoenix"}},"State":{"Status":"running","StartedAt":"2026-10-19T00:00:00Z","Pid":42},"Image":"sha256:trial","Mounts":[{"Name":"%s","Destination":"/mnt/data"}]}]\\n' "$id" "$volume"
+fi
+"""
+    )
+    podman.chmod(0o755)
+    uv = bin_dir / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "[[ \"$1\" == run ]] || exit 97\nshift\n"
+        "if [[ \"$FAILURE\" == prepare-fails && \" $* \" == *' phoenix-trial prepare '* ]]; then exit 1; fi\n"
+        "if [[ \"$FAILURE\" == mark-fails && \" $* \" == *' phoenix-trial mark-attempt '* ]]; then exit 1; fi\n"
+        "if [[ \" $* \" == *' phoenix-trial verify '* ]]; then printf '%s\\n' '{}'; exit 0; fi\n"
+        "script=\"$1\"; shift\nexec \"$PYTHON\" \"$script\" \"$@\"\n"
+    )
+    uv.chmod(0o755)
+    for name, content in {
+        "curl": "#!/usr/bin/bash\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+        "ss": "#!/usr/bin/bash\nprintf 'ss %s\\n' \"$*\" >> \"$CALLS\"\n[[ \"$FAILURE\" == busy-port ]] && printf 'LISTEN 127.0.0.1\\n'\nexit 0\n",
+        "flock": "#!/usr/bin/bash\n[[ \"$FAILURE\" == lock-contention ]] && exit 1\nexec /usr/bin/flock \"$@\"\n",
+    }.items():
+        command = bin_dir / name
+        command.write_text(content)
+        command.chmod(0o755)
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "TMPDIR": os.environ.get("TMPDIR", str(tmp_path)),
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "CALLS": str(calls),
+        "FAILURE": failure,
+        "PYTHON": sys.executable,
+    }
+    # A None override removes the variable entirely (e.g. simulating the
+    # unset-TMPDIR default path); anything else overrides it.
+    for key, value in (overrides or {}).items():
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = value
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/phoenix-trial.sh", action],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, calls
+
+
+def run_phoenix_stop_with_owned_resources(
+    tmp_path: pathlib.Path, *, owned_volume: bool, owned_container: bool,
+    config_text: str | None = "system_one:\n  enabled: false\n",
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    calls = tmp_path / "calls"
+    home = tmp_path / "home"
+    config = home / ".config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    if config_text is not None:
+        config.write_text(config_text)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  'ps -aq --filter label=llm-env.project=llm-env-phoenix')\n"
+        "    [ \"$OWNED_CONTAINER\" = 1 ] && printf 'owned-container\\n' ;;\n"
+        "  'volume inspect --format {{.Name}} llm-env-phoenix-data')\n"
+        "    [ \"$OWNED_VOLUME\" = 1 ] || [ \"$OWNED_CONTAINER\" = 1 ] || exit 1\n"
+        "    printf 'llm-env-phoenix-data\\n' ;;\n"
+        "  'volume inspect --format {{json .Labels}} llm-env-phoenix-data')\n"
+        "    [ \"$OWNED_VOLUME\" = 1 ] || [ \"$OWNED_CONTAINER\" = 1 ] || exit 1\n"
+        "    printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\"}' ;;\n"
+        "  'inspect --format {{json .Config.Labels}} owned-container')\n"
+        "    printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\",\"com.docker.compose.project\":\"llm-env-phoenix\",\"com.docker.compose.service\":\"phoenix\"}' ;;\n"
+        "  'network inspect --format {{json .Labels}} llm-env-phoenix_internal') exit 1 ;;\n"
+        "  compose\\ *) exit 0 ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    podman.chmod(0o755)
+    compose = commands / "podman-compose"
+    compose.write_text("#!/usr/bin/bash\nexit 0\n")
+    compose.chmod(0o755)
+    real_yq, real_jq = shutil.which("yq"), shutil.which("jq")
+    assert real_yq and real_jq
+    for name, real in (("yq", real_yq), ("jq", real_jq)):
+        link = commands / name
+        link.symlink_to(real)
+    env = os.environ | {
+        "CALLS": str(calls), "HOME": str(home), "LLM_ENV_CONFIG": str(config),
+        "OWNED_VOLUME": "1" if owned_volume else "0",
+        "OWNED_CONTAINER": "1" if owned_container else "0",
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    for key in ("PHOENIX_CPU_SHARES", "PHOENIX_CPUS_MAX", "PHOENIX_MEMORY_MIN_MIB", "PHOENIX_MEMORY_MAX_MIB"):
+        env.pop(key, None)
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/phoenix.sh", "stop"], cwd=ROOT, env=env,
+        text=True, capture_output=True, check=False,
+    )
+    return result, calls.read_text() if calls.exists() else ""
+
+
+@pytest.mark.parametrize("owned_volume,owned_container", [(True, False), (False, True)])
+def test_phoenix_owned_stop_initializes_resource_environment(
+    tmp_path: pathlib.Path, owned_volume: bool, owned_container: bool
+) -> None:
+    result, calls = run_phoenix_stop_with_owned_resources(
+        tmp_path, owned_volume=owned_volume, owned_container=owned_container
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "podman compose " in calls and " down" in calls
+    assert "data volume retained" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [None, "resources:\n  phoenix: {cpus_min: stale, cpus_max: null}\n"],
+)
+def test_phoenix_owned_stop_works_without_usable_config(tmp_path: pathlib.Path, config_text: str | None):
+    result, calls = run_phoenix_stop_with_owned_resources(
+        tmp_path, owned_volume=True, owned_container=False, config_text=config_text
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "podman compose " in calls and " down" in calls
+
+
+def test_phoenix_trial_seed_prepares_before_single_sender_attempt(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "seed", failure="response-lost")
+    recorded = calls_path.read_text()
+    assert result.returncode != 0
+    assert recorded.index("phoenix-trial prepare") < recorded.index("phoenix-trial mark-attempt")
+    assert recorded.index("phoenix-trial mark-attempt") < recorded.index("run --rm -T sender seed")
+    assert recorded.count("run --rm -T sender seed") == 1
+    assert "phoenix-trial verify" in result.stderr
+    assert "Phoenix sender diagnostic: Phoenix POST outcome is uncertain (_TransientTransportError)" in result.stderr
+    assert "down -v" not in recorded and "volume rm" not in recorded
+    runs = list((tmp_path / "state" / "llm-env" / "phoenix-trial").glob("*/runs/*"))
+    assert len(runs) == 1
+    assert (runs[0] / "expected.json").is_file()
+    assert (runs[0] / "prepared.json").is_file()
+    assert (runs[0] / "attempt.json").is_file()
+
+
+def test_phoenix_trial_failed_pull_creates_no_volume_or_container(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", failure="pull-fails")
+    assert result.returncode != 0
+    calls = calls_path.read_text()
+    assert "podman pull" in calls
+    assert "volume create" not in calls
+    assert "compose --env-file /dev/null" not in calls
+
+
+@pytest.mark.parametrize("failure", ["prepare-fails", "mark-fails"])
+def test_phoenix_trial_preparation_failures_never_start_sender(tmp_path: pathlib.Path, failure: str):
+    result, calls_path = run_phoenix_trial(tmp_path, "seed", failure=failure)
+    assert result.returncode != 0
+    assert "no sender POST was attempted" in result.stderr
+    assert "sender seed" not in calls_path.read_text()
+
+
+def test_phoenix_trial_lock_contention_stops_before_engine_access(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "stop", failure="lock-contention")
+    assert result.returncode != 0
+    assert "lifecycle is already running" in result.stderr
+    assert not calls_path.exists() or "podman " not in calls_path.read_text()
+
+
+def test_phoenix_trial_rejects_invalid_success_receipt(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "seed", failure="invalid-successreceipt")
+    assert result.returncode != 0
+    assert "receipt that does not match" in result.stderr
+    assert "sender seed" in calls_path.read_text()
+    runs = list((tmp_path / "state" / "llm-env" / "phoenix-trial").glob("*/runs/*"))
+    assert len(runs) == 1
+    assert not (runs[0] / "seed-result.json").exists()
+
+
+def test_phoenix_trial_warns_about_unresolved_prior_attempt_without_retry(tmp_path: pathlib.Path):
+    first, _ = run_phoenix_trial(tmp_path, "seed", failure="response-lost")
+    assert first.returncode != 0
+    second, calls = run_phoenix_trial(tmp_path, "seed", failure="response-lost")
+    assert second.returncode != 0
+    assert "persisted data may or may not exist" in second.stderr
+    assert "No retry or reseed" in second.stderr
+    assert calls.read_text().count("run --rm -T sender seed") == 1
+    run_dirs = list((tmp_path / "state" / "llm-env" / "phoenix-trial").glob("*/runs/*"))
+    assert len(run_dirs) == 2
+
+
+def test_phoenix_trial_status_is_read_only(tmp_path: pathlib.Path):
+
+    result, calls_path = run_phoenix_trial(tmp_path, "status")
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert "compose ps" in calls or "compose" in calls
+    assert " pull " not in calls
+    assert " build " not in calls
+    assert " up " not in calls
+    assert " down " not in calls
+
+
+def test_phoenix_trial_resolves_trusted_home_symlink_before_state_checks(tmp_path: pathlib.Path):
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    home_alias = tmp_path / "home-alias"
+    home_alias.symlink_to(real_home, target_is_directory=True)
+    result, _ = run_phoenix_trial(tmp_path, "stop", overrides={"HOME": str(home_alias), "XDG_STATE_HOME": ""})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (real_home / ".local/state/llm-env/phoenix-trial/llm-env-phoenix-trial").is_dir()
+
+
+def test_phoenix_trial_rejects_invalid_action_before_engine_access(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "restart")
+    assert result.returncode != 0
+    assert not calls_path.exists() or "podman" not in calls_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"LLM_ENV_PHOENIX_TRIAL_PROJECT": "production"}, "project"),
+        ({"LLM_ENV_PHOENIX_PORT": "0"}, "port"),
+        ({"LLM_ENV_PHOENIX_PORT": "65536"}, "port"),
+        ({"LLM_ENV_PHOENIX_RETENTION_DAYS": "0"}, "RETENTION_DAYS"),
+    ],
+)
+def test_phoenix_trial_rejects_invalid_configuration_before_engine_access(
+    tmp_path: pathlib.Path, overrides: dict[str, str | None], message: str
+):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", overrides=overrides)
+    assert result.returncode != 0
+    assert message.lower() in (result.stdout + result.stderr).lower()
+    assert not calls_path.exists() or "podman" not in calls_path.read_text()
+
+
+def test_phoenix_trial_busy_port_fails_before_pull_or_volume_mutation(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", failure="busy-port")
+    assert result.returncode != 0
+    assert "already in use" in result.stderr
+    calls = calls_path.read_text()
+    assert "podman pull" not in calls
+    assert "volume create" not in calls
+    assert "compose up" not in calls
+
+
+def test_phoenix_trial_refuses_unowned_volume(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "stop", failure="unowned-volume")
+    assert result.returncode != 0
+    assert "unowned Phoenix trial volume" in result.stderr
+    assert "compose down" not in calls_path.read_text()
+
+
+def test_phoenix_trial_up_refuses_unowned_sender_image(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", failure="unowned-image")
+    assert result.returncode != 0
+    assert "unowned Phoenix trial sender image" in result.stderr
+    calls = calls_path.read_text()
+    assert "podman pull" not in calls
+    assert "podman build" not in calls
+
+
+def test_phoenix_trial_seed_refuses_unowned_server_before_preparation(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "seed", failure="unowned-container")
+    assert result.returncode != 0
+    assert "unowned Phoenix trial container" in result.stderr
+    calls = calls_path.read_text()
+    assert "phoenix-trial prepare" not in calls
+    assert "run --rm -T sender seed" not in calls
+
+
+def test_phoenix_trial_up_is_scoped_and_starts_only_server(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up")
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert "podman pull docker.io/arizephoenix/phoenix:20.23.0@sha256:" in calls
+    # Basic startup must not build or even require the synthetic sender.
+    assert "podman build" not in calls
+    assert "run --rm" not in calls
+    assert "podman compose " in calls and " up -d phoenix" in calls
+    assert "--profile tools" not in calls
+    assert "scripts/start.sh" not in calls and "systemctl" not in calls
+
+
+def test_phoenix_trial_up_accepts_unset_tmpdir(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", overrides={"TMPDIR": None})
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert "podman pull docker.io/arizephoenix/phoenix:20.23.0@sha256:" in calls
+    assert "podman build" not in calls
+
+
+def test_phoenix_trial_up_accepts_inherited_system_tmpdir(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "up", overrides={"TMPDIR": "/tmp"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert "podman pull" in calls
+    assert "podman build" not in calls
+
+
+def test_phoenix_trial_seed_builds_missing_sender_with_unset_tmpdir(
+    tmp_path: pathlib.Path,
+):
+    result, calls_path = run_phoenix_trial(
+        tmp_path, "seed", failure="missing-sender", overrides={"TMPDIR": None}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert calls.index("podman build --label llm-env.scope=phoenix-trial") < calls.index(
+        "run --rm -T sender seed"
+    )
+
+
+def test_phoenix_trial_seed_builds_scratch_inside_repo_tmp_with_system_tmpdir(
+    tmp_path: pathlib.Path,
+):
+    result, calls_path = run_phoenix_trial(
+        tmp_path, "seed", failure="missing-sender", overrides={"TMPDIR": "/tmp"}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    build_line = next(
+        line
+        for line in calls_path.read_text().splitlines()
+        if line.startswith("podman build ")
+    )
+    context = build_line.split()[-1]
+    assert context.startswith(str(ROOT / "tmp") + os.sep), context
+
+
+def test_phoenix_trial_seed_refuses_symlinked_tmpdir_before_build(
+    tmp_path: pathlib.Path,
+):
+    probe = ROOT / "tmp" / f"phoenix-trial-symlink-probe-{tmp_path.name}"
+    probe.mkdir(parents=True)
+    (probe / "real").mkdir()
+    link = probe / "link"
+    link.symlink_to(probe / "real", target_is_directory=True)
+    try:
+        result, calls_path = run_phoenix_trial(
+            tmp_path, "seed", failure="missing-sender", overrides={"TMPDIR": str(link)}
+        )
+    finally:
+        link.unlink()
+        (probe / "real").rmdir()
+        probe.rmdir()
+    assert result.returncode != 0
+    assert "refusing symlink" in result.stderr
+    assert "podman build" not in calls_path.read_text()
+
+
+def test_phoenix_trial_stop_never_removes_volume(tmp_path: pathlib.Path):
+    result, calls_path = run_phoenix_trial(tmp_path, "stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    assert "compose" in calls and " down" in calls
+    assert "down -v" not in calls
+    assert "volume rm" not in calls
+
+
+def _prepare_phoenix_trial_state(tmp_path: pathlib.Path) -> pathlib.Path:
+    state_dir = tmp_path / "state" / "llm-env" / "phoenix-trial" / "llm-env-phoenix-trial"
+    state_dir.mkdir(parents=True)
+    prepared = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "llmenv.py"),
+            "phoenix-trial",
+            "prepare",
+            "--manifest",
+            str(ROOT / "docker/phoenix-trial/fixtures/laya-synthetic.json"),
+            "--state-dir",
+            str(state_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    return pathlib.Path(json.loads(prepared.stdout)["expected_path"])
+
+
+def test_phoenix_trial_persistence_uses_newest_prepared_not_uuid_order(tmp_path: pathlib.Path):
+    state_dir = tmp_path / "state" / "llm-env" / "phoenix-trial" / "llm-env-phoenix-trial"
+    state_dir.mkdir(parents=True)
+    manifest = str(ROOT / "docker/phoenix-trial/fixtures/laya-synthetic.json")
+    older_id = "f1234567123442348123123456789abc"
+    older_result = subprocess.run(
+        [sys.executable, str(ROOT / "llmenv.py"), "phoenix-trial", "prepare",
+         "--manifest", manifest, "--state-dir", str(state_dir), "--run-id", older_id],
+        capture_output=True, text=True, check=False,
+    )
+    assert older_result.returncode == 0, older_result.stderr
+    older = pathlib.Path(json.loads(older_result.stdout)["expected_path"])
+    run_root = older.parent.parent
+    newer_id = "21234567123442348123123456789abc"
+    prepared = subprocess.run(
+        [sys.executable, str(ROOT / "llmenv.py"), "phoenix-trial", "prepare",
+         "--manifest", manifest,
+         "--state-dir", str(run_root.parent), "--run-id", newer_id],
+        capture_output=True, text=True, check=False,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    newer_path = pathlib.Path(json.loads(prepared.stdout)["expected_path"])
+    os.utime(older.parent / "prepared.json", ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    os.utime(newer_path.parent / "prepared.json", ns=(1_800_000_000_000_000_000, 1_800_000_000_000_000_000))
+
+    result, calls_path = run_phoenix_trial(tmp_path, "verify-persistence")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"--run-id {newer_id}" in calls_path.read_text()
+
+
+def test_phoenix_trial_verify_reads_before_recreate_and_never_seeds(tmp_path: pathlib.Path):
+
+
+    expected_path = _prepare_phoenix_trial_state(tmp_path)
+    original = expected_path.read_bytes()
+
+    result, calls_path = run_phoenix_trial(tmp_path, "verify-persistence")
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_path.read_text()
+    verify = calls.index("phoenix-trial verify")
+    recreate = calls.index("--force-recreate phoenix")
+    assert verify < recreate
+    assert "phoenix-trial seed" not in calls
+    assert calls.count("phoenix-trial verify") == 1
+    assert "sender verify --base-url http://phoenix:6006" in calls
+    assert calls.count("volume-bytes") == 2
+    assert calls.index("volume-bytes") < recreate < calls.rindex("volume-bytes")
+    assert expected_path.read_bytes() == original
+
+
+def test_phoenix_trial_recreation_refuses_volume_drift(tmp_path: pathlib.Path):
+    _prepare_phoenix_trial_state(tmp_path)
+    result, calls_path = run_phoenix_trial(
+        tmp_path, "verify-persistence", failure="volume-drift"
+    )
+    assert result.returncode != 0
+    assert "volume" in (result.stdout + result.stderr).lower()
+    calls = calls_path.read_text()
+    assert "--force-recreate phoenix" in calls
+    assert calls.count("phoenix-trial verify") == 1
+    assert "phoenix-trial seed" not in calls

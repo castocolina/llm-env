@@ -1,0 +1,12 @@
+FROM ghcr.io/astral-sh/uv:0.12.19-python3.13-trixie-slim@sha256:aba5f865793af9275ceaa06d30935dfc6db8b81969c9fb099b0ebca6396b189e
+WORKDIR /app
+ENV UV_CACHE_DIR=/opt/uv-cache UV_PYTHON_DOWNLOADS=never
+COPY pyproject.toml uv.lock llmenv.py ./
+COPY pylib/__init__.py pylib/agent_runner.py pylib/budget.py pylib/compose.py pylib/config.py pylib/detect.py pylib/dotenv.py pylib/gguf.py pylib/omniroute.py pylib/omniroute_combos.py pylib/presets.py pylib/remote_setup.py pylib/resources.py pylib/transcript.py pylib/phoenix_trial.py ./pylib/
+COPY docker/phoenix-trial/fixtures/laya-synthetic.json ./docker/phoenix-trial/fixtures/laya-synthetic.json
+RUN uv sync --frozen --no-dev --no-install-project \
+ && uv run llmenv.py phoenix-trial fixture-check --manifest docker/phoenix-trial/fixtures/laya-synthetic.json \
+ && UV_OFFLINE=1 uv run llmenv.py phoenix-trial fixture-check --manifest docker/phoenix-trial/fixtures/laya-synthetic.json
+ENV UV_OFFLINE=1
+ENTRYPOINT ["uv", "run", "llmenv.py", "phoenix-trial"]
+CMD ["fixture-check", "--manifest", "docker/phoenix-trial/fixtures/laya-synthetic.json"]

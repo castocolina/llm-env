@@ -241,6 +241,21 @@ require_cmd() {
     done
 }
 
+# Reject symlink components anywhere below the filesystem root in $1.
+# Callers pass a fully-chosen path (e.g. a private state or build-scratch
+# directory); the path below the chosen root must be ordinary directories.
+# Trusted canonical aliases (a resolved HOME/XDG state root) are handled by
+# the caller before this check.
+reject_symlink_components() {
+    local path="$1" current=/ component
+    IFS=/ read -r -a parts <<< "${path#/}"
+    for component in "${parts[@]}"; do
+        [[ -z "$component" ]] && continue
+        current="${current%/}/$component"
+        [[ ! -L "$current" ]] || die "refusing symlink component in path: $current"
+    done
+}
+
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 

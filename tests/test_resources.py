@@ -12,12 +12,16 @@ from pylib.resources import (
     OMNIROUTE_CPU_MIN,
     OMNIROUTE_MEMORY_MAX_MIB,
     OMNIROUTE_MEMORY_MIN_MIB,
+    PHOENIX_CPUS_MIN,
+    PHOENIX_MEMORY_MIN_MIB,
     REMOTE_SETUP_CPU_MAX,
     REMOTE_SETUP_CPU_MIN,
     REMOTE_SETUP_MEMORY_MAX_MIB,
     REMOTE_SETUP_MEMORY_MIN_MIB,
     SYSTEM_ONE_CPUS,
+    SYSTEM_ONE_CPUS_MIN,
     SYSTEM_ONE_MEMORY_MIB,
+    SYSTEM_ONE_MEMORY_MIN_MIB,
     ResourceError,
     compute_resource_limits,
 )
@@ -250,18 +254,19 @@ def test_system_one_reservation_shrinks_llm_server_remainder():
     )
     # Caps stay on the service; the host floor subtracts the reservation, same as OmniRoute's min.
     assert with_one["system_one"] == {"cpus": SYSTEM_ONE_CPUS, "memory_mib": SYSTEM_ONE_MEMORY_MIB}
-    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - 2560
-    assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - 1
+    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIN_MIB - PHOENIX_MEMORY_MIN_MIB
+    assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - SYSTEM_ONE_CPUS_MIN - PHOENIX_CPUS_MIN
     assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - 2560
 
 
 def test_system_one_host_floor_uses_the_reservation_not_the_cap():
     cpu = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN + 1
     memory = (
-        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB + 2560
+        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+        + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
     )
     compute_resource_limits(cpu + 1, memory + 1, system_one_enabled=True)
-    with pytest.raises(ResourceError, match=r"System One's reservation \(1 CPUs, 2560 MiB\)"):
+    with pytest.raises(ResourceError, match=r"System One's budgeted minimum \(1 CPU-share unit, 2560 MiB\)"):
         compute_resource_limits(cpu, memory + 1, system_one_enabled=True)
 
 
@@ -270,7 +275,7 @@ def test_system_one_reservation_absent_when_disabled():
 
 
 def test_system_one_resource_error_names_its_reservation():
-    message = r"System One's reservation \(1 CPUs, 2560 MiB\)"
+    message = r"System One's budgeted minimum \(1 CPU-share unit, 2560 MiB\)"
     cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN + 1
     memory_floor = (
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB + 2560

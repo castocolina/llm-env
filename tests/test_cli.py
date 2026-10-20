@@ -1422,6 +1422,119 @@ def test_resources_emits_host_and_llm_server_limits(tmp_path: Path):
         assert "error" in payload
 
 
+def test_phoenix_resource_policy_is_charged_only_with_system_one():
+    from pylib.resources import (
+        PHOENIX_CPUS_MAX,
+        PHOENIX_CPUS_MIN,
+        PHOENIX_MEMORY_MAX_MIB,
+        PHOENIX_MEMORY_MIN_MIB,
+        compute_resource_limits,
+    )
+
+    policy = {
+        "cpus_min": PHOENIX_CPUS_MIN,
+        "cpus_max": PHOENIX_CPUS_MAX,
+        "memory_min_mib": PHOENIX_MEMORY_MIN_MIB,
+        "memory_max_mib": PHOENIX_MEMORY_MAX_MIB,
+    }
+    enabled = compute_resource_limits(16, 65536, system_one_enabled=True)
+    disabled = compute_resource_limits(16, 65536, system_one_enabled=False)
+    # llm-server-disabled (OmniRoute gateway) mode still charges Phoenix
+    # whenever System One is enabled.
+    gateway = compute_resource_limits(
+        16, 65536, llm_server_enabled=False, system_one_enabled=True
+    )
+
+    assert enabled["phoenix"] == policy
+    assert gateway["phoenix"] == policy
+    assert disabled["phoenix"] == {
+        "cpus_min": 0,
+        "cpus_max": 0,
+        "memory_min_mib": 0,
+        "memory_max_mib": 0,
+    }
+    # Phoenix's soft reservation (together with System One's) shrinks the
+    # llm-server remainder of the same 16-CPU/64-GiB host.
+    from pylib.resources import (
+        HOST_CPU_FLOOR,
+        HOST_MEMORY_FLOOR_MIB,
+        SYSTEM_ONE_CPUS_MIN,
+        SYSTEM_ONE_MEMORY_MIN_MIB,
+    )
+
+    expected_cpu_floor = (
+        HOST_CPU_FLOOR + 1 + 1 + SYSTEM_ONE_CPUS_MIN + PHOENIX_CPUS_MIN
+    )
+    expected_memory_floor = (
+        HOST_MEMORY_FLOOR_MIB + 1024 + 32 + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
+    )
+    assert enabled["llm_server"]["cpus"] == 16 - expected_cpu_floor
+    assert enabled["llm_server"]["memory_mib"] == 65536 - expected_memory_floor
+
+
+def test_phoenix_reservation_can_make_a_small_host_infeasible():
+    from pylib.resources import ResourceError, compute_resource_limits
+
+    # 4 CPUs / 6 GiB RAM: enough for the host floor + OmniRoute +
+    # remote-setup + System One, but not once the Phoenix reservation is
+    # added -- the error must name Phoenix, not just "the floor".
+    with pytest.raises(ResourceError, match="Phoenix"):
+        compute_resource_limits(4, 6144, llm_server_enabled=False, system_one_enabled=True)
+
+
+def test_migrate_config_defaults_phoenix_resources(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    result = run("migrate-config", "--config", str(config))
+    assert result.returncode == 0, result.stderr
+    parsed = yaml.safe_load(config.read_text())
+    assert parsed["resources"]["phoenix"] == {
+        "cpus_min": 0.25,
+        "cpus_max": 2,
+        "memory_min_mib": 256,
+        "memory_max_mib": 1024,
+    }
+
+
+def test_resources_rejects_phoenix_min_above_max(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed.setdefault("resources", {})["phoenix"] = {
+        "cpus_min": 4,
+        "cpus_max": 2,
+        "memory_min_mib": 256,
+        "memory_max_mib": 1024,
+    }
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+
+    result = run("resources", "--config", str(config))
+    assert result.returncode == 1
+    assert "resources.phoenix.cpus_min" in result.stdout + result.stderr
+
+
+def test_resources_emits_phoenix_policy_when_system_one_enabled(tmp_path: Path):
+    config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed["system_one"] = {
+        "enabled": True,
+        "port": 8010,
+        "image": "localhost/llm-env-system-one:rocm",
+        "models": "english",
+        "vram_reserve_mib": 4096,
+    }
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
+
+    result = run("resources", "--config", str(config))
+    payload = json.loads(result.stdout)
+    if result.returncode != 0:
+        # A genuinely tiny host is allowed to refuse the reservation.
+        assert "error" in payload
+        return
+    assert payload["phoenix"]["memory_min_mib"] == 256
+    assert payload["phoenix"]["memory_max_mib"] == 1024
+    assert payload["phoenix"]["cpus_min"] == 0.25
+    assert payload["phoenix"]["cpus_max"] == 2
+
+
 def test_resources_respects_the_configured_memory_ceiling_floor(tmp_path: Path):
     config = write_test_config(tmp_path)
     parsed = yaml.safe_load(config.read_text())
@@ -2164,3 +2277,188 @@ def test_resources_zeroes_llm_server_when_disabled(tmp_path: Path):
     else:
         assert result.returncode == 1
         assert "error" in payload
+
+
+# ---------------------------------------------------------------------------
+# Phoenix trial CLI contracts
+# ---------------------------------------------------------------------------
+
+
+def test_phoenix_trial_fixture_check_emits_valid_summary():
+    result = run(
+        "phoenix-trial",
+        "fixture-check",
+        "--manifest",
+        "docker/phoenix-trial/fixtures/laya-synthetic.json",
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "valid"
+    assert payload["fixture_version"] == "laya-synthetic-v1"
+    assert payload["summary"]["spans"] == 13
+    assert payload["summary"]["median_ms"] == 65
+
+
+def test_phoenix_trial_fixture_check_rejects_malformed_manifest(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"schema_version": 2}')
+    result = run("phoenix-trial", "fixture-check", "--manifest", str(manifest))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"error"}
+
+
+def test_phoenix_trial_prepare_writes_durable_state(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    result = run(
+        "phoenix-trial",
+        "prepare",
+        "--manifest",
+        "docker/phoenix-trial/fixtures/laya-synthetic.json",
+        "--state-dir",
+        str(state_dir),
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "prepared"
+    assert receipt["project"] == "laya-phoenix-trial"
+    run_id = receipt["run_id"]
+    assert len(run_id) == 32 and run_id.islower()
+    expected_path = Path(receipt["expected_path"])
+    assert expected_path.is_file()
+    assert (expected_path.parent / "prepared.json").is_file()
+    # Deterministic re-derivation: same explicit run id + state fails (exclusive).
+    again = run(
+        "phoenix-trial",
+        "prepare",
+        "--manifest",
+        "docker/phoenix-trial/fixtures/laya-synthetic.json",
+        "--state-dir",
+        str(state_dir),
+        "--run-id",
+        run_id,
+    )
+    assert again.returncode == 1
+
+
+def test_phoenix_trial_prepare_rejects_bad_run_id(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    result = run(
+        "phoenix-trial",
+        "prepare",
+        "--manifest",
+        "docker/phoenix-trial/fixtures/laya-synthetic.json",
+        "--state-dir",
+        str(state_dir),
+        "--run-id",
+        "NOTHEX",
+    )
+    assert result.returncode == 1
+    assert set(json.loads(result.stdout)) == {"error"}
+
+
+def test_phoenix_trial_mark_attempt_roundtrip(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    prepared = json.loads(
+        run(
+            "phoenix-trial",
+            "prepare",
+            "--manifest",
+            "docker/phoenix-trial/fixtures/laya-synthetic.json",
+            "--state-dir",
+            str(state_dir),
+        ).stdout
+    )
+    result = run(
+        "phoenix-trial",
+        "mark-attempt",
+        "--expected",
+        prepared["expected_path"],
+    )
+    assert result.returncode == 0, result.stderr
+    attempt = json.loads(result.stdout)
+    assert attempt["run_id"] == prepared["run_id"]
+    assert attempt["post_may_have_started"] is True
+    second = run(
+        "phoenix-trial",
+        "mark-attempt",
+        "--expected",
+        prepared["expected_path"],
+    )
+    assert second.returncode == 1
+
+
+def test_phoenix_trial_missing_arguments_exit_2():
+    result = run("phoenix-trial")
+    assert result.returncode == 2
+    result = run("phoenix-trial", "prepare")
+    assert result.returncode == 2
+
+
+def test_phoenix_trial_verify_refuses_symlink_expected(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    prepared = json.loads(
+        run(
+            "phoenix-trial",
+            "prepare",
+            "--manifest",
+            "docker/phoenix-trial/fixtures/laya-synthetic.json",
+            "--state-dir",
+            str(state_dir),
+        ).stdout
+    )
+    link = tmp_path / "expected-link.json"
+    link.symlink_to(prepared["expected_path"])
+    result = run(
+        "phoenix-trial",
+        "verify",
+        "--base-url",
+        "https://invalid.example",
+        "--run-id",
+        prepared["run_id"],
+        "--expected",
+        str(link),
+    )
+    assert result.returncode == 1
+    assert "symlink" in json.loads(result.stdout)["error"]
+
+
+def test_phoenix_trial_volume_bytes_cli_counts_files(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    (volume / "sqlite.db").write_bytes(b"12345")
+    result = run("phoenix-trial", "volume-bytes", "--path", str(volume))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"bytes": 5}
+
+
+def test_phoenix_trial_local_cli_actions_never_open_http(tmp_path, monkeypatch, capsys):
+    import urllib.request
+
+    import llmenv
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("local Phoenix trial action attempted HTTP")
+
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(urllib.request, "build_opener", forbidden)
+    manifest = "docker/phoenix-trial/fixtures/laya-synthetic.json"
+    state = tmp_path / "state"
+    state.mkdir()
+
+    assert llmenv.main(["phoenix-trial", "fixture-check", "--manifest", manifest]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "valid"
+    assert llmenv.main(
+        ["phoenix-trial", "prepare", "--manifest", manifest, "--state-dir", str(state)]
+    ) == 0
+    prepared = json.loads(capsys.readouterr().out)
+    assert llmenv.main(
+        ["phoenix-trial", "mark-attempt", "--expected", prepared["expected_path"]]
+    ) == 0
+    attempt = json.loads(capsys.readouterr().out)
+    assert attempt["run_id"] == prepared["run_id"]

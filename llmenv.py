@@ -70,6 +70,17 @@ from pylib.omniroute import (
     provision,
 )
 from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
+from pylib.phoenix_trial import (
+    PhoenixTrialError,
+    load_expected_file,
+    load_manifest,
+    mark_attempt,
+    prepare_run,
+    seed_spans,
+    validate_expected,
+    verify_run,
+    volume_bytes,
+)
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import ResourceError, compute_resource_limits
@@ -561,6 +572,49 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     return emit({"written": written, "path": str(path)})
 
 
+def cmd_phoenix_trial(args: argparse.Namespace) -> int:
+    try:
+        if args.action == "fixture-check":
+            manifest = load_manifest(args.manifest)
+            return emit(
+                {
+                    "schema_version": 1,
+                    "status": "valid",
+                    "fixture_version": manifest["fixture_version"],
+                    "summary": manifest["expected_summary"],
+                }
+            )
+        if args.action == "prepare":
+            manifest = load_manifest(args.manifest)
+            return emit(dict(prepare_run(manifest, args.state_dir, run_id=args.run_id)))
+        if args.action == "mark-attempt":
+            return emit(dict(mark_attempt(args.expected)))
+        if args.action == "volume-bytes":
+            return emit({"bytes": volume_bytes(args.path)})
+        if args.action in ("seed", "verify"):
+            if args.expected == "-":
+                from pylib.phoenix_trial import loads_strict_object
+
+                expected = validate_expected(loads_strict_object(sys.stdin.read()))
+            else:
+                expected = load_expected_file(args.expected)
+            if args.action == "seed":
+                receipt = seed_spans(
+                    args.base_url, expected, timeout_seconds=args.timeout_seconds
+                )
+            else:
+                receipt = verify_run(
+                    args.base_url,
+                    run_id=args.run_id,
+                    expected=expected,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            return emit(dict(receipt))
+        raise PhoenixTrialError("unsupported Phoenix trial action")
+    except PhoenixTrialError as exc:
+        return fail(str(exc))
+
+
 def cmd_run_agent_bounded(args: argparse.Namespace) -> int:
     command = args.agent_command
     if command[:1] == ["--"]:
@@ -706,6 +760,29 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--config", default=argparse.SUPPRESS)
     migrate.set_defaults(func=cmd_migrate_config)
 
+    phoenix_trial_parser = sub.add_parser("phoenix-trial")
+    phoenix_trial_sub = phoenix_trial_parser.add_subparsers(dest="action", required=True)
+    fixture_check = phoenix_trial_sub.add_parser("fixture-check")
+    fixture_check.add_argument("--manifest", type=Path, required=True)
+    prepare = phoenix_trial_sub.add_parser("prepare")
+    prepare.add_argument("--manifest", type=Path, required=True)
+    prepare.add_argument("--state-dir", type=Path, required=True)
+    prepare.add_argument("--run-id", default=None)
+    mark = phoenix_trial_sub.add_parser("mark-attempt")
+    mark.add_argument("--expected", type=Path, required=True)
+    seed = phoenix_trial_sub.add_parser("seed")
+    seed.add_argument("--base-url", required=True)
+    seed.add_argument("--expected", required=True)
+    seed.add_argument("--timeout-seconds", type=finite_positive_float, default=60.0)
+    verify = phoenix_trial_sub.add_parser("verify")
+    verify.add_argument("--base-url", required=True)
+    verify.add_argument("--run-id", required=True)
+    verify.add_argument("--expected", required=True)
+    verify.add_argument("--timeout-seconds", type=finite_positive_float, default=60.0)
+    volume = phoenix_trial_sub.add_parser("volume-bytes")
+    volume.add_argument("--path", type=Path, required=True)
+    phoenix_trial_parser.set_defaults(func=cmd_phoenix_trial)
+
     run_agent = sub.add_parser("run-agent-bounded")
     run_agent.add_argument("--transcript", type=Path, required=True)
     run_agent.add_argument("--stderr", type=Path, required=True)
@@ -740,7 +817,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.func(args)
-    except (ConfigError, BudgetError, GgufError, DetectError, ResourceError, OmniRouteError) as exc:
+    except (
+        ConfigError,
+        BudgetError,
+        GgufError,
+        DetectError,
+        ResourceError,
+        OmniRouteError,
+        PhoenixTrialError,
+    ) as exc:
         return fail(str(exc))
     except OSError as exc:
         return fail(f"filesystem error: {exc}")

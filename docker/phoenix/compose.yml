@@ -1,0 +1,63 @@
+# Phoenix dashboard (normal lifecycle, System One companion).
+#
+# Owned by scripts/phoenix.sh as a SEPARATE compose project on its own
+# internal network: the main stack's services already share the podman
+# native pod, so joining this service to that pod's networks would not be
+# isolation. Loopback-only publication; no GPU, privileged mode, socket,
+# broad mounts, credentials, telemetry or external providers.
+#
+# Resource values are policy constants from pylib/resources.py
+# (PHOENIX_*), passed as environment variables by scripts/phoenix.sh and
+# persisted into models.yml by setup/start:
+#   cpu_shares        = cpus_min * 1024 = 256 -- a RELATIVE WEIGHT under
+#                     contention, not guaranteed cores
+#   cpus              = hard CPU cap
+#   mem_reservation   = soft memory reservation (not a guaranteed allocation)
+#   mem_limit         = hard memory cap
+# Justified by 2026-10-19 measurements (~128 MiB current, ~526 MiB peak,
+# ~0.17% of one core idle); not a supported minimum or load benchmark.
+services:
+  phoenix:
+    image: docker.io/arizephoenix/phoenix:20.23.0@sha256:c542e7de1dc1fdd0f938de337d44ebefa7266e91391eed6e7978523d7f6e1f2f
+    ports: ["127.0.0.1:${PHOENIX_PORT:?}:6006"]
+    environment:
+      PHOENIX_HOST: "0.0.0.0"
+      PHOENIX_PORT: "6006"
+      PHOENIX_WORKING_DIR: /mnt/data
+      PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: "${PHOENIX_RETENTION_DAYS:?}"
+      PHOENIX_ALLOW_EXTERNAL_RESOURCES: "false"
+      PHOENIX_TELEMETRY_ENABLED: "false"
+      PHOENIX_ALLOWED_PROVIDERS: NONE
+      PHOENIX_ALLOWED_SANDBOX_PROVIDERS: NONE
+      PHOENIX_ENABLE_MCP_SERVER: "false"
+      PHOENIX_ENABLE_PROMETHEUS: "false"
+      PHOENIX_ENABLE_AUTH: "false"
+    volumes: ["data:/mnt/data"]
+    healthcheck:
+      # The pinned distroless image has no shell/curl; this Python binary is
+      # verified in the image and probes Phoenix's database-aware readiness.
+      test:
+        - CMD
+        - /usr/bin/python3.13
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006/readyz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [internal]
+    cpu_shares: "${PHOENIX_CPU_SHARES:?}"
+    cpus: "${PHOENIX_CPUS_MAX:?}"
+    mem_reservation: "${PHOENIX_MEMORY_MIN_MIB:?}m"
+    mem_limit: "${PHOENIX_MEMORY_MAX_MIB:?}m"
+    labels:
+      llm-env.scope: phoenix
+      llm-env.project: "${PHOENIX_PROJECT:?}"
+networks:
+  internal:
+    external: true
+    name: "${PHOENIX_INTERNAL_NETWORK:-llm-env-phoenix_internal}"
+volumes:
+  data:
+    external: true
+    name: "${PHOENIX_VOLUME:?}"

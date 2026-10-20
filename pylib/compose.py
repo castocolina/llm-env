@@ -253,13 +253,16 @@ def render_compose(
                 "system_one is enabled but ROCR_VISIBLE_DEVICES was not resolved"
             )
         system_one_service = {
-            "image": _dollar_escape(system_one["image"]),
+            "image": _dollar_escape(
+                os.environ.get("LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE") or system_one["image"]
+            ),
             "container_name": "system-one",
             "devices": ["/dev/kfd", "/dev/dri:/dev/dri"],
             "group_add": ["keep-groups"],
             "security_opt": ["label=disable"],
             "volumes": ["system-one-cache:/home/laya/.cache/huggingface"],
             "ports": [f"127.0.0.1:{system_one['port']}:8000"],
+            "networks": ["default", "phoenix-trace"],
             "environment": {
                 "LAYA_MODELS": _dollar_escape(system_one["models"]),
                 "LAYA_MAX_LOADED": str(
@@ -272,6 +275,7 @@ def render_compose(
                 # No runtime downloads. An unprepared checkpoint fails instead of fetching.
                 "HF_HUB_OFFLINE": "1",
                 "ROCR_VISIBLE_DEVICES": system_one_rocr_index,
+                "LAYA_PHOENIX_URL": "http://phoenix:6006/v1/projects/laya/spans",
             },
             "healthcheck": {
                 # slim image has no curl
@@ -310,6 +314,11 @@ def render_compose(
     if system_one_service is not None:
         volumes["system-one-cache"] = {"name": "llm-env-system-one-cache"}
     document = {"services": services, "volumes": volumes}
+    if system_one_service is not None:
+        document["networks"] = {
+            "default": {},
+            "phoenix-trace": {"name": "llm-env-phoenix_internal", "external": True},
+        }
     return HEADER_COMMENT + yaml.safe_dump(
         document, sort_keys=False, default_flow_style=False
     )

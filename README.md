@@ -43,6 +43,53 @@ make check-server
   unloads) Laya drops its checkpoints and frees about 3.7 GB of VRAM. The
   next request reloads them in about 0.4 s.
 
+### Laya request history in Phoenix
+
+When System One is enabled, normal `make start` also starts Phoenix and the
+server-side observer records real Laya requests in the `laya` project. Open
+`http://127.0.0.1:6006/projects` (or the configured
+`LLM_ENV_PHOENIX_PORT`) and select **laya**. History begins when the observer
+is deployed; earlier requests are not backfilled. Use normal `make stop` to
+stop the dashboard. Its owned data volume survives normal stops and starts.
+
+The observer records request state and questions, typed answers and their
+probabilities/confidence fields, model/routing metadata, known usage, timing,
+HTTP status/errors, and batch structure. It does not record HTTP headers and
+redacts credential-like JSON keys. Each request and response capture is
+limited to 24,000 bytes; truncation is marked. Export uses a 128-record
+in-memory queue, a 64 KiB record cap, and a 1.5-second background HTTP
+timeout. If Phoenix is unavailable or the queue fills, exports can be lost;
+those failures and drops are logged. This is best-effort history, not a
+complete audit log. Trace details show the captured input/output; do not
+assume every attribute is available as a native chart or that confidence
+means correctness. Comparative observer latency overhead has not been measured.
+
+Phoenix binds to loopback and disables authentication. This blocks LAN
+publication, but **does not protect traces from other users or processes on
+the same machine**. `make update-omniroute` is intentionally deferred: there
+is currently no qualified automatic updater or safe isolated replacement path
+for this dependency-bearing native deployment. It performs no update and does
+not claim that idle-time or image qualification has completed; an architecture
+decision is still required before updates can be enabled. Treat prompts, state, and model output in this dashboard
+as locally accessible private data. No Phoenix telemetry or off-host export
+is enabled. The configured seven-day retention policy
+(`LLM_ENV_PHOENIX_RETENTION_DAYS`, default `7`) is a scheduled cleanup policy,
+not a storage quota or a guarantee that every record has been deleted on time.
+`make status` reports only the bounded first page of up to 1,000 spans; its
+range and counts describe that page, and the `completeness` field indicates
+whether Phoenix reports another page. Cgroup `memory.low` (best-effort
+protection) and `memory.min` (hard protection) are distinct; neither should be
+read as the other. CPU quota is reported from `NanoCpus` when available, with
+`CpuQuota/CpuPeriod` as the compatible fallback.
+
+The current resource policy reserves 256 MiB soft memory and caps Phoenix at
+1 GiB memory and 2 CPUs. CPU shares are 256 relative shares under contention,
+not guaranteed cores. These are policy limits, not a load or capacity
+benchmark. Browser E2E discovery uses an installed Playwright package or a
+local npm cache; set `LLM_ENV_PLAYWRIGHT_ROOT` to a Playwright package
+location or `LLM_ENV_CHROMIUM_EXECUTABLE` to an existing Chromium binary when
+automatic discovery is unavailable. The test does not install packages.
+
 ## Configuration
 
 Everything lives in `~/.config/llm-env/models.yml`. Models are enabled and

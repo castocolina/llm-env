@@ -20,6 +20,10 @@ ensure_omniroute_secrets
 llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
 
 system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+if [ "$system_one_enabled" != "true" ]; then
+    # Disabled transition: don't leave a prior Phoenix companion running.
+    bash "${REPO_DIR}/scripts/phoenix.sh" stop
+fi
 if [ "$system_one_enabled" = "true" ]; then
     system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
     system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
@@ -100,7 +104,7 @@ if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
             .resources.remote_setup.memory_min_mib = (strenv(REMOTE_SETUP_MEMORY_MIN_MIB) | tonumber) |
             .resources.remote_setup.memory_max_mib = (strenv(REMOTE_SETUP_MEMORY_MAX_MIB) | tonumber)
           ' "$CONFIG_PATH"
-        log_info "reserved ${cpus} CPUs, ${memory_mib} MiB RAM for llm-server"
+        log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
     else
         OMNIROUTE_CPUS_MIN="$omniroute_cpus_min" OMNIROUTE_CPUS_MAX="$omniroute_cpus_max" \
           OMNIROUTE_MEMORY_MIN_MIB="$omniroute_memory_min_mib" OMNIROUTE_MEMORY_MAX_MIB="$omniroute_memory_max_mib" \
@@ -125,6 +129,25 @@ else
     # disable the safety mechanism precisely when it matters most. Fail
     # loudly instead, exactly like setup/setup.sh's Step 8 already does.
     die "$(jq -r '.error' "$resources_json")"
+fi
+
+# Phoenix resources are fixed policy (pylib/resources.py PHOENIX_*), not a
+# share of the remainder; llmenv resources still validates that the host
+# can afford them whenever System One is enabled.
+if [ "$system_one_enabled" = "true" ]; then
+    phoenix_cpus_min="$(jq -r '.phoenix.cpus_min' "$resources_json")"
+    phoenix_cpus_max="$(jq -r '.phoenix.cpus_max' "$resources_json")"
+    phoenix_memory_min_mib="$(jq -r '.phoenix.memory_min_mib' "$resources_json")"
+    phoenix_memory_max_mib="$(jq -r '.phoenix.memory_max_mib' "$resources_json")"
+    PHOENIX_CPUS_MIN="$phoenix_cpus_min" PHOENIX_CPUS_MAX="$phoenix_cpus_max" \
+      PHOENIX_MEMORY_MIN_MIB="$phoenix_memory_min_mib" PHOENIX_MEMORY_MAX_MIB="$phoenix_memory_max_mib" \
+      yq -i '
+        .resources.phoenix.cpus_min = (strenv(PHOENIX_CPUS_MIN) | tonumber) |
+        .resources.phoenix.cpus_max = (strenv(PHOENIX_CPUS_MAX) | tonumber) |
+        .resources.phoenix.memory_min_mib = (strenv(PHOENIX_MEMORY_MIN_MIB) | tonumber) |
+        .resources.phoenix.memory_max_mib = (strenv(PHOENIX_MEMORY_MAX_MIB) | tonumber)
+      ' "$CONFIG_PATH"
+    log_info "Phoenix policy: ${phoenix_memory_min_mib} MiB soft memory reservation, ${phoenix_memory_max_mib} MiB hard cap, ${phoenix_cpus_max} CPUs max"
 fi
 
 bash "${REPO_DIR}/setup/render-unit.sh"
@@ -155,14 +178,11 @@ if [ "$system_one_enabled" = "true" ]; then
         exit 1
     fi
     log_info "System One is ready"
-    # First decision after start pays GPU warm-up (~1.6s); a failure must not fail start.
-    warmup_body='{"model":"jev-1","state":{"ticket":"I was charged twice this month, please refund me"},"questions":{"team":{"type":"choice","instructions":"Which team should handle this ticket?","criteria":{"billing":"charges, invoices, refunds","technical":"bugs, crashes, outages","other":"everything else"}}}}'
-    if ! curl -fsS --max-time 10 -o /dev/null \
-            -H "Content-Type: application/json" \
-            --data-raw "$warmup_body" \
-            "http://127.0.0.1:${system_one_port}/v1/systemone" 2>/dev/null; then
-        log_warn "System One warm-up request failed"
-    fi
+    # The Phoenix dashboard is a System One companion: readiness failure
+    # here fails `make start` (the boot wrapper unit runs the same script
+    # best-effort via ExecStartPost).
+    log_step "Starting the Phoenix dashboard"
+    bash "${REPO_DIR}/scripts/phoenix.sh" start
 fi
 
 bash "${REPO_DIR}/setup/network.sh"

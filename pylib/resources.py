@@ -1,11 +1,10 @@
-"""Host CPU/RAM budgeting for the compose container stack.
+"""Conservative host CPU/RAM budget and per-service Compose policy.
 
-Mirrors pylib/budget.py's shape for VRAM: fixed reservations for the host,
-for OmniRoute's own process, and for remote-setup's own process, then
-whatever is left goes to llm-server. cpus_min/cpus_max are whole CPU-core
-counts usable directly as compose's `cpu_shares:`/`cpus:` service keys;
-memory_min_mib/memory_max_mib are whole-MiB integers usable as
-`mem_reservation: <n>m`/`mem_limit: <n>m`.
+The host floor reserves budget in this calculation; it does not allocate
+resources at the OS/cgroup level. ``cpus_min`` is a relative CPU-share
+weight input (converted to Compose ``cpu_shares``), not a core reservation.
+``cpus_max`` is a hard quota. Memory minima are soft Compose reservations;
+maxima are hard cgroup limits. Neither minimum is guaranteed allocation.
 """
 
 from __future__ import annotations
@@ -17,19 +16,19 @@ HOST_CPU_FLOOR = 2
 HOST_MEMORY_FLOOR_MIB = 4096
 
 # OmniRoute is a lightweight Node/Next.js process, not the workload driving
-# resource needs here -- it gets a flat min/max range, not a share of the
-# remainder. The MIN values are what's actually reserved from the host's
-# perspective (subtracted from the floor available to llm_server below); the
-# MAX values are just a ceiling the container's cgroup cannot exceed, they
-# don't need to be pre-reserved from other consumers.
+# resource needs here -- it gets a flat min/max policy, not a share of the
+# remainder. Minima are included in the conservative llm_server host-budget
+# calculation, but cpu_shares is only a relative contention weight and
+# mem_reservation is soft policy; neither is an OS-guaranteed allocation.
 #
 # A flat 1024 MiB cap proved too tight in practice: OmniRoute's own internal
 # resourcePressure guard (cgroup_ratio) was observed tripping and returning
 # 503s under concurrent cross-AI/tool-heavy sessions (my-coding,
 # my-plan-review combos with 11-17 tools each) while sitting at only ~700MB
 # baseline -- on a host with tens of GB free, so the cap (not host pressure)
-# was the bottleneck. A min/max range instead guarantees OmniRoute a real
-# floor while capping how far it can grow under a burst.
+# was the bottleneck. The min/max policy supplies contention weight and a
+# soft memory reservation while capping growth under a burst; it does not
+# guarantee an absolute CPU or memory allocation.
 OMNIROUTE_CPU_MIN = 1
 OMNIROUTE_CPU_MAX = 4
 OMNIROUTE_MEMORY_MIN_MIB = 1024
@@ -50,9 +49,26 @@ REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
 SYSTEM_ONE_CPUS = 2  # hard cap; 16 clients used ~1.3 cores
 SYSTEM_ONE_MEMORY_MIB = 4608  # hard cap; memory.peak was 3155 MiB
-# Host floor counts these mins, same as OmniRoute. Steady RSS is ~2.4 GB; idle CPU is ~0.
+# Conservative host budget includes these policy minima. Steady RSS is ~2.4 GB; idle CPU is ~0.
 SYSTEM_ONE_CPUS_MIN = 1
 SYSTEM_ONE_MEMORY_MIN_MIB = 2560
+
+# Phoenix dashboard (pinned arizephoenix/phoenix:20.23.0), started with
+# System One on its own internal compose project. Resource POLICY starting
+# point, justified by the 2026-10-19 measurements of a live private
+# instance: ~128 MiB current / ~526 MiB lifetime-peak memory, ~0.17% of one
+# core over a 2 s idle sample, plus short synthetic-ingestion headroom.
+# This is NOT a supported minimum and NOT a load benchmark; if a capped
+# startup/ingestion/browser workflow fails, record the measurement before
+# adjusting. cpus_min is in compose "share units" (baseline 1024 = 1 unit):
+# it renders to cpu_shares, a RELATIVE WEIGHT under contention, not
+# guaranteed cores; cpus_max/memory_max_mib are hard cgroup caps.
+# memory_min_mib is a soft Compose reservation; this host's observed
+# memory.min was zero, so do not claim an enforced cgroup floor.
+PHOENIX_CPUS_MIN = 0.25  # -> cpu_shares 256
+PHOENIX_CPUS_MAX = 2  # hard cap
+PHOENIX_MEMORY_MIN_MIB = 256  # soft reservation
+PHOENIX_MEMORY_MAX_MIB = 1024  # hard cap
 
 # OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
 # upstream) bounds concurrent "heavy" requests (large tool/context bodies --
@@ -63,15 +79,16 @@ OMNIROUTE_CHAT_ADMISSION_QUEUE_MS = 8000
 
 
 class ResourceError(Exception):
-    """Raised when the host has too few resources to reserve the fixed floors."""
+    """Raised when the conservative host budget leaves too little for services."""
 
 
 def _floor_words(system_one_enabled: bool) -> str:
-    words = "the host floor and OmniRoute's/remote-setup's fixed allocations"
+    words = "the conservative host budget and OmniRoute/remote-setup policy minima"
     if system_one_enabled:
         words += (
-            f" and System One's reservation ({SYSTEM_ONE_CPUS_MIN} CPUs, "
-            f"{SYSTEM_ONE_MEMORY_MIN_MIB} MiB)"
+            f", System One's budgeted minimum ({SYSTEM_ONE_CPUS_MIN} CPU-share unit, "
+            f"{SYSTEM_ONE_MEMORY_MIN_MIB} MiB) and Phoenix's budgeted minimum "
+            f"({PHOENIX_CPUS_MIN} CPU share units, {PHOENIX_MEMORY_MIN_MIB} MiB)"
         )
     return words
 
@@ -93,6 +110,10 @@ def compute_resource_limits(
     if system_one_enabled:
         cpu_floor += SYSTEM_ONE_CPUS_MIN
         memory_floor_mib += SYSTEM_ONE_MEMORY_MIN_MIB
+        # Phoenix shares the System One enable flag: it is charged whenever
+        # System One is on, including the llm-server-disabled gateway mode.
+        cpu_floor += PHOENIX_CPUS_MIN
+        memory_floor_mib += PHOENIX_MEMORY_MIN_MIB
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(
@@ -177,5 +198,11 @@ def compute_resource_limits(
         "system_one": {
             "cpus": SYSTEM_ONE_CPUS if system_one_enabled else 0,
             "memory_mib": SYSTEM_ONE_MEMORY_MIB if system_one_enabled else 0,
+        },
+        "phoenix": {
+            "cpus_min": PHOENIX_CPUS_MIN if system_one_enabled else 0,
+            "cpus_max": PHOENIX_CPUS_MAX if system_one_enabled else 0,
+            "memory_min_mib": PHOENIX_MEMORY_MIN_MIB if system_one_enabled else 0,
+            "memory_max_mib": PHOENIX_MEMORY_MAX_MIB if system_one_enabled else 0,
         },
     }

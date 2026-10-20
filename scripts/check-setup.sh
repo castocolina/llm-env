@@ -237,6 +237,55 @@ system_one_rocr_matches() {
 }
 
 system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)"
+
+phoenix_offline_check() {
+    local image health cpus memory network volume observer_image source_hash base_id key labels resource local_kind local_name internal base_image
+    image="$(yq -r '.services.phoenix.image // ""' "$REPO_DIR/docker/phoenix/compose.yml")" || { printf 'Phoenix offline check: cannot read pinned image declaration\n' >&2; return 1; }
+    [[ "$image" =~ ^docker.io/arizephoenix/phoenix:20\.23\.0@sha256:[0-9a-f]{64}$ ]] || { printf 'Phoenix offline check: image must use the pinned Phoenix digest\n' >&2; return 1; }
+    health="$(yq -r '.services.phoenix.healthcheck.test[1] // ""' "$REPO_DIR/docker/phoenix/compose.yml")" || { printf 'Phoenix offline check: cannot read healthcheck executable\n' >&2; return 1; }
+    [[ "$health" == /usr/bin/python3.13 ]] || { printf 'Phoenix offline check: healthcheck must use /usr/bin/python3.13\n' >&2; return 1; }
+    cpus="$(yq -r '.services.phoenix.cpus // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
+    memory="$(yq -r '.services.phoenix.mem_limit // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
+    [[ "$cpus" == "\${PHOENIX_CPUS_MAX:?}" && "$memory" == "\${PHOENIX_MEMORY_MAX_MIB:?}m" ]] || { printf 'Phoenix offline check: CPU and memory limits must use configured maxima\n' >&2; return 1; }
+    yq -o=json '.resources.phoenix // {"cpus_min": 0.25, "cpus_max": 2, "memory_min_mib": 256, "memory_max_mib": 1024}' "$CONFIG_PATH" |
+        jq -e '(.cpus_min | type) == "number" and (.cpus_max | type) == "number" and
+          .cpus_min > 0 and .cpus_max >= .cpus_min and
+          (.memory_min_mib | type) == "number" and (.memory_max_mib | type) == "number" and
+          .memory_min_mib > 0 and .memory_max_mib >= .memory_min_mib and
+          (.memory_min_mib | floor == .) and (.memory_max_mib | floor == .)' >/dev/null || { printf 'Phoenix offline check: resource policy must have positive ordered CPU and integral memory bounds\n' >&2; return 1; }
+    network="$(yq -r '.networks.internal.name // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
+    volume="$(yq -r '.volumes.data.name // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
+    [[ "$network" == *llm-env-phoenix_internal* && "$volume" == "\${PHOENIX_VOLUME:?}" ]] || { printf 'Phoenix offline check: network and volume declarations do not match owned resources\n' >&2; return 1; }
+    volume="llm-env-phoenix-data"
+    network="llm-env-phoenix_internal"
+    podman image exists "$image" || { printf 'Phoenix offline check: pinned Phoenix image is missing; use the authorized startup workflow\n' >&2; return 1; }
+    for resource in "volume:$volume" "network:$network"; do
+        local_kind="${resource%%:*}"; local_name="${resource#*:}"
+        if ! podman "$local_kind" exists "$local_name" >/dev/null 2>&1; then
+            # Not created until Phoenix's first startup is an expected offline skip.
+            printf 'SKIP %s %s: not created before first Phoenix startup\n' "$local_kind" "$local_name"
+            continue
+        fi
+        labels="$(podman "$local_kind" inspect --format '{{json .Labels}}' "$local_name" 2>/dev/null)" || { printf 'Phoenix offline check: cannot inspect owned %s metadata\n' "$local_kind" >&2; return 1; }
+        jq -e '.["llm-env.scope"] == "phoenix" and .["llm-env.project"] == "llm-env-phoenix"' <<<"$labels" >/dev/null || { printf 'Phoenix offline check: %s has missing or foreign ownership labels\n' "$local_kind" >&2; return 1; }
+        if [[ "$local_kind" == network ]]; then
+            internal="$(podman network inspect --format '{{.Internal}}' "$local_name" 2>/dev/null)" || { printf 'Phoenix offline check: cannot inspect internal network setting\n' >&2; return 1; }
+            [[ "$internal" == true ]] || { printf 'Phoenix offline check: network must be internal\n' >&2; return 1; }
+        fi
+    done
+    observer_image="$(yq -r '.services["system-one"].image // ""' "$COMPOSE_FILE" 2>/dev/null)"
+    [[ "$observer_image" == *llm-env-system-one-phoenix:* ]] || { printf 'Phoenix offline check: System One observer image declaration is missing\n' >&2; return 1; }
+    [[ "$(yq -r '.services["system-one"].environment.LAYA_PHOENIX_URL // ""' "$COMPOSE_FILE")" == http://phoenix:6006/v1/projects/laya/spans ]] || { printf 'Phoenix offline check: observer endpoint must target Phoenix spans\n' >&2; return 1; }
+    yq -e '.services["system-one"].networks | contains(["phoenix-trace"])' "$COMPOSE_FILE" >/dev/null || { printf 'Phoenix offline check: System One must join the trace network\n' >&2; return 1; }
+    yq -e '.networks["phoenix-trace"].external == true' "$COMPOSE_FILE" >/dev/null || { printf 'Phoenix offline check: trace network must be external\n' >&2; return 1; }
+    source_hash="$(cat "$REPO_DIR/docker/system-one/observer.Dockerfile" "$REPO_DIR/docker/system-one/phoenix_observer.py" | sha256sum | awk '{print $1}')"
+    base_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
+    base_id="$(podman image inspect "$base_image" --format '{{.Id}}' 2>/dev/null)" || { printf 'Phoenix offline check: cannot inspect configured System One base image\n' >&2; return 1; }
+    key="$(printf '%s\n%s\n' "$base_id" "$source_hash" | sha256sum | awk '{print substr($1,1,12)}')"
+    [[ "$observer_image" == "localhost/llm-env-system-one-phoenix:${key}" ]] || { printf 'Phoenix offline check: observer image is stale; rebuild from current sources\n' >&2; return 1; }
+    podman image inspect "$observer_image" | jq -e --arg key "$key" '.[0].Labels["llm-env.phoenix-observer-sha256"] == $key' >/dev/null || { printf 'Phoenix offline check: observer freshness label is stale; rebuild the image\n' >&2; return 1; }
+}
+
 log_step "System One"
 if [ "$system_one_enabled" = "true" ]; then
     system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
@@ -273,8 +322,15 @@ if [ "$system_one_enabled" = "true" ]; then
             -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
             -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
             --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py verify || true
+    if [ -f "$COMPOSE_FILE" ] && [ "$(yq -r '.services["system-one"] // "null"' "$COMPOSE_FILE")" != null ]; then
+        record_command "Phoenix deployment metadata" "offline Phoenix image, observer freshness, resource, network and history-volume declarations; validate owned resource labels when present" "" "declarations valid; resources absent before first startup are skipped; foreign labels fail" "" 0 "Scoped metadata" "Command stderr" phoenix_offline_check || true
+    else
+        log_warn "Verdict: SKIP identity=Phoenix deployment metadata reason=system-one compose service not rendered yet"
+    fi
 else
     log_warn "Verdict: SKIP reason=system-one is disabled"
+    log_step "Phoenix deployment metadata"
+    log_warn "Verdict: SKIP identity=Phoenix deployment metadata reason=System One is disabled"
 fi
 
 log_step "Compose file"

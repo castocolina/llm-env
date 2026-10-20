@@ -12,6 +12,9 @@ if ! systemctl --user list-unit-files "${UNIT_NAME}.service" >/dev/null 2>&1; th
     exit 0
 fi
 
+# Stop the companion even if setup has already disabled System One.
+bash "${REPO_DIR}/scripts/phoenix.sh" stop
+
 if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
     systemctl --user stop "${UNIT_NAME}.service"
     log_info "server stopped"
