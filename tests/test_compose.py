@@ -435,11 +435,53 @@ def test_remote_setup_models_json_is_empty_when_llm_server_disabled():
     assert models_json == []
 
 
-def test_remote_setup_service_depends_on_omniroute_healthy():
+def test_remote_setup_service_has_no_native_dependency_on_omniroute():
     _, document = compose_dict()
-    assert document["services"]["remote-setup"]["depends_on"] == {
-        "omniroute": {"condition": "service_healthy"},
+    assert "depends_on" not in document["services"]["remote-setup"]
+
+
+def test_remote_setup_service_is_unchanged_except_the_removed_dependency():
+    """Pin the pre-change render (which carried only the now-removed depends_on extra key):
+    everything below is deep-equal to the render before the dependency was dropped."""
+    _, document = compose_dict()
+    service = document["services"]["remote-setup"]
+    pre_change = {
+        "image": "docker.io/library/python:3.13-alpine",
+        "container_name": "remote-setup",
+        "command": ["python3", "-m", "pylib.remote_setup"],
+        "working_dir": "/app",
+        "environment": {
+            "OMNIROUTE_INTERNAL_URL": "http://omniroute:20128",
+            "OMNIROUTE_PORT": "20128",
+            "OMNIROUTE_DASHBOARD_PASSWORD": "test-password",
+            "OMNI_ROUTER_MASTER_KEY": "",
+            "MODELS_JSON": "[]",
+            "REMOTE_SETUP_PORT": "20130",
+        },
+        "ports": ["0.0.0.0:20130:20130"],
+        "restart": "unless-stopped",
+        "volumes": [
+            "/home/user/llm-env/pylib:/app/pylib:ro,z",
+            "/home/user/llm-env/setup/update-opencode-config.mjs:/app/setup/update-opencode-config.mjs:ro,z",
+            "/home/user/llm-env/setup/lib:/app/setup/lib:ro,z",
+            "remote-setup-data:/app/data",
+        ],
+        "healthcheck": {
+            "test": [
+                "CMD",
+                "python3",
+                "-c",
+                "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:20130/setup.sh', timeout=3)",
+            ],
+            "interval": "5s",
+            "timeout": "3s",
+            "retries": 5,
+            "start_period": "5s",
+        },
+        "depends_on": {"omniroute": {"condition": "service_healthy"}},
     }
+    assert {k: v for k, v in pre_change.items() if k != "depends_on"} == service
+    assert "depends_on" not in service
 
 
 def test_remote_setup_service_has_a_healthcheck():
@@ -476,12 +518,10 @@ def test_llm_server_service_present_when_llm_server_key_absent():
     }
 
 
-def test_remote_setup_depends_on_omniroute_unaffected_by_llm_server_disabled():
+def test_remote_setup_has_no_dependency_regardless_of_llm_server_state():
     cfg = {**CFG, "llm_server": {"enabled": False}}
     _, document = compose_dict(cfg)
-    assert document["services"]["remote-setup"]["depends_on"] == {
-        "omniroute": {"condition": "service_healthy"}
-    }
+    assert "depends_on" not in document["services"]["remote-setup"]
 
 
 def test_omniroute_depends_on_key_ordering_preserved_when_enabled():

@@ -1,3 +1,4 @@
+import contextlib
 import http.client
 import http.server
 import json
@@ -780,7 +781,7 @@ def test_config_includes_omniroute_combos_alongside_llm_server_models(tmp_path, 
         fake_thread.join()
 
 
-def test_config_returns_502_when_combo_context_fails(tmp_path, monkeypatch):
+def test_config_returns_503_when_combo_context_fails(tmp_path, monkeypatch):
     class _BrokenComboHandler(_FakeOmniRouteHandler):
         def do_GET(self):
             if self.path == "/v1/models":
@@ -807,7 +808,8 @@ def test_config_returns_502_when_combo_context_fails(tmp_path, monkeypatch):
             conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
             response = conn.getresponse()
             payload = json.loads(response.read())
-            assert response.status == 502
+            assert response.status == 503
+            assert response.getheader("Retry-After") == "5"
             assert "combo" in payload["error"]
         finally:
             server.shutdown()
@@ -1644,3 +1646,89 @@ def test_setup_sh_prints_nothing_until_curl_has_closed_the_pipe(monkeypatch):
     err = process.stderr.read()
     process.wait(timeout=30)
     assert b"close Pi and OpenCode before continuing" in err
+
+
+# ---- Task 7: bounded, single-flight /config (503 + Retry-After) ----
+
+@contextlib.contextmanager
+def _config_server(monkeypatch, tmp_path, fake_port=1):
+    monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
+    monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+    monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+    monkeypatch.setenv("MODELS_JSON", "[]")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def _get_config(port):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
+    response = conn.getresponse()
+    return response.status, response.getheader("Retry-After"), json.loads(response.read())
+
+
+def _wait_flight_idle():
+    end = time.monotonic() + 3
+    while remote_setup_module._config_flight.locked() and time.monotonic() < end:
+        time.sleep(0.01)
+    assert not remote_setup_module._config_flight.locked()
+
+
+def test_config_returns_503_with_retry_after_when_omniroute_unreachable(tmp_path, monkeypatch):
+    def down(*args, **kwargs):
+        raise OmniRouteError("connection refused")
+    monkeypatch.setattr(remote_setup_module, "ensure_api_key", down)
+    with _config_server(monkeypatch, tmp_path) as port:
+        status, retry_after, body = _get_config(port)
+    assert status == 503 and retry_after == "5" and "OmniRoute" in body["error"]
+    _wait_flight_idle()
+
+
+def test_config_blocked_backend_answers_503_within_deadline(tmp_path, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(remote_setup_module, "ensure_api_key", lambda *a, **k: release.wait(30) or "key")
+    monkeypatch.setattr(remote_setup_module, "compute_combo_context", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 0.5)
+    with _config_server(monkeypatch, tmp_path) as port:
+        start = time.monotonic()
+        status, retry_after, _ = _get_config(port)
+        assert status == 503 and retry_after == "5" and time.monotonic() - start < 1.5
+        release.set()
+        _wait_flight_idle()
+
+
+def test_config_is_single_flight(tmp_path, monkeypatch):
+    release, calls = threading.Event(), []
+    def slow(*a, **k):
+        calls.append(1)
+        release.wait(30)
+        return "key"
+    monkeypatch.setattr(remote_setup_module, "ensure_api_key", slow)
+    monkeypatch.setattr(remote_setup_module, "compute_combo_context", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 5.0)
+    with _config_server(monkeypatch, tmp_path) as port:
+        first = threading.Thread(target=_get_config, args=(port,))
+        first.start()
+        time.sleep(0.2)                                   # the first worker now holds the flight lock
+        start = time.monotonic()
+        status, retry_after, _ = _get_config(port)        # must not wait for the 5 s deadline or start a second worker
+        assert status == 503 and retry_after == "5" and time.monotonic() - start < 1.0 and len(calls) == 1
+        release.set()
+        first.join()
+        _wait_flight_idle()
+
+
+def test_config_unexpected_worker_exception_is_still_a_json_500(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("unexpected")
+    monkeypatch.setattr(remote_setup_module, "ensure_api_key", boom)
+    with _config_server(monkeypatch, tmp_path) as port:
+        status, _, body = _get_config(port)
+    assert status == 500 and "error" in body
+    _wait_flight_idle()

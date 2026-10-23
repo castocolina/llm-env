@@ -29,6 +29,8 @@ make enable-boot              # Start at boot (opt-in)
 make disable-boot             # Disable start at boot
 make status                   # Show service status and print endpoints/credentials
 make show-secrets              # Print endpoints/credentials without starting anything
+make update-omniroute          # Idle-aware OmniRoute-only update (defers unless idle, profiled, verified)
+make migrate-remote-setup      # One-time remote-setup recreation without its OmniRoute dependency
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
 make key-reset                 # Rotate the server API key
@@ -71,6 +73,15 @@ After editing any `.py` file, run `make validate && make test`.
 Makefile target bodies longer than 3 lines must delegate to a `.sh` file.
 
 Python is invoked only as `uv run llmenv.py <subcommand>`.
+
+### External Agent Runs
+
+Monitor every delegated run (`pi -p`, `dispatch-reviewer`, background
+subagents) until it ends: launch detached with output under `./tmp/`, poll
+output files and `ps` by PID at least every 5 minutes (never `pgrep -f` /
+`pkill -f` with a self-matching pattern), and treat a stalled file, an exited
+process or a process question as a stall to act on at once. Report run state
+to the user in every status message.
 
 ### Language
 

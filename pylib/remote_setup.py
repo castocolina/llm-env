@@ -30,6 +30,8 @@ from pylib.omniroute import OmniRouteError, _login, _request, compute_combo_cont
 
 KEY_NAME = "llm-env-remote-agents"
 CACHE_PATH = Path("/app/data/api-key.json")
+CONFIG_DEADLINE_SECONDS = 20.0
+_config_flight = threading.Lock()
 
 # Mounted read-only by pylib/compose.py's remote-setup service (see Task
 # 2) alongside pylib/ itself. NOT served over HTTP -- the design defines
@@ -275,6 +277,23 @@ echo "  Keep it as private as the master key.)"
 }
 main "$@"
 '''
+
+
+def _fetch_config_inputs(base_url: str, password: str, box: dict[str, Any]) -> None:
+    try:
+        try:
+            box["api_key"] = ensure_api_key(base_url, password, CACHE_PATH)
+        except OmniRouteError as exc:
+            box["error"] = f"could not reach OmniRoute: {exc}"
+            return
+        try:
+            box["combos"] = compute_combo_context(base_url, password)
+        except OmniRouteError as exc:
+            box["error"] = f"could not fetch OmniRoute combos: {exc}"
+    except Exception as exc:  # noqa: BLE001 # surfaced to the request thread, which re-raises it as the existing JSON 500
+        box["crash"] = exc
+    finally:
+        _config_flight.release()              # a late worker never overlaps the next key creation
 
 
 def parse_bearer_token(header_value: str | None) -> str | None:
@@ -564,6 +583,15 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         self._last_status = code
         super().send_response(code, message)
 
+    def _write_unavailable(self, message: str) -> None:
+        body = json.dumps({"error": message}).encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", "5")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -628,16 +656,27 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
 
         base_url = os.environ.get("OMNIROUTE_INTERNAL_URL", "")
         dashboard_password = os.environ.get("OMNIROUTE_DASHBOARD_PASSWORD", "")
-        try:
-            api_key = ensure_api_key(base_url, dashboard_password, CACHE_PATH)
-        except OmniRouteError as exc:
-            self._write_json(502, {"error": f"could not reach OmniRoute: {exc}"})
+        if not _config_flight.acquire(blocking=False):
+            self._write_unavailable("OmniRoute configuration is being prepared; retry shortly")
             return
+        box: dict[str, Any] = {}
+        worker = threading.Thread(target=_fetch_config_inputs, args=(base_url, dashboard_password, box), daemon=True)
         try:
-            combos = compute_combo_context(base_url, dashboard_password)
-        except OmniRouteError as exc:
-            self._write_json(502, {"error": f"could not fetch OmniRoute combos: {exc}"})
+            worker.start()
+        except RuntimeError:
+            _config_flight.release()
+            self._write_unavailable("OmniRoute configuration worker could not start; retry shortly")
             return
+        worker.join(CONFIG_DEADLINE_SECONDS)
+        if worker.is_alive():
+            self._write_unavailable("OmniRoute did not answer in time; retry shortly")
+            return
+        if "crash" in box:
+            raise box["crash"]
+        if "error" in box:
+            self._write_unavailable(box["error"])
+            return
+        api_key, combos = box["api_key"], box["combos"]
 
         host = host_without_port(host_header)
         omniroute_port = os.environ.get("OMNIROUTE_PORT", "")
@@ -655,7 +694,7 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Log only what an operator would need to see in
         `podman logs remote-setup`: failed master-key attempts (401),
-        OmniRoute outages (502), misconfiguration (503) and internal
+        OmniRoute outages (503) and internal
         errors (500). Successful 200s on a low-traffic installer endpoint
         are pure noise, so they stay quiet. Same message shape as the base
         class -- the status gate is the only change."""

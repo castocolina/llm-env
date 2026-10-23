@@ -223,7 +223,6 @@ def render_compose(
             ),
             "MODELS_JSON": _dollar_escape(json.dumps(enabled_models)),
         },
-        "depends_on": {"omniroute": {"condition": "service_healthy"}},
         "restart": "unless-stopped",
         "healthcheck": {
             "test": [

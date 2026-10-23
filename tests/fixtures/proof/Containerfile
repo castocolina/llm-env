@@ -1,0 +1,6 @@
+FROM docker.io/library/python:3.12-slim
+ARG VARIANT
+ENV NODE_ENV=production
+RUN mkdir -p /app && echo "$VARIANT" > /app/VARIANT && echo '{"cache_ms": 1000}' > /app/state.json
+COPY fake_omniroute.py /app/fake_omniroute.py
+ENTRYPOINT ["python3", "/app/fake_omniroute.py"]

@@ -69,6 +69,7 @@ from pylib.omniroute import (
     import_codex_auth,
     provision,
 )
+from pylib.omniroute_cli import register as register_omniroute_update
 from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
 from pylib.phoenix_trial import (
     PhoenixTrialError,
@@ -803,6 +804,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_agent.add_argument("agent_command", nargs=argparse.REMAINDER)
     run_agent.set_defaults(func=cmd_run_agent_bounded, command_parser=run_agent)
+
+    register_omniroute_update(sub)
 
     return parser
 

@@ -58,12 +58,23 @@ make disable-boot
 
 ## Updates
 
-`make update-omniroute` is a safety deferral, not an updater: no automatic
-update is currently qualified for this native dependency-bearing deployment.
-It does not evaluate or claim completion of the idle policy or image
-qualification, and performs no lifecycle or registry mutation. Enabling updates
-requires an explicit architecture decision for a safe isolated replacement
-path.
+`make update-omniroute` replaces the OmniRoute container only when the
+configured image tag resolves to a different digest than the running image,
+the dashboard has been idle for `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300)
+within `LLM_ENV_UPDATE_MAX_WAIT_SECONDS` (default 10800), a reviewed activity
+profile exists for the running image (otherwise it defers with `capability`),
+and every pre-commit inventory/fingerprint recheck passes. It prints
+`updated <old> -> <new>`, `unchanged`, or `deferred: <reason>` (exit 75); a
+failure exits 1 with the stage that failed and **no rollback is attempted**.
+It is not zero-downtime and observation is not admission control.
+
+`make migrate-remote-setup` recreates the remote-setup container without its
+native OmniRoute dependency. It refuses to run until the deployed compose is
+re-rendered without the remote-setup `depends_on` (re-run `make setup`; it
+device-probes with `podman run --rm`, prepares Phoenix and builds the
+observer image when System One is enabled, stops a legacy `llm-mdns.service`
+and runs `systemctl --user daemon-reload`). While remote-setup is down,
+`/config` answers 503 + `Retry-After: 5` instead of hanging.
 
 ## OmniRoute dashboard
 

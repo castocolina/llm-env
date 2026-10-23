@@ -2462,3 +2462,213 @@ def test_phoenix_trial_local_cli_actions_never_open_http(tmp_path, monkeypatch, 
     ) == 0
     attempt = json.loads(capsys.readouterr().out)
     assert attempt["run_id"] == prepared["run_id"]
+
+
+def test_omniroute_update_resolve_is_registered():
+    import llmenv
+    args = llmenv.build_parser().parse_args(["omniroute-update", "resolve", "--reference", "x/y:latest",
+                                              "--os", "linux", "--arch", "amd64", "--json", "r.json"])
+    assert args.func.__name__ == "cmd_resolve" and args.variant == ""
+
+
+def test_preflight_cli_exit_codes_and_files(tmp_path, capsys):
+    from omniroute_fakes import OMNI, PASSWORD, RS, inspect_doc, preflight_world
+
+    from pylib.omniroute_cli import cmd_preflight
+    from pylib.omniroute_update import UpdateError
+    _cfg, cp, comp, prov, _env, run_backend = preflight_world(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(mode=0o700)
+    args = Namespace(config=cp, compose=comp, out_dir=str(out), recheck=False, budget=60, service="omniroute")
+    assert cmd_preflight(args, run=run_backend, env={"PATH": "/usr/bin", "HOME": "/h"},
+                         which=lambda name: prov) == 0
+    output = capsys.readouterr().out
+    assert "container_id=" in output and "image_id=sha256:" in output and PASSWORD not in output
+    for name in ("snapshot.json", "fingerprint.txt", "effective.json", "target.json", "deployment.json"):
+        assert (out / name).stat().st_mode & 0o777 == 0o600
+    _, _, _, _, _, dependent_run = preflight_world(tmp_path, extra_containers={RS: inspect_doc(RS, deps=[OMNI])})
+    assert cmd_preflight(args, run=dependent_run, env={"PATH": "/usr/bin", "HOME": "/h"},
+                         which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: ownership\n"
+    def failing(argv, timeout=None):
+        raise UpdateError("failed")
+    # Ruling (Task 2): the plan prose said "returns 1" but its binding reason table maps command
+    # failure to Reason.io, a Deferral -> exit 75, matching recheck's UpdateError->io conversion.
+    assert cmd_preflight(args, run=failing, env={"PATH": "/usr/bin", "HOME": "/h"},
+                         which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: io\n"
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir(mode=0o755)
+    bad_args = Namespace(**{**vars(args), "out_dir": str(unsafe)})
+    assert cmd_preflight(bad_args, run=run_backend, env={"PATH": "/usr/bin", "HOME": "/h"},
+                         which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: lock\n"
+    assert cmd_preflight(args, run=run_backend,
+                         env={"PATH": "/usr/bin", "HOME": "/h", "CONTAINER_HOST": "ssh://x"},
+                         which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: input\n"
+    recheck_args = Namespace(**{**vars(args), "recheck": True})
+    assert cmd_preflight(recheck_args, run=run_backend, env={}, which=lambda name: prov) == 0
+    assert capsys.readouterr().out == ""
+    _, _, _, _, _, drift_run = preflight_world(tmp_path, extra_containers={RS: inspect_doc(RS)})
+    assert cmd_preflight(recheck_args, run=drift_run, env={}, which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: ownership\n"
+
+
+def test_preflight_recheck_budget_discards_a_slow_success(tmp_path, capsys):
+    import time
+
+    from omniroute_fakes import preflight_world
+
+    from pylib.omniroute_cli import cmd_preflight
+    from pylib.omniroute_update import preflight, write_preflight_artifacts
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path)
+    dep, snap, fp, effective = preflight(cfg, cp, comp, env, run, provider=prov)
+    out = tmp_path / "out"; out.mkdir(mode=0o700)
+    write_preflight_artifacts(str(out), dep, snap, fp, effective, snap.docs[dep.container_id])
+    def slow(argv, timeout=None):
+        if argv[:2] == ["podman", "info"]:
+            time.sleep(1.2)
+        return run(argv, timeout=timeout)
+    args = Namespace(config=cp, compose=comp, out_dir=str(out), recheck=True, budget=1, service="omniroute")
+    assert cmd_preflight(args, run=slow, env={}, which=lambda name: prov) == 75
+    assert capsys.readouterr().out == "deferred: io\n"
+
+
+def test_overrides_and_deadline_and_preflight_are_registered():
+    import llmenv
+    p = llmenv.build_parser()
+    a = p.parse_args(["omniroute-update", "overrides", "--idle", "60", "--max-wait", "600"])
+    assert a.func.__name__ == "cmd_overrides" and a.idle == "60" and a.max_wait == "600"
+    b = p.parse_args(["omniroute-update", "deadline", "--file", "f", "--init", "10"])
+    assert b.func.__name__ == "cmd_deadline" and b.init == 10
+    c = p.parse_args(["omniroute-update", "preflight", "--config", "m.yml", "--compose", "d.yml",
+                      "--out-dir", "o", "--recheck", "--budget", "30", "--service", "omniroute"])
+    assert c.func.__name__ == "cmd_preflight" and c.recheck and c.budget == 30 and c.service == "omniroute"
+
+
+def test_lock_path_cli_prints_only_the_path(tmp_path, capsys):
+    from pylib.omniroute_cli import cmd_lock_path
+    from pylib.omniroute_observer import lock_path
+    (tmp_path / "g").mkdir()
+    (tmp_path / "r").mkdir()
+    doc = json.dumps({"store": {"graphRoot": str(tmp_path / "g"), "runRoot": str(tmp_path / "r")}}).encode()
+    args = Namespace(container="omniroute")
+    assert cmd_lock_path(args, run=lambda argv, timeout=None: doc) == 0
+    out = capsys.readouterr()
+    assert out.out == f"{lock_path(lambda argv, timeout=None: doc)}\n" and out.err == ""
+    assert cmd_lock_path(args, run=lambda argv, timeout=None: (_ for _ in ()).throw(
+        __import__("pylib.omniroute_update", fromlist=["UpdateError"]).UpdateError("boom"))) == 75
+    assert capsys.readouterr().err.startswith("deferred: io")
+    assert capsys.readouterr().out == ""
+
+
+def _task6_world(tmp_path):
+    import yaml as _yaml
+    from omniroute_fakes import NET, omni
+
+    from pylib.omniroute_update import write_preflight_artifacts
+    svc = {"image": "docker.io/diegosouzapw/omniroute:latest", "container_name": "omniroute",
+           "ports": ["0.0.0.0:20128:20128"], "stop_grace_period": "40s",
+           "environment": {"PORT": "20128", "INITIAL_PASSWORD": "pa$$s", "REQUIRE_API_KEY": "true"},
+           "volumes": ["omniroute-data:/app/data"], "depends_on": {"x": {}}}
+    eff = {"services": {"omniroute": svc}, "networks": {"default": {}}, "volumes": {"omniroute-data": {}}}
+    tgt = omni(env=["INITIAL_PASSWORD=pa$s", "PORT=20128", "REQUIRE_API_KEY=true", "NODE_ENV=production"])
+    tgt["Mounts"] = [{"Type": "volume", "Name": "llm-env_omniroute-data"}]
+    tgt["NetworkSettings"]["Networks"] = {"llm-env_default": {"NetworkID": NET}}
+    cfg = {"omniroute": {"port": 20128, "image": "docker.io/diegosouzapw/omniroute:latest",
+                         "initial_password": "pa$s"}}
+    cp = tmp_path / "models.yml"; cp.write_text(_yaml.safe_dump(cfg))
+    comp = tmp_path / "docker-compose.yml"; comp.write_text("services:\n  omniroute: {}\n")
+    prov = tmp_path / "podman-compose"; prov.write_bytes(b"#!/bin/sh\n"); prov.chmod(0o755)
+    out = tmp_path / "art"; out.mkdir(mode=0o700)
+    write_preflight_artifacts(str(out), type("D", (), {"__iter__": lambda s: iter([])})(), None, None, None, None) \
+        if False else None
+    # build the artifact files directly (deployment.json needs only project/provider for the CLI)
+    import json as _json
+    dep = {"project": "llm-env", "provider": str(prov)}
+    (out / "deployment.json").write_text(_json.dumps(dep))
+    (out / "effective.json").write_text(_json.dumps(eff))
+    (out / "target.json").write_text(_json.dumps([tgt]))
+    image = "docker.io/diegosouzapw/omniroute@sha256:" + "9" * 64
+    return str(cp), str(comp), str(out), str(prov), eff, tgt, image
+
+
+def _provider_run(mutate=lambda doc: doc):
+    import yaml as _yaml
+    def run(argv, timeout=None):
+        assert argv[-1] == "config"
+        from pylib.omniroute_update import _unescape
+        doc = _unescape(json.loads(Path(argv[argv.index("-f") + 1]).read_text()))
+        return _yaml.safe_dump(mutate(doc)).encode()
+    return run
+
+
+def test_verify_staged_cli(tmp_path, capsys):
+    import hashlib
+
+    from pylib.omniroute_cli import cmd_verify_staged
+    m = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {"digest": "sha256:" + "c" * 64,
+                               "mediaType": "application/vnd.oci.image.config.v1+json", "size": 1},
+                    "layers": []}).encode()
+    _digest = "sha256:" + hashlib.sha256(m).hexdigest()
+    resolved = tmp_path / "r.json"
+    args = Namespace(reference="docker.io/x/y:latest", os="linux", arch="amd64", variant="", json=str(resolved))
+    from pylib.omniroute_cli import cmd_resolve
+    assert cmd_resolve(args, run=lambda a, timeout=None: m) == 0
+    capsys.readouterr()  # resolve prints its key=value lines; verify-staged itself prints nothing
+    good = tmp_path / "i.json"
+    good.write_text(json.dumps([{"Id": "c" * 64, "Os": "linux", "Architecture": "amd64", "Variant": ""}]))
+    va = Namespace(resolved=str(resolved), inspect=str(good))
+    assert cmd_verify_staged(va) == 0
+    assert capsys.readouterr().out == ""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([{"Id": "d" * 64, "Os": "linux", "Architecture": "amd64", "Variant": ""}]))
+    assert cmd_verify_staged(Namespace(resolved=str(resolved), inspect=str(bad))) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err
+
+
+def test_projection_cli_writes_private_file_and_verifies(tmp_path, capsys):
+    from pylib.omniroute_cli import cmd_projection
+    _, _, out, _, _, _, image = _task6_world(tmp_path)
+    projection = tmp_path / "projection.yml"
+    args = Namespace(dir=out, service="omniroute", image=image, out=str(projection))
+    assert cmd_projection(args, run=_provider_run(), env={"PATH": "/usr/bin", "HOME": "/h"}) == 0
+    assert projection.stat().st_mode & 0o777 == 0o600
+    assert capsys.readouterr().out == ""
+    # a provider that mutates the ports makes the round trip disagree -> 75 ownership
+    def mutate(doc):
+        doc["services"]["omniroute"]["ports"] = ["0.0.0.0:9999:9999"]
+        return doc
+    assert cmd_projection(args, run=_provider_run(mutate), env={"PATH": "/usr/bin", "HOME": "/h"}) == 75
+    assert capsys.readouterr().out == "deferred: ownership\n"
+
+
+def test_verify_commit_cli(tmp_path, capsys):
+    from omniroute_fakes import NEW, OMNI, SIB, fake_backend, inspect_doc, omni
+
+    from pylib.omniroute_cli import cmd_verify_commit
+    from pylib.omniroute_update import take_snapshot, write_private
+    snap = take_snapshot(fake_backend({OMNI: omni(), SIB: inspect_doc(SIB, name="sib")}))
+    out = tmp_path / "art"; out.mkdir(mode=0o700)
+    write_private(str(out / "snapshot.json"), snap.to_json())
+    write_private(str(out / "target.json"), json.dumps([omni()]))
+    new_doc = inspect_doc(NEW, name="omniroute", image="2" * 64)
+    new_doc["Mounts"] = omni()["Mounts"]
+    state = {"i": 0}
+    def run(argv, timeout=None):
+        if argv[:2] == ["podman", "info"]:
+            state["i"] += 1
+        containers = {OMNI: omni(), SIB: inspect_doc(SIB, name="sib")} if state["i"] <= 1 \
+            else {NEW: new_doc, SIB: inspect_doc(SIB, name="sib")}
+        return fake_backend(containers)(argv, timeout=timeout)
+    args = Namespace(dir=str(out), service="omniroute", old_id=OMNI, config_id="sha256:" + "2" * 64,
+                     timeout=5, expect_no_deps=False)
+    assert cmd_verify_commit(args, run=run, env={"PATH": "/usr/bin", "HOME": "/h"}) == 0
+    assert capsys.readouterr().out.startswith("new_id=")
+    args_bad = Namespace(**{**vars(args), "config_id": "sha256:" + "3" * 64})
+    assert cmd_verify_commit(args_bad, run=run, env={"PATH": "/usr/bin", "HOME": "/h"}) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err

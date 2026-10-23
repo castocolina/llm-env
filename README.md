@@ -66,11 +66,7 @@ means correctness. Comparative observer latency overhead has not been measured.
 
 Phoenix binds to loopback and disables authentication. This blocks LAN
 publication, but **does not protect traces from other users or processes on
-the same machine**. `make update-omniroute` is intentionally deferred: there
-is currently no qualified automatic updater or safe isolated replacement path
-for this dependency-bearing native deployment. It performs no update and does
-not claim that idle-time or image qualification has completed; an architecture
-decision is still required before updates can be enabled. Treat prompts, state, and model output in this dashboard
+the same machine**. Treat prompts, state, and model output in this dashboard
 as locally accessible private data. No Phoenix telemetry or off-host export
 is enabled. The configured seven-day retention policy
 (`LLM_ENV_PHOENIX_RETENTION_DAYS`, default `7`) is a scheduled cleanup policy,
@@ -149,6 +145,66 @@ instance and the GPU untouched. This is persisted as `llm_server.enabled` in
 later. In this mode, configure an upstream provider (OpenRouter, another
 frontier API, etc.) through the OmniRoute dashboard yourself; `make start`
 does not auto-provision a connection to a local model that doesn't exist.
+
+## OmniRoute updates
+
+`make update-omniroute` is an idle-aware, dependency-aware updater for the
+OmniRoute container. It only acts when **all** of these hold:
+
+- The configured image tag resolves to a different immutable digest than the
+  running container's image (otherwise it prints `unchanged` and exits 0).
+- The OmniRoute activity profile for the running image is reviewed and
+  checked in (`pylib/omniroute_activity_profiles.json`). A running image
+  without a reviewed profile **always defers** with `deferred: capability`.
+- The dashboard's activity feed and health endpoint show the router idle for
+  `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300) and stay idle while it
+  re-samples; a single deployment-wide deadline bounds the whole wait
+  (`LLM_ENV_UPDATE_MAX_WAIT_SECONDS`, default 10800).
+- The backend inventory, compose configuration, effective compose output and
+  running container all agree (fingerprints and digests are rechecked at
+  commit time by a detached worker that holds the update lock).
+
+Exit codes: `0` updated or unchanged, `1` sanitized failure (never rolls
+back), `75` `deferred: <reason>` — a closed set: `io`, `schema`, `auth`,
+`clock`, `feed`, `busy`, `lock`, `ownership`, `deadline`, `capability`.
+Deferral is the normal safe outcome; nothing mutates before every check
+passes, and the replacement itself is not transactional and is never rolled
+back (the previous image stays in the local store; recovery is manual).
+
+This is **not zero-downtime** and observation is **not admission control**:
+in-flight requests are drained with the compose `stop_grace_period`, and the
+idle policy reduces, but cannot eliminate, the chance of cutting a request.
+
+`make migrate-remote-setup` is a one-time recreation of the remote-setup
+container without its native dependency on OmniRoute. It requires the
+**deployed** `docker-compose.yml` to already have no
+`services.remote-setup.depends_on` — re-render it first (see "Updates"
+above; `make setup` re-renders, and its side effects include a device-probe
+`podman run --rm`, Phoenix prepare and observer-image build when System One
+is enabled, a legacy `llm-mdns.service` stop, and a `systemctl --user
+daemon-reload`). The migration never rewrites the deployed compose file.
+While remote-setup is down or `/config` cannot reach OmniRoute, `/config`
+answers `503` + `Retry-After: 5` (bounded, single-flight, never a hang);
+OmniRoute itself is untouched.
+
+Cgroup resource caps in the rendered compose are soft/hard policy, not
+reservations. The OmniRoute 2 GiB cap is an untested candidate — the prior
+1 GiB limit tripped OmniRoute's 503 memory guard under load. No limits were
+changed by the updater work.
+
+How the updater itself is verified: normal `make test` runs stubbed worlds plus
+unit coverage of the derivation rules. Two opt-in suites exercise real
+containers inside a **disposable** rootless Podman backend under `tmp/` (never
+the live stack; they need `podman-compose`, `skopeo`, a readable journal and
+the base images on the host):
+
+```bash
+LLM_ENV_UPDATE_PROOF=1 uv run pytest tests/test_omniroute_update_proof.py -q      # replacement mechanics
+LLM_ENV_UPDATE_CHARACTERIZE=1 uv run pytest tests/test_omniroute_characterize.py -q  # activity measurement
+```
+
+Measurements and their review outcome live in
+`docs/superpowers/research/2026-10-23-updater-characterization.md`.
 
 ## Remote setup
 

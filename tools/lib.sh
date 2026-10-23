@@ -358,3 +358,30 @@ wait_for_health() {
     done
     return 1
 }
+
+# One Podman backend environment for EVERY updater invocation (matches pylib backend_env()): env -i plus an allowlist,
+# so the backend that was inventoried is the backend that is mutated.
+backend_env_init() {
+    local v
+    # shellcheck disable=SC2034 # Consumed by the scripts that source this file.
+    backend_env=(env -i "PATH=$PATH" "HOME=$HOME")
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then backend_env+=("XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"); fi
+    for v in CONTAINERS_STORAGE_CONF CONTAINERS_CONF CONTAINERS_REGISTRIES_CONF; do
+        if [[ -n "${!v:-}" ]]; then backend_env+=("$v=${!v}"); fi
+    done
+}
+
+# Take the canonical update lock on FD 9 (kept until the process, or the detached worker that inherits it, exits).
+# Needs the `llm` array and a private $work directory. Exits 75 `deferred: lock` on contention.
+# shellcheck disable=SC2154 # llm/work are provided by the sourcing script.
+acquire_update_lock() {
+    local rc=0 lock_file
+    lock_file="$("${llm[@]}" lock-path 2>"$work/lock.err")" || rc=$?
+    if (( rc == 75 )); then cat "$work/lock.err"; exit 75; fi
+    if (( rc != 0 )); then cat "$work/lock.err" >&2; exit "$rc"; fi
+    exec 9>>"$lock_file"
+    if [[ -L "$lock_file" || "$(stat -Lc %i /proc/self/fd/9)" != "$(stat -c %i "$lock_file")" ]] || ! flock -n 9; then
+        echo "deferred: lock"
+        exit 75
+    fi
+}
