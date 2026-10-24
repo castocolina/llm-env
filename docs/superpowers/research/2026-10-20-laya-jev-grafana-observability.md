@@ -33,7 +33,7 @@ Each line names the 2026-10-20 statement and where its correction lives.
 5. "Grafana can be the only interface" with Prometheus + Loki as the base: Grafana is optional and comes last (§5).
 6. "Prometheus supplies numeric metrics" for every owned container: no packaged exporter supplies the cgroup limit fields; the repo's own sampler does (§5).
 7. Alloy `loki.source.journal` works "without privileged recipes": Alloy documents that it needs the `adm` and `systemd-journal` groups (§6).
-8. OmniRoute has only JSON usage routes: `main` also has an OTLP GenAI span exporter, unverified on the deployed version (§5, §6).
+8. OmniRoute has only JSON usage routes: it also has an OTLP GenAI span exporter, verified on 3.8.53 and rejected for the reasons in §3.
 9. "Assess the Loki-first option": VictoriaLogs is preferred on this host for its disk cap; Loki stays acceptable (§5).
 10. "Preserve bounded full content; metadata-only would not meet the inspection need": proposed default is hash plus shape, content opt-in (§7, §12 Q1).
 11. "All 49 current spans": Phoenix held 5,542 spans on 2026-10-24, still with zero `session.id` (§1).
@@ -425,24 +425,33 @@ The 2026-10-20 proposal's "collectors" wording was clarified: it meant a shared 
   `drm-memory-vram`) and sysfs `mem_info_vram_used`. Adding `memory.max`,
   `memory.swap.peak`, `memory.events` and `memory.pressure` is a small change.
 
-**OmniRoute can emit OTLP GenAI spans (source-verified on `main` only).**
-`OtlpHttpsEventSink` (since commit `d87b97a786`, 2026-08-20) is enabled by
-`OMNIROUTE_OTEL_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`. It sends OTLP/HTTP
-**JSON** to `<endpoint>/v1/traces` in batches of 64 every 10 s from a bounded
-buffer that drops the oldest events. Spans carry `gen_ai.provider.name`,
-`gen_ai.request.model`, `gen_ai.operation.name="chat"`, input/output token
-counts, `gen_ai.completion.finish_reason` and `omniroute.connection_id`; its
-header says no secrets or prompts are serialized. Caveats:
+**OmniRoute's OTLP GenAI span exporter: verified on the deployed build (2026-10-24), verdict DROP.**
+Tested on image `7d2169fb2bd6` (3.8.53, the build the live container runs) in throwaway containers with a
+receiver on the host; details in the experiment report (`tmp/otlp-verification.md`, not versioned). Observed:
 
-- Missing tokens are written as `0`, which breaks unknown ≠ zero; treat 0 as
-  unknown.
-- `gen_ai.system` carries the routing strategy; `gen_ai.request.temperature` is
-  hardcoded to 0.
-- Presence and behavior in the deployed `omniroute 3.8.53` (read from
-  `/app/package.json` in the container) is **unverified** and needs a throwaway
-  container first (§12 Q7).
-- Phoenix ingests OTLP **protobuf** on `/v1/traces`; whether it accepts the JSON
-  variant is unverified. An OTel Collector accepts both.
+- `OMNIROUTE_OTEL_ENDPOINT` enables it (`OTEL_EXPORTER_OTLP_ENDPOINT` is a fallback, `OTEL_SERVICE_NAME` defaults
+  to `omniroute`); an empty `OMNIROUTE_OTEL_ENDPOINT=""` disables it and blocks the fallback. It reads no header,
+  protocol or sampling variables.
+- It sends only OTLP/HTTP **JSON** to `<endpoint>/v1/traces`, batches of up to 64 every 10 s, 3 s timeout; a failed
+  send is retried on the next tick and spans are dropped after 5 consecutive failures. Spans arrived 8.6 to 10 s
+  after each request.
+- One span per event, named `chat <provider>/<model>`, with `gen_ai.*`, `omniroute.routing.*` and
+  `omniroute.connection_id`. No prompt content was sent (a unique marker in every prompt appeared in 0 of 3
+  exported batches).
+- Wrong or missing data: `gen_ai.system` holds the routing strategy, temperature is always 0, there is no error
+  status, and timestamps are shifted later by the request's own duration. **Upstream failures produce no span**
+  (7 requests sent, 5 spans received; the two upstream 500s were never exported). A non-stream request without
+  upstream usage exports 0/0 tokens although the client received an estimate.
+- No session or trace linking: session headers, `metadata.session_id`, `user` and `traceparent` never appear;
+  every span is its own trace, so it does not fix Phoenix's zero-sessions gap.
+- A throwaway Phoenix from the live image answered **415** to the JSON batch, so using it would require an
+  OpenTelemetry Collector to convert the format.
+- Memory cost was not measurable (about +6 MiB, within noise). The live instance exposes no telemetry setting and
+  sets no OTEL variable.
+
+Conclusion: do not build on it. Reconsider only if a collector is added for other reasons and a later OmniRoute
+version exports failures and session ids. Not tested: embeddings and responses endpoints, combo fallback, how
+Phoenix would render these spans behind a collector.
 
 On the host, OmniRoute `/metrics` and `/api/metrics` return 404 even with a
 dashboard cookie. The guard and traffic counters the limit work needs are in
@@ -566,9 +575,8 @@ receives the journal lines of the four containers and the healer unit, pushed
 as JSON lines by the sampler from
 `journalctl --user -o json --after-cursor=<saved cursor>` (no Alloy, no extra
 group); one **decision record** per Jev item from ai-kit; optionally Claude
-Code OTLP logs with prompts redacted. Turn on `OMNIROUTE_OTEL_ENDPOINT` only
-after a throwaway-container check (§12 Q7); add an OTel Collector only if
-Phoenix or another store cannot take OTLP/JSON directly.
+Code OTLP logs with prompts redacted. Leave `OMNIROUTE_OTEL_ENDPOINT` unset (the
+exporter was verified and rejected, §3); an OTel Collector is only needed if another need justifies it.
 
 **Phase 3: Grafana, only if one UI is demanded** (§12 Q2), over the
 VictoriaMetrics (Prometheus-type), VictoriaLogs and Phoenix (link-out) sources.
@@ -603,7 +611,7 @@ journal recovery already proves user-scoped access to Laya logs.
 | --- | --- | --- |
 | Every current owned container | CPU time/quota/throttling; charged RAM, anon/cache, peak, swap, limit events, PSI; health; stdout/stderr journal | Identify by owned service and verified current cgroup, not a stale ID or delegation root |
 | Laya | The above plus device-level GPU context | Request/answer/usage collection exists; caller/session/fallback linkage does not |
-| OmniRoute | The above plus request/provider logs and `/api/monitoring/health` counters | `/metrics` is 404; an OTLP GenAI exporter exists on `main`, unverified on 3.8.53 (§5) |
+| OmniRoute | The above plus request/provider logs and `/api/monitoring/health` counters | `/metrics` is 404; the OTLP GenAI exporter works on 3.8.53 but is not recommended (§3) |
 | remote-setup | The above plus endpoint availability/errors | `/setup.sh` readiness and `/config` backend failures have different meanings; redact credentials and never collect config response bodies |
 | Phoenix while retained | The above and its readiness | Optional own metrics (`PHOENIX_ENABLE_PROMETHEUS`, currently false) do not monitor other containers or AMD hardware |
 | llama.cpp if enabled later | The same container coverage | Qualify that exact server's metrics flags/endpoint; currently disabled, not “zero traffic” from a missing scrape |
@@ -676,7 +684,7 @@ read the `.scope` level instead, so the path must be verified per tool.
 | Target | What to set or emit | Notes |
 | --- | --- | --- |
 | **system-one** (our own Laya observer, `docker/system-one/phoenix_observer.py`) | In `RequestObserver.__call__`, read `scope["headers"]` for `x-session-id`, `x-run-id`, `x-jev-caller`, `traceparent`. Set `session.id`, `gen_ai.conversation.id`, `llmenv.run_id`, `llmenv.caller`; use the `traceparent` trace id as trace id/parent. Add `gen_ai.operation.name`, `gen_ai.provider.name="laya"`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`/`output_tokens` next to `llm.token_count.*`. A proposed `LAYA_CAPTURE_CONTENT=0\|1` switches `input.value`/`output.value` between redacted content and hash plus shape (§7). Expose `BoundedPhoenixExporter.dropped` (today only a log warning) as a periodic log line or `/health` field. | Bound header values (≤ 128 chars, `[A-Za-z0-9._:-]`), reject others. A header the caller did not send stays **unknown**; never invent sessions from timing. `/health` already gives `loaded`, `idle_seconds`, `cpu_fallbacks`, `device`. |
-| **omniroute** | `OMNIROUTE_OTEL_ENDPOINT=http://<collector>:4318` + `OTEL_SERVICE_NAME=omniroute`, **pending verification on the deployed 3.8.53** (§12 Q7). The sampler reads `/api/monitoring/health`. | Treat token 0 as unknown. Whether OmniRoute uses a generic inbound `x-session-id` for non-OpenCode providers is unverified; its doc names only `x-opencode-session` and "existing affinity/session headers". |
+| **omniroute** | Do **not** enable the built-in OTLP exporter (verified 2026-10-24: no failure spans, no session linking, Phoenix rejects its JSON). The sampler reads `/api/monitoring/health` and the call logs. | Treat token 0 as unknown. Whether OmniRoute uses a generic inbound `x-session-id` for non-OpenCode providers is unverified; its doc names only `x-opencode-session` and "existing affinity/session headers". |
 | **phoenix** (while kept) | `PHOENIX_ENABLE_PROMETHEUS=true` would expose metrics on container port 9090 (currently false, verified by inspect). Keep `PHOENIX_DEFAULT_RETENTION_POLICY_DAYS=7`. | `PHOENIX_ENABLE_AUTH=false`, so it stays loopback-only; stored content is unauthenticated. |
 | **remote-setup** | cgroup + health only. | Never collect `/config` bodies. |
 | **host** | `/proc/pressure/*`, `/proc/meminfo`, `/sys/block/zram0/mm_stat`, `/sys/class/drm/card*/device/{mem_info_vram_used,mem_info_vram_total,gpu_busy_percent}`; per-process VRAM from `/proc/<laya pid>/fdinfo` (`drm-memory-vram`). | Discover cards at runtime (two AMD cards here); never hardcode. |
@@ -785,8 +793,7 @@ were printed.
 ### Remaining uncertainty
 
 Still unverified: actual Laya/hosted-Jev paired outcomes (no remote rung is
-usable), caller session propagation, a hosted history export, the OmniRoute
-OTLP exporter on 3.8.53 and Phoenix's acceptance of OTLP/JSON, every
+usable), caller session propagation, a hosted history export, how Phoenix would render OmniRoute spans behind a collector, every
 *estimated* RAM figure in §5, UI acceptance, ingestion loss/retention and
 comparative observer overhead, the TypeSafe confidence formulas (not re-fetched),
 the 82 archived pairs and 49,864 health records (private manifests not
@@ -992,7 +999,8 @@ backlog.
 6. **Retention (analysis below):** days-based with a GB cap per store; metrics 365 days / 2 GB, logs 90 days /
    5 GB, traces and decision records 30 days / 2 GB; one combined budget of 10 GB for everything this research
    proposes, plus a free-space guard (alert when `/var` free space drops under 100 GB or 15 %).
-7. **OTLP check:** approved, including reading the live instance through its API; result in §3 once done.
+7. **OTLP check:** done on 2026-10-24 (throwaway containers plus read-only look at the live instance): the exporter
+   works but is rejected, see §3.
 
 ### Disk analysis behind decision 6 (measured 2026-10-24)
 
