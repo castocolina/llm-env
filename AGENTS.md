@@ -161,10 +161,20 @@ output files and `ps` by PID at least every 5 minutes (never `pgrep -f` /
 process or a process question as a stall to act on at once. Report run state
 to the user in every status message.
 
-When an external run fails: retry the same lane (3 times, then a new session), never retry a
-quota/rate-limit/auth error against the same model, and never switch harness, provider or model on
-your own initiative; report the failure with evidence and let the user choose. The detailed ladder
-lives in the runner (ai-kit's cross-ai executor), not here.
+When an external run fails against the router (transient error or quota/rate-limit), the orchestrator
+manages the session itself: retry the same lane up to 3 times, then change session (the combo picks
+a member again), up to 3 session changes. Only if the error persists after those 3 changes report it
+with evidence (status, combo, model, timestamps), then wait several minutes before trying or
+reporting again. Never switch harness, provider or model on your own initiative; that is the user's
+call. The detailed ladder lives in the runner (ai-kit's cross-ai executor), not here.
+
+### Test Processes and Containers
+
+Every process, container, volume or temp directory started for a test,
+benchmark or experiment is stopped and removed by the same run before it
+ends, on success and on failure (`try`/`finally` or a trap). Verify nothing
+is left (`podman ps -a`, `ps` by PID) before reporting; never ask whether to
+clean up what you started. Only resources you did not start need approval.
 
 ### Language
 
