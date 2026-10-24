@@ -12,6 +12,7 @@ from pylib.omniroute_update import (
     Reason,
     UpdateError,
     canon_image_id,
+    config_drift,
     parse_reference,
     resolve_image,
     verify_staged,
@@ -382,17 +383,13 @@ def test_preflight_happy_path_returns_deployment_without_secrets(tmp_path):
 PIN_A, PIN_B = "docker.io/diegosouzapw/omniroute@sha256:" + "a" * 64, "docker.io/diegosouzapw/omniroute@sha256:" + "b" * 64
 
 @pytest.mark.parametrize("name,kw,reason", [
-    ("image-mismatch", {"omni_kw": {"image_name": "docker.io/other/img:latest"}}, Reason.ownership),
     ("docker-hub-alias-ok", {"image": "diegosouzapw/omniroute:latest"}, None),
     ("digest-form-running-reference-ok", {"omni_kw": {"image_name": "docker.io/diegosouzapw/omniroute@sha256:" + "9" * 64}}, None),
-    ("pinned-config-running-other-digest", {"image": PIN_A, "svc_patch": {"image": PIN_A}, "omni_kw": {"image_name": PIN_B}}, Reason.ownership),
     ("pinned-config-effective-other-digest", {"image": PIN_A, "svc_patch": {"image": PIN_B}, "omni_kw": {"image": PIN_A}}, Reason.ownership),
     ("effective-image-differs-from-config", {"svc_patch": {"image": "docker.io/other/img:latest"}}, Reason.ownership),
     ("effective-port-differs-from-config", {"svc_patch": {"ports": ["0.0.0.0:9999:9999"]}}, Reason.ownership),
     ("effective-password-differs-from-config", {"svc_patch": {"environment": {"INITIAL_PASSWORD": "wrong", "REQUIRE_API_KEY": "true"}}}, Reason.ownership),
     ("effective-require-key-off", {"svc_patch": {"environment": {"INITIAL_PASSWORD": PASSWORD, "REQUIRE_API_KEY": "false"}}}, Reason.ownership),
-    ("port-mismatch", {"omni_kw": {"port": 9999}}, Reason.ownership),
-    ("password-mismatch", {"omni_kw": {"env": ["INITIAL_PASSWORD=wrong", "REQUIRE_API_KEY=true"]}}, Reason.ownership),
     ("dollar-password-ok", {"password": "pa$s", "omni_kw": {"env": ["INITIAL_PASSWORD=pa$s", "REQUIRE_API_KEY=true"]}}, None),
     ("require-key-off", {"omni_kw": {"env": [f"INITIAL_PASSWORD={PASSWORD}", "REQUIRE_API_KEY=false"]}}, Reason.ownership),
     ("unhealthy-without-api-probe", {"omni_kw": {"health": "unhealthy"}}, Reason.health),
@@ -506,10 +503,14 @@ def test_mixed_dollar_forms_defer_input():
     assert e.value.reason is Reason.input
 
 
-def test_environment_value_differing_from_runtime_defers_ownership():
+def test_a_drifted_environment_value_is_projected_as_the_desired_one():
+    eff = {**EFF, "services": {"omniroute": {**SVC, "environment": {**SVC["environment"], "INITIAL_PASSWORD": "new"}}}}
+    out = build_projection(eff, "omniroute", target(password="other"), IMAGE, "llm-env")
+    assert out["services"]["omniroute"]["environment"]["INITIAL_PASSWORD"] == "new"
+    # A drifted value with a "$" and no matching value to show the provider's escaping form: safe deferral.
     with pytest.raises(Deferral) as e:
         build_projection(EFF, "omniroute", target(password="other"), IMAGE, "llm-env")
-    assert e.value.reason is Reason.ownership and "other" not in str(e.value)
+    assert e.value.reason is Reason.input and "other" not in str(e.value) and "pa$" not in str(e.value)
 
 
 def test_extra_inspected_network_defers_ownership():
@@ -747,9 +748,6 @@ def test_stopped_target_preflight_reports_the_stopped_state(tmp_path, status):
 
 
 @pytest.mark.parametrize("name,kw", [
-    ("image", {"omni_kw": {"state": "exited", "image_name": "docker.io/other/img:latest"}}),
-    ("port", {"omni_kw": {"state": "exited", "port": 9999}}),
-    ("password", {"omni_kw": {"state": "exited", "env": ["INITIAL_PASSWORD=wrong", "REQUIRE_API_KEY=true"]}}),
     ("require-key", {"omni_kw": {"state": "exited", "env": [f"INITIAL_PASSWORD={PASSWORD}", "REQUIRE_API_KEY=false"]}}),
     ("project-label", {"omni_kw": {"state": "exited", "project": ""}}),
     ("incoming-dependent", {"omni_kw": {"state": "exited"},
@@ -850,3 +848,47 @@ def test_verify_commit_for_an_absent_target_matches_by_project_and_image(tmp_pat
                       clock=clock, sleep=sleep)
     with pytest.raises(UpdateError, match="config id"):
         verify_commit(stepping_backend({NEW: new_omni()}), d, "omniroute", "", None, 5, clock=clock, sleep=sleep)
+
+
+# ---- 2026-10-24 addendum (l): config drift is an update with the same image, never an ownership deferral ----
+
+@pytest.mark.parametrize("state", ["running", "exited"])
+@pytest.mark.parametrize("name,kw,drift", [
+    ("none", {}, ""),
+    ("image-reference", {"omni_kw": {"image_name": "docker.io/other/img:latest"}}, "image"),
+    ("pinned-other-digest", {"image": PIN_A, "svc_patch": {"image": PIN_A}, "omni_kw": {"image_name": PIN_B}}, "image"),
+    ("port", {"omni_kw": {"port": 9999}}, "ports"),
+    ("secret-only", {"omni_kw": {"env": ["INITIAL_PASSWORD=old-secret-value", "REQUIRE_API_KEY=true"]}},
+     "environment INITIAL_PASSWORD"),
+    ("env-and-memory", {"svc_patch": {"mem_limit": "2048m", "environment": {
+        "INITIAL_PASSWORD": PASSWORD, "REQUIRE_API_KEY": "true", "CALL_LOG_MAX_ENTRIES": "5000"}}},
+     "environment CALL_LOG_MAX_ENTRIES, memory"),
+])
+def test_running_differences_are_reported_as_drift_names_without_values(tmp_path, state, name, kw, drift):
+    kw = {**kw, "omni_kw": {**kw.get("omni_kw", {}), "state": state}}
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path, **kw)
+    dep, _snap, _fp, _eff = preflight(cfg, cp, comp, env, run, provider=prov)
+    assert dep.drift == drift
+    assert dep.live_port == (9999 if name == "port" else 20128) and dep.port == 20128
+    assert "old-secret-value" not in repr(dep) and PASSWORD not in repr(dep)
+
+
+def test_env_list_or_map_form_and_order_create_no_drift():
+    svc = {"image": "docker.io/diegosouzapw/omniroute:latest", "ports": ["0.0.0.0:20128:20128"], "restart": "unless-stopped",
+           "mem_limit": "2g", "mem_reservation": "768m", "cpus": 2, "cpu_shares": 1024,
+           "healthcheck": {"test": ["CMD", "node", "healthcheck.mjs"], "interval": "5s", "timeout": "3s",
+                           "retries": 5, "start_period": "10s"},
+           "environment": ["B=2", "PASS=a$$b", "A=1"]}
+    doc = omni(env=["PATH=/usr/bin", "A=1", "PASS=a$b", "B=2", "HOSTNAME=x"])
+    doc["HostConfig"].update(Memory=2 << 30, MemoryReservation=768 << 20, NanoCpus=2_000_000_000, CpuShares=1024,
+                             RestartPolicy={"Name": "unless-stopped", "MaximumRetryCount": 0},
+                             PortBindings={"20128/tcp": [{"HostIp": "0.0.0.0", "HostPort": "20128"}]})
+    doc["Config"]["Healthcheck"] = {"Test": ["CMD", "node", "healthcheck.mjs"], "Interval": 5_000_000_000,
+                                    "Timeout": 3_000_000_000, "Retries": 5, "StartPeriod": 10_000_000_000}
+    assert config_drift(svc, doc) == []
+    assert config_drift({**svc, "environment": {"A": "1", "B": "2", "PASS": "a$b"}}, doc) == []
+    changed = {**svc, "cpus": 1.5, "cpu_shares": 512, "mem_reservation": "1g", "restart": "always",
+               "healthcheck": {**svc["healthcheck"], "retries": 3}, "ports": ["127.0.0.1:20128:20128"],
+               "environment": ["A=1", "B=3", "PASS=a$$c", "NEW=x"]}
+    assert config_drift(changed, doc) == ["environment B NEW PASS", "ports", "memory reservation", "cpus",
+                                          "cpu shares", "healthcheck", "restart"]

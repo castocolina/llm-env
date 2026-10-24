@@ -48,13 +48,14 @@ class World:
     def __init__(self, tmp_path, *, staged=STAGED, staged_inspect_id=None, dependent=False, drift_after_observer=False,
                  up_rc=0, stop_sleep=0, prior_tag_sleep=0, env=None, busy=False, old_state="running",
                  old_health="healthy", absent=False, new_health="healthy", busy_at_last_look=False,
-                 pull_rc=0, pull_sleep=0):
+                 pull_rc=0, pull_sleep=0, svc_patch=None, omniroute_cfg=None, server_password=None,
+                 port=None, restarted_after_observer=False):
         self.tmp, self.env_extra = tmp_path, env or {}
         # The scripts' private work-dir parent ($XDG_RUNTIME_DIR, 0700) and TMPDIR: every work dir a run leaves
         # behind lands here, and close() fails the test when one with a password or deployment file survives.
         self.runtime = tmp_path / "run"
         self.runtime.mkdir(mode=0o700)
-        self.port = free_port()
+        self.port = port or free_port()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.calls, self.worldfile = self.bin / "stub-calls.jsonl", self.bin / "stub-world.json"
@@ -63,11 +64,14 @@ class World:
         cfgdir = self.home / ".config/llm-env"
         cfgdir.mkdir(parents=True)
         (cfgdir / "models.yml").write_text(yaml.safe_dump({"version": 1, "omniroute": {
-            "port": self.port, "image": "docker.io/diegosouzapw/omniroute:latest", "initial_password": PASSWORD}}))
+            "port": self.port, "image": "docker.io/diegosouzapw/omniroute:latest", "initial_password": PASSWORD,
+            **(omniroute_cfg or {})}}))
         (cfgdir / "models.yml").chmod(0o600)
         (cfgdir / "docker-compose.yml").write_text("services:\n  omniroute: {}\n")
         self.state = tmp_path / "omni-state.json"
-        self.state.write_text(json.dumps({"active": 1 if busy else 0, "cache_ms": 1000}))
+        # server_password: the fake API then accepts only that login (the running container's own password)
+        self.state.write_text(json.dumps({"active": 1 if busy else 0, "cache_ms": 1000,
+                                          **({"password": server_password} if server_password else {})}))
         stub = REPO / "tests/fixtures/stub_tool.py"
         (tmp_path / "g").mkdir(exist_ok=True)
         (tmp_path / "r").mkdir(exist_ok=True)
@@ -89,6 +93,14 @@ class World:
                                           "environment": {"PORT": str(self.port), "INITIAL_PASSWORD": PASSWORD,
                                                           "REQUIRE_API_KEY": "true", "NODE_ENV": "production"}}},
                "networks": {"default": {}}, "volumes": {"omniroute-data": {}}}
+        patch = dict(svc_patch or {})  # the rendered service differs from the running one: config drift
+        env_patch = patch.pop("environment", None)  # a list replaces the environment, a dict is merged into it
+        eff_svc = eff["services"]["omniroute"]
+        if isinstance(env_patch, list):
+            eff_svc["environment"] = env_patch
+        else:
+            eff_svc["environment"].update(env_patch or {})
+        eff_svc.update(patch)
         old["Mounts"] = [{"Type": "volume", "Name": f"{PROJECT}_omniroute-data"}]
         new["Mounts"] = old["Mounts"]
         start_ids = ([] if absent else [OMNI]) + ([RS] if dependent else [])
@@ -108,6 +120,10 @@ class World:
              "stdout": ps([OMNI, RS] if drift_after_observer else start_ids)},
             {T: "podman", "prefix": ["ps"], "phase": ["post-rm"], "stdout": ps([])},
             {T: "podman", "prefix": ["ps"], "phase": ["post-commit"], "stdout": ps([NEW])},
+            # restarted_after_observer: the healer's lock-free `podman restart` (lease path) during the observation
+            *([{T: "podman", "prefix": ["container", "inspect"], "last": OMNI, "phase": ["post-observer"],
+                "stdout": json.dumps([{**old, "State": {**old["State"], "StartedAt": "2026-10-24T00:00:00Z"}}])}]
+              if restarted_after_observer else []),
             {T: "podman", "prefix": ["container", "inspect"], "last": OMNI, "stdout": json.dumps([old])},
             {T: "podman", "prefix": ["container", "inspect"], "last": RS, "stdout": json.dumps([rs])},
             {T: "podman", "prefix": ["container", "inspect"], "last": NEW, "stdout": json.dumps([new])},

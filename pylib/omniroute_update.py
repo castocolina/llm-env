@@ -419,6 +419,96 @@ class Deployment:
     volume_names: tuple[str, ...]
     sibling_ids: tuple[str, ...]
     state: str = "running"  # running | stopped | absent (a down target skips the activity observer)
+    live_port: int = 0      # the running container's own published port (observer, last look); `port` is desired
+    drift: str = ""         # config_drift names, comma separated ("" = the container matches the compose service)
+
+
+def _same_value(value: str, actual: str | None) -> bool:
+    """Desired (provider output, possibly `$$`-escaped) vs running env value, compared as digests: drift reporting
+    never needs to hold a value (INITIAL_PASSWORD is one of them) in a message."""
+    if actual is None:
+        return False
+    want = hashlib.sha256(value.encode()).digest()
+    return any(hmac.compare_digest(want, hashlib.sha256(form.encode()).digest())
+               for form in (actual, actual.replace("$", "$$")))
+
+
+def _bytes(value) -> int:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]?)b?", str(value).strip().lower())
+    if match is None:
+        raise Deferral(Reason.input, "unparseable memory size in the compose service")
+    return int(float(match.group(1)) * 1024 ** "_kmgt".index(match.group(2) or "_"))
+
+
+_NS = {"ns": 1, "us": 1e3, "ms": 1e6, "s": 1e9, "m": 60e9, "h": 3600e9}
+
+
+def _ns(value) -> int:
+    return round(sum(float(n) * _NS[u] for n, u in re.findall(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)", str(value))))
+
+
+def _ip(host_ip) -> str:
+    return "" if str(host_ip or "") in ("", "0.0.0.0") else str(host_ip)
+
+
+def _port_bindings(svc: dict) -> set[tuple[str, str, str]]:
+    """(host ip, host port, container port/proto); shortcut: no ranges or IPv6 host ips (never rendered)."""
+    out = set()
+    for entry in svc.get("ports") or []:
+        if isinstance(entry, dict):
+            ip, host, target, proto = (entry.get("host_ip", ""), entry.get("published", ""), entry.get("target", ""),
+                                       entry.get("protocol") or "tcp")
+        else:
+            spec, _, proto = str(entry).partition("/")
+            ip, host, target = ([""] * 2 + spec.split(":"))[-3:]
+        out.add((_ip(ip), str(host), f"{target}/{proto or 'tcp'}"))
+    return out
+
+
+def _running_bindings(doc: dict) -> set[tuple[str, str, str]]:
+    return {(_ip(b.get("HostIp")), str(b.get("HostPort", "")), key)
+            for key, binds in ((doc.get("HostConfig") or {}).get("PortBindings") or {}).items() for b in binds or []}
+
+
+_HEALTH = (("test", "Test"), ("interval", "Interval"), ("timeout", "Timeout"), ("retries", "Retries"),
+           ("start_period", "StartPeriod"))
+
+
+def config_drift(svc: dict, doc: dict) -> list[str]:
+    """Names (never values) of the fields where the desired compose service differs from the running container.
+    Environment: only keys the service defines (the image's own and unrendered variables are ignored); list/map form
+    and order do not matter. Unset resource keys mean 0 (Podman's own "no limit"); a healthcheck is compared only
+    for the keys the service sets (an image HEALTHCHECK fills the rest)."""
+    running_env = _env_dict((doc.get("Config") or {}).get("Env"))
+    env = sorted(k for k, v in _env_dict(svc.get("environment")).items() if not _same_value(v, running_env.get(k)))
+    out = [f"environment {' '.join(env)}"] if env else []
+    if not same_image(str(svc.get("image", "")), str(doc.get("ImageName", ""))):
+        out.append("image")
+    if _port_bindings(svc) != _running_bindings(doc):
+        out.append("ports")
+    host = doc.get("HostConfig") or {}
+    for name, key, want in (("memory", "Memory", _bytes(svc.get("mem_limit", 0))),
+                            ("memory reservation", "MemoryReservation", _bytes(svc.get("mem_reservation", 0))),
+                            ("cpus", "NanoCpus", round(float(svc.get("cpus", 0)) * 1e9)),
+                            ("cpu shares", "CpuShares", int(svc.get("cpu_shares", 0)))):
+        if int(host.get(key) or 0) != want:
+            out.append(name)
+    health = svc.get("healthcheck") or {}
+    got = (doc.get("Config") or {}).get("Healthcheck") or {}
+    for key, inspect_key in _HEALTH:
+        if key in health:
+            want = health[key]
+            want = (["CMD-SHELL", want] if isinstance(want, str) else list(want)) if key == "test" else \
+                int(want) if key == "retries" else _ns(want)
+            if got.get(inspect_key) != want:
+                out.append("healthcheck")
+                break
+    policy = host.get("RestartPolicy") or {}
+    running_restart = (policy.get("Name") or "no") + (f":{policy['MaximumRetryCount']}"
+                                                      if policy.get("MaximumRetryCount") else "")
+    if str(svc.get("restart") or "no") != running_restart:
+        out.append("restart")
+    return out
 
 
 def _env_value(doc: dict, name: str) -> str | None:
@@ -459,6 +549,7 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
     so the caller skips the activity observer); a running OmniRoute whose Podman health is not `healthy` is accepted
     only when `api_ok(port, password)` proves its authenticated health API answers (the observer needs exactly that)."""
     snap = take_snapshot(run, env)
+    live_port = 0
     omni_cfg = cfg.get("omniroute") or {}
     port, image_ref = int(omni_cfg.get("port", 20128)), omni_cfg.get("image", DEFAULT_IMAGE)
     password = str(omni_cfg.get("initial_password", ""))
@@ -487,19 +578,18 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
     elif mode == "stopped" and (state.get("Paused") or str(state.get("Status", "")).lower() not in _DOWN_STATUSES):
         raise Deferral(Reason.ownership, "target is neither running nor cleanly stopped")
     elif mode != "absent":
-        if not same_image(image_ref, doc.get("ImageName", "")):
-            raise Deferral(Reason.ownership, "running image reference differs from configuration")
-        bindings = ((doc.get("HostConfig") or {}).get("PortBindings") or {}).get(f"{port}/tcp") or []
-        if [b.get("HostPort") for b in bindings] != [str(port)]:
-            raise Deferral(Reason.ownership, "published port differs from configuration")
-        running_pw = _env_value(doc, "INITIAL_PASSWORD") or ""
-        if not hmac.compare_digest(running_pw.encode(), password.encode()):
-            raise Deferral(Reason.ownership, "dashboard password differs from configuration")
+        # Image reference, port and password differences from the configuration are config drift (reported and
+        # applied by the recreate); the running container is observed on its OWN port with its OWN password.
+        host_ports = {b[1] for b in _running_bindings(doc)}
+        if len(host_ports) != 1 or not next(iter(host_ports)).isdigit():
+            raise Deferral(Reason.ownership, "the running target does not publish exactly one host port")
+        live_port = int(next(iter(host_ports)))
         if _env_value(doc, "REQUIRE_API_KEY") != "true":
             raise Deferral(Reason.ownership, "REQUIRE_API_KEY is not true")
         # Podman health can be wrong on hosts where its exec-based probe fails (e.g. exit 125 "unable to find user
         # node"); the authenticated API is what the observer needs, so it is the deciding signal.
-        if mode == "running" and health != "healthy" and (api_ok is None or not api_ok(port, password)):
+        if mode == "running" and health != "healthy" and \
+                (api_ok is None or not api_ok(live_port, _env_value(doc, "INITIAL_PASSWORD") or "")):
             raise Deferral(Reason.health, "running target is not healthy and its authenticated health API does not answer")
     if cid and incoming(snap, cid):
         raise Deferral(Reason.ownership, "a container depends on the target")
@@ -537,7 +627,8 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
         port, int(grace.group(1)), "@sha256:" in image_ref, *platform, provider,
         tuple(sorted({v.get("NetworkID") for v in ((doc.get("NetworkSettings") or {}).get("Networks") or {}).values()})),
         tuple(sorted(m["Name"] for m in doc.get("Mounts") or [] if m.get("Type") == "volume")),
-        tuple(siblings), mode)
+        tuple(siblings), mode, live_port or port,
+        ", ".join(config_drift(svc, doc)) if service == "omniroute" and cid else "")
     return dep, snap, fingerprint(parts), effective
 
 
@@ -601,8 +692,9 @@ def to_runtime_literal(svc: dict, inspect_doc: dict) -> dict:
     forms: set[str] = set()
     for key, value in _env_dict(svc.get("environment")).items():
         actual = running.get(key)
-        if actual is None or (value != actual and value != actual.replace("$", "$$")):
-            raise Deferral(Reason.ownership, f"effective environment {key} differs from the running container")
+        if not _same_value(value, actual):
+            continue  # config drift (preflight reported it): the projection carries the desired value
+        assert actual is not None
         if "$" in actual:
             forms.add("plain" if value == actual else "escaped")
     if len(forms) > 1:

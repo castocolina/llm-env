@@ -63,8 +63,8 @@ prior_tag="$(pm image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || tru
 if [[ "$state" == "running" ]]; then
     [[ "$min_wait" =~ ^[0-9]+$ ]] || fail "last look: malformed min_wait"
     rc=0
-    look="$(cli activity --inspect "$work/target.json" --port "$(jq -r .port "$work/deployment.json")" \
-        --password-file "$work/pw" --min-wait "$min_wait")" || rc=$?
+    look="$(cli activity --inspect "$work/target.json" --port "$(jq -r .live_port "$work/deployment.json")" \
+        --password-file "$work/live-pw" --min-wait "$min_wait")" || rc=$?   # the running container's own port/password
     if (( rc != 0 )); then printf '%s\n' "$look"; exit "$rc"; fi
 fi
 # (c) exclusive deadline, rechecked after (a)+(b) and immediately before the first mutation.

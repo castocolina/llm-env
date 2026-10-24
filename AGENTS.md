@@ -31,7 +31,7 @@ make enable-boot              # Start at boot (opt-in)
 make disable-boot             # Disable start at boot
 make status                   # Show service status and print endpoints/credentials
 make show-secrets              # Print endpoints/credentials without starting anything
-make update-omniroute          # Idle-aware OmniRoute-only update (defers unless idle and verified; first characterizes an unprofiled running image into ~/.local/state/llm-env/omniroute-profiles; a stopped/absent container is updated without waiting)
+make update-omniroute          # Idle-aware OmniRoute-only update; applies a changed omniroute service definition too, once idle (defers unless idle and verified; first characterizes an unprofiled running image into ~/.local/state/llm-env/omniroute-profiles; a stopped/absent container is updated without waiting)
 make migrate-remote-setup      # One-time remote-setup recreation without its OmniRoute dependency
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
@@ -102,7 +102,8 @@ Values must be positive (0 would mean "no limit"). `set` and `clear` only edit
 `models.yml`; running containers keep their current limits until you apply the
 change. `bash setup/render-unit.sh` re-renders the compose file and unit for the
 next start or boot and does not touch running containers (boot starts the last
-rendered file). To apply to the running stack, run `make restart`: it stops and
+rendered file). For an `omniroute` change, run `make update-omniroute`: it
+recreates only OmniRoute, once it has no load. To apply to the whole running stack, run `make restart`: it stops and
 starts OmniRoute, remote-setup, System One and (when System One is enabled)
 Phoenix, so in-flight requests are interrupted, System One reloads its weights
 before it is healthy, and every container begins a new cgroup lifetime
@@ -142,8 +143,9 @@ model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB resident, peak at
    `uv run llmenv.py resource-override set --service <service> --memory-max-mib N ...`, or
    for everyone by editing `DEFAULT_POLICY` in `pylib/resources.py` (plus its
    tests and the research doc).
-4. `bash setup/render-unit.sh`, then recreate only the affected service when it
-   is idle (or `make restart` when no agent session uses OmniRoute).
+4. `bash setup/render-unit.sh`, then `make update-omniroute` for OmniRoute (it
+   waits for idle); for another service, recreate it when it is idle (or
+   `make restart` when no agent session uses OmniRoute).
 
 ## Rules
 
@@ -153,6 +155,10 @@ After editing any `.py` file, run `make validate && make test`.
 Makefile target bodies longer than 3 lines must delegate to a `.sh` file.
 
 Python is invoked only as `uv run llmenv.py <subcommand>`.
+
+Never restart or recreate the omniroute container by hand (`podman restart`, `podman compose up --force-recreate`).
+After an OmniRoute config change (template, env, limits, ports) run `bash setup/render-unit.sh`, then
+`make update-omniroute`: it applies the change once OmniRoute has no load and may defer for hours.
 
 ### External Agent Runs
 

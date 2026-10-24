@@ -37,7 +37,7 @@ _help_line "backup" "Back up OmniRoute combos + provider connection metadata (be
 _help_line "combo-backup" "Back up OmniRoute combos only (OUTPUT=path optional)"
 _help_line "combo-restore" "Restore OmniRoute combos (INPUT=path; OVERWRITE=1 optional)"
 _help_line "connections-backup" "Back up OmniRoute provider connection metadata only (OUTPUT=path optional)"
-_help_line "update-omniroute" "Idle-aware OmniRoute update; characterizes an unprofiled running image first (local store ~/.local/state/llm-env/omniroute-profiles); a stopped container is started on the new image, an absent one created (deferral = 'Error 75', script exit 75)"
+_help_line "update-omniroute" "Idle-aware OmniRoute update; also applies a changed omniroute service definition (env, limits, ports, healthcheck; 'drift: <fields>'), once idle, after 'bash setup/render-unit.sh'; characterizes an unprofiled running image first (local store ~/.local/state/llm-env/omniroute-profiles); a stopped container is started on the new image, an absent one created (deferral = 'Error 75', script exit 75)"
 _help_line "migrate-remote-setup" "One-time recreation of remote-setup without its OmniRoute dependency"
 _help_line "logs" "Follow service logs"
 _help_line "validate" "Run shellcheck and ruff"

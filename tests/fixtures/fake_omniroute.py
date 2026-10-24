@@ -50,8 +50,11 @@ def main() -> None:
 
         def do_POST(self):
             if self.path == "/api/auth/login":
-                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 print(json.dumps({"method": "POST", "path": self.path}), flush=True)
+                want = state().get("password")  # optional: accept only this password
+                if want is not None and json.loads(body or b"{}").get("password") != want:
+                    return self._send(401, {"error": "bad password"})
                 return self._send(200, {"ok": True}, [("Set-Cookie", "auth_token=fixture; Path=/")])
             self._send(404, {"error": "not found"})
 

@@ -11,7 +11,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import yaml
-from omniroute_fakes import IMG, NEW, OMNI, PROJECT, RS, SIB, inspect_doc, profile_entry
+from omniroute_fakes import (
+    IMG,
+    NEW,
+    OMNI,
+    PASSWORD,
+    PROJECT,
+    RS,
+    SIB,
+    free_port,
+    inspect_doc,
+    profile_entry,
+)
 from omniroute_world import STAGED, World
 
 REPO = Path(__file__).resolve().parents[1]
@@ -66,7 +77,7 @@ def test_stub_finds_its_world_without_any_environment(world, tmp_path):
 def test_unchanged_when_the_running_config_id_matches(world):
     w = world(staged="sha256:" + IMG)
     r = w.run()
-    assert r.returncode == 0 and r.stdout.strip().splitlines()[-1] == "unchanged"
+    assert r.returncode == 0 and r.stdout.strip() == "unchanged"  # image and service definition both match
     assert w.mutations() == []
 
 
@@ -580,3 +591,126 @@ def test_migration_worker_completes_when_the_shell_is_terminated_at_the_hand_off
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# ---- 2026-10-24 addendum (l): config drift is a deferred restart through the same shared apply_when_idle ----
+
+IDLE = {"LLM_ENV_UPDATE_IDLE_SECONDS": "1", "LLM_ENV_UPDATE_MAX_WAIT_SECONDS": "60"}
+OBSERVING = "phase: observing (idle gate: 1 s quiet, wait budget 60 s)"
+
+
+def _observed(w):
+    return any(c["tool"] == "journalctl" and "--follow" in c["argv"] for c in w.journal())
+
+
+def test_config_drift_after_a_rerender_recreates_with_the_same_image_once_idle(world):
+    """First run after `make setup`/render-unit re-rendered the compose file with a new variable: same image, so the
+    only reason to act is the drift; it goes through the idle gate, the target-only recreate and the verification."""
+    w = world(staged="sha256:" + IMG, svc_patch={"environment": {"CALL_LOG_MAX_ENTRIES": "5000"}})
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == ["drift: environment CALL_LOG_MAX_ENTRIES", OBSERVING,
+                                     f"updated {OMNI[:12]} -> {NEW[:12]}"]
+    assert _observed(w)
+    muts = w.mutations()
+    assert muts[:4] == [("podman", "pull", w.immutable_ref), ("podman", "tag", IMG, REF),
+                        ("podman", "stop", "--time", "40", OMNI), ("podman", "rm", OMNI)]
+    assert len(muts) == 5 and muts[4][0] == "podman-compose" and muts[4][-8:][0] == "up"
+    assert any(str(a).endswith("projection.yml") for a in muts[4])
+
+
+def test_secret_only_drift_names_the_variable_never_a_value_and_observes_with_the_running_password(world):
+    """INITIAL_PASSWORD changed: the fake API accepts only the running container's password, so the observer and the
+    last look must use it; the replacement is verified on Podman health. No value reaches stdout or stderr."""
+    w = world(staged="sha256:" + IMG, omniroute_cfg={"initial_password": "rotated-secret"},
+              svc_patch={"environment": {"INITIAL_PASSWORD": "rotated-secret"}}, server_password=PASSWORD)
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines()[0] == "drift: environment INITIAL_PASSWORD"
+    assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
+    for secret in (PASSWORD, "rotated-secret"):
+        assert secret not in r.stdout and secret not in r.stderr
+
+
+def test_env_list_form_and_order_are_not_drift(world):
+    port = free_port()
+    w = world(port=port, staged="sha256:" + IMG, svc_patch={"environment": [
+        "NODE_ENV=production", "REQUIRE_API_KEY=true", f"INITIAL_PASSWORD={PASSWORD}", f"PORT={port}"]})
+    r = w.run()
+    assert r.returncode == 0 and r.stdout.strip() == "unchanged", r.stdout + r.stderr
+    assert w.mutations() == []
+
+
+def test_drift_and_a_new_image_in_one_run_apply_together(world):
+    """A new image plus a changed port and memory cap: one drift line, one observation (on the running container's
+    own port), one recreate with the new image."""
+    new_port = free_port()
+    w = world(omniroute_cfg={"port": new_port},
+              svc_patch={"ports": [f"0.0.0.0:{new_port}:{new_port}"], "mem_limit": "2048m",
+                         "environment": {"PORT": str(new_port)}})
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == ["drift: environment PORT, ports, memory", OBSERVING,
+                                     f"updated {OMNI[:12]} -> {NEW[:12]}"]
+    assert _verbs(w.mutations()) == [("podman", "pull"), ("podman", "tag"), ("podman", "stop"), ("podman", "rm"),
+                                      ("podman-compose", "--in-pod")]
+    assert w.mutations()[1] == ("podman", "tag", STAGED.removeprefix("sha256:"), REF)
+
+
+def test_a_drift_that_leaves_the_replacement_unhealthy_fails_verification_without_rollback(world):
+    w = world(staged="sha256:" + IMG, omniroute_cfg={"initial_password": "rotated-secret"},
+              svc_patch={"environment": {"INITIAL_PASSWORD": "rotated-secret"}}, server_password=PASSWORD,
+              new_health="unhealthy")
+    r = w.run(LLM_ENV_HEALTH_TIMEOUT_SECONDS="3", **IDLE)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "stage: verify-commit" in r.stderr and "No rollback was attempted" in r.stderr
+    assert _verbs(w.mutations())[-1] == ("podman-compose", "--in-pod")
+    assert "rotated-secret" not in r.stdout + r.stderr and PASSWORD not in r.stdout + r.stderr
+
+
+def test_a_healer_restart_during_a_drift_wait_defers_before_any_mutation(world):
+    """Healer interplay: its memory recycle waits for the update lock (test_heal_omniroute), but its lease restart
+    takes no lock; a restart while the drift waits for quiet changes the inventory, so the worker's recheck defers
+    `ownership` and nothing is recreated (the next run re-reads the restarted container)."""
+    w = world(staged="sha256:" + IMG, svc_patch={"environment": {"CALL_LOG_MAX_ENTRIES": "5000"}},
+              restarted_after_observer=True)
+    r = w.run(**IDLE)
+    assert r.returncode == 75 and r.stdout.splitlines()[-1] == "deferred: ownership", r.stdout + r.stderr
+    assert w.mutations() == [("podman", "pull", w.immutable_ref)]
+
+
+APPLY_DRIVER = """set -euo pipefail
+source "$1/tools/lib.sh"
+config_path="$CONFIG_PATH" compose_path="$COMPOSE_FILE"
+unset COMPOSE_FILE COMPOSE_INSPECT_DIR
+llm=(uv run --project "$REPO_DIR" "$REPO_DIR/llmenv.py" omniroute-update)
+backend_env_init
+cli() { "${llm[@]}" "$@" 9>&-; }
+pm() { "${backend_env[@]}" podman "$@" 9>&-; }
+defer() { echo "deferred: $1"; exit 75; }
+work="$(private_work_dir)"
+source "$REPO_DIR/scripts/omniroute-apply-when-idle.sh"
+trap 'stop_observer; rm -rf "$work"' EXIT
+acquire_update_lock
+cli preflight --config "$config_path" --compose "$compose_path" --out-dir "$work" >"$work/deploy.env"
+state=running stop_seconds=40 min_wait=1 max_deferred_wait="$4" health_timeout=60
+apply_when_idle "$2" "$3"
+"""
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+def test_apply_when_idle_alone_gates_recreates_and_verifies(world, busy):
+    """The shared piece without the updater around it (no resolve, no pull): given an image and the preflight
+    artifacts it observes, hands off to the worker and reports the result line; busy defers with nothing changed."""
+    w = world(busy=busy)
+    r = subprocess.run(["bash", "-c", APPLY_DRIVER, "driver", str(w.repo), STAGED, w.immutable_ref,
+                        "3" if busy else "60"],
+                       env=w.env(), capture_output=True, text=True, timeout=300, check=False)
+    if busy:
+        assert r.returncode == 75 and r.stdout.splitlines()[-1] == "deferred: deadline", r.stdout + r.stderr
+        assert w.mutations() == []
+        return
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == [OBSERVING, f"updated {OMNI[:12]} -> {NEW[:12]}"]
+    assert _verbs(w.mutations()) == [("podman", "tag"), ("podman", "stop"), ("podman", "rm"),
+                                      ("podman-compose", "--in-pod")]

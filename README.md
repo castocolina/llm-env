@@ -152,7 +152,9 @@ does not auto-provision a connection to a local model that doesn't exist.
 OmniRoute container. It only acts when **all** of these hold:
 
 - The configured image tag resolves to a different immutable digest than the
-  running container's image (otherwise it prints `unchanged` and exits 0).
+  running container's image, **or** the rendered omniroute service definition
+  differs from the running container (config drift, below). Otherwise it
+  prints `unchanged` and exits 0.
 - The running image has an OmniRoute activity profile: a reviewed one
   shipped in `pylib/omniroute_activity_profiles.json` (today `:latest`
   `038b2aba95a6` and `:next` `2a7a68e89fe5`), or one the updater derived
@@ -185,10 +187,32 @@ observer are skipped, the image is still resolved and pulled immutably, and
 only `omniroute` is recreated (`--no-deps`) and verified. Note that this
 **starts** it: a stopped container is replaced by a running one on the new
 image, and an absent one is created and started from the deployed compose file. The ownership checks
-(compose project/service labels, port, password, image reference) still
-apply. A running container that Podman reports `unhealthy` or `starting` is
+(compose project/service labels, the compose file agreeing with `models.yml`)
+still apply; a running/stopped container whose port, password or image
+reference differs is config drift. A running container that Podman reports `unhealthy` or `starting` is
 accepted only if the authenticated `/api/monitoring/health` answers;
 otherwise the update defers with `health`.
+
+**Configuration changes (deferred restart).** `make update-omniroute`
+applies a changed omniroute service definition too, once idle. It compares
+the rendered service (`~/.config/llm-env/docker-compose.yml`, from
+`bash setup/render-unit.sh` or `make setup`) with the running container: the
+environment keys the service defines (variables the image sets itself or that
+are not rendered are ignored; list or map form and order do not matter;
+values are compared as hashes and never printed), memory limit and
+reservation, CPUs and CPU shares, published ports, healthcheck, restart
+policy and image reference. Any difference prints one line naming the fields,
+e.g. `drift: environment CALL_LOG_MAX_ENTRIES, memory`, and recreates
+OmniRoute with the **same** image through the same path as an image update:
+the idle gate (profile, observer, last look), the target-only recreate and
+the health verification (a failing verification exits 1, no rollback). A new
+image and drift in one run are applied together. While the password or port
+drifted, the running container is observed with its own values and the
+replacement with the configured ones. After changing OmniRoute configuration,
+re-render and run `make update-omniroute`; never recreate the container by
+hand. Both paths share `apply_when_idle` (`scripts/omniroute-apply-when-idle.sh`).
+Not detected: a variable removed from the template (unrendered variables are
+ignored), volume or network changes (still an `ownership` deferral).
 
 Exit codes of `bash scripts/update-omniroute.sh`: `0` updated or unchanged,
 `1` sanitized failure (never rolls back; a failed `podman pull` is one),

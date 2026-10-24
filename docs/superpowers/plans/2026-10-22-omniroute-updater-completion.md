@@ -4526,3 +4526,45 @@ shipped profiles is `tests/fixtures/omniroute-evidence/<date>-omniroute-characte
 for their path); the `.json.sha256` side files are gone. The reproduction and replay tests read the `.gz`. The
 opt-in characterization writes to `./tmp/omniroute-characterization/` and the updater to the local profile store;
 neither writes under `docs/`. Earlier addenda that name `docs/superpowers/research/` paths describe the history.
+
+## Addendum (l), 2026-10-24: config drift is a deferred restart through the same updater (owner decision)
+
+`make update-omniroute` is also the deferred restart for configuration: no new target, flag or override.
+
+- **Shared piece.** `apply_when_idle CONFIG_ID IMMUTABLE_REF` (`scripts/omniroute-apply-when-idle.sh`, sourced by
+  the updater, never run alone): projection + provider round trip, idle gate (running target: profile, observer,
+  `min_wait` quiet, deadline `max_deferred_wait`, default 10800 s), hand-off to the commit worker (recheck, last
+  look, target-only stop/rm/up, health verification, no rollback). It exits the shell with the result line and the
+  0/75/1 contract. `CONFIG_ID` equal to the running image id means "same image". The desired service definition is
+  the preflight artifacts (`effective.json`). Callers: a newer image (staged and verified by hash), and config drift.
+  A unit test drives it alone with the world fakes (idle -> recreated, busy -> `deferred: deadline`, no mutation).
+- **Detection.** `config_drift(effective service, running inspect)` in preflight, written to `deploy.env` /
+  `deployment.json` as `drift=<names>`: environment keys the service defines (image-set and unrendered variables
+  ignored; list/map form and order normalized; `$$` escaping accepted; values compared as sha256 digests, names
+  only in output), `mem_limit`/`mem_reservation`/`cpus`/`cpu_shares` vs HostConfig Memory/MemoryReservation/
+  NanoCpus/CpuShares (an unset key is 0, Podman's own "no limit", verified with a throwaway container), published
+  ports (host ip `""` = `0.0.0.0`), healthcheck keys the service sets (durations to ns), restart policy (unset =
+  `no`), image reference (`same_image`: a digest-form running reference matches its tag). The image id itself is
+  the resolve step, as before. Output: `drift: environment A B, memory` before resolution; `unchanged` only when
+  both match.
+- **Ownership becomes drift.** A running/stopped container whose image reference, port or password differs from
+  `models.yml` is drift, not `ownership`. Still `ownership`: project/service labels, the compose file disagreeing
+  with `models.yml` (render first), `REQUIRE_API_KEY` not `true` on the container, networks, volumes, more than one
+  published host port. `to_runtime_literal` no longer refuses a drifted environment key; the escaping form comes from
+  the matching keys, and a drifted value with `$` and no matching key to tell the form defers `input` (safe side).
+- **Observing a drifted container.** The old container is observed (preflight API probe, observer, last look) on
+  its own published port (`live_port`) with its own `INITIAL_PASSWORD` (`live-pw`, extracted from the private
+  `target.json`); the replacement is verified on the configured port and password (`pw`). Both password files are
+  0600 in the 0700 work dir, removed at the observer's first verdict and with the work dir.
+- **Same image.** A drift-only run still pulls the resolved digest reference (no layer transfer) and runs
+  `verify-staged`, so the projection's `repo@sha256:` reference resolves locally; the worker's tag step re-points the
+  configured tag at the same image (a no-op).
+- **Edge cases (tests).** Drift detected after a re-render; no drift; secret-only drift (no value on stdout/stderr;
+  the fake API accepts only the running password); env list/order noise; drift plus a new image in one run; a drift
+  whose replacement stays unhealthy fails `verify-commit` (exit 1, no rollback); stopped target with drift is
+  replaced without observation; absent target is created from the rendered file (unchanged); the healer's lock-free
+  lease restart during the wait changes the inventory, so the worker's recheck defers `ownership` (its memory
+  recycle already waits for the lock); a re-render during the wait changes the fingerprint (`ownership`), the next
+  run applies the new file.
+- **Not detected (documented limits).** A variable removed from the template (unrendered variables are ignored by
+  the owner's rule), port ranges / IPv6 host ips, healthcheck `disable`, labels, volumes/networks (ownership).

@@ -271,7 +271,7 @@ def cmd_observe(args, run=None, env=None) -> int:
     try:
         profile = load_profile(dep["image_id"], target)
         reader = JournalctlReader(dep["container_id"], env=backend_env(env))
-        fetch = _fetcher(dep["port"], Path(args.password_file).read_text())
+        fetch = _fetcher(dep["live_port"], Path(args.password_file).read_text())  # the running container
 
         def recheck_fn(deadline):
             recheck(art_dir, args.config, args.compose, env, with_deadline(run, deadline))
