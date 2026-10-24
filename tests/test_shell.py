@@ -12805,7 +12805,7 @@ def _script_env(tmp_path: pathlib.Path, **extra: str) -> dict[str, str]:
     }
 
 
-def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.Path) -> None:
+def test_resources_snapshot_script_prints_the_policy_table_and_summary(tmp_path: pathlib.Path) -> None:
     payload = {
         "llm_server": {"cpus": 0, "memory_mib": 0},
         "omniroute": {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 2048},
@@ -12814,13 +12814,13 @@ def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.
         "phoenix": {"cpus_min": 0, "cpus_max": 0, "memory_min_mib": 0, "memory_max_mib": 0},
         "overrides_applied": {"omniroute": ["memory_max_mib"]},
         "summary": ["hard memory caps total 2112 MiB; soft reservations total 1056 MiB"],
-        "live_table": ["service\tverdict", "omniroute\tWATCH"],
+        "live_tables": [["service\tverdict", "omniroute\tWATCH"], ["service\tcpu_cores", "omniroute\t0.10"]],
         "live_footer": ["Counters start over when a container is recreated."],
     }
     (tmp_path / "models.yml").write_text("version: 1\n")
     _stub_uv(tmp_path / "bin", f"cat <<'EOF'\n{json.dumps(payload)}\nEOF\n")
     result = subprocess.run(
-        ["/usr/bin/bash", "scripts/resources.sh"], cwd=ROOT, env=_script_env(tmp_path),
+        ["/usr/bin/bash", "scripts/resources-snapshot.sh"], cwd=ROOT, env=_script_env(tmp_path),
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -12829,6 +12829,7 @@ def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.
     assert "system_one" not in result.stdout.replace("service", "")  # disabled rows hidden
     assert "hard memory caps total 2112 MiB" in result.stdout
     assert "WATCH" in result.stdout and "Counters start over" in result.stdout
+    assert "Live memory" in result.stdout and "Live pressure and activity" in result.stdout and "cpu_cores" in result.stdout
 
 
 def _resources_benchmark(tmp_path: pathlib.Path, **env: str) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -12873,12 +12874,13 @@ def test_resources_benchmark_rejects_incomplete_arguments(tmp_path: pathlib.Path
     assert "resource-benchmark" not in calls
 
 
-def test_makefile_exposes_resources_targets() -> None:
+def test_makefile_exposes_resources_snapshot_and_benchmark_targets() -> None:
     makefile = (ROOT / "Makefile").read_text()
     help_text = (ROOT / "scripts/help.sh").read_text()
-    assert "bash scripts/resources.sh" in makefile
+    assert "resources-snapshot:\n\t@bash tools/run-target.sh resources-snapshot -- bash scripts/resources-snapshot.sh" in makefile
     assert "resources-benchmark:\n\t@bash tools/run-target.sh resources-benchmark -- bash scripts/resources-benchmark.sh" in makefile
-    assert '_help_line "resources"' in help_text
+    assert '_help_line "resources-snapshot" "Point-in-time snapshot:' in help_text
+    assert '_help_line "resources" ' not in help_text
     assert '_help_line "resources-benchmark"' in help_text
     # The retired evidence gate is gone from every entry point.
     assert "resources-measure" not in makefile + help_text

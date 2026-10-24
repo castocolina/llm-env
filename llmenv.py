@@ -440,7 +440,7 @@ def cmd_resources(args: argparse.Namespace) -> int:
     payload = {"host": host, **limits, "summary": summarize_policy(limits)}
     if args.live:  # read-only cgroup counters; `make start`/`setup` callers skip the podman calls
         payload["live"] = live_resources(limits, (cfg.get("gpu") or {}).get("pci_address") or None)
-        payload["live_table"] = format_live(payload["live"])
+        payload["live_tables"] = format_live(payload["live"])
         payload["live_footer"] = LIVE_FOOTER
     return emit(payload)
 

@@ -101,7 +101,7 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             llm_server_resources.setdefault("cpu_ceiling_pct", 60)
             llm_server_resources.setdefault("cpu_ceiling_floor_pct", 20)
         # Retired generated data: the `resources.<service>` mirror (nothing reads it;
-        # `make resources` shows the effective policy) and the evidence-gate reference
+        # `make resources-snapshot` shows the effective policy) and the evidence-gate reference
         # removed on 2026-10-24. Existing files may still carry them.
         for service in ("omniroute", "remote_setup", "phoenix", "system_one"):
             resources.pop(service, None)

@@ -325,14 +325,14 @@ def test_shipped_defaults_are_the_benchmark_derived_policy():
         "omniroute": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 768, "memory_max_mib": 2048},
         "remote_setup": {"cpus_min": 0.25, "cpus_max": 0.5, "memory_min_mib": 32, "memory_max_mib": 64},
         # Explicit exception to the sizing rule (peak clipped by its own cap); see pylib/resources.py.
-        "system_one": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 2560, "memory_max_mib": 4608},
+        "system_one": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 2560, "memory_max_mib": 5120},
         # Live peak 804 MiB 2 h after a restart: 804 * 1.2 = 965 -> 1024.
         "phoenix": {"cpus_min": 0.25, "cpus_max": 1, "memory_min_mib": 192, "memory_max_mib": 1024},
     }
 
 
-def test_baseline_hard_memory_caps_sum_to_7744_mib():
-    assert sum(p["memory_max_mib"] for p in DEFAULT_POLICY.values()) == 2048 + 64 + 4608 + 1024 == 7744
+def test_baseline_hard_memory_caps_sum_to_8256_mib():
+    assert sum(p["memory_max_mib"] for p in DEFAULT_POLICY.values()) == 2048 + 64 + 5120 + 1024 == 8256
 
 
 def test_effective_policy_without_overrides_is_the_default_and_a_copy():
@@ -434,7 +434,7 @@ def test_totals_report_hard_caps_and_soft_reservations():
     result = compute_resource_limits(
         16, 65536, llm_server_enabled=False, system_one_enabled=True
     )
-    assert result["totals"]["hard_memory_cap_mib"] == 7744
+    assert result["totals"]["hard_memory_cap_mib"] == 8256
     assert result["totals"]["soft_memory_reservation_mib"] == (
         OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
         + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
@@ -534,7 +534,7 @@ def test_live_alert(tmp_path, kwargs):
 def test_live_pending_restart_when_cap_differs(tmp_path):
     row = _live(_cgroup(tmp_path / "c", cap=2048), cap_mib=1000)
     assert row["restart_pending"] and row["verdict"] == "WATCH"
-    assert "restart pending" in "\n".join(format_live({"omniroute": {"state": "running", **row}}))
+    assert "restart pending" in "\n".join(format_live({"omniroute": {"state": "running", **row}})[0])
 
 
 def test_live_missing_files_are_none_not_a_crash(tmp_path):
@@ -542,7 +542,7 @@ def test_live_missing_files_are_none_not_a_crash(tmp_path):
     empty.mkdir()
     row = _live(empty)
     assert row["current_mib"] is None and row["cpu_avg_cores"] is None and row["verdict"] == "OK"
-    assert "n/a" in "\n".join(format_live({"omniroute": {"state": "running", **row}}))
+    assert "n/a" in "\n".join(line for table in format_live({"omniroute": {"state": "running", **row}}) for line in table)
 
 
 def test_live_unlimited_cap_has_no_ratios(tmp_path):
@@ -560,6 +560,8 @@ def test_live_resources_stopped_container_and_disabled_service(tmp_path):
     assert live["omniroute"]["state"] == "running" and live["omniroute"]["cap_mib"] == 1000
     assert live["remote_setup"]["verdict"] == "n/a"  # running, cgroup not found
     assert live["system_one"] == {"state": "not running"}
-    table = format_live(live)
-    assert table[0].startswith("service\t") and any("not running" in line for line in table)
+    memory, activity = format_live(live)
+    assert memory[0].startswith("service\t") and any("not running" in line for line in memory)
+    assert activity[0].startswith("service\t") and "verdict" not in activity[0]
+    assert {len(line.split("\t")) for line in memory} == {10} and {len(line.split("\t")) for line in activity} == {6}
     assert live_verdict({"events": {"oom_kill": None}}) == "OK"

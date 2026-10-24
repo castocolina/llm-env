@@ -19,7 +19,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
 | `pylib/resources.py` | Host CPU/RAM budgeting, per-service default policy, validated overrides |
 | `pylib/resource_benchmark.py` | Benchmark harness that samples a container's cgroup (and VRAM) and derives `recommend` limits by the owner sizing rule (make resources-benchmark) |
-| `scripts/resources.sh` | Effective per-service CPU/RAM policy table and active overrides (make resources) |
+| `scripts/resources-snapshot.sh` | Point-in-time policy tables, active overrides and live cgroup counters (make resources-snapshot) |
 | `scripts/resources-benchmark.sh` | Make wrapper for `llmenv resource-benchmark` (SERVICE=omniroute, attach or report; output under tmp/resource-benchmark/) |
 | `pylib/omniroute.py` | Idempotent OmniRoute provider-connection provisioning via its admin API |
 | `pylib/remote_setup.py` | HTTP server for the master-key-gated remote-machine installer (`/setup.sh`, `/config`) |
@@ -91,7 +91,7 @@ saves only about 200 MiB, but non-English and short or accented English inputs a
 `multilingual` and return HTTP 500. Changing `system_one.models` needs
 `make setup` again so the weights are prefetched. The container reserves
 1 CPU and 2560 MiB (`cpu_shares` / `mem_reservation`) and caps at 2 CPUs and
-4608 MiB. `LAYA_MAX_CONCURRENT` is 64; beyond 64 requests in flight Laya
+5120 MiB. `LAYA_MAX_CONCURRENT` is 64; beyond 64 requests in flight Laya
 returns HTTP 503 and `Retry-After: 1` (no queue). `scripts/start.sh` calls
 `llmenv omniroute provision` once both containers are reachable, which idempotently
 creates or updates a provider connection named `llm-env-local` pointing at

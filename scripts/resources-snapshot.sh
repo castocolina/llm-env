@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# resources.sh — show the effective per-service CPU/RAM policy, active overrides and live cgroup counters.
+# resources-snapshot.sh — point-in-time, read-only snapshot: per-service CPU/RAM policy, active overrides and live cgroup counters.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -16,6 +16,7 @@ if ! llmenv --config "$CONFIG_PATH" resources --live > "$resources_json"; then
 fi
 
 # Disabled services (all-zero policy) are hidden; llm_server is the computed remainder.
+echo "Policy"
 jq -r '
   . as $r
   | ["service","mem_min_mib","mem_max_mib","cpus_min","cpus_max","source"],
@@ -27,5 +28,10 @@ jq -r '
   | @tsv' "$resources_json" | column -t -s $'\t'
 jq -r '.summary[]?' "$resources_json"
 echo
-jq -r '.live_table[]?' "$resources_json" | column -t -s $'\t'
+titles=("Live memory" "Live pressure and activity")
+for i in 0 1; do
+    echo "${titles[$i]}"
+    jq -r --argjson i "$i" '.live_tables[$i][]?' "$resources_json" | column -t -s $'\t'
+    echo
+done
 jq -r '.live_footer[]?' "$resources_json"

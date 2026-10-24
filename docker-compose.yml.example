@@ -139,7 +139,7 @@ services:
     - label=disable
     cpus: 2
     cpu_shares: 1024
-    mem_limit: 4608m
+    mem_limit: 5120m
     mem_reservation: 2560m
     volumes:
     # Named volume, podman-managed: Laya weights (~0.8 GB) at

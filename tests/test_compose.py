@@ -652,7 +652,7 @@ def test_system_one_service_has_fixed_limits():
     document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
     service = document["services"]["system-one"]
     assert service["cpus"] == 2
-    assert service["mem_limit"] == "4608m"
+    assert service["mem_limit"] == "5120m"
     assert service["cpu_shares"] == 1024
     assert service["mem_reservation"] == "2560m"
 

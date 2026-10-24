@@ -46,15 +46,16 @@ REMOTE_SETUP_MEMORY_MIN_MIB = 32
 REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
 # System One (Laya) is an EXPLICIT EXCEPTION to the sizing rule. Its hot resident
-# set is ~3.87 GiB (rule: min 4,640) and its memory.peak equals its own cap (166
-# memory.events max in the measured lifetime), so the peak is clipped and no
-# ceiling can be derived from it. Raising the cap only adds host memory
-# pressure, so the cap stays at 4608 and the reservation at 2560. Revisit with a
-# benchmark run under a temporarily higher cap.
+# set is ~3.87 GiB (rule: min 4,640) and its lifetime memory.peak (4,587 MiB) was
+# clipped at the old 4608 MiB cap (166 memory.events max), so no ceiling could be
+# derived from it. The cap was raised 4608 -> 5120 on 2026-10-24 to let the true
+# peak show; the peak is a model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB
+# resident, peak at (re)load). The reservation stays at 2560. Revisit after a few
+# days of `make resources-snapshot` data.
 SYSTEM_ONE_CPUS_MIN = 1
 SYSTEM_ONE_CPUS = 2  # hard cap; CPU peak 1.07-1.55 cores
 SYSTEM_ONE_MEMORY_MIN_MIB = 2560
-SYSTEM_ONE_MEMORY_MIB = 4608  # hard cap; see the exception above
+SYSTEM_ONE_MEMORY_MIB = 5120  # hard cap; see the exception above
 
 # Phoenix (pinned arizephoenix/phoenix), started with System One in its own
 # compose project: ~150 MiB resident under a short benchmark, but 483 MiB
@@ -364,7 +365,7 @@ def lowered_cap_warnings(policies: Mapping[str, Any]) -> list[str]:
     ]
 
 
-# --- Live counters read from each container's host cgroup (`make resources`) ---
+# --- Live counters read from each container's host cgroup (`make resources-snapshot`) ---
 # Verdict thresholds (documented in LIVE_FOOTER and AGENTS.md):
 #   ALERT: oom_kill > 0, peak/cap >= 0.92 (the guard's criticalRatio) or PSI full avg300 >= 5
 #   WATCH: events max > 0, peak/cap >= 0.85 (the guard's highRatio), PSI some avg300 >= 10,
@@ -539,26 +540,32 @@ def _uptime(seconds: int) -> str:
     return f"{days}d{rest // 3600:02d}h" if days else f"{rest // 3600}h{rest % 3600 // 60:02d}m"
 
 
-def format_live(live: Mapping[str, Any]) -> list[str]:
-    """Tab-separated table lines (header first) for `column -t -s <tab>`."""
-    rows: list[tuple[str, ...]] = [(
-        "service", "uptime", "cur_mib", "peak_mib", "cap_mib", "cur/cap", "peak/cap", "swap_mib",
-        "swap_peak", "events h/m/o/k", "psi some 10/300", "psi full 10/300", "cpu_cores", "vram_mib proc/gpu", "verdict",
+def format_live(live: Mapping[str, Any]) -> list[list[str]]:
+    """Two tab-separated tables (header first) for `column -t -s <tab>`: memory, then pressure and activity."""
+    memory: list[tuple[str, ...]] = [(
+        "service", "uptime", "cur_mib", "peak_mib", "cap_mib", "cur/cap", "peak/cap", "swap_mib", "swap_peak", "verdict",
+    )]
+    activity: list[tuple[str, ...]] = [(
+        "service", "events h/m/o/k", "psi some 10/300", "psi full 10/300", "cpu_cores", "vram_mib proc/gpu",
     )]
     for service, row in live.items():
         if row["state"] != "running" or "cap_mib" not in row:
             note = "not running" if row["state"] != "running" else "n/a (cgroup unreadable)"
-            rows.append((service, _uptime(row["uptime_s"]) if "uptime_s" in row else "-") + ("-",) * 12 + (note,))
+            memory.append((service, _uptime(row["uptime_s"]) if "uptime_s" in row else "-") + ("-",) * 7 + (note,))
+            activity.append((service,) + ("-",) * 5)
             continue
         ev = row["events"]
-        rows.append((
+        memory.append((
             service, _uptime(row["uptime_s"]), _fmt(row["current_mib"]), _fmt(row["peak_mib"]), _fmt(row["cap_mib"]),
             _fmt(row["current_over_cap"], ".2f"), _fmt(row["peak_over_cap"], ".2f"), _fmt(row["swap_mib"]), _fmt(row["swap_peak_mib"]),
+            row["verdict"] + (" (restart pending)" if row["restart_pending"] else ""),
+        ))
+        activity.append((
+            service,
             "/".join(_fmt(ev[k]) for k in ("high", "max", "oom", "oom_kill")),
             f"{_fmt(row.get('psi_some_avg10'), '.2f')}/{_fmt(row.get('psi_some_avg300'), '.2f')}",
             f"{_fmt(row.get('psi_full_avg10'), '.2f')}/{_fmt(row.get('psi_full_avg300'), '.2f')}",
             _fmt(row["cpu_avg_cores"], ".2f"),
             f"{_fmt(row['vram_mib'])}/{_fmt(row['device_vram_mib'])}" if "vram_mib" in row else "-",
-            row["verdict"] + (" (restart pending)" if row["restart_pending"] else ""),
         ))
-    return ["\t".join(r) for r in rows]
+    return [["\t".join(r) for r in table] for table in (memory, activity)]

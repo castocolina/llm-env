@@ -1,4 +1,4 @@
-.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources resources-benchmark \
+.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context backup \
         combo-backup combo-restore connections-backup update-omniroute migrate-remote-setup logs validate test test-phoenix clean prune
 
@@ -45,8 +45,8 @@ system-one-build:
 system-one-benchmark:
 	@bash tools/run-target.sh system-one-benchmark -- bash scripts/system-one-benchmark.sh
 
-resources:
-	@bash tools/run-target.sh resources -- bash scripts/resources.sh
+resources-snapshot:
+	@bash tools/run-target.sh resources-snapshot -- bash scripts/resources-snapshot.sh
 
 resources-benchmark:
 	@bash tools/run-target.sh resources-benchmark -- bash scripts/resources-benchmark.sh

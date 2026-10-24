@@ -15,7 +15,7 @@ make prerequisites           # Confirm and install Bazzite/Fedora host tools
 make setup                   # Interactive configuration (GPU inference is opt-in)
 make system-one-build        # Build the local System One (Laya) GPU image
 make system-one-benchmark    # Benchmark the running System One server and record the load table
-make resources               # Show the per-service CPU/RAM policy, active overrides and live cgroup counters (OK/WATCH/ALERT)
+make resources-snapshot      # Point-in-time snapshot: per-service CPU/RAM policy, overrides and live cgroup counters (OK/WATCH/ALERT, read-only, no load)
 make resources-benchmark SERVICE=omniroute  # Measure a container to re-derive its limits (omniroute|attach|report)
 make start                   # Start the server (or omniroute + remote-setup only); installs the OmniRoute healer timer
 make stop                    # Stop the server
@@ -90,8 +90,8 @@ Per-service CPU/RAM policy defaults live in `pylib/resources.py`
 `phoenix`). The old generated `resources.<service>` mirror is retired and
 dropped on load (`resources.llm_server` stays).
 Manage overrides with `uv run llmenv.py resource-override show|set|check|clear`.
-`make resources` also prints, per running container and read-only from its host
-cgroup (no exec), uptime, memory current/peak/cap and their ratios, swap, memory.events
+`make resources-snapshot` also prints, per running container and read-only from its host
+cgroup (no exec), in two live tables (memory; pressure and activity), uptime, memory current/peak/cap and their ratios, swap, memory.events
 high/max/oom/oom_kill, memory PSI, average CPU cores and (System One) VRAM, with one
 verdict: ALERT when `oom_kill > 0`, peak/cap >= 0.92 or PSI full avg300 >= 5; WATCH when
 events `max > 0`, peak/cap >= 0.85, PSI some avg300 >= 10 or the configured cap differs
@@ -113,7 +113,7 @@ Sizing rule (owner, 2026-10-24): `memory_min_mib` = the resident
 `memory.current` level kept under use (modal, not mean) + 20 %;
 `memory_max_mib` = the highest observed resident level or `memory.peak` + 20 %.
 Swap is reported, never added. Lowering a cap below its default is allowed:
-`resource-override set|check` and `make resources` print a warning pointing at
+`resource-override set|check` and `make resources-snapshot` print a warning pointing at
 `make resources-benchmark`. A lower cap releases no RAM -- it only bounds growth.
 
 `memory_min_mib` renders as `mem_reservation` (cgroup `memory.low`). On this host
@@ -121,10 +121,12 @@ it has no effect: the ancestor cgroups have `memory.low` 0, so the protection
 never propagates. It only feeds the budget arithmetic (sum of reservations
 against host RAM).
 
-`system_one` is an explicit exception to the sizing rule: its `memory.peak`
-is clipped by its own 4608 MiB cap (166 `memory.events` max), so "peak + 20 %"
-cannot be measured, and raising the cap only adds host pressure while its hot
-set is ~3.87 GiB. Revisit it with a benchmark under a temporarily higher cap.
+`system_one` is an explicit exception to the sizing rule: its lifetime
+`memory.peak` (4,587 MiB) was clipped at the old 4608 MiB cap (166
+`memory.events` max), so "peak + 20 %" could not be measured. The cap was raised
+4608 -> 5120 MiB on 2026-10-24 to let the true peak show. The peak is a
+model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB resident, peak at
+(re)load). Revisit it after a few days of `make resources-snapshot` data.
 
 #### Re-deriving limits
 
