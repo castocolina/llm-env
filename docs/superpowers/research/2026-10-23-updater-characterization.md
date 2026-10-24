@@ -11,11 +11,10 @@ LLM_ENV_UPDATE_CHARACTERIZE=1 uv run pytest tests/test_omniroute_characterize.py
 
 Result: **1 passed in 286.19s (0:04:46)**.
 
-Artifacts (written by the harness, both uncommitted until reviewed):
-
-- `docs/superpowers/research/2026-10-23-omniroute-characterization-038b2aba95a6.json` (6,666,180 bytes)
-- `docs/superpowers/research/2026-10-23-omniroute-characterization-038b2aba95a6.json.sha256`
-- `docs/superpowers/research/2026-10-23-omniroute-candidate-038b2aba95a6.json`
+Artifacts: the harness wrote a 6.6 MB characterization file, its sha256 and a derived candidate. They were
+removed on 2026-10-24: the re-runs of the same image with the final scenarios
+(`2026-10-24-omniroute-characterization-038b2aba95a6.json` and its `.sha256`) supersede them and are the
+evidence the shipped profile is reproduced from.
 
 Image under test: unmodified `docker.io/diegosouzapw/omniroute:latest`, deployment
 config id `sha256:038b2aba95a6...`, driven by `tests/fixtures/fake_inference.py`

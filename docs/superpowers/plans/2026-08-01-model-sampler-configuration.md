@@ -1,5 +1,16 @@
 # Model-Specific Sampler Configuration Implementation Plan
 
+> **Status (2026-10-24): PARTIAL, abandoned.** Tasks 1-2 shipped: the optional per-model `sampling` mapping
+> (`temperature`, `top_p`, `top_k`, `repeat_penalty`) is validated in `pylib/config.py` (commit `745c956`) and rendered
+> only in the owning model's preset section by `pylib/presets.py` (commit `5eb578d`). Tasks 3-6 (live qualification of
+> the Gemma replacement, publishing the default, cleaning the rollback material) were never finished. The experiment
+> stopped on 2026-08-06 after these recorded attempts: `publisher` profile, screening 1: four runner errors
+> (infra-invalid) and then `gemma4-nonpass` in the agent matrix (model-failure); `greedy` profile, screening 1: a
+> runner error and a `gemma4-nonpass` classified infra-invalid. No profile qualified, so no model in `models.yml`
+> sets `sampling` and no default was published. The local llama.cpp server is disabled on this host (OmniRoute-only
+> direction). Pick this up again only if a small local inference model returns next to System One; the experiment
+> scripts are reproduced in the tasks below, nothing else was kept.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add validated per-model sampler settings, qualify the agentic Gemma replacement with the publisher's two supported profiles, and make the first qualifying profile the clean-setup default.
