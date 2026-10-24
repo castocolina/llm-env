@@ -362,3 +362,203 @@ def lowered_cap_warnings(policies: Mapping[str, Any]) -> list[str]:
         if (policy := policies.get(service))
         and 0 < policy["memory_max_mib"] < DEFAULT_POLICY[service]["memory_max_mib"]
     ]
+
+
+# --- Live counters read from each container's host cgroup (`make resources`) ---
+# Verdict thresholds (documented in LIVE_FOOTER and AGENTS.md):
+#   ALERT: oom_kill > 0, peak/cap >= 0.92 (the guard's criticalRatio) or PSI full avg300 >= 5
+#   WATCH: events max > 0, peak/cap >= 0.85 (the guard's highRatio), PSI some avg300 >= 10,
+#          or the configured cap differs from the cgroup's memory.max (restart pending)
+ALERT_PEAK_RATIO = 0.92
+ALERT_PSI_FULL_AVG300 = 5.0
+WATCH_PEAK_RATIO = 0.85
+WATCH_PSI_SOME_AVG300 = 10.0
+LIVE_CONTAINERS = {
+    "omniroute": "omniroute",
+    "remote_setup": "remote-setup",
+    "system_one": "system-one",
+    "phoenix": "llm-env-phoenix_phoenix_1",
+}
+LIVE_FOOTER = [
+    "Counters start over when a container is recreated (`make restart`, update); uptime is the age of the current counters.",
+    "events h/m/o/k = memory.events high/max/oom/oom_kill; psi = memory.pressure avg10/avg300 (some, full); cpu = average cores since start.",
+    ("Verdict: ALERT = oom_kill > 0, peak/cap >= 0.92 or PSI full avg300 >= 5; WATCH = events max > 0, peak/cap >= 0.85, "
+     "PSI some avg300 >= 10 or cap != cgroup memory.max (restart pending); OK otherwise."),
+]
+_MIB = 1024 * 1024
+
+
+def _locate(container: str) -> tuple[Any, int, float] | None:
+    """(cgroup dir or None, pid, StartedAt epoch) of a running container, else None."""
+    import subprocess
+
+    from pylib.resource_benchmark import cgroup_dir
+
+    try:
+        out = subprocess.run(
+            ["podman", "inspect", "-f", "{{.State.Running}} {{.State.Pid}} {{.State.StartedAt.Unix}}", container],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        if out[0] != "true":
+            return None
+    except (OSError, subprocess.CalledProcessError, IndexError):
+        return None
+    try:
+        cgroup = cgroup_dir(container)
+    except (OSError, subprocess.CalledProcessError, StopIteration, ValueError):
+        cgroup = None
+    return cgroup, int(out[1]), float(out[2])
+
+
+def _kv(path: Any) -> dict[str, str]:
+    try:
+        return dict(line.split(None, 1) for line in path.read_text().splitlines() if line.strip())
+    except OSError:
+        return {}
+
+
+def _num(value: Any) -> int | None:
+    try:
+        return int(str(value).split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _psi(cgroup: Any) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for kind, text in _kv(cgroup / "memory.pressure").items():
+        fields = dict(f.split("=") for f in text.split())
+        for window in ("avg10", "avg300"):
+            try:
+                out[f"psi_{kind}_{window}"] = float(fields[window])
+            except (KeyError, ValueError):
+                out[f"psi_{kind}_{window}"] = None
+    return out
+
+
+def live_verdict(row: Mapping[str, Any]) -> str:
+    peak = row.get("peak_over_cap")
+    full300 = row.get("psi_full_avg300")
+    some300 = row.get("psi_some_avg300")
+    events = row.get("events") or {}
+    if (events.get("oom_kill") or 0) > 0 or (peak or 0) >= ALERT_PEAK_RATIO or (full300 or 0) >= ALERT_PSI_FULL_AVG300:
+        return "ALERT"
+    if (
+        (events.get("max") or 0) > 0
+        or (peak or 0) >= WATCH_PEAK_RATIO
+        or (some300 or 0) >= WATCH_PSI_SOME_AVG300
+        or row.get("restart_pending")
+    ):
+        return "WATCH"
+    return "OK"
+
+
+def _mib(value: int | None) -> int | None:
+    return None if value is None else value // _MIB
+
+
+def _read(path: Any) -> str | None:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def read_live(
+    cgroup: Any, started: float, configured_cap_mib: int, *, now: float, vram: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Counters of one running container from its cgroup dir; unreadable values are None."""
+    uptime = max(now - started, 1.0)
+    current, peak = _num(_read(cgroup / "memory.current")), _num(_read(cgroup / "memory.peak"))
+    cap_raw = _read(cgroup / "memory.max")
+    cap = _num(cap_raw)  # "max" (unlimited) parses to None
+    usec = _num(_kv(cgroup / "cpu.stat").get("usage_usec"))
+    events = _kv(cgroup / "memory.events")
+    row: dict[str, Any] = {
+        "uptime_s": int(uptime),
+        "current_mib": _mib(current),
+        "peak_mib": _mib(peak),
+        "cap_mib": _mib(cap),
+        "current_over_cap": current / cap if current is not None and cap else None,
+        "peak_over_cap": peak / cap if peak is not None and cap else None,
+        "swap_mib": _mib(_num(_read(cgroup / "memory.swap.current"))),
+        "swap_peak_mib": _mib(_num(_read(cgroup / "memory.swap.peak"))),
+        "events": {k: _num(events.get(k)) for k in ("high", "max", "oom", "oom_kill")},
+        "cpu_avg_cores": None if usec is None else usec / 1e6 / uptime,
+        "restart_pending": cap_raw is not None and cap != configured_cap_mib * _MIB,
+        **_psi(cgroup),
+    }
+    row["verdict"] = live_verdict(row)
+    return {**row, **(vram or {})}
+
+
+def live_resources(
+    limits: Mapping[str, Any], pci: str | None = None, *, locate: Any = None, now: float | None = None
+) -> dict[str, Any]:
+    """Per enabled service: {"state": "not running"|"running", ...counters}. Never raises on missing files."""
+    import time
+
+    locate = locate or _locate
+    now = time.time() if now is None else now
+    out: dict[str, Any] = {}
+    for service, container in LIVE_CONTAINERS.items():
+        policy = limits[service]
+        if policy["memory_max_mib"] <= 0:  # disabled service
+            continue
+        found = locate(container)
+        if found is None:
+            out[service] = {"state": "not running"}
+            continue
+        cgroup, pid, started = found
+        if cgroup is None:
+            out[service] = {"state": "running", "uptime_s": int(max(now - started, 1.0)), "verdict": "n/a"}
+            continue
+        vram = _vram(pid, pci) if service == "system_one" and pci else None
+        out[service] = {"state": "running", **read_live(cgroup, started, policy["memory_max_mib"], now=now, vram=vram)}
+    return out
+
+
+def _vram(pid: int, pci: str) -> dict[str, Any]:
+    """Laya process VRAM and the whole GPU's used VRAM (MiB); None when unreadable."""
+    from pylib.detect import process_vram_mib
+    from pylib.resource_benchmark import gpu_device
+
+    try:
+        device_used = int(gpu_device(pci=pci)[1].read_text().split()[0]) // _MIB
+    except (ValueError, OSError):
+        device_used = None
+    return {"vram_mib": process_vram_mib(pid, pci), "device_vram_mib": device_used}
+
+
+def _fmt(value: Any, spec: str = "") -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
+def _uptime(seconds: int) -> str:
+    days, rest = divmod(seconds, 86400)
+    return f"{days}d{rest // 3600:02d}h" if days else f"{rest // 3600}h{rest % 3600 // 60:02d}m"
+
+
+def format_live(live: Mapping[str, Any]) -> list[str]:
+    """Tab-separated table lines (header first) for `column -t -s <tab>`."""
+    rows: list[tuple[str, ...]] = [(
+        "service", "uptime", "cur_mib", "peak_mib", "cap_mib", "cur/cap", "peak/cap", "swap_mib",
+        "swap_peak", "events h/m/o/k", "psi some 10/300", "psi full 10/300", "cpu_cores", "vram_mib proc/gpu", "verdict",
+    )]
+    for service, row in live.items():
+        if row["state"] != "running" or "cap_mib" not in row:
+            note = "not running" if row["state"] != "running" else "n/a (cgroup unreadable)"
+            rows.append((service, _uptime(row["uptime_s"]) if "uptime_s" in row else "-") + ("-",) * 12 + (note,))
+            continue
+        ev = row["events"]
+        rows.append((
+            service, _uptime(row["uptime_s"]), _fmt(row["current_mib"]), _fmt(row["peak_mib"]), _fmt(row["cap_mib"]),
+            _fmt(row["current_over_cap"], ".2f"), _fmt(row["peak_over_cap"], ".2f"), _fmt(row["swap_mib"]), _fmt(row["swap_peak_mib"]),
+            "/".join(_fmt(ev[k]) for k in ("high", "max", "oom", "oom_kill")),
+            f"{_fmt(row.get('psi_some_avg10'), '.2f')}/{_fmt(row.get('psi_some_avg300'), '.2f')}",
+            f"{_fmt(row.get('psi_full_avg10'), '.2f')}/{_fmt(row.get('psi_full_avg300'), '.2f')}",
+            _fmt(row["cpu_avg_cores"], ".2f"),
+            f"{_fmt(row['vram_mib'])}/{_fmt(row['device_vram_mib'])}" if "vram_mib" in row else "-",
+            row["verdict"] + (" (restart pending)" if row["restart_pending"] else ""),
+        ))
+    return ["\t".join(r) for r in rows]

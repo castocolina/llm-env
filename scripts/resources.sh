@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# resources.sh — show the effective per-service CPU/RAM policy and active overrides.
+# resources.sh — show the effective per-service CPU/RAM policy, active overrides and live cgroup counters.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
@@ -11,7 +11,7 @@ require_cmd uv jq column
 
 resources_json="$(mktemp)"
 trap 'rm -f "$resources_json"' EXIT
-if ! llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
+if ! llmenv --config "$CONFIG_PATH" resources --live > "$resources_json"; then
     die "$(jq -r '.error // "llmenv resources failed"' "$resources_json")"
 fi
 
@@ -26,3 +26,6 @@ jq -r '
     ["llm_server", 0, $r.llm_server.memory_mib, 0, $r.llm_server.cpus, "computed remainder"]
   | @tsv' "$resources_json" | column -t -s $'\t'
 jq -r '.summary[]?' "$resources_json"
+echo
+jq -r '.live_table[]?' "$resources_json" | column -t -s $'\t'
+jq -r '.live_footer[]?' "$resources_json"

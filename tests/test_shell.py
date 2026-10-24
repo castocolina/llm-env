@@ -12814,6 +12814,8 @@ def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.
         "phoenix": {"cpus_min": 0, "cpus_max": 0, "memory_min_mib": 0, "memory_max_mib": 0},
         "overrides_applied": {"omniroute": ["memory_max_mib"]},
         "summary": ["hard memory caps total 2112 MiB; soft reservations total 1056 MiB"],
+        "live_table": ["service\tverdict", "omniroute\tWATCH"],
+        "live_footer": ["Counters start over when a container is recreated."],
     }
     (tmp_path / "models.yml").write_text("version: 1\n")
     _stub_uv(tmp_path / "bin", f"cat <<'EOF'\n{json.dumps(payload)}\nEOF\n")
@@ -12826,6 +12828,7 @@ def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.
     assert "remote_setup" in result.stdout and "default" in result.stdout
     assert "system_one" not in result.stdout.replace("service", "")  # disabled rows hidden
     assert "hard memory caps total 2112 MiB" in result.stdout
+    assert "WATCH" in result.stdout and "Counters start over" in result.stdout
 
 
 def _resources_benchmark(tmp_path: pathlib.Path, **env: str) -> tuple[subprocess.CompletedProcess[str], str]:

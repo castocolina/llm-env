@@ -86,10 +86,13 @@ from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import (
     DEFAULT_POLICY,
+    LIVE_FOOTER,
     OVERRIDABLE_SERVICES,
     ResourceError,
     compute_resource_limits,
     effective_policy,
+    format_live,
+    live_resources,
     lowered_cap_warnings,
     summarize_policy,
     validate_overrides,
@@ -434,7 +437,12 @@ def cmd_resources(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     host = host_resources()
     limits = limits_for(cfg, host)
-    return emit({"host": host, **limits, "summary": summarize_policy(limits)})
+    payload = {"host": host, **limits, "summary": summarize_policy(limits)}
+    if args.live:  # read-only cgroup counters; `make start`/`setup` callers skip the podman calls
+        payload["live"] = live_resources(limits, (cfg.get("gpu") or {}).get("pci_address") or None)
+        payload["live_table"] = format_live(payload["live"])
+        payload["live_footer"] = LIVE_FOOTER
+    return emit(payload)
 
 def cmd_resource_benchmark(args: argparse.Namespace) -> int:
     from pylib import resource_benchmark as rb
@@ -796,6 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     resources_parser = sub.add_parser("resources")
     resources_parser.add_argument("--config", default=argparse.SUPPRESS)
+    resources_parser.add_argument("--live", action="store_true")
     resources_parser.set_defaults(func=cmd_resources)
 
     omniroute_parser = sub.add_parser("omniroute")

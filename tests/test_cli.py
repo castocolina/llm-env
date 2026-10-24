@@ -2689,9 +2689,10 @@ def test_cmd_resources_applies_overrides_and_prints_a_summary(tmp_path, monkeypa
         llmenv, "host_resources", lambda: {"cpu_count": 16, "memory_total_mib": 32768}
     )
 
-    assert llmenv.cmd_resources(cast(Namespace, SimpleNamespace(config="cfg"))) == 0
+    assert llmenv.cmd_resources(cast(Namespace, SimpleNamespace(config="cfg", live=False))) == 0
     payload = json.loads(capsys.readouterr().out)
 
+    assert "live" not in payload  # cgroup counters only with --live
     assert payload["omniroute"]["memory_max_mib"] == 4096
     assert payload["overrides_applied"] == {"omniroute": ["memory_max_mib"]}
     assert any(

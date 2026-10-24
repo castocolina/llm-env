@@ -15,7 +15,7 @@ make prerequisites           # Confirm and install Bazzite/Fedora host tools
 make setup                   # Interactive configuration (GPU inference is opt-in)
 make system-one-build        # Build the local System One (Laya) GPU image
 make system-one-benchmark    # Benchmark the running System One server and record the load table
-make resources               # Show the effective per-service CPU/RAM policy and active overrides
+make resources               # Show the per-service CPU/RAM policy, active overrides and live cgroup counters (OK/WATCH/ALERT)
 make resources-benchmark SERVICE=omniroute  # Measure a container to re-derive its limits (omniroute|attach|report)
 make start                   # Start the server (or omniroute + remote-setup only); installs the OmniRoute healer timer
 make stop                    # Stop the server
@@ -90,6 +90,14 @@ Per-service CPU/RAM policy defaults live in `pylib/resources.py`
 `phoenix`). The old generated `resources.<service>` mirror is retired and
 dropped on load (`resources.llm_server` stays).
 Manage overrides with `uv run llmenv.py resource-override show|set|check|clear`.
+`make resources` also prints, per running container and read-only from its host
+cgroup (no exec), uptime, memory current/peak/cap and their ratios, swap, memory.events
+high/max/oom/oom_kill, memory PSI, average CPU cores and (System One) VRAM, with one
+verdict: ALERT when `oom_kill > 0`, peak/cap >= 0.92 or PSI full avg300 >= 5; WATCH when
+events `max > 0`, peak/cap >= 0.85, PSI some avg300 >= 10 or the configured cap differs
+from the cgroup's `memory.max` (restart pending); otherwise OK. Counters start over when a
+container is recreated, hence the uptime column. `uv run llmenv.py resources --live`
+adds the same data to the JSON under `live`.
 Values must be positive (0 would mean "no limit"). `set` and `clear` only edit
 `models.yml`; running containers keep their current limits until you apply the
 change. `bash setup/render-unit.sh` re-renders the compose file and unit for the

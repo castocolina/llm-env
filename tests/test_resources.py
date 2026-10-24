@@ -30,7 +30,11 @@ from pylib.resources import (
     ResourceError,
     compute_resource_limits,
     effective_policy,
+    format_live,
+    live_resources,
+    live_verdict,
     lowered_cap_warnings,
+    read_live,
     summarize_policy,
     validate_overrides,
 )
@@ -476,3 +480,86 @@ def test_lowered_cap_warnings_skip_disabled_services():
     # A disabled service carries an all-zero policy: nothing to warn about.
     assert lowered_cap_warnings({"system_one": dict.fromkeys(POLICY_KEYS, 0)}) == []
     assert len(lowered_cap_warnings({"phoenix": {**DEFAULT_POLICY["phoenix"], "memory_max_mib": 512}})) == 1
+
+
+# --- live cgroup counters -------------------------------------------------
+
+MIB = 1024 * 1024
+
+
+def _cgroup(path, *, current=100, peak=200, cap=1000, events="high 0\nmax 0\noom 0\noom_kill 0",
+            psi_some=0.0, psi_full=0.0, cap_text=None, usage_usec=10_000_000):
+    path.mkdir(parents=True, exist_ok=True)
+    files = {
+        "memory.current": f"{current * MIB}", "memory.peak": f"{peak * MIB}",
+        "memory.max": cap_text or f"{cap * MIB}", "memory.swap.current": f"{3 * MIB}",
+        "memory.swap.peak": f"{5 * MIB}", "memory.events": events,
+        "memory.pressure": f"some avg10=0.00 avg60=0.00 avg300={psi_some:.2f} total=1\n"
+                           f"full avg10=0.00 avg60=0.00 avg300={psi_full:.2f} total=1",
+        "cpu.stat": f"usage_usec {usage_usec}\nuser_usec 1",
+    }
+    for name, text in files.items():
+        (path / name).write_text(text + "\n")
+    return path
+
+
+def _live(cgroup, cap_mib=1000):
+    return read_live(cgroup, 0, cap_mib, now=100)
+
+
+def test_live_ok(tmp_path):
+    row = _live(_cgroup(tmp_path / "c"))
+    assert row["verdict"] == "OK"
+    assert (row["current_mib"], row["peak_mib"], row["cap_mib"]) == (100, 200, 1000)
+    assert row["peak_over_cap"] == pytest.approx(0.2)
+    assert (row["swap_mib"], row["swap_peak_mib"]) == (3, 5)
+    assert row["cpu_avg_cores"] == pytest.approx(0.1)  # 10 s of CPU over 100 s
+    assert row["events"] == {"high": 0, "max": 0, "oom": 0, "oom_kill": 0}
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"peak": 850}, {"events": "high 0\nmax 2\noom 0\noom_kill 0"}, {"psi_some": 10.0},
+])
+def test_live_watch(tmp_path, kwargs):
+    assert _live(_cgroup(tmp_path / "c", **kwargs))["verdict"] == "WATCH"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"peak": 920}, {"events": "high 0\nmax 0\noom 1\noom_kill 1"}, {"psi_full": 5.0},
+])
+def test_live_alert(tmp_path, kwargs):
+    assert _live(_cgroup(tmp_path / "c", **kwargs))["verdict"] == "ALERT"
+
+
+def test_live_pending_restart_when_cap_differs(tmp_path):
+    row = _live(_cgroup(tmp_path / "c", cap=2048), cap_mib=1000)
+    assert row["restart_pending"] and row["verdict"] == "WATCH"
+    assert "restart pending" in "\n".join(format_live({"omniroute": {"state": "running", **row}}))
+
+
+def test_live_missing_files_are_none_not_a_crash(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    row = _live(empty)
+    assert row["current_mib"] is None and row["cpu_avg_cores"] is None and row["verdict"] == "OK"
+    assert "n/a" in "\n".join(format_live({"omniroute": {"state": "running", **row}}))
+
+
+def test_live_unlimited_cap_has_no_ratios(tmp_path):
+    row = _live(_cgroup(tmp_path / "c", cap_text="max"))
+    assert row["cap_mib"] is None and row["peak_over_cap"] is None and row["restart_pending"]
+
+
+def test_live_resources_stopped_container_and_disabled_service(tmp_path):
+    cg = _cgroup(tmp_path / "c")
+    limits = {s: dict(p) for s, p in DEFAULT_POLICY.items()}
+    limits["phoenix"] = dict.fromkeys(POLICY_KEYS, 0)  # disabled: omitted
+    found = {"omniroute": (cg, 1, 0.0), "remote-setup": (None, 2, 0.0)}
+    live = live_resources(limits, locate=lambda name: found.get(name), now=100)
+    assert set(live) == {"omniroute", "remote_setup", "system_one"}
+    assert live["omniroute"]["state"] == "running" and live["omniroute"]["cap_mib"] == 1000
+    assert live["remote_setup"]["verdict"] == "n/a"  # running, cgroup not found
+    assert live["system_one"] == {"state": "not running"}
+    table = format_live(live)
+    assert table[0].startswith("service\t") and any("not running" in line for line in table)
+    assert live_verdict({"events": {"oom_kill": None}}) == "OK"
