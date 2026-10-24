@@ -1018,12 +1018,16 @@ backlog.
 - Phoenix SQLite: 30 MB since 2026-10-19 (about 6 MB per day with stored content; hash-only would be a fraction).
 - Proposed metrics (cgroup JSONL every 60 s for 4 containers, roughly 400 bytes per sample): about 2.3 MB per
   day raw, about 70 MB for 30 days; a time-series store compresses this to a few tens of MB per year.
-- **Decision (owner, 2026-10-24): OmniRoute call history capped at 180 days and about 1 GB.** OmniRoute has no size
-  cap and its retention applies to rows and artifacts together (default 7 days), so the cap is built from its knobs
-  in the compose service (`pylib/resources.py`): `CALL_LOG_RETENTION_DAYS=180`, `CALL_LOG_PIPELINE_MAX_SIZE_KB=8`
-  (a payload larger than this is not stored, so big prompts are skipped and small error bodies kept) and
-  `CALL_LOGS_TABLE_MAX_ROWS=50000` (about 800 MB worst case plus rows). Whichever of 180 days or 50,000 rows comes
-  first applies; at today's ~5,400 calls per day the row cap binds after about 9 days. The 2.3 GB already on disk
-  stays until it ages out; `POST /api/settings/purge-request-history` would erase rows too, so it is not run.
+- **Decision (owner, 2026-10-24): OmniRoute call history, 180 days of rows and payload artifacts bounded to about
+  10 GB.** First attempt (rejected the same day): 8 KB per payload and 50,000 rows, derived by worst-case arithmetic
+  without measuring; the measurement below showed it would have skipped ~64 % of calls and that the table cap is not
+  what bounds the disk. Measured on the live data dir: one artifact file per call (10,001 files, 2,316 MB, average
+  237 KB, p50 296 KB, p90 471 KB, hard cap 512 KB); the per-day file counts (766 + 4 + 23 + 17 + 5,417 + 3,773) add up
+  to exactly 10,000, so the artifact store is bounded by `CALL_LOG_MAX_ENTRIES` (default 10,000), not by days.
+  Settings in the compose service (`pylib/resources.py`): `CALL_LOG_RETENTION_DAYS=180`,
+  `CALL_LOG_PIPELINE_MAX_SIZE_KB=512` (the default, made explicit), `CALL_LOG_MAX_ENTRIES=20000` (worst case
+  20,000 x 512 KB = 10 GB, about 4.7 GB at the average) and `CALL_LOGS_TABLE_MAX_ROWS=100000`. At ~5,400 calls per
+  day the payloads cover the last ~3.7 days; rows last longer. The 2.3 GB already on disk fits the new cap, so
+  nothing is purged. The change is applied by a deferred recreate when OmniRoute has no load.
 - Verdict: the proposed observability stores stay under 1 GB per 90 days at today's volumes; the 10 GB combined
   cap is a safety ceiling, not an expectation. The real disk risk to watch is OmniRoute's `call_logs/`.

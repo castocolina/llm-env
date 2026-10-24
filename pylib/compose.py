@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from pylib.resources import (
+    OMNIROUTE_CALL_LOG_MAX_ENTRIES,
     OMNIROUTE_CALL_LOG_PAYLOAD_KB,
     OMNIROUTE_CALL_LOG_RETENTION_DAYS,
     OMNIROUTE_CALL_LOGS_MAX_ROWS,
@@ -151,9 +152,10 @@ def render_compose(
             # 8000ms so legitimate concurrent bursts serialize instead of failing
             # immediately.
             "OMNIROUTE_CHAT_ADMISSION_QUEUE_MS": str(OMNIROUTE_CHAT_ADMISSION_QUEUE_MS),
-            # Call history: at most 180 days and ~1 GB (see pylib/resources.py).
+            # Call history: 180 days of rows, payload artifacts bounded to ~10 GB (see pylib/resources.py).
             "CALL_LOG_RETENTION_DAYS": str(OMNIROUTE_CALL_LOG_RETENTION_DAYS),
             "CALL_LOG_PIPELINE_MAX_SIZE_KB": str(OMNIROUTE_CALL_LOG_PAYLOAD_KB),
+            "CALL_LOG_MAX_ENTRIES": str(OMNIROUTE_CALL_LOG_MAX_ENTRIES),
             "CALL_LOGS_TABLE_MAX_ROWS": str(OMNIROUTE_CALL_LOGS_MAX_ROWS),
         },
         "healthcheck": {

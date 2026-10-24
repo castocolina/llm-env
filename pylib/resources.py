@@ -74,16 +74,17 @@ PHOENIX_MEMORY_MAX_MIB = 1024
 OMNIROUTE_CHAT_ADMISSION_QUEUE_MS = 8000
 
 # OmniRoute's call history (2026-10-24 disk analysis, docs/superpowers/research/
-# 2026-10-20-laya-jev-grafana-observability.md section 12): rows and their payload artifacts under
-# /app/data/call_logs/ grew ~2 GB per heavy day with the defaults (7 days, 512 KB per payload).
-# Owner decision: keep up to 180 days but never more than ~1 GB. OmniRoute has no size cap, so the cap
-# is built from its two knobs: a payload larger than OMNIROUTE_CALL_LOG_PAYLOAD_KB is not stored at
-# all (large prompts are skipped, small error bodies are kept), and the table (rows plus their
-# artifacts) is bounded by OMNIROUTE_CALL_LOGS_MAX_ROWS rows: 50,000 rows x 2 payloads x 8 KB = 800 MB
-# worst case, plus ~50 MB of rows. Whichever of 180 days or 50,000 rows comes first applies.
+# 2026-10-20-laya-jev-grafana-observability.md section 12). Measured on the live data dir: one artifact file
+# per call under /app/data/call_logs/ (10,001 files, 2,316 MB, average 237 KB, p50 296 KB, p90 471 KB, hard
+# cap 512 KB per file), and the file count stops at CALL_LOG_MAX_ENTRIES (default 10,000), which is what
+# bounds the disk. Owner decision: 180 days of rows, payload artifacts bounded to about 10 GB. Worst case
+# is entries x per-file cap = 20,000 x 512 KB = 10 GB (about 4.7 GB at the measured average); at today's ~5,400
+# calls per day that keeps the payloads of the last ~3.7 days, longer when traffic is lighter. The rows are
+# small and keep the default 100,000-row table cap.
 OMNIROUTE_CALL_LOG_RETENTION_DAYS = 180
-OMNIROUTE_CALL_LOG_PAYLOAD_KB = 8
-OMNIROUTE_CALL_LOGS_MAX_ROWS = 50000
+OMNIROUTE_CALL_LOG_PAYLOAD_KB = 512
+OMNIROUTE_CALL_LOG_MAX_ENTRIES = 20000
+OMNIROUTE_CALL_LOGS_MAX_ROWS = 100000
 
 # Built-in per-service policy (benchmark-derived, see the sizing rule above).
 # Persistent `resources.overrides.<service>` entries in models.yml merge over it.
