@@ -970,19 +970,45 @@ backlog.
 10. **Contract test.** Assert that no request body or header ever contains a
     key value and that header values pass the validation in item 1.
 
-## 12. Open questions for the owner
+## 12. Decisions of 2026-10-24 (answers to the former open questions)
 
-1. **Content or metadata by default for Laya traces?** Move the observer to
-   hash plus shape by default with content opt-in, replacing the 2026-10-19
-   full-content capture?
-2. **Is one Grafana UI a hard requirement,** or are vmui, the VictoriaLogs UI
-   and Phoenix acceptable through phase 2?
-3. **Remote Jev escalation is effectively off:** TypeSafe has consent but no
-   key, and Zen has neither. Is that intended?
-4. **Has the OmniRoute dashboard password been rotated** after the credential
-   incident described in §8?
-5. **The untracked `.docs/` duplicate copy:** delete it or keep it?
-6. **Retention targets:** how many days or GiB for metrics, logs and decision
-   records?
-7. **May a throwaway OmniRoute container be started** to verify
-   `OMNIROUTE_OTEL_ENDPOINT` on the deployed version?
+1. **Content or metadata by default:** decided by the assistant on the owner's delegation: hash plus shape by
+   default, content opt-in, applied when the observer is touched for the instrumentation phase.
+2. **One UI:** nice to have, not a requirement. vmui, the VictoriaLogs UI and Phoenix are acceptable through
+   phase 2; Grafana only if a single pane is still wanted afterwards.
+3. **Remote Jev (checked 2026-10-24):** the skill is ai-kit's (`~/.claude/skills/jev-fast-decision` is a symlink
+   into the ai-kit repo) and the OpenCode Zen backend already exists there, gated by consent. Probe result:
+   Laya usable; TypeSafe has consent (2026-10-14) but no key file found by any of its documented sources
+   (`TYPESAFE_API_KEY`/`JEV_API_KEY`, `JEV_API_KEY_FILE`, `~/.config/ai-kit/secrets.env`,
+   `~/.local/state/typesafe/api_key`), so it is not usable; Zen has neither consent nor key, so it is effectively
+   disabled, as intended. If the owner has a TypeSafe key it goes in `~/.config/ai-kit/secrets.env` (mode 0600).
+4. **Dashboard password after the incident:** the incident is the 2026-10-20 K3 agent grep that printed the
+   OmniRoute dashboard password into that agent's tool output (it may remain in that agent's transcript). The
+   password lives in `~/.config/llm-env/models.yml` (`omniroute.initial_password`), not in a `.env`. Rotation is
+   still the recommendation and is not done: it needs the new value set in OmniRoute and in `models.yml`, then
+   OmniRoute recreated. API keys were not exposed.
+5. **`.docs/` duplicate:** removed on 2026-10-24 (two files identical, the third was the pre-review original,
+   kept in git history).
+6. **Retention (analysis below):** days-based with a GB cap per store; metrics 365 days / 2 GB, logs 90 days /
+   5 GB, traces and decision records 30 days / 2 GB; one combined budget of 10 GB for everything this research
+   proposes, plus a free-space guard (alert when `/var` free space drops under 100 GB or 15 %).
+7. **OTLP check:** approved, including reading the live instance through its API; result in §3 once done.
+
+### Disk analysis behind decision 6 (measured 2026-10-24)
+
+- Host: `/var` 806 GB, 462 GB used, 342 GB free.
+- **The only store that can eat the disk is OmniRoute's own data, not the observability stack.**
+  `/app/data` in the omniroute container is 3.2 GB: `call_logs/` 2.3 GB (full request/response bodies per call:
+  1.3 GB on 2026-10-23, 0.9 GB by midday on 2026-10-24, about 2 GB per heavy day with ~100K-token contexts),
+  `db_backups/` 445 MB (three pre-migration SQLite copies), `storage.sqlite` 259 MB, `logs/` 100 MB.
+  Its own knobs, none set by us, so defaults apply: `CALL_LOG_RETENTION_DAYS=7`, `APP_LOG_RETENTION_DAYS=7`,
+  `CALL_LOG_PIPELINE_MAX_SIZE_KB=512` per call, `CALL_LOG_MAX_ENTRIES=10000`, `CALL_LOGS_TABLE_MAX_ROWS=100000`,
+  `DB_BACKUP_RETENTION_DAYS` unset (0). At today's intensity the 7-day window settles around 10 to 15 GB; a
+  lower per-call cap (for example 128 KB) would cut that roughly four-fold. Those bodies are private prompt content.
+- Container logs in journald, last 24 h: omniroute 19.7 MB (274,082 lines), Laya 0.56 MB, Phoenix 0.98 MB,
+  remote-setup 220 bytes, about 21 MB per day. The user journal already holds 3.8 GB in total (other units).
+- Phoenix SQLite: 30 MB since 2026-10-19 (about 6 MB per day with stored content; hash-only would be a fraction).
+- Proposed metrics (cgroup JSONL every 60 s for 4 containers, roughly 400 bytes per sample): about 2.3 MB per
+  day raw, about 70 MB for 30 days; a time-series store compresses this to a few tens of MB per year.
+- Verdict: the proposed observability stores stay under 1 GB per 90 days at today's volumes; the 10 GB combined
+  cap is a safety ceiling, not an expectation. The real disk risk to watch is OmniRoute's `call_logs/`.

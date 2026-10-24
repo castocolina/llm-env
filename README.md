@@ -267,12 +267,15 @@ LLM_ENV_UPDATE_CHARACTERIZE=1 uv run pytest tests/test_omniroute_characterize.py
 Measurements and their review outcome live in
 `docs/superpowers/research/2026-10-23-updater-characterization.md`. The second
 command runs the same harness as the updater's self-characterization
-(`pylib/omniroute_characterize.py`) and writes reviewable evidence under
-`docs/superpowers/research/`; set `LLM_ENV_UPDATE_CHARACTERIZE_IMAGE=<image>`
-for another image. A complete run also writes
-`<date>-omniroute-profile-<config12>.json`, which a reviewer may append to
-`pylib/omniroute_activity_profiles.json` to ship it (the test suite re-derives
-every shipped entry from its committed evidence).
+(`pylib/omniroute_characterize.py`) and writes the gzipped evidence, the
+candidate and, when complete, `<date>-omniroute-profile-<config12>.json` under
+`tmp/omniroute-characterization/` (gitignored; never `docs/`); set
+`LLM_ENV_UPDATE_CHARACTERIZE_IMAGE=<image>` for another image. To ship a
+profile, copy its `.json.gz` into `tests/fixtures/omniroute-evidence/` (the
+entry already names that path) and append the entry to
+`pylib/omniroute_activity_profiles.json`; the test suite re-derives every
+shipped entry byte for byte from that fixture, and replays the recorded real
+samples through the runtime.
 
 Work files: each updater, migration and healer run keeps its artifacts (the
 dashboard password file, the projection with environment values) in a fresh

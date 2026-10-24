@@ -4517,3 +4517,12 @@ is the only target for this area.
   this path (a unit test stores it from the recorded research evidence and checks it equals the research profile).
 - **Phases on stdout.** `phase: characterizing ...` (with sub-steps), `phase: deriving`, `phase: storing <path>`,
   `phase: stored ...`, then `phase: observing ...`; the last stdout line stays the machine-readable result.
+
+## Addendum (k), 2026-10-24: characterization evidence is a test fixture, not research
+
+The recorded series are logs, so they no longer live in `docs/superpowers/research/`. The evidence behind the
+shipped profiles is `tests/fixtures/omniroute-evidence/<date>-omniroute-characterization-<config12>.json.gz` (gzip;
+`characterization_sha256` in the entry is the hash of the uncompressed bytes, so the entries are unchanged except
+for their path); the `.json.sha256` side files are gone. The reproduction and replay tests read the `.gz`. The
+opt-in characterization writes to `./tmp/omniroute-characterization/` and the updater to the local profile store;
+neither writes under `docs/`. Earlier addenda that name `docs/superpowers/research/` paths describe the history.

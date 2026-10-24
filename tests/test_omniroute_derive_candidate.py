@@ -7,6 +7,7 @@ evidence shaped exactly like the sampler's output (JSON-pointer keys, `<pointer>
 from __future__ import annotations
 
 import datetime
+import gzip
 import hashlib
 import json
 import pathlib
@@ -306,11 +307,9 @@ def test_checked_in_profiles_are_reproduced_from_their_committed_evidence():
     doc = json.loads(PROFILE_PATH.read_text())
     assert doc["schema"] == 1 and doc["profiles"]
     for entry in doc["profiles"]:
-        ev_path = REPO / entry["evidence"]["characterization"]
-        raw = ev_path.read_bytes()
+        raw = gzip.decompress((REPO / entry["evidence"]["characterization"]).read_bytes())  # sha of the plain bytes
         sha = hashlib.sha256(raw).hexdigest()
         assert sha == entry["evidence"]["characterization_sha256"]
-        assert sha == ev_path.with_suffix(".json.sha256").read_text().strip()
         evidence = json.loads(raw)
         assert evidence["config_id"] == entry["config_id"]
         # The entrypoint is a deployment fact the evidence of this vintage does not record; load_profile re-checks it
@@ -415,7 +414,7 @@ def _tick_in(evidence: dict, scenario: str, fraction: float) -> int:
 
 @pytest.mark.parametrize("entry", json.loads(PROFILE_PATH.read_text())["profiles"], ids=lambda e: e["config_id"][7:19])
 def test_shipped_profiles_classify_recorded_real_samples_end_to_end(entry):
-    evidence = json.loads((REPO / entry["evidence"]["characterization"]).read_bytes())
+    evidence = json.loads(gzip.decompress((REPO / entry["evidence"]["characterization"]).read_bytes()))
     # mid long_stream: a real in-flight chat request (in-memory row, activeRequests, pending) is busy
     state, s = _replay(entry, evidence, _tick_in(evidence, "long_stream", 0.3), min_wait=2)
     assert state == "busy", s
@@ -435,7 +434,7 @@ def _first_tick_with_row(evidence: dict, path: str) -> int:
 
 @pytest.mark.parametrize("entry", json.loads(PROFILE_PATH.read_text())["profiles"], ids=lambda e: e["config_id"][7:19])
 def test_recorded_extra_client_routes_are_activity_and_embeddings_defers_naming_the_route(entry):
-    evidence = json.loads((REPO / entry["evidence"]["characterization"]).read_bytes())
+    evidence = json.loads(gzip.decompress((REPO / entry["evidence"]["characterization"]).read_bytes()))
     for path in ("/v1/messages", "/v1/responses"):  # profiled inference routes: their first row is client activity
         state, s = _replay(entry, evidence, _first_tick_with_row(evidence, path), min_wait=2)
         assert state == "busy", (path, s)
@@ -445,7 +444,8 @@ def test_recorded_extra_client_routes_are_activity_and_embeddings_defers_naming_
 
 # ---- the updater's self-characterization (omniroute-update characterize), fed recorded evidence ----
 
-RESEARCH_EVIDENCE = REPO / "docs/superpowers/research/2026-10-24-omniroute-characterization-2a7a68e89fe5.json"
+FIXTURES = REPO / "tests/fixtures/omniroute-evidence"  # recorded real runs backing the shipped profiles
+RECORDED_EVIDENCE = FIXTURES / "2026-10-24-omniroute-characterization-2a7a68e89fe5.json.gz"
 
 
 # The recorded run belongs to a SHIPPED profile, so the image under test is given a synthetic config id that no
@@ -463,7 +463,7 @@ def _without_evidence_hashes(node):
 
 
 def _recorded_evidence():
-    evidence = json.loads(RESEARCH_EVIDENCE.read_bytes())
+    evidence = json.loads(gzip.decompress(RECORDED_EVIDENCE.read_bytes()))
     evidence["config_id"] = UNPROFILED_ID
     return evidence
 
@@ -493,7 +493,7 @@ def test_an_unprofiled_image_is_characterized_into_the_local_store_and_loads(tmp
     store = tmp_path / "store"
     assert oct(store.stat().st_mode & 0o777) == "0o700"
     stored = json.loads((store / f"{hexid}.profile.json").read_text())
-    research = json.loads((REPO / "docs/superpowers/research/2026-10-24-omniroute-profile-2a7a68e89fe5.json").read_text())
+    research = json.loads((FIXTURES / "2026-10-24-omniroute-profile-2a7a68e89fe5.json").read_text())
     assert stored["evidence"]["characterization"] == f"{hexid}.evidence.json"
     assert _without_evidence_hashes({**stored, "config_id": None}) == _without_evidence_hashes({**research, "config_id": None})  # same derivation as the reviewed run
     container = {"Config": {"Env": [], "Entrypoint": stored["entrypoint"]}, "HostConfig": {"LogConfig": {"Type": "journald"}}}

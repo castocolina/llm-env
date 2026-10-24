@@ -13,8 +13,9 @@ Result: **1 passed in 286.19s (0:04:46)**.
 
 Artifacts: the harness wrote a 6.6 MB characterization file, its sha256 and a derived candidate. They were
 removed on 2026-10-24: the re-runs of the same image with the final scenarios
-(`2026-10-24-omniroute-characterization-038b2aba95a6.json` and its `.sha256`) supersede them and are the
-evidence the shipped profile is reproduced from.
+supersede them and are the evidence the shipped profile is reproduced from. That evidence is a test fixture,
+`tests/fixtures/omniroute-evidence/2026-10-24-omniroute-characterization-038b2aba95a6.json.gz` (gzip; the sha256 of
+the uncompressed bytes lives in the profile entry), not a docs/ file.
 
 Image under test: unmodified `docker.io/diegosouzapw/omniroute:latest`, deployment
 config id `sha256:038b2aba95a6...`, driven by `tests/fixtures/fake_inference.py`
