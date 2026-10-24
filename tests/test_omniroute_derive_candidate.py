@@ -445,14 +445,34 @@ def test_recorded_extra_client_routes_are_activity_and_embeddings_defers_naming_
 
 # ---- the updater's self-characterization (omniroute-update characterize), fed recorded evidence ----
 
-RESEARCH_7D21 = REPO / "docs/superpowers/research/2026-10-24-omniroute-characterization-7d2169fb2bd6.json"
+RESEARCH_EVIDENCE = REPO / "docs/superpowers/research/2026-10-24-omniroute-characterization-2a7a68e89fe5.json"
+
+
+# The recorded run belongs to a SHIPPED profile, so the image under test is given a synthetic config id that no
+# profile covers: this is how an unprofiled image looks to the updater.
+UNPROFILED_ID = "sha256:" + "7" * 64
+
+
+def _without_evidence_hashes(node):
+    """Profiles cite the sha of the evidence they came from; a synthetic config id changes that hash."""
+    if isinstance(node, dict):
+        return {k: _without_evidence_hashes(v) for k, v in node.items() if k != "evidence"}
+    if isinstance(node, list):
+        return [_without_evidence_hashes(v) for v in node]
+    return node
+
+
+def _recorded_evidence():
+    evidence = json.loads(RESEARCH_EVIDENCE.read_bytes())
+    evidence["config_id"] = UNPROFILED_ID
+    return evidence
 
 
 def _characterize(tmp_path, collect, budget=1200):
     import argparse
 
     from pylib.omniroute_cli import cmd_characterize
-    evidence = json.loads(RESEARCH_7D21.read_bytes())
+    evidence = _recorded_evidence()
     args = argparse.Namespace(config_id=evidence["config_id"], budget=budget)
     return evidence["config_id"], cmd_characterize(args, collect=collect, store_dir=tmp_path / "store")
 
@@ -463,7 +483,7 @@ def test_an_unprofiled_image_is_characterized_into_the_local_store_and_loads(tmp
     def collect(config_id, log):
         calls.append(config_id)
         log("running the scenarios")
-        return json.loads(RESEARCH_7D21.read_bytes())
+        return _recorded_evidence()
     config_id, rc = _characterize(tmp_path, collect)
     out = capsys.readouterr().out
     assert rc == 0 and calls == [config_id]
@@ -473,9 +493,9 @@ def test_an_unprofiled_image_is_characterized_into_the_local_store_and_loads(tmp
     store = tmp_path / "store"
     assert oct(store.stat().st_mode & 0o777) == "0o700"
     stored = json.loads((store / f"{hexid}.profile.json").read_text())
-    research = json.loads((REPO / "docs/superpowers/research/2026-10-24-omniroute-profile-7d2169fb2bd6.json").read_text())
+    research = json.loads((REPO / "docs/superpowers/research/2026-10-24-omniroute-profile-2a7a68e89fe5.json").read_text())
     assert stored["evidence"]["characterization"] == f"{hexid}.evidence.json"
-    assert {**stored, "evidence": None} == {**research, "evidence": None}  # the same derivation as the reviewed run
+    assert _without_evidence_hashes({**stored, "config_id": None}) == _without_evidence_hashes({**research, "config_id": None})  # same derivation as the reviewed run
     container = {"Config": {"Env": [], "Entrypoint": stored["entrypoint"]}, "HostConfig": {"LogConfig": {"Type": "journald"}}}
     assert load_profile(config_id, container, local_dir=store).health_cache_ms == stored["health_cache_ms"]
     _, rc = _characterize(tmp_path, collect)  # profiled now: nothing runs
@@ -484,7 +504,7 @@ def test_an_unprofiled_image_is_characterized_into_the_local_store_and_loads(tmp
 
 def test_an_incomplete_characterization_defers_capability_naming_reasons_and_evidence(tmp_path, capsys):
     def collect(config_id, log):
-        evidence = json.loads(RESEARCH_7D21.read_bytes())
+        evidence = _recorded_evidence()
         evidence["scenarios"] = [s for s in evidence["scenarios"] if s["scenario"] != "idle_poll"]
         return evidence
     config_id, rc = _characterize(tmp_path, collect)
