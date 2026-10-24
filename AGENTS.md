@@ -161,6 +161,26 @@ output files and `ps` by PID at least every 5 minutes (never `pgrep -f` /
 process or a process question as a stall to act on at once. Report run state
 to the user in every status message.
 
+When an external run fails, climb this ladder and stop at the first rung that
+applies; never skip to another harness:
+
+1. Transient error (`[400]: event: error`, 5xx, dropped stream, timeout): retry
+   the same lane up to 3 times, in the same session.
+2. Still failing after 3 attempts: start a NEW session on the same lane
+   (OmniRoute pins a session to one combo member, so a fresh session lets the
+   combo choose again), up to 3 more attempts.
+3. Quota, rate-limit or auth errors (`429`, "monthly usage limit", 401/403):
+   do not retry the same model. A quota is exhausted for the whole cycle;
+   retrying only burns time. Stop and report.
+4. Out of rungs: stop and report the failure with evidence (status, combo,
+   model, timestamps). The user decides what to do next.
+
+The catalog of CLI harnesses a runner knows (cursor, codex, claude, pi,
+opencode, ...) is a menu for when the user asks for one by name. An
+orchestrating agent never switches harness, provider or model on its own
+initiative because a run failed, and never falls back to a different CLI
+because the first one hit a quota. Switching lanes is the user's call.
+
 ### Test Processes and Containers
 
 Every process, container, volume or temp directory started for a test,
