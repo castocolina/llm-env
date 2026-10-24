@@ -73,6 +73,18 @@ PHOENIX_MEMORY_MAX_MIB = 1024
 # heavy requests serializes through the gate instead of failing immediately.
 OMNIROUTE_CHAT_ADMISSION_QUEUE_MS = 8000
 
+# OmniRoute's call history (2026-10-24 disk analysis, docs/superpowers/research/
+# 2026-10-20-laya-jev-grafana-observability.md section 12): rows and their payload artifacts under
+# /app/data/call_logs/ grew ~2 GB per heavy day with the defaults (7 days, 512 KB per payload).
+# Owner decision: keep up to 180 days but never more than ~1 GB. OmniRoute has no size cap, so the cap
+# is built from its two knobs: a payload larger than OMNIROUTE_CALL_LOG_PAYLOAD_KB is not stored at
+# all (large prompts are skipped, small error bodies are kept), and the table (rows plus their
+# artifacts) is bounded by OMNIROUTE_CALL_LOGS_MAX_ROWS rows: 50,000 rows x 2 payloads x 8 KB = 800 MB
+# worst case, plus ~50 MB of rows. Whichever of 180 days or 50,000 rows comes first applies.
+OMNIROUTE_CALL_LOG_RETENTION_DAYS = 180
+OMNIROUTE_CALL_LOG_PAYLOAD_KB = 8
+OMNIROUTE_CALL_LOGS_MAX_ROWS = 50000
+
 # Built-in per-service policy (benchmark-derived, see the sizing rule above).
 # Persistent `resources.overrides.<service>` entries in models.yml merge over it.
 DEFAULT_POLICY: dict[str, dict[str, Any]] = {

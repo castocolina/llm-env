@@ -1018,5 +1018,12 @@ backlog.
 - Phoenix SQLite: 30 MB since 2026-10-19 (about 6 MB per day with stored content; hash-only would be a fraction).
 - Proposed metrics (cgroup JSONL every 60 s for 4 containers, roughly 400 bytes per sample): about 2.3 MB per
   day raw, about 70 MB for 30 days; a time-series store compresses this to a few tens of MB per year.
+- **Decision (owner, 2026-10-24): OmniRoute call history capped at 180 days and about 1 GB.** OmniRoute has no size
+  cap and its retention applies to rows and artifacts together (default 7 days), so the cap is built from its knobs
+  in the compose service (`pylib/resources.py`): `CALL_LOG_RETENTION_DAYS=180`, `CALL_LOG_PIPELINE_MAX_SIZE_KB=8`
+  (a payload larger than this is not stored, so big prompts are skipped and small error bodies kept) and
+  `CALL_LOGS_TABLE_MAX_ROWS=50000` (about 800 MB worst case plus rows). Whichever of 180 days or 50,000 rows comes
+  first applies; at today's ~5,400 calls per day the row cap binds after about 9 days. The 2.3 GB already on disk
+  stays until it ages out; `POST /api/settings/purge-request-history` would erase rows too, so it is not run.
 - Verdict: the proposed observability stores stay under 1 GB per 90 days at today's volumes; the 10 GB combined
   cap is a safety ceiling, not an expectation. The real disk risk to watch is OmniRoute's `call_logs/`.

@@ -170,6 +170,9 @@ def test_omniroute_service_extends_chat_admission_queue_wait():
     _, document = compose_dict()
     env = document["services"]["omniroute"]["environment"]
     assert env["OMNIROUTE_CHAT_ADMISSION_QUEUE_MS"] == "8000"
+    assert env["CALL_LOG_RETENTION_DAYS"] == "180"
+    assert env["CALL_LOG_PIPELINE_MAX_SIZE_KB"] == "8"
+    assert env["CALL_LOGS_TABLE_MAX_ROWS"] == "50000"
     assert "OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT" not in env
 
 
