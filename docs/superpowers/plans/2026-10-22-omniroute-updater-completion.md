@@ -4568,3 +4568,30 @@ neither writes under `docs/`. Earlier addenda that name `docs/superpowers/resear
   run applies the new file.
 - **Not detected (documented limits).** A variable removed from the template (unrendered variables are ignored by
   the owner's rule), port ranges / IPv6 host ips, healthcheck `disable`, labels, volumes/networks (ownership).
+
+## Addendum (m), 2026-10-24: only relevant inventory changes count; one re-baseline per run (owner decision)
+
+Live run (15:44-16:14, 2783 s): the drift waited for quiet, then deferred `ownership` (`backend inventory changed`)
+because other agents created and removed throwaway containers in the same rootless Podman. Rule:
+
+- **Relevant set** (`relevant_ids`): the target; every container with the target's compose project label (siblings);
+  every container whose `Dependencies` (`--requires`, pod/namespace links) name the target; every container attached
+  to one of the target's networks (it can reach it by alias). `restrict()` keeps only those in the snapshot, the
+  fingerprint, `snapshot.json` and the commit verification baseline; the unrelated ids are kept as a set only to
+  count them. The worker's recheck prints `ignored unrelated inventory change: N added, M removed` on stderr.
+- **Details name containers, never values**: `relevant inventory changed: system-one restarted, remote-setup
+  appeared` (restarted = StartedAt differs; changed = anything else in the inspected identity/config hash),
+  `target replaced or removed: omniroute`, `a container depends on the target: remote-setup`. Preflight and recheck
+  print their deferral `detail:` on stderr.
+- **Re-baseline once.** A relevant change seen by the observer during the wait makes `apply_when_idle` stop the
+  observer, print `phase: re-baselining (...)` and return (its only return); `update-omniroute.sh` re-runs steps 2-5
+  (preflight, characterize no-op, resolve, pull without transfer, verify, projection) in the same lock and work dir;
+  the deadline file is kept, so the wait budget is not reset. A second relevant change in the run defers
+  `ownership` with the detail. The target replaced/removed (different id or gone) defers at once, no re-baseline. A
+  dependent that appeared is refused by the re-baseline preflight. Limit: a change in the seconds between the
+  observer's `ready` and the worker's recheck defers without a re-baseline (the worker has no way back to preflight).
+- **Tests (world fakes, `inventory` per phase; the stub's journal follower enters phase `observing`):** unrelated
+  container appears and disappears mid-wait -> applied, counts logged; sibling restarted once -> re-baselined, applied;
+  repeated -> deferred with the name; dependent appears -> re-baselined, then refused; target restarted (healer) ->
+  re-baselined, applied; target replaced -> deferred, no re-baseline; unit test of `relevant_ids`/`restrict`/
+  `assert_unchanged` naming.

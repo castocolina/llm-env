@@ -257,15 +257,41 @@ class Snapshot:
     containers: dict[str, str]
     deps: frozenset[tuple[str, str]]
     docs: dict[str, dict] = field(default_factory=dict, compare=False, repr=False)
+    names: dict[str, str] = field(default_factory=dict, compare=False)    # id -> name (detail messages only)
+    started: dict[str, str] = field(default_factory=dict, compare=False)  # id -> StartedAt (restarted vs changed)
+    others: frozenset[str] = field(default_factory=frozenset, compare=False)  # unrelated ids left out by restrict()
 
     def to_json(self) -> str:
         return json.dumps({"backend": self.backend, "containers": self.containers,
-                           "deps": sorted([list(d) for d in self.deps])}, sort_keys=True)
+                           "deps": sorted([list(d) for d in self.deps]), "names": self.names,
+                           "started": self.started, "others": sorted(self.others)}, sort_keys=True)
 
     @staticmethod
     def from_json(text: str) -> Snapshot:
         raw = json.loads(text)
-        return Snapshot(raw["backend"], raw["containers"], frozenset(tuple(d) for d in raw["deps"]))
+        return Snapshot(raw["backend"], raw["containers"], frozenset(tuple(d) for d in raw["deps"]), {},
+                        raw.get("names", {}), raw.get("started", {}), frozenset(raw.get("others", [])))
+
+
+def _networks(doc: dict) -> set[str]:
+    return {v.get("NetworkID") for v in ((doc.get("NetworkSettings") or {}).get("Networks") or {}).values()}
+
+
+def relevant_ids(snap: Snapshot, target_id: str, project: str, networks) -> set[str]:
+    """Containers that matter to replacing the target: the target, every container of its compose project, any
+    container that depends on it, and any container sharing one of its networks (it can reach it by alias). Throwaway
+    containers of other projects on a shared dev host are not relevant."""
+    nets = set(networks)
+    return {cid for cid, d in snap.docs.items()
+            if cid == target_id or (target_id and (cid, target_id) in snap.deps) or _networks(d) & nets
+            or (project and ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT) == project)}
+
+
+def restrict(snap: Snapshot, keep: set[str]) -> Snapshot:
+    return Snapshot(snap.backend, {c: h for c, h in snap.containers.items() if c in keep},
+                    frozenset(d for d in snap.deps if d[0] in keep), {c: d for c, d in snap.docs.items() if c in keep},
+                    {c: n for c, n in snap.names.items() if c in keep},
+                    {c: t for c, t in snap.started.items() if c in keep}, frozenset(set(snap.containers) - keep))
 
 
 def take_snapshot(run: Runner, env: Mapping[str, str] = os.environ) -> Snapshot:
@@ -284,7 +310,7 @@ def take_snapshot(run: Runner, env: Mapping[str, str] = os.environ) -> Snapshot:
     if not isinstance(rows, list) or any(not isinstance(c, dict) or "Id" not in c for c in rows):
         raise Deferral(Reason.schema, "unexpected container inventory shape")
     ids = [c["Id"] for c in rows]
-    containers, deps, docs = {}, set(), {}
+    containers, deps, docs, names, started = {}, set(), {}, {}, {}
     for cid in ids:
         if not isinstance(cid, str) or not _ID_RE.fullmatch(cid):
             raise Deferral(Reason.schema, "malformed container id")
@@ -297,11 +323,13 @@ def take_snapshot(run: Runner, env: Mapping[str, str] = os.environ) -> Snapshot:
             raise Deferral(Reason.schema, "missing or malformed Dependencies")
         deps.update((cid, t) for t in dependencies)
         docs[cid] = d
+        names[cid] = str(d.get("Name", "")).lstrip("/") or cid[:12]
+        started[cid] = str((d.get("State") or {}).get("StartedAt", ""))
         containers[cid] = _canon_hash(
             {k: d.get(k) for k in ("Id", "Name", "Image", "ImageName", "Dependencies", "Mounts", "HostConfig", "Config")}
             | {"networks": {n: v.get("NetworkID") for n, v in ((d.get("NetworkSettings") or {}).get("Networks") or {}).items()},
                "started": (d.get("State") or {}).get("StartedAt")})
-    return Snapshot(backend, containers, frozenset(deps), docs)
+    return Snapshot(backend, containers, frozenset(deps), docs, names, started)
 
 
 def incoming(snap: Snapshot, target_id: str) -> list[str]:
@@ -309,8 +337,22 @@ def incoming(snap: Snapshot, target_id: str) -> list[str]:
 
 
 def assert_unchanged(before: Snapshot, after: Snapshot) -> None:
-    if before.backend != after.backend or before.containers != after.containers or before.deps != after.deps:
+    """Defers `ownership` naming each changed container (names only). Callers restrict() both sides first, so an
+    unrelated container appearing or disappearing is not a change."""
+    if before.backend != after.backend:
         raise Deferral(Reason.ownership, "backend inventory changed")
+    changes = []
+    for cid in sorted(set(before.containers) | set(after.containers)):
+        name = after.names.get(cid) or before.names.get(cid) or cid[:12]
+        if cid not in after.containers:
+            changes.append(f"{name} removed")
+        elif cid not in before.containers:
+            changes.append(f"{name} appeared")
+        elif before.containers[cid] != after.containers[cid]:
+            restarted = before.started.get(cid) != after.started.get(cid)
+            changes.append(f"{name} {'restarted' if restarted else 'changed'}")
+    if changes or before.deps != after.deps:
+        raise Deferral(Reason.ownership, "relevant inventory changed: " + (", ".join(changes) or "dependencies"))
 
 
 def _strings(obj):
@@ -591,8 +633,10 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
         if mode == "running" and health != "healthy" and \
                 (api_ok is None or not api_ok(live_port, _env_value(doc, "INITIAL_PASSWORD") or "")):
             raise Deferral(Reason.health, "running target is not healthy and its authenticated health API does not answer")
+    snap = restrict(snap, relevant_ids(snap, cid, project, _networks(doc)))
     if cid and incoming(snap, cid):
-        raise Deferral(Reason.ownership, "a container depends on the target")
+        raise Deferral(Reason.ownership, "a container depends on the target: "
+                       + ", ".join(snap.names.get(c, c[:12]) for c in incoming(snap, cid)))
     provider = provider or shutil.which("podman-compose") or ""
     if not provider:
         raise Deferral(Reason.input, "podman-compose not found")
@@ -647,13 +691,19 @@ def check_private_dir(path: str) -> None:
         raise Deferral(Reason.lock, "artifact directory is not a private 0700 directory owned by this user")
 
 
-def recheck(out_dir: str, config_path: str, compose_path: str, env, run: Runner) -> None:
+def recheck(out_dir: str, config_path: str, compose_path: str, env, run: Runner) -> tuple[int, int]:
+    """Re-verify the relevant inventory and the fingerprint. Returns (added, removed) counts of unrelated containers
+    since the baseline (ignored). The target gone or replaced defers `ownership` with `target replaced`; any other
+    relevant change defers with `relevant inventory changed: <names and what>` (the updater re-baselines once)."""
     check_private_dir(out_dir)
     before = Snapshot.from_json(Path(out_dir, "snapshot.json").read_text())
     expected = Path(out_dir, "fingerprint.txt").read_text().strip()
     dep = json.loads(Path(out_dir, "deployment.json").read_text())
     try:
         snap = take_snapshot(run, env)
+        snap = restrict(snap, relevant_ids(snap, dep["container_id"], dep["project"], dep["network_ids"]))
+        if dep["container_id"] and dep["container_id"] not in snap.containers:
+            raise Deferral(Reason.ownership, f"target replaced or removed: {before.names.get(dep['container_id'], dep['container_name'])}")
         assert_unchanged(before, snap)
         if incoming(snap, dep["container_id"]):
             raise Deferral(Reason.ownership, "a container now depends on the target")
@@ -662,6 +712,7 @@ def recheck(out_dir: str, config_path: str, compose_path: str, env, run: Runner)
             raise Deferral(Reason.ownership, "deployment fingerprint drifted")
     except UpdateError as exc:
         raise Deferral(Reason.io, "recheck command failed") from exc
+    return len(snap.others - before.others), len(before.others - snap.others)
 
 
 # ---- projection, provider round trip and commit verification (Task 6) ----

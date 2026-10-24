@@ -714,3 +714,73 @@ def test_apply_when_idle_alone_gates_recreates_and_verifies(world, busy):
     assert r.stdout.splitlines() == [OBSERVING, f"updated {OMNI[:12]} -> {NEW[:12]}"]
     assert _verbs(w.mutations()) == [("podman", "tag"), ("podman", "stop"), ("podman", "rm"),
                                       ("podman-compose", "--in-pod")]
+
+
+# ---- 2026-10-24 addendum (m): only relevant inventory changes count; one re-baseline per run ----
+
+def _restarted(doc, at):
+    return {**doc, "State": {**doc["State"], "StartedAt": at}}
+
+
+UNRELATED_1 = inspect_doc("1" * 64, name="otlp-experiment", project="otlp", net="2" * 64)
+UNRELATED_2 = inspect_doc("3" * 64, name="ai-kit-e2e", project="ai-kit", net="4" * 64)
+SIBLING = inspect_doc(SIB, name="system-one")
+DEPENDENT = inspect_doc(RS, name="remote-setup", deps=[OMNI])
+
+
+def test_unrelated_containers_appearing_and_disappearing_mid_wait_are_ignored(world):
+    w = world(inventory={"start": ["target", UNRELATED_1], "observing": ["target", UNRELATED_2],
+                         "post-observer": ["target"]})
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
+    assert "re-baselining" not in r.stdout
+    assert "ignored unrelated inventory change: 0 added, 1 removed" in r.stderr
+
+
+def test_a_sibling_restarted_mid_wait_is_re_baselined_once_and_the_update_applies(world):
+    s2 = _restarted(SIBLING, "2026-10-24T02:00:00Z")
+    w = world(inventory={"start": ["target", SIBLING], "observing": ["target", s2], "post-observer": ["target", s2],
+                         "post-rm": [s2], "post-commit": ["new", s2]})
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "phase: re-baselining (system-one restarted)" in r.stdout.splitlines()
+    assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
+
+
+def test_a_relevant_change_that_repeats_in_the_same_run_defers_naming_the_container(world):
+    w = world(inventory={"start": ["target", SIBLING],
+                         "observing": ["target", _restarted(SIBLING, "2026-10-24T02:00:00Z")],
+                         "post-observer": ["target", _restarted(SIBLING, "2026-10-24T03:00:00Z")]})
+    r = w.run(**IDLE)
+    assert r.returncode == 75 and r.stdout.splitlines()[-1] == "deferred: ownership", r.stdout + r.stderr
+    assert r.stdout.count("phase: re-baselining") == 1
+    assert "detail: relevant inventory changed: system-one restarted" in r.stderr
+    assert w.mutations() == [("podman", "pull", w.immutable_ref)] * 2  # the re-baseline re-stages (no transfer)
+
+
+def test_a_dependent_appearing_mid_wait_re_baselines_and_preflight_then_refuses_it(world):
+    w = world(inventory={"observing": ["target", DEPENDENT], "post-observer": ["target", DEPENDENT]})
+    r = w.run(**IDLE)
+    assert r.returncode == 75 and r.stdout.splitlines()[-1] == "deferred: ownership", r.stdout + r.stderr
+    assert "phase: re-baselining (remote-setup appeared)" in r.stdout.splitlines()
+    assert "detail: a container depends on the target: remote-setup" in r.stderr
+    assert w.mutations() == [("podman", "pull", w.immutable_ref)]
+
+
+def test_the_target_restarted_mid_wait_by_the_healer_is_re_baselined_and_observed_again(world):
+    w = world(inventory={"observing": ["target-restarted"], "post-observer": ["target-restarted"]})
+    r = w.run(**IDLE)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "phase: re-baselining (omniroute restarted)" in r.stdout.splitlines()
+    assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
+
+
+def test_the_target_replaced_externally_mid_wait_defers_without_a_re_baseline(world):
+    other = inspect_doc("5" * 64, name="omniroute")
+    w = world(inventory={"observing": [other], "post-observer": [other]})
+    r = w.run(**IDLE)
+    assert r.returncode == 75 and r.stdout.splitlines()[-1] == "deferred: ownership", r.stdout + r.stderr
+    assert "re-baselining" not in r.stdout
+    assert "detail: target replaced or removed: omniroute" in r.stderr
+    assert w.mutations() == [("podman", "pull", w.immutable_ref)]

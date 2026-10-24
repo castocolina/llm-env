@@ -57,6 +57,8 @@ if rule is None:
     print(f"stub: unscripted {name} {argv} in phase {phase}", file=sys.stderr)
     sys.exit(99)
 matched = rule
+if "enter_phase" in rule:  # switch the world at once (e.g. when the observer's journal follower starts)
+    set_phase(rule["enter_phase"])
 if "on_term_set_phase" in matched:
     def on_term(*_):
         set_phase(matched["on_term_set_phase"])

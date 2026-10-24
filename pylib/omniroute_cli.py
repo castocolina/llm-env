@@ -86,14 +86,21 @@ def cmd_preflight(args, run=None, env=None, which=shutil.which, api_ok=api_answe
     env = os.environ if env is None else env
     run = run or scrubbed_runner(env)
     check_private_dir(args.out_dir)
-    if args.recheck:
-        recheck(args.out_dir, args.config, args.compose, env,
-                with_deadline(run, time.monotonic() + args.budget))
-        return 0
-    cfg = yaml.safe_load(Path(args.config).read_text()) or {}
-    dep, snap, fp, effective = preflight(cfg, args.config, args.compose, env, run,
-                                         provider=which("podman-compose") or None, service=args.service,
-                                         api_ok=api_ok)
+    try:
+        if args.recheck:
+            added, removed = recheck(args.out_dir, args.config, args.compose, env,
+                                     with_deadline(run, time.monotonic() + args.budget))
+            if added or removed:
+                print(f"ignored unrelated inventory change: {added} added, {removed} removed", file=sys.stderr)
+            return 0
+        cfg = yaml.safe_load(Path(args.config).read_text()) or {}
+        dep, snap, fp, effective = preflight(cfg, args.config, args.compose, env, run,
+                                             provider=which("podman-compose") or None, service=args.service,
+                                             api_ok=api_ok)
+    except Deferral as exc:
+        if exc.detail:  # sanitized (names, never values): which container or check refused
+            print(f"detail: {exc.detail}", file=sys.stderr)
+        raise
     write_preflight_artifacts(args.out_dir, dep, snap, fp, effective, snap.docs.get(dep.container_id))
     for key, value in asdict(dep).items():
         if isinstance(value, (str, int, bool)):

@@ -49,7 +49,7 @@ class World:
                  up_rc=0, stop_sleep=0, prior_tag_sleep=0, env=None, busy=False, old_state="running",
                  old_health="healthy", absent=False, new_health="healthy", busy_at_last_look=False,
                  pull_rc=0, pull_sleep=0, svc_patch=None, omniroute_cfg=None, server_password=None,
-                 port=None, restarted_after_observer=False):
+                 port=None, restarted_after_observer=False, inventory=None):
         self.tmp, self.env_extra = tmp_path, env or {}
         # The scripts' private work-dir parent ($XDG_RUNTIME_DIR, 0700) and TMPDIR: every work dir a run leaves
         # behind lands here, and close() fails the test when one with a password or deployment file survives.
@@ -104,6 +104,14 @@ class World:
         old["Mounts"] = [{"Type": "volume", "Name": f"{PROJECT}_omniroute-data"}]
         new["Mounts"] = old["Mounts"]
         start_ids = ([] if absent else [OMNI]) + ([RS] if dependent else [])
+        # inventory: {phase: [docs]} replaces the container list (and those docs' inspect output) in that phase.
+        # Phases: start (first preflight), observing (from the observer's journal follower start), post-observer
+        # (re-baseline preflight, worker recheck), post-rm, post-commit.
+        # "target", "target-restarted" and "new" stand for this world's own target / replacement docs.
+        named = {"target": old, "new": new,
+                 "target-restarted": {**old, "State": {**old["State"], "StartedAt": "2026-10-24T01:00:00Z"}}}
+        inventory = {ph: [named[d] if isinstance(d, str) else d for d in docs]
+                     for ph, docs in (inventory or {}).items()}
 
         def ps(ids):
             return json.dumps([{"Id": i} for i in ids])
@@ -115,7 +123,11 @@ class World:
                                    "host": {"security": {"rootless": True}, "serviceIsRemote": False,
                                             "os": "linux", "arch": "amd64"}})},
             {T: "podman", "prefix": ["ps", "--all", "--filter"], "stdout": ""},
-            {T: "podman", "prefix": ["ps"], "phase": ["start"], "stdout": ps(start_ids)},
+            *({T: "podman", "prefix": ["ps"], "phase": [ph], "stdout": ps([d["Id"] for d in docs])}
+              for ph, docs in inventory.items()),
+            *({T: "podman", "prefix": ["container", "inspect"], "last": d["Id"], "phase": [ph],
+               "stdout": json.dumps([d])} for ph, docs in inventory.items() for d in docs),
+            {T: "podman", "prefix": ["ps"], "phase": ["start", "observing"], "stdout": ps(start_ids)},
             {T: "podman", "prefix": ["ps"], "phase": ["post-observer"],
              "stdout": ps([OMNI, RS] if drift_after_observer else start_ids)},
             {T: "podman", "prefix": ["ps"], "phase": ["post-rm"], "stdout": ps([])},
@@ -144,6 +156,7 @@ class World:
             {T: "podman-compose", "last": "config", "stdout": yaml.safe_dump(eff)},
             {T: "podman-compose", "has": ["up"], "rc": up_rc, "set_phase": "post-commit" if up_rc == 0 else "start"},
             {T: "journalctl", "has": ["--follow"], "sleep": 300, "on_term_set_phase": "post-observer",
+             "enter_phase": "observing",
              # Ruling: the plan's follow rule printed nothing, so the barrier cursor could never be seen and
              # no sample could ever be `feed`-clean; a real follower streams records, so echo the marker line.
              "stdout": json.dumps({"__CURSOR": "s1", "_BOOT_ID": "b1",

@@ -10,10 +10,11 @@
 #   min_wait s, newest client call older than that, waiting up to max_deferred_wait s); hand-off to the commit worker
 #   (recheck, last look, target-only stop/rm/up, health verification; no rollback).
 #   Result: exit 0 with `updated <old> -> <new>`, 75 with `deferred: <reason>`, 1 with `error: ...` on stderr. It
-#   exits the calling shell (it never returns).
+#   exits the calling shell, except once per run (while $rebaselined is empty): a relevant inventory change during the
+#   wait prints `phase: re-baselining (...)` and returns, so the caller re-runs preflight and calls it again.
 #
 # Run context (set by the caller, as for acquire_update_lock): llm, cli, work (0700, preflight artifacts), the update
-# lock on FD 9, defer, config_path, compose_path, state, stop_seconds, min_wait, max_deferred_wait, health_timeout.
+# lock on FD 9, defer, rebaselined, config_path, compose_path, state, stop_seconds, min_wait, max_deferred_wait, health_timeout.
 # shellcheck disable=SC2154 # the run context above is provided by the sourcing script.
 
 observer_pid=""
@@ -51,7 +52,7 @@ apply_when_idle() {
 
     # Observe (running targets only). The wait budget starts now (after staging). The supervisor reads the password
     # file once at start and publishes the gate verdict in $work/latest.json; the file is removed at its first verdict.
-    cli deadline --file "$work/deadline" --init "$max_deferred_wait"
+    [[ -f "$work/deadline" ]] || cli deadline --file "$work/deadline" --init "$max_deferred_wait"   # kept on re-baseline
     if [[ "$state" == "running" ]]; then
         echo "phase: observing (idle gate: ${min_wait} s quiet, wait budget ${max_deferred_wait} s)"
         write_pw
@@ -84,6 +85,14 @@ apply_when_idle() {
                     defer-unknown)
                         [[ "$reason" =~ ^[a-z]+$ ]] || reason=feed
                         detail="$(jq -r '.sample.detail // ""' "$work/latest.json" 2>/dev/null || true)"
+                        # A relevant container (sibling, dependent; never the target itself) changed while waiting: the caller
+                        # re-runs preflight once in the same lock and budget; a second change in this run defers `ownership`.
+                        if [[ "$reason" == ownership && "$detail" == "relevant inventory changed: "* && -z "${rebaselined:-}" ]]; then
+                            stop_observer
+                            rm -f "$work/latest.json" "$work/pw" "$work/live-pw"
+                            echo "phase: re-baselining (${detail#relevant inventory changed: })"
+                            return 0
+                        fi
                         if [[ -n "$detail" ]]; then printf 'detail: %s\n' "$detail" >&2; fi   # e.g. the unprofiled route
                         defer "$reason" ;;
                     *) echo "error: unexpected observer verdict" >&2; exit 1 ;;

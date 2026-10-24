@@ -892,3 +892,26 @@ def test_env_list_or_map_form_and_order_create_no_drift():
                "environment": ["A=1", "B=3", "PASS=a$$c", "NEW=x"]}
     assert config_drift(changed, doc) == ["environment B NEW PASS", "ports", "memory reservation", "cpus",
                                           "cpu shares", "healthcheck", "restart"]
+
+
+# ---- 2026-10-24 addendum (m): relevance of the inventory ----
+
+def test_only_relevant_containers_are_compared_and_changes_are_named():
+    from pylib.omniroute_update import relevant_ids, restrict
+    unrelated = inspect_doc("1" * 64, name="throwaway", project="other", net="2" * 64)
+    netmate = inspect_doc("3" * 64, name="netmate", project="other")                        # shares the target network
+    dependent = inspect_doc("4" * 64, name="dep", project="other", net="5" * 64, deps=[OMNI])
+    sibling = inspect_doc(SIB, name="sib", net="6" * 64)                                     # same compose project
+    snap = take_snapshot(fake_backend({OMNI: omni(), "1" * 64: unrelated, "3" * 64: netmate, "4" * 64: dependent,
+                                       SIB: sibling}))
+    keep = relevant_ids(snap, OMNI, PROJECT, [NET])
+    assert keep == {OMNI, "3" * 64, "4" * 64, SIB}
+    base = restrict(snap, keep)
+    assert base.others == {"1" * 64} and Snapshot.from_json(base.to_json()).names[SIB] == "sib"
+    gone = take_snapshot(fake_backend({OMNI: omni(), "3" * 64: netmate, "4" * 64: dependent, SIB: sibling}))
+    assert_unchanged(base, restrict(gone, relevant_ids(gone, OMNI, PROJECT, [NET])))  # unrelated removal ignored
+    moved = {**sibling, "State": {**sibling["State"], "StartedAt": "later"}}
+    after = take_snapshot(fake_backend({OMNI: omni(), "3" * 64: netmate, SIB: moved}))
+    with pytest.raises(Deferral) as e:
+        assert_unchanged(Snapshot.from_json(base.to_json()), restrict(after, relevant_ids(after, OMNI, PROJECT, [NET])))
+    assert e.value.detail == "relevant inventory changed: dep removed, sib restarted"

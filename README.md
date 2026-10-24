@@ -177,9 +177,27 @@ OmniRoute container. It only acts when **all** of these hold:
   `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300) and stay idle while it
   re-samples; a single deployment-wide deadline bounds the whole wait
   (`LLM_ENV_UPDATE_MAX_WAIT_SECONDS`, default 10800).
-- The backend inventory, compose configuration, effective compose output and
-  running container all agree (fingerprints and digests are rechecked at
-  commit time by a detached worker that holds the update lock).
+- The relevant backend inventory, compose configuration, effective compose
+  output and running container all agree (fingerprints and digests are
+  rechecked during the wait and at commit time by a detached worker that holds
+  the update lock).
+
+**What counts as a relevant inventory change.** Only containers that matter to
+replacing OmniRoute are compared: the target itself, every container of its
+compose project (siblings, including restarts), any container that depends on
+it, and any container attached to one of its networks. Throwaway containers of
+other projects on the same rootless Podman (experiments, e2e runs) may come and
+go during an hours-long wait; at commit time the updater prints
+`ignored unrelated inventory change: N added, M removed` (counts only). A
+relevant change while waiting (a sibling restarted, a dependent appeared, the
+target restarted by the healer) prints `phase: re-baselining (<names and what>)`
+and re-runs preflight once, in the same lock and wait budget; a second relevant
+change in the same run defers `ownership` with a `detail:` line naming the
+containers. The target replaced or removed by someone else defers at once
+(`detail: target replaced or removed: omniroute`); a new dependent is refused by
+the re-baseline preflight (`detail: a container depends on the target: <name>`).
+A change in the few seconds between the end of the wait and the recreate
+defers without a re-baseline.
 
 When OmniRoute is **stopped or absent** (for example after `make stop`),
 nothing can be interrupted: the idle gate, the activity profile and the
