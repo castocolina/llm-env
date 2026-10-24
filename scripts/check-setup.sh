@@ -247,7 +247,7 @@ phoenix_offline_check() {
     cpus="$(yq -r '.services.phoenix.cpus // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
     memory="$(yq -r '.services.phoenix.mem_limit // ""' "$REPO_DIR/docker/phoenix/compose.yml")"
     [[ "$cpus" == "\${PHOENIX_CPUS_MAX:?}" && "$memory" == "\${PHOENIX_MEMORY_MAX_MIB:?}m" ]] || { printf 'Phoenix offline check: CPU and memory limits must use configured maxima\n' >&2; return 1; }
-    yq -o=json '.resources.phoenix // {"cpus_min": 0.25, "cpus_max": 2, "memory_min_mib": 256, "memory_max_mib": 1024}' "$CONFIG_PATH" |
+    llmenv --config "$CONFIG_PATH" effective-policy --service phoenix |
         jq -e '(.cpus_min | type) == "number" and (.cpus_max | type) == "number" and
           .cpus_min > 0 and .cpus_max >= .cpus_min and
           (.memory_min_mib | type) == "number" and (.memory_max_mib | type) == "number" and

@@ -32,8 +32,8 @@ def test_normal_docs_explain_laya_history_privacy_and_retention_limits() -> None
             "off-host", "not a", "confidence", "not been measured",
         ):
             assert detail.lower() in document.lower(), f"missing {detail}"
-        assert "256 MiB" in document
+        assert "192 MiB" in document  # the shipped Phoenix policy (pylib/resources.py)
         assert "1 GiB" in document
-        assert "2 CPU" in document
+        assert "1 CPU" in document
         assert "256 relative" in document and "shares" in document
         assert "does not protect" in document.lower() or "can access the traces" in document.lower()

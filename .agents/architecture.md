@@ -14,8 +14,13 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `setup/setup.sh` | Interactive configuration, downloads, network exposure |
 | `scripts/benchmark.sh` | Per-model Vulkan measurement (with CPU fallback) pinned to the configured GPU device, using each model's own presets-sourced offload flags and `client_max_output_tokens`/`check_ctx_size`; runs via `llama bench`, a subcommand of `/app/llama` in the image (there is no separate `llama-bench` binary); persists results to `.models[<alias>].benchmark.vulkan` |
 | `scripts/start.sh` | Budget check, device resolution, compose+wrapper-unit render, health gate |
+| `scripts/heal-omniroute-admission.sh` | Host-side 5-minute timer job (`setup/enable-omniroute-heal.sh`): restarts OmniRoute after a stuck admission lease, or when it is idle with cgroup memory above 60 % of its `memory.max` (or `OMNIROUTE_HEAL_MEMORY_MIB`) for N runs (6 h cooldown, max 2 per 24 h, `0` disables); reads memory from `/sys/fs/cgroup`, never execs |
+| `scripts/update-omniroute.sh` | Idle-aware OmniRoute update; a stopped/absent target is pulled and recreated without the idle gate (`pylib/omniroute_update.py`, `pylib/omniroute_activity.py`) |
 | `pylib/compose.py` | `docker-compose.yml` rendering from `models.yml` |
-| `pylib/resources.py` | Host CPU/RAM budgeting for the compose container stack |
+| `pylib/resources.py` | Host CPU/RAM budgeting, per-service default policy, validated overrides |
+| `pylib/resource_benchmark.py` | Benchmark harness that samples a container's cgroup (and VRAM) and derives `recommend` limits by the owner sizing rule (make resources-benchmark) |
+| `scripts/resources.sh` | Effective per-service CPU/RAM policy table and active overrides (make resources) |
+| `scripts/resources-benchmark.sh` | Make wrapper for `llmenv resource-benchmark` (SERVICE=omniroute, attach or report; output under tmp/resource-benchmark/) |
 | `pylib/omniroute.py` | Idempotent OmniRoute provider-connection provisioning via its admin API |
 | `pylib/remote_setup.py` | HTTP server for the master-key-gated remote-machine installer (`/setup.sh`, `/config`) |
 | `scripts/print-endpoints.sh` | Local/Network/mDNS URLs and credentials for llm-server, OmniRoute, and remote-setup; shared by `setup/network.sh` (post-`make start`) and `scripts/status.sh` |
@@ -48,6 +53,14 @@ every `make start`:
   by name (`llm-server.service`); systemd supervises "is the compose stack
   up," while each compose service's own `restart:` policy handles
   crash-restart.
+
+Resource policy is layered: `pylib/resources.py` holds the benchmark-derived
+defaults, `resources.overrides.<service>` in `models.yml` holds user intent,
+and `llmenv render-compose`, `scripts/phoenix.sh` and `scripts/check-setup.sh`
+recompute the effective policy from those on every run. Nothing persists the
+effective policy (the old `resources.<service>` mirror is dropped on load). Boot
+(`setup/enable-boot.sh` -> `setup/render-unit.sh`) renders through the same
+path and then starts the rendered compose file.
 
 The wrapper unit is `Type=oneshot`/`RemainAfterExit=yes`, so its own
 `journalctl -u llm-server.service` only carries the oneshot invocation's

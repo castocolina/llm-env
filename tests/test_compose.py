@@ -7,7 +7,10 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from resource_fixtures import limits_of
+
 from pylib.compose import render_compose, write_compose
+from pylib.resources import effective_policy
 
 CFG = {
     "version": 1,
@@ -57,6 +60,7 @@ def compose_dict(cfg=CFG):
         models_dir="/home/user/llm-workspace/models",
         presets_path="/home/user/.config/llm-env/presets.ini",
         repo_root="/home/user/llm-env",
+        limits=limits_of(cfg),
     )
     return text, yaml.safe_load(text)
 
@@ -267,7 +271,12 @@ def test_dollar_signs_in_secrets_are_escaped_against_compose_interpolation():
 def test_write_compose_creates_parent_directories(tmp_path):
     target = tmp_path / "nested" / "docker-compose.yml"
     write_compose(
-        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+        CFG,
+        models_dir="/models",
+        presets_path="/presets.ini",
+        repo_root="/repo",
+        path=target,
+        limits=limits_of(CFG),
     )
     assert target.exists()
     assert "llm-server" in yaml.safe_load(target.read_text())["services"]
@@ -276,7 +285,12 @@ def test_write_compose_creates_parent_directories(tmp_path):
 def test_write_compose_sets_restrictive_file_mode(tmp_path):
     target = tmp_path / "docker-compose.yml"
     write_compose(
-        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+        CFG,
+        models_dir="/models",
+        presets_path="/presets.ini",
+        repo_root="/repo",
+        path=target,
+        limits=limits_of(CFG),
     )
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
@@ -307,6 +321,7 @@ def test_write_compose_is_never_briefly_world_readable(tmp_path, monkeypatch):
             repo_root="/repo",
             omni_router_master_key="test-master-key",
             path=target,
+            limits=limits_of(CFG),
         )
     finally:
         os.umask(previous_umask)
@@ -321,7 +336,12 @@ def test_write_compose_failure_leaves_the_existing_file_intact(tmp_path, monkeyp
     and must not leave a temp file behind."""
     target = tmp_path / "docker-compose.yml"
     write_compose(
-        CFG, models_dir="/models", presets_path="/presets.ini", repo_root="/repo", path=target
+        CFG,
+        models_dir="/models",
+        presets_path="/presets.ini",
+        repo_root="/repo",
+        path=target,
+        limits=limits_of(CFG),
     )
     original = target.read_text(encoding="utf-8")
 
@@ -336,6 +356,7 @@ def test_write_compose_failure_leaves_the_existing_file_intact(tmp_path, monkeyp
             presets_path="/presets.ini",
             repo_root="/repo",
             path=target,
+            limits=limits_of(CFG),
         )
     except OSError:
         pass
@@ -392,6 +413,7 @@ def test_remote_setup_environment_carries_omniroute_and_master_key():
         presets_path="/presets.ini",
         repo_root="/repo",
         omni_router_master_key="test-master-key",
+        limits=limits_of(CFG),
     )
     document = yaml.safe_load(text)
     env = document["services"]["remote-setup"]["environment"]
@@ -552,6 +574,7 @@ def system_one_document(cfg):
         presets_path="/p",
         repo_root="/r",
         system_one_rocr_index="0",
+        limits=limits_of(cfg),
     )
     return yaml.safe_load(text)
 
@@ -621,6 +644,7 @@ def test_system_one_requires_a_rocr_index():
             models_dir="/m",
             presets_path="/p",
             repo_root="/r",
+            limits=limits_of(CFG),
         )
 
 
@@ -644,3 +668,37 @@ def test_system_one_renders_idle_unload_seconds():
     off = {**CFG, "system_one": {**SYSTEM_ONE, "idle_unload_seconds": 0}}
     env = system_one_document(off)["services"]["system-one"]["environment"]
     assert env["LAYA_IDLE_UNLOAD_SECONDS"] == "0"
+
+
+def test_system_one_limits_come_from_the_limits_argument():
+    cfg = {**CFG, "system_one": SYSTEM_ONE}
+    limits = {
+        **limits_of(cfg),
+        "system_one": effective_policy(
+            "system_one", {"system_one": {"memory_max_mib": 5120, "cpus_max": 1.5}}
+        ),
+    }
+    text = render_compose(
+        cfg, models_dir="/m", presets_path="/p", repo_root="/r",
+        system_one_rocr_index="0", limits=limits,
+    )
+    service = yaml.safe_load(text)["services"]["system-one"]
+    assert service["mem_limit"] == "5120m"
+    assert service["cpus"] == 1.5
+    assert service["mem_reservation"] == "2560m"
+    assert service["cpu_shares"] == 1024
+
+
+def test_render_compose_ignores_the_persisted_resource_mirror():
+    cfg = {
+        **CFG,
+        "resources": {
+            **CFG["resources"],
+            "omniroute": {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 512, "memory_max_mib": 999},
+        },
+    }
+    limits = {**limits_of(CFG), "omniroute": effective_policy("omniroute", None)}
+    text = render_compose(
+        cfg, models_dir="/m", presets_path="/p", repo_root="/r", limits=limits
+    )
+    assert yaml.safe_load(text)["services"]["omniroute"]["mem_limit"] == "2048m"

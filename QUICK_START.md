@@ -42,8 +42,9 @@ timeout. Unavailable Phoenix, oversized records, or a full queue can cause
 loss; drops are logged. The default seven-day retention policy is configured
 with `LLM_ENV_PHOENIX_RETENTION_DAYS`; it is scheduled cleanup, not a quota or
 deletion-time guarantee. Normal `make stop` retains the data
-volume. Phoenix has 256 MiB soft memory, 1 GiB hard memory, 256 relative CPU
-shares, and a 2 CPU hard cap; these are policy limits, not a capacity test.
+volume. Phoenix has a 192 MiB soft memory hint, 1 GiB hard memory, 256 relative
+CPU shares, and a 1 CPU hard cap, derived from a measured run (483 MiB resident,
+804 MiB peak) by the sizing rule in AGENTS.md.
 Confidence is not correctness, native charts are not guaranteed for every
 field, and observer latency overhead has not been measured. Phoenix telemetry
 and off-host export are disabled. See [README](README.md#laya-request-history-in-phoenix)
@@ -63,9 +64,16 @@ configured image tag resolves to a different digest than the running image,
 the dashboard has been idle for `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300)
 within `LLM_ENV_UPDATE_MAX_WAIT_SECONDS` (default 10800), a reviewed activity
 profile exists for the running image (otherwise it defers with `capability`),
-and every pre-commit inventory/fingerprint recheck passes. It prints
-`updated <old> -> <new>`, `unchanged`, or `deferred: <reason>` (exit 75); a
-failure exits 1 with the stage that failed and **no rollback is attempted**.
+and every pre-commit inventory/fingerprint recheck passes. When OmniRoute is
+stopped or absent it skips the idle wait and only pulls, recreates and
+verifies `omniroute` (so a stopped OmniRoute ends up **running** on the new
+image); a running container that Podman marks `unhealthy` is accepted only if
+its API answers (otherwise `deferred: health`). Reviewed profiles exist for
+`:latest` and `:next`. It prints `updated <old> -> <new>`, `unchanged`, or
+`deferred: <reason>` (exit 75; `make` reports it as `Error 75` and exits 2, so
+scripts call `bash scripts/update-omniroute.sh`); a failure exits 1 with the
+stage that failed and **no rollback is attempted**. Reasons and the client
+routes that count as activity are listed in the README ("OmniRoute updates").
 It is not zero-downtime and observation is not admission control.
 
 `make migrate-remote-setup` recreates the remote-setup container without its

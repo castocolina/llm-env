@@ -27,6 +27,9 @@ elapsed=$(( $(date +%s) - started_at ))
 if [ "$status" -eq 0 ]; then
     printf '%s%s■ %s end — ok (%ss)%s\n' "$BOLD" "$GREEN" "$name" "$elapsed" "$NC"
     printf '%s%s%s%s\n' "$BOLD" "$GREEN" "$separator" "$NC"
+elif [ "$status" -eq 75 ]; then  # EX_TEMPFAIL: a safe deferral, nothing changed (make itself still exits 2)
+    printf '%s%s■ %s end — deferred, exit 75 (%ss)%s\n' "$BOLD" "$YELLOW" "$name" "$elapsed" "$NC"
+    printf '%s%s%s%s\n' "$BOLD" "$YELLOW" "$separator" "$NC"
 else
     printf '%s%s■ %s end — failed, exit %s (%ss)%s\n' "$BOLD" "$RED" "$name" "$status" "$elapsed" "$NC"
     printf '%s%s%s%s\n' "$BOLD" "$RED" "$separator" "$NC"

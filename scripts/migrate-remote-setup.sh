@@ -38,6 +38,7 @@ read_deploy() {   # sets container_id image_id project stop_seconds provider fro
 if [[ "${1:-}" == "--worker" ]]; then
     work="$2" config_path="$3" compose_path="$4"
     trap 'rm -rf "$work"' EXIT
+    trap_signals_to_exit
     read_deploy
     fail() {
         printf 'error: migration failed at stage: %s\n' "$1" >&2
@@ -64,8 +65,9 @@ yq -e '.services["remote-setup"] | has("depends_on") | not' "$compose_path" >/de
     echo "error: re-render the deployed compose first (README 'Operations'); the migration never rewrites it" >&2
     exit 1
 }
-work="$(mktemp -d)"
+work="$(private_work_dir)"
 trap 'rm -rf "$work"' EXIT
+trap_signals_to_exit
 # 2. Lock + read-only preflight of the remote-setup service.
 acquire_update_lock
 rc=0
@@ -86,8 +88,10 @@ jq -e --arg v "${project}_remote-setup-data" '.volume_names | index($v)' "$work/
 cli projection --dir "$work" --service remote-setup --image "${image_id#sha256:}" --out "$work/projection.yml"
 # 5. Detached bounded worker; it inherits FD 9 (the lock) and keeps it until it exits.
 budget=$(( stop_seconds + 3 * health_timeout + 120 ))
+trap - EXIT HUP INT TERM   # from here the worker owns $work (its own trap removes it): a signal here must not delete it
 rc=0
 setsid --wait timeout --kill-after=10 "$budget" bash "${BASH_SOURCE[0]}" --worker "$work" "$config_path" "$compose_path" || rc=$?
+rm -rf "$work"   # the worker is gone (its own trap normally removed it; a SIGKILL after its time budget cannot)
 if (( rc == 124 || rc == 137 )); then
     echo "error: the migration worker exceeded its time budget; inspect remote-setup manually (no rollback was attempted)" >&2
     exit 1

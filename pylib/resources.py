@@ -9,66 +9,61 @@ maxima are hard cgroup limits. Neither minimum is guaranteed allocation.
 
 from __future__ import annotations
 
-from typing import Any
+import math
+from collections.abc import Mapping
+from typing import Any, TypeGuard
 
 # Fixed floor reserved for the host OS and other applications.
 HOST_CPU_FLOOR = 2
 HOST_MEMORY_FLOOR_MIB = 4096
 
-# OmniRoute is a lightweight Node/Next.js process, not the workload driving
-# resource needs here -- it gets a flat min/max policy, not a share of the
-# remainder. Minima are included in the conservative llm_server host-budget
-# calculation, but cpu_shares is only a relative contention weight and
-# mem_reservation is soft policy; neither is an OS-guaranteed allocation.
-#
-# A flat 1024 MiB cap proved too tight in practice: OmniRoute's own internal
-# resourcePressure guard (cgroup_ratio) was observed tripping and returning
-# 503s under concurrent cross-AI/tool-heavy sessions (my-coding,
-# my-plan-review combos with 11-17 tools each) while sitting at only ~700MB
-# baseline -- on a host with tens of GB free, so the cap (not host pressure)
-# was the bottleneck. The min/max policy supplies contention weight and a
-# soft memory reservation while capping growth under a burst; it does not
-# guarantee an absolute CPU or memory allocation.
-OMNIROUTE_CPU_MIN = 1
-OMNIROUTE_CPU_MAX = 4
-OMNIROUTE_MEMORY_MIN_MIB = 1024
-OMNIROUTE_MEMORY_MAX_MIB = 3072
+# Sizing rule (owner, 2026-10-24; data and limits in
+# docs/superpowers/research/2026-10-24-benchmark-derived-sizing.md):
+#   memory_min_mib = resident memory (memory.current) the container keeps under use + 20 %
+#   memory_max_mib = highest observed resident memory or memory.peak + 20 %
+# preferring the modal level to the mean; swap is reported, never added. Re-derive
+# with `make resources-benchmark`. memory_min_mib renders to mem_reservation
+# (cgroup memory.low), a soft hint: on this host every ancestor cgroup has
+# memory.low 0, so it protects nothing and only feeds the budget arithmetic below.
+# cpus_min renders to cpu_shares (a relative weight); cpus_max and memory_max_mib
+# are hard cgroup caps.
 
-# remote-setup is a small stdlib-only Python HTTP server used solely for the
-# one-time /setup.sh and /config remote-agent bootstrap flow -- observed
-# real usage is ~15MB baseline, ~41.8MB peak, essentially idle. Same
-# min/max shape as OmniRoute, scaled down to what it actually needs: 64 MiB
-# is an intentionally tight-but-sufficient cap (~22MB of headroom over the
-# observed ~41.8MB peak), not a generous one, but still capped rather than
-# left fully uncapped (its previous state) so a bug in it can't consume the
-# host floor meant for everything else.
-REMOTE_SETUP_CPU_MIN = 1
-REMOTE_SETUP_CPU_MAX = 1
+# OmniRoute (Node/Next.js gateway): fresh loaded process ~640 MiB resident
+# (min 768); the live lifetime peak of 1,651 MiB after 5 days of retention sets
+# the cap (1,651 * 1.2 -> 2048). The benchmark alone cannot derive this cap: its
+# fake upstream understates tool-heavy traffic. The admission healer recycles an
+# idle process above 60 % of this cap (scripts/heal-omniroute-admission.sh).
+OMNIROUTE_CPU_MIN = 1
+OMNIROUTE_CPU_MAX = 2
+OMNIROUTE_MEMORY_MIN_MIB = 768
+OMNIROUTE_MEMORY_MAX_MIB = 2048
+
+# remote-setup (stdlib Python HTTP server for the one-time remote bootstrap):
+# 17 MiB resident, lifetime peak 39 MiB (39 * 1.2 = 47 -> kept at 64).
+REMOTE_SETUP_CPU_MIN = 0.25
+REMOTE_SETUP_CPU_MAX = 0.5
 REMOTE_SETUP_MEMORY_MIN_MIB = 32
 REMOTE_SETUP_MEMORY_MAX_MIB = 64
 
-SYSTEM_ONE_CPUS = 2  # hard cap; 16 clients used ~1.3 cores
-SYSTEM_ONE_MEMORY_MIB = 4608  # hard cap; memory.peak was 3155 MiB
-# Conservative host budget includes these policy minima. Steady RSS is ~2.4 GB; idle CPU is ~0.
+# System One (Laya) is an EXPLICIT EXCEPTION to the sizing rule. Its hot resident
+# set is ~3.87 GiB (rule: min 4,640) and its memory.peak equals its own cap (166
+# memory.events max in the measured lifetime), so the peak is clipped and no
+# ceiling can be derived from it. Raising the cap only adds host memory
+# pressure, so the cap stays at 4608 and the reservation at 2560. Revisit with a
+# benchmark run under a temporarily higher cap.
 SYSTEM_ONE_CPUS_MIN = 1
+SYSTEM_ONE_CPUS = 2  # hard cap; CPU peak 1.07-1.55 cores
 SYSTEM_ONE_MEMORY_MIN_MIB = 2560
+SYSTEM_ONE_MEMORY_MIB = 4608  # hard cap; see the exception above
 
-# Phoenix dashboard (pinned arizephoenix/phoenix:20.23.0), started with
-# System One on its own internal compose project. Resource POLICY starting
-# point, justified by the 2026-10-19 measurements of a live private
-# instance: ~128 MiB current / ~526 MiB lifetime-peak memory, ~0.17% of one
-# core over a 2 s idle sample, plus short synthetic-ingestion headroom.
-# This is NOT a supported minimum and NOT a load benchmark; if a capped
-# startup/ingestion/browser workflow fails, record the measurement before
-# adjusting. cpus_min is in compose "share units" (baseline 1024 = 1 unit):
-# it renders to cpu_shares, a RELATIVE WEIGHT under contention, not
-# guaranteed cores; cpus_max/memory_max_mib are hard cgroup caps.
-# memory_min_mib is a soft Compose reservation; this host's observed
-# memory.min was zero, so do not claim an enforced cgroup floor.
+# Phoenix (pinned arizephoenix/phoenix), started with System One in its own
+# compose project: ~150 MiB resident under a short benchmark, but 483 MiB
+# resident and a 804 MiB peak 2 h after a restart with real Laya traffic
+# (804 * 1.2 = 965 -> 1024). Re-derive the reservation over hours, not minutes.
 PHOENIX_CPUS_MIN = 0.25  # -> cpu_shares 256
-PHOENIX_CPUS_MAX = 2  # hard cap
-PHOENIX_MEMORY_MIN_MIB = 256  # soft reservation
-PHOENIX_MEMORY_MAX_MIB = 1024  # hard cap
+PHOENIX_CPUS_MAX = 1
+PHOENIX_MEMORY_MIN_MIB = 192
+PHOENIX_MEMORY_MAX_MIB = 1024
 
 # OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
 # upstream) bounds concurrent "heavy" requests (large tool/context bodies --
@@ -77,24 +72,135 @@ PHOENIX_MEMORY_MAX_MIB = 1024  # hard cap
 # heavy requests serializes through the gate instead of failing immediately.
 OMNIROUTE_CHAT_ADMISSION_QUEUE_MS = 8000
 
+# Built-in per-service policy (benchmark-derived, see the sizing rule above).
+# Persistent `resources.overrides.<service>` entries in models.yml merge over it.
+DEFAULT_POLICY: dict[str, dict[str, Any]] = {
+    "omniroute": {
+        "cpus_min": OMNIROUTE_CPU_MIN,
+        "cpus_max": OMNIROUTE_CPU_MAX,
+        "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
+        "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
+    },
+    "remote_setup": {
+        "cpus_min": REMOTE_SETUP_CPU_MIN,
+        "cpus_max": REMOTE_SETUP_CPU_MAX,
+        "memory_min_mib": REMOTE_SETUP_MEMORY_MIN_MIB,
+        "memory_max_mib": REMOTE_SETUP_MEMORY_MAX_MIB,
+    },
+    "system_one": {
+        "cpus_min": SYSTEM_ONE_CPUS_MIN,
+        "cpus_max": SYSTEM_ONE_CPUS,
+        "memory_min_mib": SYSTEM_ONE_MEMORY_MIN_MIB,
+        "memory_max_mib": SYSTEM_ONE_MEMORY_MIB,
+    },
+    "phoenix": {
+        "cpus_min": PHOENIX_CPUS_MIN,
+        "cpus_max": PHOENIX_CPUS_MAX,
+        "memory_min_mib": PHOENIX_MEMORY_MIN_MIB,
+        "memory_max_mib": PHOENIX_MEMORY_MAX_MIB,
+    },
+}
+OVERRIDABLE_SERVICES = tuple(DEFAULT_POLICY)
+POLICY_KEYS = ("cpus_min", "cpus_max", "memory_min_mib", "memory_max_mib")
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _is_int_at_least(value: object, minimum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def validate_overrides(overrides: object) -> list[str]:
+    """Return human-readable errors for a `resources.overrides` value.
+
+    Every policy value must be strictly positive: 0 means "no limit" to
+    pylib/compose.py, so an override of 0 would silently uncap a container.
+    A memory_max_mib below the built-in default is allowed; summarize_policy
+    and `resource-override set` warn about it (see lowered_cap_warnings).
+    """
+    if overrides is None:
+        return []
+    if not isinstance(overrides, Mapping):
+        return ["resources.overrides must be a mapping"]
+    errors: list[str] = []
+    for service, override in overrides.items():
+        prefix = f"resources.overrides.{service}"
+        if service not in DEFAULT_POLICY:
+            errors.append(
+                f"{prefix} is not an overridable service "
+                f"(expected one of {', '.join(OVERRIDABLE_SERVICES)})"
+            )
+            continue
+        if not isinstance(override, Mapping):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+        service_errors: list[str] = []
+        for key, value in override.items():
+            if key not in POLICY_KEYS:
+                service_errors.append(
+                    f"{prefix}.{key} is not an overridable field "
+                    f"(expected one of {', '.join(POLICY_KEYS)})"
+                )
+            elif key.startswith("cpus"):
+                if not (_is_finite_number(value) and value > 0):
+                    service_errors.append(
+                        f"{prefix}.{key} must be a positive number (0 would remove the limit)"
+                    )
+            elif not _is_int_at_least(value, 1):
+                service_errors.append(
+                    f"{prefix}.{key} must be a positive integer (0 would remove the limit)"
+                )
+        errors.extend(service_errors)
+        if service_errors:
+            continue
+        merged = effective_policy(service, {service: override})
+        for low, high in (("cpus_min", "cpus_max"), ("memory_min_mib", "memory_max_mib")):
+            if merged[low] > merged[high]:
+                errors.append(
+                    f"{prefix}: effective {low} ({merged[low]}) must not exceed "
+                    f"effective {high} ({merged[high]})"
+                )
+    return errors
+
+
+def effective_policy(
+    service: str, overrides: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Built-in policy for `service` with validated overrides merged over it."""
+    override = (overrides or {}).get(service) or {}
+    return {
+        **DEFAULT_POLICY[service],
+        **{key: value for key, value in override.items() if key in POLICY_KEYS},
+    }
+
 
 class ResourceError(Exception):
     """Raised when the conservative host budget leaves too little for services."""
 
 
-def _floor_words(system_one_enabled: bool) -> str:
+def _floor_words(
+    system_one_enabled: bool,
+    system_one: Mapping[str, Any],
+    phoenix: Mapping[str, Any],
+) -> str:
     words = "the conservative host budget and OmniRoute/remote-setup policy minima"
     if system_one_enabled:
         words += (
-            f", System One's budgeted minimum ({SYSTEM_ONE_CPUS_MIN} CPU-share unit, "
-            f"{SYSTEM_ONE_MEMORY_MIN_MIB} MiB) and Phoenix's budgeted minimum "
-            f"({PHOENIX_CPUS_MIN} CPU share units, {PHOENIX_MEMORY_MIN_MIB} MiB)"
+            f", System One's budgeted minimum ({system_one['cpus_min']} CPU-share unit, "
+            f"{system_one['memory_min_mib']} MiB) and Phoenix's budgeted minimum "
+            f"({phoenix['cpus_min']} CPU share units, {phoenix['memory_min_mib']} MiB)"
         )
     return words
 
 
 def compute_resource_limits(
-    host_cpu_count: int,
+    host_cpu_count: float,
     host_memory_total_mib: int,
     memory_ceiling_pct: float = 100,
     memory_ceiling_floor_pct: float = 20,
@@ -102,42 +208,52 @@ def compute_resource_limits(
     cpu_ceiling_floor_pct: float = 20,
     llm_server_enabled: bool = True,
     system_one_enabled: bool = False,
+    overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    cpu_floor = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN
+    override_errors = validate_overrides(overrides)
+    if override_errors:
+        raise ResourceError("; ".join(override_errors))
+    omniroute = effective_policy("omniroute", overrides)
+    remote_setup = effective_policy("remote_setup", overrides)
+    system_one = effective_policy("system_one", overrides)
+    phoenix = effective_policy("phoenix", overrides)
+    cpu_floor = HOST_CPU_FLOOR + omniroute["cpus_min"] + remote_setup["cpus_min"]
     memory_floor_mib = (
-        HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+        HOST_MEMORY_FLOOR_MIB
+        + omniroute["memory_min_mib"]
+        + remote_setup["memory_min_mib"]
     )
     if system_one_enabled:
-        cpu_floor += SYSTEM_ONE_CPUS_MIN
-        memory_floor_mib += SYSTEM_ONE_MEMORY_MIN_MIB
+        cpu_floor += system_one["cpus_min"]
+        memory_floor_mib += system_one["memory_min_mib"]
         # Phoenix shares the System One enable flag: it is charged whenever
         # System One is on, including the llm-server-disabled gateway mode.
-        cpu_floor += PHOENIX_CPUS_MIN
-        memory_floor_mib += PHOENIX_MEMORY_MIN_MIB
+        cpu_floor += phoenix["cpus_min"]
+        memory_floor_mib += phoenix["memory_min_mib"]
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
-                f"required to reserve {_floor_words(system_one_enabled)} and still "
+                f"required to reserve {_floor_words(system_one_enabled, system_one, phoenix)} and still "
                 "run llm-server"
             )
         if host_memory_total_mib <= memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; more than "
                 f"{memory_floor_mib} MiB is required to reserve "
-                f"{_floor_words(system_one_enabled)} and still run llm-server"
+                f"{_floor_words(system_one_enabled, system_one, phoenix)} and still run llm-server"
             )
     else:
         if host_cpu_count < cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; at least {cpu_floor} are "
-                f"required to reserve {_floor_words(system_one_enabled)}"
+                f"required to reserve {_floor_words(system_one_enabled, system_one, phoenix)}"
             )
         if host_memory_total_mib < memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; at least "
                 f"{memory_floor_mib} MiB is required to reserve "
-                f"{_floor_words(system_one_enabled)}"
+                f"{_floor_words(system_one_enabled, system_one, phoenix)}"
             )
 
     if llm_server_enabled:
@@ -176,33 +292,73 @@ def compute_resource_limits(
         llm_server_memory_mib = 0
         llm_server_cpus = 0
 
+    system_one_policy = (
+        system_one if system_one_enabled else dict.fromkeys(POLICY_KEYS, 0)
+    )
+    phoenix_policy = phoenix if system_one_enabled else dict.fromkeys(POLICY_KEYS, 0)
+    active = ["omniroute", "remote_setup"] + (
+        ["system_one", "phoenix"] if system_one_enabled else []
+    )
+    overrides_applied = {
+        service: sorted(key for key in overrides[service] if key in POLICY_KEYS)
+        for service in active
+        if overrides and overrides.get(service)
+    }
+    policies = [omniroute, remote_setup, system_one_policy, phoenix_policy]
     return {
         "host_cpu_floor": HOST_CPU_FLOOR,
         "host_memory_floor_mib": HOST_MEMORY_FLOOR_MIB,
-        "omniroute": {
-            "cpus_min": OMNIROUTE_CPU_MIN,
-            "cpus_max": OMNIROUTE_CPU_MAX,
-            "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
-            "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
-        },
-        "remote_setup": {
-            "cpus_min": REMOTE_SETUP_CPU_MIN,
-            "cpus_max": REMOTE_SETUP_CPU_MAX,
-            "memory_min_mib": REMOTE_SETUP_MEMORY_MIN_MIB,
-            "memory_max_mib": REMOTE_SETUP_MEMORY_MAX_MIB,
-        },
+        "omniroute": omniroute,
+        "remote_setup": remote_setup,
         "llm_server": {
             "cpus": llm_server_cpus,
             "memory_mib": llm_server_memory_mib,
         },
-        "system_one": {
-            "cpus": SYSTEM_ONE_CPUS if system_one_enabled else 0,
-            "memory_mib": SYSTEM_ONE_MEMORY_MIB if system_one_enabled else 0,
-        },
-        "phoenix": {
-            "cpus_min": PHOENIX_CPUS_MIN if system_one_enabled else 0,
-            "cpus_max": PHOENIX_CPUS_MAX if system_one_enabled else 0,
-            "memory_min_mib": PHOENIX_MEMORY_MIN_MIB if system_one_enabled else 0,
-            "memory_max_mib": PHOENIX_MEMORY_MAX_MIB if system_one_enabled else 0,
+        "system_one": system_one_policy,
+        "phoenix": phoenix_policy,
+        "overrides_applied": overrides_applied,
+        "totals": {
+            "hard_memory_cap_mib": llm_server_memory_mib
+            + sum(policy["memory_max_mib"] for policy in policies),
+            "soft_memory_reservation_mib": sum(
+                policy["memory_min_mib"] for policy in policies
+            ),
         },
     }
+
+
+def summarize_policy(limits: Mapping[str, Any]) -> list[str]:
+    totals = limits["totals"]
+    lines = [
+        (
+            f"hard memory caps total {totals['hard_memory_cap_mib']} MiB; "
+            f"soft reservations (memory.low, not allocated RAM) total "
+            f"{totals['soft_memory_reservation_mib']} MiB"
+        )
+    ]
+    applied = limits["overrides_applied"]
+    if applied:
+        lines.append(
+            "resource overrides applied: "
+            + "; ".join(f"{service}={','.join(keys)}" for service, keys in applied.items())
+        )
+    return lines + lowered_cap_warnings(limits)
+
+
+def lowered_cap_warnings(policies: Mapping[str, Any]) -> list[str]:
+    """One warning per service whose memory cap is below its built-in default.
+
+    Lowering is allowed (one owner, rare action); the warning keeps it visible
+    and points at the tool that re-derives the numbers. Disabled services carry
+    an all-zero policy and are skipped.
+    """
+    return [
+        (
+            f"WARNING: {service} memory_max_mib {policy['memory_max_mib']} MiB is below its "
+            f"benchmark-derived default {DEFAULT_POLICY[service]['memory_max_mib']} MiB; "
+            "re-derive it with `make resources-benchmark` before relying on it"
+        )
+        for service in OVERRIDABLE_SERVICES
+        if (policy := policies.get(service))
+        and 0 < policy["memory_max_mib"] < DEFAULT_POLICY[service]["memory_max_mib"]
+    ]

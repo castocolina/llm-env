@@ -84,7 +84,16 @@ from pylib.phoenix_trial import (
 )
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
-from pylib.resources import ResourceError, compute_resource_limits
+from pylib.resources import (
+    DEFAULT_POLICY,
+    OVERRIDABLE_SERVICES,
+    ResourceError,
+    compute_resource_limits,
+    effective_policy,
+    lowered_cap_warnings,
+    summarize_policy,
+    validate_overrides,
+)
 from pylib.transcript import classify_transcript
 
 DEVICE_LINE_RE = re.compile(
@@ -257,6 +266,30 @@ def _model_costs(cfg: dict[str, Any], models_dir: Path) -> list[dict[str, Any]]:
     return costs
 
 
+def limits_for(
+    cfg: dict[str, Any],
+    host: dict[str, Any],
+    *,
+    memory_ceiling_pct: float | None = None,
+) -> dict[str, Any]:
+    """The one place llmenv turns config + host facts into resource limits."""
+    resources = cfg.get("resources", {})
+    llm_server = resources.get("llm_server", {})
+    return compute_resource_limits(
+        host["cpu_count"],
+        host["memory_total_mib"],
+        llm_server.get("memory_ceiling_pct", 46)
+        if memory_ceiling_pct is None
+        else memory_ceiling_pct,
+        llm_server.get("memory_ceiling_floor_pct", 30),
+        llm_server.get("cpu_ceiling_pct", 60),
+        llm_server.get("cpu_ceiling_floor_pct", 20),
+        llm_server_enabled=cfg.get("llm_server", {}).get("enabled", True),
+        system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
+        overrides=resources.get("overrides"),
+    )
+
+
 def cmd_budget(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     facts = detect()
@@ -327,21 +360,11 @@ def cmd_budget(args: argparse.Namespace) -> int:
     ]
     result["ram_required_mib"] = ram_required_mib
 
-    llm_server_resources = cfg.get("resources", {}).get("llm_server", {})
     host = host_resources()
     ram_available_mib = None
     resource_floor_error = None
     try:
-        resource_limits = compute_resource_limits(
-            host["cpu_count"],
-            host["memory_total_mib"],
-            llm_server_resources.get("memory_ceiling_pct", 46),
-            llm_server_resources.get("memory_ceiling_floor_pct", 30),
-            llm_server_resources.get("cpu_ceiling_pct", 60),
-            llm_server_resources.get("cpu_ceiling_floor_pct", 20),
-            system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
-            llm_server_enabled=cfg.get("llm_server", {}).get("enabled", True),
-        )
+        resource_limits = limits_for(cfg, host)
         ram_available_mib = resource_limits["llm_server"]["memory_mib"]
     except ResourceError as exc:
         # `make setup` (Step 3 below) and `make start` (Step 5d below) both
@@ -372,16 +395,7 @@ def cmd_budget(args: argparse.Namespace) -> int:
         ram_feasible = False
         ram_shortfall_mib = ram_required_mib - ram_available_mib
         result.setdefault("remedies", [])
-        absolute_max_limits = compute_resource_limits(
-            host["cpu_count"],
-            host["memory_total_mib"],
-            memory_ceiling_pct=100,
-            memory_ceiling_floor_pct=llm_server_resources.get("memory_ceiling_floor_pct", 30),
-            cpu_ceiling_pct=llm_server_resources.get("cpu_ceiling_pct", 60),
-            cpu_ceiling_floor_pct=llm_server_resources.get("cpu_ceiling_floor_pct", 20),
-            system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
-            llm_server_enabled=cfg.get("llm_server", {}).get("enabled", True),
-        )
+        absolute_max_limits = limits_for(cfg, host, memory_ceiling_pct=100)
         absolute_max_mib = absolute_max_limits["llm_server"]["memory_mib"]
         # Built without ever putting a possessive "'s" directly after a
         # closing quote mark (i.e. never "'alias''s") -- that construction
@@ -419,19 +433,114 @@ def cmd_budget(args: argparse.Namespace) -> int:
 def cmd_resources(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     host = host_resources()
-    llm_server_resources = cfg["resources"]["llm_server"]
-    llm_server_enabled = cfg.get("llm_server", {}).get("enabled", True)
-    limits = compute_resource_limits(
-        host["cpu_count"],
-        host["memory_total_mib"],
-        llm_server_resources["memory_ceiling_pct"],
-        llm_server_resources["memory_ceiling_floor_pct"],
-        llm_server_resources["cpu_ceiling_pct"],
-        llm_server_resources["cpu_ceiling_floor_pct"],
-        llm_server_enabled=llm_server_enabled,
-        system_one_enabled=cfg.get("system_one", {}).get("enabled", False),
+    limits = limits_for(cfg, host)
+    return emit({"host": host, **limits, "summary": summarize_policy(limits)})
+
+def cmd_resource_benchmark(args: argparse.Namespace) -> int:
+    from pylib import resource_benchmark as rb
+    out = Path(args.out) if args.out else None
+    if args.mode == "omniroute":
+        image = args.image or load_config(Path(args.config))["omniroute"]["image"]
+        return emit(rb.run_omniroute(image, args.scale, args.prompt_kb, out))
+    if args.mode == "attach":
+        if not args.container:
+            raise SystemExit("attach needs at least one --container")
+        pci = args.pci
+        if pci is None and args.render is None and "system-one" in args.container:
+            try:  # System One is the GPU service: sample VRAM on the configured GPU
+                pci = (load_config(Path(args.config)).get("gpu") or {}).get("pci_address") or None
+            except ConfigError:
+                pci = None
+        try:
+            gpu = rb.gpu_device(pci=pci, render=args.render) if pci or args.render else None
+        except ValueError as exc:
+            return fail(str(exc))
+        return emit(rb.run_attach(args.container, args.run, args.seconds, args.cooldown, out, gpu))
+    if not args.file:
+        raise SystemExit("report needs --file")
+    return emit(rb.report(Path(args.file), args.headroom))
+
+
+# set/clear only edit models.yml. Rendering for the next start and applying to
+# running containers are different steps with different impact; say so.
+_APPLY_HINT = (
+    "saved to models.yml only; running containers keep their current limits. "
+    "`bash setup/render-unit.sh` re-renders the compose file and unit for the next start or boot "
+    "and does not touch running containers. To apply this to the running stack now, run "
+    "`make restart` (stop, then start): OmniRoute, remote-setup, System One and, when System One "
+    "is enabled, Phoenix are stopped and started again, so in-flight requests are interrupted, "
+    "System One reloads its weights before it is healthy, and every container begins a "
+    "new cgroup lifetime (memory.peak and counters start over)"
+)
+
+
+def cmd_resource_override(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    cfg = load_config(path)
+    if args.action != "clear":
+        require_valid_config(cfg)  # clear must work even when a bad hand edit broke the config
+    resources = cfg["resources"]
+    current = resources.get("overrides")
+    overrides: dict[str, Any] = (
+        {name: dict(value) for name, value in current.items() if isinstance(value, dict)}
+        if isinstance(current, dict)
+        else {}
     )
-    return emit({"host": host, **limits})
+
+    if args.action == "show":
+        return emit(
+            {
+                "overrides": overrides,
+                "defaults": {name: DEFAULT_POLICY[name] for name in OVERRIDABLE_SERVICES},
+            }
+        )
+
+    if args.action == "clear":
+        if args.service is None:
+            overrides = {}
+        else:
+            overrides.pop(args.service, None)
+        if overrides:
+            resources["overrides"] = overrides
+        else:
+            resources.pop("overrides", None)
+        require_valid_config(cfg)
+        save_config(cfg, path)
+        return emit({"overrides": overrides, "apply": _APPLY_HINT})
+
+    service = args.service
+    if service is None:
+        return fail(f"--service is required for {args.action}")
+    requested = {
+        key: value
+        for key, value in (
+            ("cpus_min", args.cpus_min),
+            ("cpus_max", args.cpus_max),
+            ("memory_min_mib", args.memory_min_mib),
+            ("memory_max_mib", args.memory_max_mib),
+        )
+        if value is not None
+    }
+    if not requested:
+        return fail(
+            f"{args.action} needs at least one of --cpus-min, --cpus-max, --memory-min-mib, --memory-max-mib"
+        )
+    merged = {**overrides.get(service, {}), **requested}
+    candidate = {**overrides, service: merged}
+    errors = validate_overrides(candidate)
+    if errors:
+        return fail("; ".join(errors))
+    effective = effective_policy(service, candidate)
+    warnings = lowered_cap_warnings({service: effective})
+    for warning in warnings:
+        print(warning, file=sys.stderr)
+    result = {"service": service, "override": merged, "effective": effective, "warnings": warnings}
+    if args.action == "check":
+        return emit(result)
+    resources["overrides"] = candidate
+    require_valid_config(cfg)
+    save_config(cfg, path)
+    return emit({**result, "apply": _APPLY_HINT})
 
 
 def cmd_omniroute(args: argparse.Namespace) -> int:
@@ -494,12 +603,16 @@ def cmd_presets(args: argparse.Namespace) -> int:
 def cmd_render_compose(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     env_vars = read_env_file(Path(args.env_file)) if args.env_file else {}
+    # Recomputed on every render from the effective policy and THIS host's
+    # facts: start.sh, render-unit.sh and enable-boot all land here.
+    limits = limits_for(cfg, host_resources())
     try:
         write_compose(
             cfg,
             models_dir=args.models_dir,
             presets_path=args.presets_path,
             repo_root=args.repo_root,
+            limits=limits,
             omni_router_master_key=env_vars.get("OMNI_ROUTER_MASTER_KEY", ""),
             path=Path(args.output),
             system_one_rocr_index=args.system_one_rocr_index,
@@ -507,6 +620,11 @@ def cmd_render_compose(args: argparse.Namespace) -> int:
     except ValueError as error:
         return fail(str(error))
     return emit({"written": str(args.output)})
+
+
+def cmd_effective_policy(args: argparse.Namespace) -> int:
+    cfg = require_valid_config(load_config(Path(args.config)))
+    return emit(effective_policy(args.service, cfg["resources"].get("overrides")))
 
 
 def cmd_models(args: argparse.Namespace) -> int:
@@ -735,6 +853,38 @@ def build_parser() -> argparse.ArgumentParser:
     render_compose.add_argument("--output", required=True)
     render_compose.add_argument("--system-one-rocr-index", default="")
     render_compose.set_defaults(func=cmd_render_compose)
+
+    effective_parser = sub.add_parser("effective-policy")
+    effective_parser.add_argument("--config", default=argparse.SUPPRESS)
+    effective_parser.add_argument("--service", required=True, choices=OVERRIDABLE_SERVICES)
+    effective_parser.set_defaults(func=cmd_effective_policy)
+
+    benchmark_parser = sub.add_parser("resource-benchmark")
+    benchmark_parser.add_argument("--config", default=argparse.SUPPRESS)
+    benchmark_parser.add_argument("mode", choices=["omniroute", "attach", "report"])
+    benchmark_parser.add_argument("--image", default=None)
+    benchmark_parser.add_argument("--scale", type=finite_positive_float, default=1.0)
+    benchmark_parser.add_argument("--prompt-kb", type=positive_int, default=8)
+    benchmark_parser.add_argument("--container", action="append")
+    benchmark_parser.add_argument("--run", default=None)
+    benchmark_parser.add_argument("--seconds", type=finite_positive_float, default=60.0)
+    benchmark_parser.add_argument("--cooldown", type=finite_positive_float, default=60.0)
+    benchmark_parser.add_argument("--file", default=None)
+    benchmark_parser.add_argument("--headroom", type=finite_positive_float, default=0.2)
+    benchmark_parser.add_argument("--out", default=None)
+    benchmark_parser.add_argument("--pci", default=None, help="GPU PCI address to sample VRAM on (attach)")
+    benchmark_parser.add_argument("--render", default=None, help="GPU render node (renderD128) to sample VRAM on")
+    benchmark_parser.set_defaults(func=cmd_resource_benchmark)
+
+    override_parser = sub.add_parser("resource-override")
+    override_parser.add_argument("--config", default=argparse.SUPPRESS)
+    override_parser.add_argument("action", choices=["show", "set", "check", "clear"])
+    override_parser.add_argument("--service", choices=OVERRIDABLE_SERVICES, default=None)
+    override_parser.add_argument("--cpus-min", type=finite_positive_float, default=None)
+    override_parser.add_argument("--cpus-max", type=finite_positive_float, default=None)
+    override_parser.add_argument("--memory-min-mib", type=positive_int, default=None)
+    override_parser.add_argument("--memory-max-mib", type=positive_int, default=None)
+    override_parser.set_defaults(func=cmd_resource_override)
 
     models = sub.add_parser("models")
     models.add_argument("--config", default=argparse.SUPPRESS)

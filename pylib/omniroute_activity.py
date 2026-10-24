@@ -1,6 +1,7 @@
 """OmniRoute activity sampling: sanitized observer state, capability profiles, collectors, journal reader."""
 from __future__ import annotations
 
+import datetime
 import hashlib
 import http.client
 import json
@@ -8,10 +9,11 @@ import math
 import os
 import re
 import selectors
+import stat
 import subprocess
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn
@@ -49,6 +51,7 @@ class Sample:
     overflow: bool
     unknown: bool
     reason: Reason
+    detail: str = ""  # why an unknown sample is unknown, for the operator (e.g. the unprofiled route); never logic
 
     def validate(self) -> None:
         for name in ("active", "pending", "admission", "arrival_generation", "row_generation", "sequence"):
@@ -76,11 +79,20 @@ class Sample:
 
 
 def classify(s: Sample) -> Literal["idle", "busy", "unknown"]:
-    if s.active > 0 or s.pending > 0 or s.admission > 0:
+    if s.active > 0 or s.pending > 0 or s.admission > 0 or (s.reason is Reason.busy and not s.unknown):
         return "busy"
     if s.unknown or s.overflow or not (s.feed_ready and s.barrier_seen and s.continuous):
         return "unknown"
     return "idle"
+
+
+def _first_failure(overflow, discontinuous, feed_missing, coverage_gap) -> Reason | None:
+    """Structural journal/row failures in priority order."""
+    for cond, reason in ((overflow, Reason.overflow), (discontinuous, Reason.continuity),
+                         (feed_missing, Reason.feed), (coverage_gap, Reason.coverage)):
+        if cond:
+            return reason
+    return None
 
 
 def check_freshness(timestamp_ms, wall_ms, cache_ms, refresh_ms, tolerance_ms) -> Reason | None:
@@ -88,11 +100,11 @@ def check_freshness(timestamp_ms, wall_ms, cache_ms, refresh_ms, tolerance_ms) -
     return None if 0 <= age <= cache_ms + refresh_ms + tolerance_ms else Reason.age
 
 
-def failed_sample(container_id, started_at, sequence, reason: Reason, now) -> Sample:
+def failed_sample(container_id, started_at, sequence, reason: Reason, now, detail: str = "") -> Sample:
     return Sample(schema=1, profile_sha256="0" * 64, container_id=container_id, started_at=started_at, boot_id="",
                   sequence=sequence, sample_monotonic=now, arrival_generation=0, row_generation=0, active=0, pending=0,
                   admission=0, health_timestamp_ms=None, health_age_ms=None, feed_ready=False, barrier_seen=False,
-                  continuous=False, overflow=False, unknown=True, reason=reason)
+                  continuous=False, overflow=False, unknown=True, reason=reason, detail=detail)
 
 
 # ---- capability profiles ----
@@ -120,6 +132,12 @@ class Profile:
             if route["method"] == method and route["path_pattern"] == clean:
                 return route.get("class")
         return None
+
+    def classify_path(self, path: str) -> str | None:
+        """Class of a call-log row by path alone (in-memory rows carry an empty method); None unless unambiguous."""
+        clean = str(path).split("?", 1)[0].split(" | ", 1)[0]
+        kinds = {route.get("class") for route in self.entry["routes"] if route["path_pattern"] == clean}
+        return kinds.pop() if len(kinds) == 1 else None
 
 
 def _profile_defer(reason: Reason, detail: str) -> NoReturn:
@@ -152,7 +170,50 @@ def _verify_coverage(entry: dict) -> None:
             _profile_defer(Reason.coverage, f"reachable route has no entry: {key}")
 
 
-def load_profile(config_id: str, container_inspect: dict, path: Path | str = PROFILE_PATH) -> Profile:
+def local_profile_dir(env: Mapping[str, str] = os.environ) -> Path:
+    """The user-local profile store: `make update-omniroute` characterizes a running image that has no shipped
+    profile and keeps the complete result here (never in the git working tree)."""
+    state = env.get("XDG_STATE_HOME") or str(Path(env.get("HOME") or Path.home()) / ".local/state")
+    return Path(state) / "llm-env/omniroute-profiles"
+
+
+def _local_entry(config_id: str, local_dir: Path) -> dict | None:
+    """A local entry, bound to its evidence: `<hex>.profile.json` whose evidence `<hex>.evidence.json` (same private
+    0700 directory) still hashes to the recorded sha256. Shipped entries are bound the same way by the reproduction
+    test on every `make test`; a local one has no review, so the loader checks it on every load."""
+    hexid = config_id.removeprefix("sha256:")
+    path = local_dir / f"{hexid}.profile.json"
+    if not os.path.lexists(path):
+        return None
+    st = os.lstat(local_dir)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+        _profile_defer(Reason.capability, f"local profile store {local_dir} is not a private 0700 directory")
+    try:
+        entry = json.loads(path.read_text())
+        evidence = (local_dir / f"{hexid}.evidence.json").read_bytes()
+    except (OSError, ValueError) as exc:
+        raise Deferral(Reason.capability, f"local activity profile {path} or its evidence is unreadable") from exc
+    ev = entry.get("evidence") if isinstance(entry, dict) else None
+    if not isinstance(ev, dict) or entry.get("config_id") != config_id \
+            or ev.get("characterization") != f"{hexid}.evidence.json" \
+            or ev.get("characterization_sha256") != hashlib.sha256(evidence).hexdigest():
+        _profile_defer(Reason.capability, f"local activity profile {path} does not match its evidence")
+    return entry
+
+
+def has_profile(config_id: str, path: Path | str = PROFILE_PATH, local_dir: Path | None = None) -> bool:
+    """Whether a shipped entry, or a local one still bound to its evidence, exists (the loader then validates it)."""
+    try:
+        if any(p.get("config_id") == config_id for p in json.loads(Path(path).read_text()).get("profiles", [])):
+            return True
+        return _local_entry(config_id, local_profile_dir() if local_dir is None else local_dir) is not None
+    except (OSError, ValueError, Deferral):
+        return False
+
+
+def load_profile(config_id: str, container_inspect: dict, path: Path | str = PROFILE_PATH,
+                 local_dir: Path | None = None) -> Profile:
+    """The shipped entry for `config_id`, else the user-local one; both pass the same checks below."""
     if not isinstance(config_id, str) or _CANON_RE.fullmatch(config_id) is None:
         _profile_defer(Reason.capability, "config id is not the canonical sha256:<64 hex> form")
     try:
@@ -160,14 +221,20 @@ def load_profile(config_id: str, container_inspect: dict, path: Path | str = PRO
     except (OSError, ValueError) as exc:
         raise Deferral(Reason.capability, "activity profile file is unreadable") from exc
     entries = [p for p in doc.get("profiles", []) if p.get("config_id") == config_id]
-    if not entries:
-        _profile_defer(Reason.capability, f"no reviewed activity profile for {config_id}")
-    entry = entries[0]
+    local_dir = local_profile_dir() if local_dir is None else local_dir
+    entry = entries[0] if entries else _local_entry(config_id, local_dir)
+    if entry is None:
+        _profile_defer(Reason.capability, f"no activity profile for {config_id} (shipped or in {local_dir}); "
+                                          "`make update-omniroute` characterizes a running image without one")
     for name in ("health_cache_ms", "health_refresh_bound_ms", "evidence", "api_fields", "logger"):
         if name not in entry:
             _profile_defer(Reason.capability, f"profile is missing {name}")
-    for name in ("health_cache_ms", "health_refresh_bound_ms"):
-        value = entry[name]
+    for name in ("rows", "row_path", "row_timestamp", "row_memory_flag"):
+        if not isinstance((entry["api_fields"] or {}).get(name), str):
+            _profile_defer(Reason.capability, f"profile is missing api_fields.{name}")
+    for name, value in (("health_cache_ms", entry["health_cache_ms"]),
+                        ("health_refresh_bound_ms", entry["health_refresh_bound_ms"]),
+                        ("api_fields.rows_page_limit", (entry["api_fields"] or {}).get("rows_page_limit"))):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             _profile_defer(Reason.capability, f"{name} must be a positive integer")
     _verify_coverage(entry)
@@ -261,6 +328,16 @@ def bounded_get(base_url: str, path: str, token: str, deadline: float, _retry: b
     if status != 200:
         raise Deferral(Reason.io, f"HTTP {status}")
     return data
+
+
+def api_answers(port: int, password: str, budget: float = 10.0) -> bool:
+    """True when the dashboard login and the authenticated `/api/monitoring/health` GET both succeed with JSON."""
+    base, deadline = f"http://127.0.0.1:{port}", time.monotonic() + budget
+    try:
+        json.loads(bounded_get(base, "/api/monitoring/health", bounded_login(base, password, deadline), deadline))
+        return True
+    except (Deferral, ValueError):
+        return False
 
 
 # ---- journal ----
@@ -463,6 +540,25 @@ def _count(value):
     return value
 
 
+def _inflight(value):
+    """In-flight count: a non-negative integer, or an array whose length is the count (OmniRoute's
+    `/api/usage/history` exposes in-flight work only as the `activeRequests` array; one entry per in-flight
+    group, so the length is a lower bound that is zero exactly when nothing is in flight)."""
+    return len(value) if isinstance(value, list) else _count(value)
+
+
+_RFC3339_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
+
+
+def epoch_ms(value):
+    """Health timestamp in integer epoch milliseconds: an integer as-is, or an RFC 3339 UTC string (`...Z`)."""
+    if isinstance(value, str) and _RFC3339_UTC.fullmatch(value):
+        whole, _, frac = value[:-1].partition(".")
+        stamp = datetime.datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.UTC)
+        return int(stamp.timestamp()) * 1000 + int((frac + "000")[:3])
+    return _count(value)
+
+
 def _require(doc, pointer, kind):
     value = _ptr(doc, pointer)
     if not isinstance(value, kind):
@@ -470,17 +566,70 @@ def _require(doc, pointer, kind):
     return value
 
 
+def _route_name(method, path) -> str:
+    """An unprofiled route for the operator: printable ASCII, query and access-log suffix dropped, bounded."""
+    clean = str(path).split("?", 1)[0].split(" | ", 1)[0]
+    name = " ".join(re.sub(r"[^\x21-\x7e]", "?", str(part)) for part in (method, clean) if part)
+    return name[:120] or "(empty path)"
+
+
+# Bounded call-log paging per sample: a page whose rows are all internal probes and still younger than the idle
+# threshold is followed by the next page, at most this many pages; past the bound the sample is a transient unknown.
+ROW_PAGES = 5
+# `/api/monitoring/health` is stale-while-revalidate (measured live 2026-10-24): a response carries the snapshot the
+# PREVIOUS request triggered, so a lone read's age is the gap since the last health request (6-18 s at idle). The
+# sampler primes (one discarded GET starts the recompute) and reads again after this gap; capped below the profile's
+# health_cache_ms so the read is served the snapshot the prime just computed.
+PRIME_GAP_S = 0.2
+
+
 class Collector:
-    """One instance per observation: keeps the reader, the previous row hashes, generation counters and clocks."""
+    """One instance per observation: keeps the reader, the newest client trace, generation counters and clocks."""
 
     def __init__(self, *, deployment, profile: Profile, reader, fetch: Callable, recheck: Callable,
                  clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
-                 tolerance_ms: int):
+                 sleep: Callable[[float], None] = time.sleep, tolerance_ms: int, min_wait: float):
         self.deployment, self.profile, self.reader, self.fetch, self.recheck = deployment, profile, reader, fetch, recheck
-        self.clock, self.wall, self.tolerance_ms = clock, wall, tolerance_ms
+        self.clock, self.wall, self.sleep, self.tolerance_ms = clock, wall, sleep, tolerance_ms
+        self.min_wait_ms = int(min_wait * 1000)
         self.sequence = self.arrival_gen = self.row_gen = 0
-        self.rows = None
+        self.newest = None
         self.last = None
+
+    def _call_logs(self, deadline: float, wall_ms: int):
+        """(newest client trace ms or None, a client row is in flight, an unclassified row path, transient failure).
+
+        Source-verified in both characterized images (`/api/usage/call-logs` route and `getCallLogs`): a page is every
+        in-memory row (in flight first, then completed but not yet persisted), followed by the persisted rows
+        `ORDER BY timestamp DESC LIMIT limit OFFSET offset`. So in-flight rows are on every page, the newest trace is
+        the maximum over client rows, and the last row of a page is the oldest persisted row on it (when the page has
+        none, every persisted row was already seen). A page shorter than `limit` holds every remaining persisted row."""
+        f = self.profile.api_fields
+        limit, horizon = f["rows_page_limit"], wall_ms - self.min_wait_ms
+        newest, inflight, gap, failure = None, False, "", None
+        for page in range(ROW_PAGES):
+            body = json.loads(self.fetch(f"/api/usage/call-logs?limit={limit}&offset={page * limit}", deadline))
+            rows = _require(body, f["rows"], list)  # a missing/null/mistyped page is schema unknown, never zero rows
+            stamp = None
+            for row in rows:
+                kind = self.profile.classify_path(row[f["row_path"]])
+                try:
+                    stamp = epoch_ms(row[f["row_timestamp"]])
+                except ValueError:
+                    stamp, failure = None, failure or Reason.age  # an unreadable trace time proves no age
+                if stamp is not None and stamp > wall_ms + self.tolerance_ms:
+                    stamp, failure = None, failure or Reason.clock  # a future trace proves nothing, not even activity
+                if kind is None:
+                    gap = gap or _route_name("", row[f["row_path"]])  # never characterized: coverage, as for the journal
+                elif kind == "inference":
+                    inflight = inflight or bool(row.get(f["row_memory_flag"]))
+                    if stamp is not None:
+                        newest = stamp if newest is None else max(newest, stamp)
+            if inflight or (newest is not None and newest > horizon) or len(rows) < limit:
+                return newest, inflight, gap, failure  # activity found, or every persisted row has been seen
+            if stamp is not None and stamp <= horizon:
+                return newest, inflight, gap, failure  # the oldest persisted row on the page is past the threshold
+        return newest, inflight, gap, failure or Reason.age  # bound reached with internal rows still too young
 
     def sample(self, deadline: float, force_barrier: bool = False) -> Sample:
         self.sequence += 1
@@ -490,47 +639,60 @@ class Collector:
                  "active": 0, "pending": 0, "admission": 0, "health_timestamp_ms": None, "health_age_ms": None,
                  "feed_ready": False, "barrier_seen": False, "continuous": False, "overflow": False,
                  "unknown": True, "reason": Reason.io}
+        # Activity seen this sample from sources independent of the health timestamp (journal arrivals, counters,
+        # in-memory call-log rows). It only ever turns a transient failure into `busy`, which delays an update.
+        evidence = False
+        structural = None
         try:
             self.recheck(deadline)  # inventory + fingerprint, shared budget
             b = self.reader.poll(deadline, force_barrier)
             s.update(boot_id=b.boot_id, feed_ready=b.ready, barrier_seen=b.barrier_seen,
                      continuous=b.continuous, overflow=b.overflow)
-            gap = False
+            gap = ""
             for rec in b.records:
                 kind = self.profile.classify_route(rec.method, rec.path)
                 if kind == "inference":
                     self.arrival_gen += 1
+                    evidence = True
                 elif kind is None:
-                    gap = True
+                    gap = gap or _route_name(rec.method, rec.path)
             s["arrival_generation"] = self.arrival_gen
+            structural = _first_failure(b.overflow, not b.continuous, not (b.ready and b.barrier_seen), gap)
+            prime_gap = min(PRIME_GAP_S, self.profile.health_cache_ms / 2000)
+            try:
+                self.fetch("/api/monitoring/health", deadline)  # prime: answers the old snapshot, recomputes behind it
+            except Deferral as exc:
+                raise Deferral(Reason.io, f"health prime failed ({exc.reason.value})") from exc
+            if self.clock() + prime_gap >= deadline:
+                raise Deferral(Reason.io, "sample deadline reached before the health read")
+            self.sleep(prime_gap)
             t0, w0 = self.clock(), self.wall()  # exactly two wall() reads per sample
             health = json.loads(self.fetch("/api/monitoring/health", deadline))
             t1, w1 = self.clock(), self.wall()
             history = json.loads(self.fetch("/api/usage/history", deadline))
-            logs = json.loads(self.fetch("/api/usage/call-logs?limit=1000&offset=0", deadline))
+            wall_ms = int(w1 * 1000)
+            newest, inflight, row_gap, row_failure = self._call_logs(deadline, wall_ms)
             f = self.profile.api_fields
             s["admission"] = sum(_count(_ptr(health, p)) for p in f["admission"])
-            s["active"] = _count(_ptr(history, f["active"]))
+            s["active"] = _inflight(_ptr(history, f["active"]))
             s["pending"] = sum(_count(v) for v in _require(history, f["pending_by_model"], dict).values())
-            ts = _count(_ptr(health, f["health_timestamp"]))
-            persisted, memory = set(), set()
-            for row in _require(logs, f["rows"], list):  # a missing/null/mistyped source is schema unknown, never zero rows
-                digest = hashlib.sha256(str(row[f["row_id"]]).encode()).hexdigest()
-                (memory if row.get(f["row_memory_flag"]) else persisted).add(digest)
-            current = (frozenset(persisted), frozenset(memory))
-            # Explained changes only: a previously seen persisted row must still be there (a page under 1000 rows cannot
-            # evict it), and an in-flight row must still be in flight or have become a persisted row.
-            lost = self.rows is not None and bool((self.rows[0] - current[0]) or (self.rows[1] - current[0] - current[1]))
-            if self.rows is not None and current != self.rows:
-                self.row_gen += 1
-            self.rows = current
+            ts = epoch_ms(_ptr(health, f["health_timestamp"]))
+            if self.last is not None and newest != self.newest:
+                self.row_gen += 1  # a new client trace: activity even when both samples look idle
+            self.newest = newest
             s.update(row_generation=self.row_gen, health_timestamp_ms=ts)
-            wall_ms = int(w1 * 1000)
             s["health_age_ms"] = max(0, wall_ms - ts)
-            if len(persisted) >= 1000:
-                s.update(overflow=True)
             previous, self.last = self.last, (t1, w1, ts)
-            # counts above stay visible so busy still wins; the reasons below are in priority order
+            recent = newest is not None and wall_ms - newest < self.min_wait_ms
+            busy = s["active"] > 0 or s["pending"] > 0 or s["admission"] > 0 or inflight or recent
+            evidence = evidence or busy
+            # Structural failures first: they stay unknown even with activity evidence.
+            structural = _first_failure(b.overflow, not b.continuous, not (b.ready and b.barrier_seen), gap or row_gap)
+            if structural:
+                unprofiled = gap or row_gap
+                raise Deferral(structural, f"unprofiled route: {unprofiled}" if structural is Reason.coverage else "")
+            if row_failure:
+                raise Deferral(row_failure, "call-log trace time is unreadable, in the future, or past the page bound")
             if abs((w1 - w0) - (t1 - t0)) * 1000 > self.tolerance_ms or (t1 - t0) * 1000 > 5000:
                 raise Deferral(Reason.clock, "wall/monotonic bracket mismatch")
             if previous is not None:
@@ -539,22 +701,28 @@ class Collector:
                     raise Deferral(Reason.clock, "clock jumped or health timestamp went backward between samples")
             if (reason := check_freshness(ts, wall_ms, self.profile.health_cache_ms,
                                           self.profile.health_refresh_bound_ms, self.tolerance_ms)):
-                raise Deferral(reason, "stale or future health timestamp")
-            for cond, reason in ((b.overflow or s["overflow"], Reason.overflow),
-                                 (not b.continuous or lost, Reason.continuity),
-                                 (not (b.ready and b.barrier_seen), Reason.feed), (gap, Reason.coverage)):
-                if cond:
-                    raise Deferral(reason, "")
-            busy = s["active"] > 0 or s["pending"] > 0 or s["admission"] > 0
+                limit = self.profile.health_cache_ms + self.profile.health_refresh_bound_ms + self.tolerance_ms
+                raise Deferral(reason, f"health timestamp age {wall_ms - ts} ms outside 0..{limit} ms")
             s.update(unknown=False, reason=Reason.busy if busy else Reason.ready)
         except Deferral as exc:
-            s.update(unknown=True, reason=exc.reason)
+            if exc.reason in TRANSIENT_REASONS and evidence and structural is None:
+                # The health clock lags by seconds under load (observed 11 s): independent activity wins.
+                s.update(unknown=False, reason=Reason.busy)
+            else:
+                s.update(unknown=True, reason=exc.reason, detail=exc.detail)
         except (ValueError, KeyError, TypeError, AttributeError):
             s.update(unknown=True, reason=Reason.schema)
         return Sample(**s)
 
 
 # ---- idle gate and override validation (Task 4) ----
+
+# Unknown-sample reasons caused by timing or load that clear on their own: the gate keeps waiting through them for
+# up to UNKNOWN_BUDGET_S of continuous unknown samples. Every other reason (capability, coverage, logging, feed,
+# overflow, continuity, auth, schema, ownership, input, lock, ...) is structural and defers on its first sample.
+TRANSIENT_REASONS = frozenset({Reason.age, Reason.io, Reason.clock})
+UNKNOWN_BUDGET_S = 60
+
 
 class IdleGate:
     """In-memory only: owned by the observer; there is no gate file and no JSON persistence."""
@@ -566,15 +734,24 @@ class IdleGate:
         self.quiet_since = None
         self.quiet_gens = None
         self.resampling = False
+        self.unknown_since = None
 
     def remaining(self, now) -> float:
         return max(0.0, self.deadline - now)
 
-    def step(self, now, state, *, arrival_generation, row_generation, health_timestamp_ms):
+    def step(self, now, state, *, arrival_generation, row_generation, health_timestamp_ms, reason=None):
         if now >= self.deadline:  # exclusive; checked first
             return "defer-deadline"
         if state == "unknown":
-            return "defer-unknown"
+            if self.unknown_since is None:
+                self.unknown_since = now
+            if reason not in TRANSIENT_REASONS or now - self.unknown_since > UNKNOWN_BUDGET_S:
+                return "defer-unknown"
+            # A transient unknown proves nothing about activity: drop the quiet window, never commit across it.
+            self.quiet_since = self.quiet_gens = None
+            self.resampling = False
+            return "wait"
+        self.unknown_since = None
         gens = (arrival_generation, row_generation)
         if health_timestamp_ms is not None:
             if self.base_ts is None:

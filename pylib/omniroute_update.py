@@ -52,9 +52,11 @@ class Reason(str, Enum):
     continuity = "continuity"
     deadline = "deadline"
     ownership = "ownership"
+    health = "health"
     lock = "lock"
     input = "input"
     io = "io"
+    state = "state"  # the observer cannot write its own verdict file (disk full, quota): not a feed problem
 
 
 class Deferral(Exception):
@@ -416,6 +418,7 @@ class Deployment:
     network_ids: tuple[str, ...]
     volume_names: tuple[str, ...]
     sibling_ids: tuple[str, ...]
+    state: str = "running"  # running | stopped | absent (a down target skips the activity observer)
 
 
 def _env_value(doc: dict, name: str) -> str | None:
@@ -426,25 +429,64 @@ def _env_value(doc: dict, name: str) -> str | None:
     return None
 
 
-def preflight(cfg, config_path, compose_path, env, run, provider: str | None = None, service: str = "omniroute"):
+_DOWN_STATUSES = ("created", "configured", "exited", "stopped")
+_PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
+LABEL_WORKDIR = "com.docker.compose.project.working_dir"
+
+
+def _absent_project(snap: Snapshot, compose_path: str) -> str:
+    """podman-compose's own default project for `-f compose_path` (top-level `name`, else the directory name).
+
+    Any container that podman-compose created from the same directory must carry that project label."""
+    directory = os.path.realpath(os.path.dirname(compose_path))
+    try:
+        top = yaml.safe_load(Path(compose_path).read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise Deferral(Reason.input, "deployed compose file is unreadable") from exc
+    project = str((top.get("name") if isinstance(top, dict) else None) or os.path.basename(directory).lower())
+    if not _PROJECT_RE.fullmatch(project):
+        raise Deferral(Reason.input, "cannot derive the compose project name")
+    for d in snap.docs.values():
+        labels = (d.get("Config") or {}).get("Labels") or {}
+        if labels.get(LABEL_WORKDIR) == directory and labels.get(LABEL_PROJECT) != project:
+            raise Deferral(Reason.ownership, "containers from this compose directory use another project")
+    return project
+
+
+def preflight(cfg, config_path, compose_path, env, run, provider: str | None = None, service: str = "omniroute",
+              api_ok: Callable[[int, str], bool] | None = None):
+    """Ownership/agreement checks. For OmniRoute the target may also be stopped or absent (nothing can be in flight,
+    so the caller skips the activity observer); a running OmniRoute whose Podman health is not `healthy` is accepted
+    only when `api_ok(port, password)` proves its authenticated health API answers (the observer needs exactly that)."""
     snap = take_snapshot(run, env)
     omni_cfg = cfg.get("omniroute") or {}
     port, image_ref = int(omni_cfg.get("port", 20128)), omni_cfg.get("image", DEFAULT_IMAGE)
     password = str(omni_cfg.get("initial_password", ""))
     matches = [cid for cid, d in snap.docs.items()
                if ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_SERVICE) == service]
-    if len(matches) != 1:
+    if service == "omniroute" and not matches:
+        if any(str(d.get("Name", "")).lstrip("/") == "omniroute" for d in snap.docs.values()):
+            raise Deferral(Reason.ownership, "an unlabeled container already uses the name omniroute")
+        cid, doc, mode = "", {}, "absent"
+        project = _absent_project(snap, compose_path)
+    elif len(matches) != 1:
         raise Deferral(Reason.ownership, f"expected exactly one container for service {service}")
-    cid = matches[0]
-    doc = snap.docs[cid]
-    labels = (doc.get("Config") or {}).get("Labels") or {}
-    project = labels.get(LABEL_PROJECT)
-    if not project:
-        raise Deferral(Reason.ownership, "project label missing")
+    else:
+        cid = matches[0]
+        doc = snap.docs[cid]
+        project = ((doc.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT)
+        if not project:
+            raise Deferral(Reason.ownership, "project label missing")
+        mode = "running" if (doc.get("State") or {}).get("Running") is True else "stopped"
     state = doc.get("State") or {}
-    if state.get("Running") is not True or (state.get("Health") or {}).get("Status") != "healthy":
-        raise Deferral(Reason.ownership, "target is not running and healthy")
-    if service == "omniroute":
+    health = (state.get("Health") or {}).get("Status")
+    if service != "omniroute":
+        if mode != "running" or health != "healthy":
+            raise Deferral(Reason.ownership, "target is not running and healthy")
+        port, image_ref = 0, doc.get("ImageName", "")
+    elif mode == "stopped" and (state.get("Paused") or str(state.get("Status", "")).lower() not in _DOWN_STATUSES):
+        raise Deferral(Reason.ownership, "target is neither running nor cleanly stopped")
+    elif mode != "absent":
         if not same_image(image_ref, doc.get("ImageName", "")):
             raise Deferral(Reason.ownership, "running image reference differs from configuration")
         bindings = ((doc.get("HostConfig") or {}).get("PortBindings") or {}).get(f"{port}/tcp") or []
@@ -455,9 +497,11 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
             raise Deferral(Reason.ownership, "dashboard password differs from configuration")
         if _env_value(doc, "REQUIRE_API_KEY") != "true":
             raise Deferral(Reason.ownership, "REQUIRE_API_KEY is not true")
-    else:
-        port, image_ref = 0, doc.get("ImageName", "")
-    if incoming(snap, cid):
+        # Podman health can be wrong on hosts where its exec-based probe fails (e.g. exit 125 "unable to find user
+        # node"); the authenticated API is what the observer needs, so it is the deciding signal.
+        if mode == "running" and health != "healthy" and (api_ok is None or not api_ok(port, password)):
+            raise Deferral(Reason.health, "running target is not healthy and its authenticated health API does not answer")
+    if cid and incoming(snap, cid):
         raise Deferral(Reason.ownership, "a container depends on the target")
     provider = provider or shutil.which("podman-compose") or ""
     if not provider:
@@ -480,24 +524,29 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
     grace = re.fullmatch(r"(\d+)s", str(svc.get("stop_grace_period", "" if service == "omniroute" else "10s")))
     if not grace:
         raise Deferral(Reason.input, "stop_grace_period must be whole seconds")
-    image_info = _inventory(run, ["podman", "image", "inspect", "--format", "json", doc["Image"]], "image inspect")[0]
+    if cid:
+        image_info = _inventory(run, ["podman", "image", "inspect", "--format", "json", doc["Image"]], "image inspect")[0]
+        platform = (image_info.get("Os", ""), image_info.get("Architecture", ""), image_info.get("Variant", ""))
+    else:  # nothing to inspect: resolve for this host's own platform
+        host = _inventory(run, ["podman", "info", "--format", "json"], "info").get("host") or {}
+        platform = (host.get("os", ""), host.get("arch", ""), host.get("variant", ""))
     siblings = sorted(c for c, d in snap.docs.items()
                       if c != cid and ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT) == project)
     dep = Deployment(
-        cid, service, project, canon_image_id(doc["Image"]), image_ref, state.get("StartedAt", ""), port, int(grace.group(1)),
-        "@sha256:" in image_ref, image_info.get("Os", ""), image_info.get("Architecture", ""),
-        image_info.get("Variant", ""), provider,
+        cid, service, project, canon_image_id(doc["Image"]) if cid else "", image_ref, state.get("StartedAt", ""),
+        port, int(grace.group(1)), "@sha256:" in image_ref, *platform, provider,
         tuple(sorted({v.get("NetworkID") for v in ((doc.get("NetworkSettings") or {}).get("Networks") or {}).values()})),
         tuple(sorted(m["Name"] for m in doc.get("Mounts") or [] if m.get("Type") == "volume")),
-        tuple(siblings))
+        tuple(siblings), mode)
     return dep, snap, fingerprint(parts), effective
 
 
-def write_preflight_artifacts(out_dir: str, dep: Deployment, snap: Snapshot, fp: str, effective: dict, target_doc: dict) -> None:
+def write_preflight_artifacts(out_dir: str, dep: Deployment, snap: Snapshot, fp: str, effective: dict,
+                              target_doc: dict | None) -> None:
     write_private(f"{out_dir}/snapshot.json", snap.to_json())
     write_private(f"{out_dir}/fingerprint.txt", fp + "\n")
     write_private(f"{out_dir}/effective.json", json.dumps(effective))
-    write_private(f"{out_dir}/target.json", json.dumps([target_doc]))
+    write_private(f"{out_dir}/target.json", json.dumps([target_doc] if target_doc else []))  # [] = absent target
     write_private(f"{out_dir}/deployment.json", json.dumps(asdict(dep)))
 
 
@@ -645,13 +694,26 @@ def verify_projection(effective, service, inspect_doc, image, project, projectio
 
 
 def verify_commit(run, out_dir, service, old_id, config_id, timeout, *, expect_no_deps=False,
-                  env=os.environ, sleep=time.sleep, clock=time.monotonic) -> str:
+                  env=os.environ, sleep=time.sleep, clock=time.monotonic,
+                  api_ok: Callable[[], bool] | None = None) -> str:
+    """Wait for exactly one replacement. Ready = Podman `healthy`, or running with `api_ok()` true (the same rule
+    preflight applies to a running target whose exec-based Podman healthcheck cannot succeed on this host)."""
     baseline = Snapshot.from_json(Path(out_dir, "snapshot.json").read_text())
-    target = json.loads(Path(out_dir, "target.json").read_text())[0]
-    t_labels = (target.get("Config") or {}).get("Labels") or {}
-    want_image = config_id if config_id else canon_image_id(target["Image"])
-    want_nets = sorted(v["NetworkID"] for v in (target["NetworkSettings"]["Networks"]).values())
-    want_vols = sorted(m["Name"] for m in target.get("Mounts") or [] if m.get("Type") == "volume")
+    targets = json.loads(Path(out_dir, "target.json").read_text())
+    target = targets[0] if targets else None  # None: the target was absent, so there is no prior container to match
+    if target is not None:
+        project = ((target.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT)
+        want_nets = sorted(v["NetworkID"] for v in (target["NetworkSettings"]["Networks"]).values())
+        want_vols = sorted(m["Name"] for m in target.get("Mounts") or [] if m.get("Type") == "volume")
+    else:
+        project = json.loads(Path(out_dir, "deployment.json").read_text())["project"]
+        want_nets = want_vols = None
+    if config_id:
+        want_image = config_id
+    elif target is not None:
+        want_image = canon_image_id(target["Image"])
+    else:
+        raise UpdateError("an absent target needs the resolved config id")
     deadline, new_id, problem = clock() + timeout, "", "not replaced"
     bounded = with_deadline(run, deadline, clock)  # slow-but-successful commands are discarded too
     while True:
@@ -665,7 +727,7 @@ def verify_commit(run, out_dir, service, old_id, config_id, timeout, *, expect_n
                 f"inventory unavailable during verification: {exc.reason.value}; old={old_id[:12]}") from exc
         cands = [c for c, d in snap.docs.items()
                  if ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_SERVICE) == service
-                 and ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT) == t_labels.get(LABEL_PROJECT)
+                 and ((d.get("Config") or {}).get("Labels") or {}).get(LABEL_PROJECT) == project
                  and c != old_id]
         changed = sorted(c[:12] for c, h in baseline.containers.items() if c != old_id and snap.containers.get(c) != h)
         if changed:
@@ -676,11 +738,13 @@ def verify_commit(run, out_dir, service, old_id, config_id, timeout, *, expect_n
             vols = sorted(m["Name"] for m in doc.get("Mounts") or [] if m.get("Type") == "volume")
             if canon_image_id(doc["Image"]) != want_image:
                 raise UpdateError(f"new {service} runs an unexpected image; old={old_id[:12]} new={new_id[:12]}")
-            if nets != want_nets or vols != want_vols:
+            if want_nets is not None and (nets != want_nets or vols != want_vols):
                 raise UpdateError(f"new {service} resource attachments differ; old={old_id[:12]} new={new_id[:12]}")
             if expect_no_deps and doc["Dependencies"]:
                 raise UpdateError(f"new {service} still has native dependencies; old={old_id[:12]} new={new_id[:12]}")
-            if ((doc.get("State") or {}).get("Health") or {}).get("Status") == "healthy":
+            state = doc.get("State") or {}
+            if (state.get("Health") or {}).get("Status") == "healthy" or \
+                    (state.get("Running") is True and api_ok is not None and api_ok()):
                 if clock() >= deadline:
                     raise UpdateError(
                         f"new {service} became healthy only after the {timeout}s budget; old={old_id[:12]} new={new_id[:12]}")

@@ -1,9 +1,12 @@
+import hashlib
 import http.server
 import json
 import math
 import sys
 import threading
 import time
+import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,7 @@ from omniroute_fakes import CONTAINER, mk_sample, profile_entry, write_profiles
 
 from pylib.omniroute_activity import (
     OVERFLOW,
+    ROW_PAGES,
     Collector,
     JournalBatch,
     JournalctlReader,
@@ -24,6 +28,7 @@ from pylib.omniroute_activity import (
     check_freshness,
     classify,
     failed_sample,
+    has_profile,
     load_profile,
     measure_clock_tolerance_ms,
     parse_journal_line,
@@ -48,7 +53,9 @@ def batch(*records, ready=True, barrier=True, continuous=True, overflow=False, b
 
 
 def make_fetch(*, ts=1000, active=0, by_model=None, waiting=0, rows=(), health=None, history=None, logs=None):
-    """Raw-body fake of the three admin GETs; `health`/`history`/`logs` replace a whole body (for missing-source cases)."""
+    """Raw-body fake of the three admin GETs; `health`/`history`/`logs` replace a whole body (for missing-source cases).
+
+    Call-log paging follows the source: every page holds all in-memory rows, then persisted rows by limit/offset."""
     def fetch(path, deadline):
         if path.startswith("/api/monitoring/health"):
             return json.dumps(health if health is not None else {"timestamp": ts, "chatAdmission": {
@@ -57,8 +64,14 @@ def make_fetch(*, ts=1000, active=0, by_model=None, waiting=0, rows=(), health=N
             return json.dumps(history if history is not None else {"active": active, "pending": {
                 "byModel": by_model or {}, "byAccount": {"a": 1} if by_model else {}}}).encode()
         if path.startswith("/api/usage/call-logs"):
-            return json.dumps(logs if logs is not None else {"logs": list(rows)}).encode()
+            fetch.pages.append(path)
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            limit, offset = int(q["limit"][0]), int(q["offset"][0])
+            persisted = [r for r in rows if not r.get("memory")]
+            page = [r for r in rows if r.get("memory")] + persisted[offset:offset + limit]
+            return json.dumps(logs if logs is not None else {"logs": page}).encode()
         raise AssertionError(path)
+    fetch.pages = []
     return fetch
 
 
@@ -66,7 +79,7 @@ def collector(tmp_path, reader, fetch, *, wall=lambda: 1.0, recheck=lambda d: No
     prof = load_profile("sha256:" + "c" * 64, CONTAINER, write_profiles(tmp_path, profile_entry()))
     dep = type("D", (), {"container_id": "a" * 64, "started_at": "t"})()
     return Collector(deployment=dep, profile=prof, reader=reader, fetch=fetch, recheck=recheck,
-                     clock=lambda: 1.0, wall=wall, tolerance_ms=tol)
+                     clock=lambda: 1.0, wall=wall, sleep=lambda _: None, tolerance_ms=tol, min_wait=300)
 
 
 # ---- classify and counts ----
@@ -94,6 +107,138 @@ def test_uncaught_barrier_is_unknown_even_with_zero_counts(tmp_path):
 def test_unprofiled_embeddings_arrival_is_coverage_unknown(tmp_path):
     s = collector(tmp_path, FakeReader(batch(JournalRecord("POST", "/v1/embeddings"))), make_fetch()).sample(time.monotonic() + 5)
     assert classify(s) == "unknown" and s.reason is Reason.coverage
+    assert s.detail == "unprofiled route: POST /v1/embeddings"  # the operator sees which route to characterize
+
+
+# ---- a stale health clock under load: independent activity evidence wins (addendum c) ----
+
+STALE = lambda: 5.0  # health timestamp 1000 ms vs wall 5000 ms: 4 s old, over 1000 + 500 + 250
+CHAT = JournalRecord("POST", "/v1/chat/completions")
+
+
+@pytest.mark.parametrize("reader,fetch", [
+    (lambda: FakeReader(batch()), lambda: make_fetch(active=1)),
+    (lambda: FakeReader(batch()), lambda: make_fetch(waiting=1)),
+    (lambda: FakeReader(batch(CHAT)), lambda: make_fetch()),
+    (lambda: FakeReader(batch()), lambda: make_fetch(rows=[{"path": "/v1/chat/completions", "ts": 1000, "memory": True}])),
+], ids=["active-request", "admission", "journal-arrival", "in-memory-row"])
+def test_stale_health_with_independent_activity_is_a_busy_sample(tmp_path, reader, fetch):
+    s = collector(tmp_path, reader(), fetch(), wall=STALE).sample(time.monotonic() + 5)
+    assert not s.unknown and s.reason is Reason.busy and classify(s) == "busy"
+
+
+def test_stale_health_without_activity_is_transient_age_unknown(tmp_path):
+    s = collector(tmp_path, FakeReader(batch()), make_fetch(), wall=STALE).sample(time.monotonic() + 5)
+    assert s.unknown and s.reason is Reason.age and classify(s) == "unknown"
+    assert s.detail == "health timestamp age 4000 ms outside 0..1750 ms"  # the age seen and the limit, for diagnosis
+    assert Reason.age in TRANSIENT_REASONS
+
+
+# ---- stale-while-revalidate health: prime, then read (addendum h) ----
+
+class StaleWhileRevalidate:
+    """`/api/monitoring/health` as measured live (2026-10-24): every response is the snapshot the previous request
+    computed (its timestamp and its counters); a request finding it older than the cache window recomputes it behind
+    its own answer. History and call-logs answer the current state. Time is fake and advanced by `sleep`."""
+
+    def __init__(self, cache_ms=1000):
+        self.now, self.cache_ms, self.waiting, self.active, self.health_reads = 100.0, cache_ms, 0, 0, 0
+        self.on_sleep: Callable[[], None] | None = None
+        self.snap = (int(self.now * 1000), 0)
+
+    def fetch(self, path, deadline):
+        if not path.startswith("/api/monitoring/health"):
+            return make_fetch(active=self.active)(path, deadline)
+        self.health_reads += 1
+        (ts, waiting), now_ms = self.snap, int(self.now * 1000)
+        if now_ms - ts >= self.cache_ms:
+            self.snap = (now_ms, self.waiting)
+        return json.dumps({"timestamp": ts, "chatAdmission": {
+            "activeHeavy": 0, "activeHealthyHeadroom": 0, "waiting": waiting, "queuedBytes": 0}}).encode()
+
+    def sleep(self, seconds):
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep()
+
+    def collector(self, tmp_path):
+        c = collector(tmp_path, FakeReader(*[batch() for _ in range(10)]), self.fetch)
+        c.clock = c.wall = lambda: self.now
+        c.sleep = self.sleep
+        return c
+
+
+def test_single_health_read_is_stale_at_idle_but_prime_then_read_is_fresh(tmp_path):
+    lone = StaleWhileRevalidate()
+    lone.now += 5  # the observer's 5 s poll, no other client
+    ts = json.loads(lone.fetch("/api/monitoring/health", 0))["timestamp"]
+    assert check_freshness(ts, int(lone.now * 1000), 1000, 500, 250) is Reason.age  # 5000 ms: our own poll interval
+    swr = StaleWhileRevalidate()
+    c, stamps = swr.collector(tmp_path), []
+    for _ in range(6):  # 30 s of idle 5 s polling
+        swr.now += 5
+        s = c.sample(1e18)
+        assert classify(s) == "idle" and s.health_age_ms == 200, s
+        stamps.append(s.health_timestamp_ms)
+    assert stamps == sorted(set(stamps)) and swr.health_reads == 12  # advancing; one extra GET per sample
+
+
+def test_busy_counters_come_from_the_primed_snapshot(tmp_path):
+    swr = StaleWhileRevalidate()
+    swr.waiting = 1  # queued after the last snapshot: a lone read still answers waiting=0
+    swr.now += 5
+    s = swr.collector(tmp_path).sample(1e18)
+    assert s.admission == 1 and classify(s) == "busy"
+
+
+def test_a_request_starting_between_prime_and_read_is_visible(tmp_path):
+    swr = StaleWhileRevalidate()
+    swr.on_sleep = lambda: setattr(swr, "active", 1)
+    swr.now += 5
+    s = swr.collector(tmp_path).sample(1e18)
+    assert s.admission == 0 and s.active == 1 and classify(s) == "busy"  # history is read after the health read
+
+
+def test_a_failed_health_prime_is_a_transient_io_unknown(tmp_path):
+    good = make_fetch()
+
+    def fetch(path, deadline):
+        if path.startswith("/api/monitoring/health") and not fetch.primed:
+            fetch.primed = True
+            raise Deferral(Reason.auth, "session rejected")
+        return good(path, deadline)
+    fetch.primed = False
+    s = collector(tmp_path, FakeReader(batch()), fetch).sample(time.monotonic() + 5)
+    assert s.unknown and s.reason is Reason.io and "prime" in s.detail
+
+
+def test_structural_failure_stays_unknown_even_with_activity(tmp_path):
+    s = collector(tmp_path, FakeReader(batch(CHAT, barrier=False)), make_fetch(active=1), wall=STALE).sample(
+        time.monotonic() + 5)
+    assert s.unknown and s.reason is Reason.feed
+
+
+def test_io_failure_after_a_journal_arrival_is_busy(tmp_path):
+    good = make_fetch()
+
+    def fetch(path, deadline):
+        if path.startswith("/api/usage/history"):
+            raise Deferral(Reason.io, "timeout")
+        return good(path, deadline)
+    s = collector(tmp_path, FakeReader(batch(CHAT)), fetch).sample(time.monotonic() + 5)
+    assert not s.unknown and s.reason is Reason.busy
+    s = collector(tmp_path, FakeReader(batch()), fetch).sample(time.monotonic() + 5)
+    assert s.unknown and s.reason is Reason.io  # no evidence: still a transient unknown
+
+
+def test_busy_samples_with_a_stale_clock_never_exhaust_the_unknown_budget(tmp_path):
+    g = IdleGate(300, 10800)
+    c = collector(tmp_path, FakeReader(*[batch(CHAT) for _ in range(40)]), make_fetch(), wall=STALE)
+    for t in range(0, 200, 5):  # 200 s of continuously stale health while requests keep arriving
+        s = c.sample(time.monotonic() + 5)
+        assert g.step(t, classify(s), arrival_generation=s.arrival_generation, row_generation=s.row_generation,
+                      health_timestamp_ms=s.health_timestamp_ms, reason=s.reason) == "wait"
+    assert g.quiet_since is None
 
 
 def test_probe_arrivals_do_not_reset_quiet(tmp_path):
@@ -109,13 +254,12 @@ def test_chat_suffix_and_query_are_stripped_before_matching(tmp_path):
     assert b.arrival_generation == a.arrival_generation + 1 and classify(b) == "idle"
 
 
-def test_between_poll_arrival_and_row_change_bump_generations_though_both_samples_idle(tmp_path):
-    rows1 = [{"id": "r1"}]
-    rows2 = [{"id": "r1"}, {"id": "r2"}]
-    c = collector(tmp_path, FakeReader(batch(), batch(JournalRecord("POST", "/v1/chat/completions"))), make_fetch())
-    c.fetch = make_fetch(rows=rows1)
+def test_between_poll_arrival_and_new_client_trace_bump_generations_though_both_samples_idle(tmp_path):
+    c = collector(tmp_path, FakeReader(batch(), batch(JournalRecord("POST", "/v1/chat/completions"))), make_fetch(),
+                  wall=NOW)
+    c.fetch = make_fetch(ts=NOW_MS, rows=[client(OLD)])
     a = c.sample(time.monotonic() + 5)
-    c.fetch = make_fetch(rows=rows2)
+    c.fetch = make_fetch(ts=NOW_MS, rows=[client(OLD - 1), client(OLD - 2)])
     b = c.sample(time.monotonic() + 5)
     assert classify(a) == classify(b) == "idle"
     assert b.arrival_generation == a.arrival_generation + 1 and b.row_generation == a.row_generation + 1
@@ -140,10 +284,68 @@ def test_clock_bracket_mismatch_is_clock_unknown(tmp_path):
     assert c.sample(time.monotonic() + 5).reason is Reason.clock
 
 
-def test_full_call_log_page_overflows(tmp_path):
-    rows = [{"id": f"r{i}"} for i in range(1000)]
-    s = collector(tmp_path, FakeReader(batch()), make_fetch(rows=rows)).sample(time.monotonic() + 5)
-    assert s.overflow and classify(s) == "unknown"
+# ---- call-log traces: the newest client trace against the idle threshold (min_wait 300 s, page limit 3) ----
+
+NOW = lambda: 1000.0
+NOW_MS = 1_000_000
+OLD, RECENT = NOW_MS - 300_000, NOW_MS - 299_999  # exactly the threshold is old enough; 1 ms less is still recent
+
+
+def client(ts, **extra):
+    return {"path": "/v1/chat/completions", "ts": ts, **extra}
+
+
+def probe(ts, **extra):
+    return {"path": "/api/providers/test", "ts": ts, **extra}
+
+
+def trace_sample(tmp_path, rows):
+    fetch = make_fetch(ts=NOW_MS, rows=rows)
+    return collector(tmp_path, FakeReader(batch()), fetch, wall=NOW).sample(time.monotonic() + 5), fetch.pages
+
+
+@pytest.mark.parametrize("rows,state,pages", [
+    ([client(OLD - i) for i in range(5000)], "idle", 1),  # a full store is nothing: one small page, oldest is old
+    ([], "idle", 1),  # no traces at all: idle (the journal and health still had to agree)
+    ([client(OLD)], "idle", 1),
+    ([client(RECENT), client(OLD)], "busy", 1),
+    ([client(OLD - 60_000, memory=True)], "busy", 1),  # in flight, however long ago it started
+    ([probe(NOW_MS - 1), client(OLD)], "idle", 1),  # a probe newer than an old client trace never counts
+    ([probe(NOW_MS - i) for i in range(1, 4)] + [client(OLD)], "idle", 2),  # probes only, then page to an old client
+    ([probe(NOW_MS - 1, memory=True), client(OLD)], "idle", 1),  # an in-flight probe is not activity either
+    ([probe(NOW_MS - i) for i in range(1, 4)] + [probe(OLD - 1)] * 3 + [client(RECENT - 5)], "idle", 2),
+], ids=["full-store", "empty", "old-trace", "recent-trace", "in-flight", "probe-newer-than-old-client",
+        "probes-then-old-client", "in-flight-probe", "oldest-probe-past-threshold"])
+def test_newest_client_trace_decides_busy_or_idle(tmp_path, rows, state, pages):
+    s, fetched = trace_sample(tmp_path, rows)
+    assert classify(s) == state and not s.unknown and len(fetched) == pages
+    assert fetched[0] == "/api/usage/call-logs?limit=3&offset=0"
+
+
+def test_probe_only_pages_up_to_the_bound_while_still_young_are_transient_unknown(tmp_path):
+    s, fetched = trace_sample(tmp_path, [probe(NOW_MS - i) for i in range(1, 100)])
+    assert s.unknown and s.reason is Reason.age and s.reason in TRANSIENT_REASONS
+    assert fetched == [f"/api/usage/call-logs?limit=3&offset={3 * i}" for i in range(ROW_PAGES)]
+
+
+@pytest.mark.parametrize("ts,reason", [("yesterday", Reason.age), ("2026-13-40T00:00:00Z", Reason.age),
+                                        (None, Reason.age), (NOW_MS + 251, Reason.clock)])
+def test_unreadable_or_future_trace_time_is_transient_unknown(tmp_path, ts, reason):
+    s, _ = trace_sample(tmp_path, [client(ts)])
+    assert s.unknown and s.reason is reason and reason in TRANSIENT_REASONS
+
+
+def test_unknown_row_path_is_coverage_unknown(tmp_path):
+    s, _ = trace_sample(tmp_path, [{"path": "/v1/embeddings?x=1", "ts": OLD}])
+    assert s.unknown and s.reason is Reason.coverage and s.detail == "unprofiled route: /v1/embeddings"
+    s, _ = trace_sample(tmp_path, [{"path": "", "ts": OLD}])  # an in-memory row without a client endpoint
+    assert s.unknown and s.reason is Reason.coverage and s.detail == "unprofiled route: (empty path)"
+
+
+@pytest.mark.parametrize("row", [{"ts": OLD}, {"path": "/v1/chat/completions"}, "row"])
+def test_row_without_its_profiled_fields_is_schema_unknown(tmp_path, row):
+    s, _ = trace_sample(tmp_path, [row])
+    assert s.unknown and s.reason is Reason.schema
 
 
 def test_boot_change_or_vanished_cursor_is_not_continuous(tmp_path):
@@ -190,33 +392,6 @@ def test_missing_health_fields_are_schema_unknown(tmp_path, health):
     assert classify(s) == "unknown" and s.reason is Reason.schema
 
 
-def two_samples(tmp_path, first_rows, second_rows):
-    c = collector(tmp_path, FakeReader(batch(), batch()), make_fetch(rows=first_rows))
-    a = c.sample(time.monotonic() + 5)
-    c.fetch = make_fetch(rows=second_rows)
-    return a, c.sample(time.monotonic() + 5)
-
-
-def test_persisted_row_disappearing_is_continuity_unknown(tmp_path):
-    a, b = two_samples(tmp_path, [{"id": "r1"}, {"id": "r2"}], [{"id": "r2"}])
-    assert classify(a) == "idle" and classify(b) == "unknown" and b.reason is Reason.continuity
-
-
-def test_call_log_reset_to_empty_is_continuity_unknown(tmp_path):
-    _a, b = two_samples(tmp_path, [{"id": "r1"}], [])
-    assert classify(b) == "unknown" and b.reason is Reason.continuity
-
-
-def test_in_flight_row_vanishing_without_persisting_is_continuity_unknown(tmp_path):
-    _a, b = two_samples(tmp_path, [{"id": "m1", "memory": True}], [])
-    assert classify(b) == "unknown" and b.reason is Reason.continuity
-
-
-def test_in_flight_row_that_completes_as_a_persisted_row_is_only_a_generation_change(tmp_path):
-    a, b = two_samples(tmp_path, [{"id": "m1", "memory": True}], [{"id": "m1"}])
-    assert classify(b) == "idle" and b.row_generation == a.row_generation + 1
-
-
 def test_wall_clock_jump_between_samples_is_clock_unknown_even_when_each_bracket_is_fine(tmp_path):
     walls = iter([1.0, 1.0, 9.0, 9.0])  # (w0, w1) per sample: every bracket is 0 s wide, the clock jumps between samples
     c = collector(tmp_path, FakeReader(batch(), batch()), make_fetch(ts=1000), wall=lambda: next(walls))
@@ -257,13 +432,74 @@ def test_sample_json_roundtrip():
 def test_missing_profile_defers_capability(tmp_path):
     with pytest.raises(Deferral) as e:
         load_profile("sha256:" + "9" * 64, CONTAINER, write_profiles(tmp_path))
-    assert e.value.reason is Reason.capability
+    assert e.value.reason is Reason.capability and "make update-omniroute" in e.value.detail
 
 
-def test_empty_shipped_profile_list_defers_capability():
+def _local_store(tmp_path, entry=None, evidence=b"{}"):
+    store = tmp_path / "store"
+    store.mkdir(mode=0o700)
+    hexid = "c" * 64
+    (store / f"{hexid}.evidence.json").write_bytes(evidence)
+    entry = entry or profile_entry(evidence={"characterization": f"{hexid}.evidence.json",
+                                             "characterization_sha256": hashlib.sha256(evidence).hexdigest()})
+    (store / f"{hexid}.profile.json").write_text(json.dumps(entry))
+    return store, entry
+
+
+def test_a_local_profile_bound_to_its_evidence_loads_after_the_shipped_list(tmp_path):
+    store, entry = _local_store(tmp_path)
+    assert has_profile("sha256:" + "c" * 64, write_profiles(tmp_path), store)
+    assert load_profile("sha256:" + "c" * 64, CONTAINER, write_profiles(tmp_path), store).entry == entry
+    shipped = profile_entry(health_cache_ms=2000)
+    assert load_profile("sha256:" + "c" * 64, CONTAINER, write_profiles(tmp_path, shipped), store).entry == shipped
+
+
+@pytest.mark.parametrize("damage", ["evidence", "name", "mode"])
+def test_a_local_profile_that_no_longer_matches_its_evidence_or_store_defers_capability(tmp_path, damage):
+    store, _ = _local_store(tmp_path)
+    if damage == "evidence":
+        (store / f"{'c' * 64}.evidence.json").write_bytes(b"{} ")
+    elif damage == "name":
+        entry = json.loads((store / f"{'c' * 64}.profile.json").read_text())
+        entry["evidence"]["characterization"] = "other.json"
+        (store / f"{'c' * 64}.profile.json").write_text(json.dumps(entry))
+    else:
+        store.chmod(0o770)
+    with pytest.raises(Deferral) as e:
+        load_profile("sha256:" + "c" * 64, CONTAINER, write_profiles(tmp_path), store)
+    assert e.value.reason is Reason.capability and str(store) in e.value.detail
+    assert not has_profile("sha256:" + "c" * 64, write_profiles(tmp_path), store)  # the updater re-characterizes it
+
+
+def test_shipped_profile_list_defers_capability_for_an_uncharacterized_config():
     with pytest.raises(Deferral) as e:
         load_profile("sha256:" + "c" * 64, CONTAINER)
     assert e.value.reason is Reason.capability
+
+
+def _collector_with(tmp_path, fetch, wall=lambda: 1.0, **api):
+    entry = profile_entry(api_fields={**profile_entry()["api_fields"], **api})
+    prof = load_profile("sha256:" + "c" * 64, CONTAINER, write_profiles(tmp_path, entry))
+    dep = type("D", (), {"container_id": "a" * 64, "started_at": "t"})()
+    return Collector(deployment=dep, profile=prof, reader=FakeReader(batch()), fetch=fetch, recheck=lambda d: None,
+                     clock=lambda: 1.0, wall=wall, sleep=lambda _: None, tolerance_ms=250, min_wait=300)
+
+
+@pytest.mark.parametrize("requests,expected,state", [([], 0, "idle"), ([{"model": "m"}, {"model": "n"}], 2, "busy")])
+def test_array_in_flight_source_counts_its_length(tmp_path, requests, expected, state):
+    fetch = make_fetch(history={"activeRequests": requests, "pending": {"byModel": {}}})
+    s = _collector_with(tmp_path, fetch, active="/activeRequests").sample(time.monotonic() + 5)
+    assert s.active == expected and classify(s) == state
+
+
+def test_rfc3339_health_timestamp_is_read_as_epoch_milliseconds(tmp_path):
+    health = {"timestamp": "1970-01-01T00:00:01.000Z", "chatAdmission": {
+        "activeHeavy": 0, "activeHealthyHeadroom": 0, "waiting": 0, "queuedBytes": 0}}
+    s = _collector_with(tmp_path, make_fetch(health=health)).sample(time.monotonic() + 5)
+    assert s.health_timestamp_ms == 1000 and s.reason is Reason.ready
+    health["timestamp"] = "1970-01-01T01:00:01.000+01:00"  # only the UTC `Z` form is accepted
+    s = _collector_with(tmp_path, make_fetch(health=health)).sample(time.monotonic() + 5)
+    assert s.unknown and s.reason is Reason.schema
 
 
 @pytest.mark.parametrize("drop", ["arrival", "inflight", "queue"])
@@ -507,7 +743,12 @@ def test_measure_clock_tolerance_ms_is_ceiling_plus_resolution():
 
 import argparse
 
-from pylib.omniroute_activity import IdleGate, validate_overrides
+from pylib.omniroute_activity import (
+    TRANSIENT_REASONS,
+    UNKNOWN_BUDGET_S,
+    IdleGate,
+    validate_overrides,
+)
 from pylib.omniroute_cli import cmd_deadline, cmd_overrides
 from pylib.omniroute_update import UpdateError
 
@@ -573,9 +814,76 @@ def test_deadline_exclusive_and_wins_over_ready():
     assert feed(g, 1000, "idle", h=9) == "defer-deadline"
 
 
-def test_unknown_defers_immediately():
+def test_unknown_without_a_reason_defers_immediately():
     g = IdleGate(300, 10800)
     assert feed(g, 5, "unknown") == "defer-unknown"
+
+
+@pytest.mark.parametrize("reason", sorted(set(Reason) - TRANSIENT_REASONS - {Reason.ready, Reason.busy}))
+def test_structural_unknown_defers_on_its_first_sample(reason):
+    g = IdleGate(300, 10800)
+    feed(g, 0, "idle", h=1); feed(g, 5, "idle", h=2)  # quiet window open
+    assert g.step(10, "unknown", arrival_generation=0, row_generation=0, health_timestamp_ms=None,
+                  reason=reason) == "defer-unknown"
+
+
+def unknown(g, now, reason=Reason.age):
+    return g.step(now, "unknown", arrival_generation=0, row_generation=0, health_timestamp_ms=None, reason=reason)
+
+
+@pytest.mark.parametrize("reason", sorted(TRANSIENT_REASONS))
+def test_single_transient_unknown_restarts_a_full_window(reason):
+    g = IdleGate(300, 10800)
+    feed(g, 0, "idle", h=1); feed(g, 5, "idle", h=2)  # quiet starts at 5
+    assert unknown(g, 290, reason) == "wait"
+    assert g.quiet_since is None
+    assert feed(g, 305, "idle", h=3) == "wait"  # would have been 300 s of quiet; the unknown cleared it
+    assert feed(g, 306, "idle", h=4) == "wait"  # the new window starts at 305, not on the unknown sample
+    assert feed(g, 604, "idle", h=5) == "wait"
+    assert feed(g, 605, "idle", h=6) == "resample"
+    assert feed(g, 606, "idle", h=7) == "ready"
+
+
+def test_continuous_transient_unknown_defers_after_the_budget():
+    g = IdleGate(300, 10800)
+    feed(g, 0, "idle", h=1)
+    for t in range(10, 10 + UNKNOWN_BUDGET_S + 1, 5):  # 10 .. 70: exactly the budget, still waiting
+        assert unknown(g, t, Reason.io if t % 2 else Reason.age) == "wait"
+    assert unknown(g, 10 + UNKNOWN_BUDGET_S + 0.5, Reason.age) == "defer-unknown"
+
+
+def test_a_complete_sample_resets_the_unknown_budget():
+    g = IdleGate(300, 10800)
+    feed(g, 0, "idle", h=1)
+    assert unknown(g, 10) == "wait"
+    assert unknown(g, 65) == "wait"
+    assert feed(g, 66, "busy", h=2) == "wait"
+    assert unknown(g, 100) == "wait" and unknown(g, 160) == "wait"  # a new 60 s budget from 100
+    assert unknown(g, 161) == "defer-unknown"
+
+
+def test_a_structural_unknown_inside_a_transient_run_still_defers_at_once():
+    g = IdleGate(300, 10800)
+    assert unknown(g, 1) == "wait"
+    assert unknown(g, 2, Reason.capability) == "defer-unknown"
+
+
+def test_transient_unknown_during_the_resample_resets_the_window():
+    g = IdleGate(300, 10800)
+    feed(g, 0, "idle", h=1); feed(g, 1, "idle", h=2)
+    assert feed(g, 301, "idle", h=3) == "resample"
+    assert unknown(g, 302) == "wait"
+    assert g.resampling is False and g.quiet_since is None
+    assert feed(g, 303, "idle", h=4) == "wait"  # new window starts at 303
+    assert feed(g, 602, "idle", h=5) == "wait"
+    assert feed(g, 603, "idle", h=6) == "resample"
+    assert feed(g, 604, "idle", h=7) == "ready"
+
+
+def test_deadline_still_wins_during_transient_unknowns():
+    g = IdleGate(300, 100)
+    assert unknown(g, 90) == "wait"
+    assert unknown(g, 100) == "defer-deadline"
 
 
 @pytest.mark.parametrize("idle,mx", [("", None), (None, ""), ("0", None), ("abc", None),

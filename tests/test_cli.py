@@ -1463,10 +1463,10 @@ def test_phoenix_resource_policy_is_charged_only_with_system_one():
     )
 
     expected_cpu_floor = (
-        HOST_CPU_FLOOR + 1 + 1 + SYSTEM_ONE_CPUS_MIN + PHOENIX_CPUS_MIN
+        HOST_CPU_FLOOR + 1 + 0.25 + SYSTEM_ONE_CPUS_MIN + PHOENIX_CPUS_MIN
     )
     expected_memory_floor = (
-        HOST_MEMORY_FLOOR_MIB + 1024 + 32 + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
+        HOST_MEMORY_FLOOR_MIB + 768 + 32 + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
     )
     assert enabled["llm_server"]["cpus"] == 16 - expected_cpu_floor
     assert enabled["llm_server"]["memory_mib"] == 65536 - expected_memory_floor
@@ -1482,33 +1482,29 @@ def test_phoenix_reservation_can_make_a_small_host_infeasible():
         compute_resource_limits(4, 6144, llm_server_enabled=False, system_one_enabled=True)
 
 
-def test_migrate_config_defaults_phoenix_resources(tmp_path: Path):
+def test_migrate_config_drops_the_generated_resources_mirror(tmp_path: Path):
+    """`resources.<service>` was a generated copy nothing read; a stale one (even an invalid one) is dropped."""
     config = write_test_config(tmp_path)
+    parsed = yaml.safe_load(config.read_text())
+    parsed.setdefault("resources", {})["phoenix"] = {"cpus_min": 4, "cpus_max": 1}
+    parsed["resources"]["omniroute"] = {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 3072}
+    config.write_text(yaml.safe_dump(parsed, sort_keys=False))
     result = run("migrate-config", "--config", str(config))
-    assert result.returncode == 0, result.stderr
-    parsed = yaml.safe_load(config.read_text())
-    assert parsed["resources"]["phoenix"] == {
-        "cpus_min": 0.25,
-        "cpus_max": 2,
-        "memory_min_mib": 256,
-        "memory_max_mib": 1024,
-    }
+    assert result.returncode == 0, result.stdout + result.stderr
+    resources = yaml.safe_load(config.read_text())["resources"]
+    assert "phoenix" not in resources and "omniroute" not in resources
+    assert "llm_server" in resources
 
 
-def test_resources_rejects_phoenix_min_above_max(tmp_path: Path):
+def test_resources_rejects_a_phoenix_override_with_min_above_max(tmp_path: Path):
     config = write_test_config(tmp_path)
     parsed = yaml.safe_load(config.read_text())
-    parsed.setdefault("resources", {})["phoenix"] = {
-        "cpus_min": 4,
-        "cpus_max": 2,
-        "memory_min_mib": 256,
-        "memory_max_mib": 1024,
-    }
+    parsed.setdefault("resources", {})["overrides"] = {"phoenix": {"cpus_min": 4}}
     config.write_text(yaml.safe_dump(parsed, sort_keys=False))
 
     result = run("resources", "--config", str(config))
     assert result.returncode == 1
-    assert "resources.phoenix.cpus_min" in result.stdout + result.stderr
+    assert "resources.overrides.phoenix" in result.stdout + result.stderr
 
 
 def test_resources_emits_phoenix_policy_when_system_one_enabled(tmp_path: Path):
@@ -1529,10 +1525,10 @@ def test_resources_emits_phoenix_policy_when_system_one_enabled(tmp_path: Path):
         # A genuinely tiny host is allowed to refuse the reservation.
         assert "error" in payload
         return
-    assert payload["phoenix"]["memory_min_mib"] == 256
+    assert payload["phoenix"]["memory_min_mib"] == 192
     assert payload["phoenix"]["memory_max_mib"] == 1024
     assert payload["phoenix"]["cpus_min"] == 0.25
-    assert payload["phoenix"]["cpus_max"] == 2
+    assert payload["phoenix"]["cpus_max"] == 1
 
 
 def test_resources_respects_the_configured_memory_ceiling_floor(tmp_path: Path):
@@ -2665,10 +2661,268 @@ def test_verify_commit_cli(tmp_path, capsys):
             else {NEW: new_doc, SIB: inspect_doc(SIB, name="sib")}
         return fake_backend(containers)(argv, timeout=timeout)
     args = Namespace(dir=str(out), service="omniroute", old_id=OMNI, config_id="sha256:" + "2" * 64,
-                     timeout=5, expect_no_deps=False)
+                     timeout=5, expect_no_deps=False, password_file=None)
     assert cmd_verify_commit(args, run=run, env={"PATH": "/usr/bin", "HOME": "/h"}) == 0
     assert capsys.readouterr().out.startswith("new_id=")
     args_bad = Namespace(**{**vars(args), "config_id": "sha256:" + "3" * 64})
     assert cmd_verify_commit(args_bad, run=run, env={"PATH": "/usr/bin", "HOME": "/h"}) == 1
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err
+
+
+def _resources_cfg(tmp_path, **overrides):
+    from pylib.config import migrate_config
+
+    cfg = migrate_config(yaml.safe_load(write_test_config(tmp_path).read_text()))
+    cfg["resources"]["llm_server"]["memory_ceiling_pct"] = 100
+    if overrides:
+        cfg["resources"]["overrides"] = overrides
+    return cfg
+
+
+def test_cmd_resources_applies_overrides_and_prints_a_summary(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    cfg = _resources_cfg(tmp_path, omniroute={"memory_max_mib": 4096})
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(
+        llmenv, "host_resources", lambda: {"cpu_count": 16, "memory_total_mib": 32768}
+    )
+
+    assert llmenv.cmd_resources(cast(Namespace, SimpleNamespace(config="cfg"))) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["omniroute"]["memory_max_mib"] == 4096
+    assert payload["overrides_applied"] == {"omniroute": ["memory_max_mib"]}
+    assert any(
+        "resource overrides applied: omniroute=memory_max_mib" in line
+        for line in payload["summary"]
+    )
+
+
+def test_cmd_budget_ram_check_sees_a_raised_minimum(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    facts = {
+        "compositor_render_node": "/dev/dri/renderD128",
+        "gpus": [{
+            "pci_address": "0000:03:00.0", "render_node": "/dev/dri/renderD129",
+            "vram_total_mib": 16304, "vram_used_mib": 200,
+        }],
+    }
+    available = []
+    for extra in ({}, {"omniroute": {"memory_min_mib": 2048}}):
+        cfg = _resources_cfg(tmp_path, **extra)
+        monkeypatch.setattr(llmenv, "load_config", lambda path, cfg=cfg: cfg)
+        monkeypatch.setattr(llmenv, "detect", lambda: facts)
+        monkeypatch.setattr(
+            llmenv, "host_resources", lambda: {"cpu_count": 24, "memory_total_mib": 32768}
+        )
+        monkeypatch.setattr(
+            llmenv, "_model_costs",
+            lambda config, path: [{"alias": "a", "weights_mib": 100, "ram_weights_mib": 0, "kv_mib": 10}],
+        )
+        llmenv.cmd_budget(cast(Namespace, SimpleNamespace(config="cfg", models_dir="models")))
+        available.append(json.loads(capsys.readouterr().out)["ram_available_mib"])
+
+    assert available[0] - available[1] == 2048 - 768
+
+
+def _render_args(tmp_path):
+    return cast(Namespace, SimpleNamespace(
+        config="cfg", models_dir="/m", presets_path="/p", repo_root="/r",
+        env_file=None, output=str(tmp_path / "compose.yml"), system_one_rocr_index="",
+    ))
+
+
+def _render_with(tmp_path, monkeypatch, **overrides):
+    import llmenv
+
+    cfg = _resources_cfg(tmp_path, **overrides)
+    # Stale generated mirror: must not reach the rendered file.
+    cfg["resources"]["omniroute"] = {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 512, "memory_max_mib": 999}
+    cfg["resources"]["remote_setup"] = {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 16, "memory_max_mib": 17}
+    cfg["resources"]["llm_server"].update({"cpus": 1, "memory_mib": 1})
+    host = {"cpu_count": 16, "memory_total_mib": 32768}
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "host_resources", lambda: host)
+    assert llmenv.cmd_render_compose(_render_args(tmp_path)) == 0
+    services = yaml.safe_load((tmp_path / "compose.yml").read_text())["services"]
+    return services, llmenv.limits_for(cfg, host)
+
+
+def test_render_compose_follows_overrides_not_the_stale_mirror(tmp_path, monkeypatch):
+    services, limits = _render_with(tmp_path, monkeypatch, omniroute={"memory_max_mib": 4096})
+    assert services["omniroute"]["mem_limit"] == "4096m"
+    assert services["remote-setup"]["mem_limit"] == "64m"
+    assert services["llm-server"]["mem_limit"] == f"{limits['llm_server']['memory_mib']}m"
+
+
+def test_render_compose_after_clear_restores_defaults_despite_the_stale_mirror(tmp_path, monkeypatch):
+    services, limits = _render_with(tmp_path, monkeypatch)
+    assert services["omniroute"]["mem_limit"] == "2048m"
+    assert services["remote-setup"]["mem_limit"] == "64m"
+    assert limits["llm_server"]["memory_mib"] > 1
+    assert services["llm-server"]["mem_limit"] == f"{limits['llm_server']['memory_mib']}m"
+
+
+def test_effective_policy_command_returns_the_merged_policy(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    cfg = _resources_cfg(tmp_path, phoenix={"cpus_max": 1.5, "memory_max_mib": 1536})
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    code = llmenv.cmd_effective_policy(cast(Namespace, SimpleNamespace(config="cfg", service="phoenix")))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload == {"cpus_min": 0.25, "cpus_max": 1.5, "memory_min_mib": 192, "memory_max_mib": 1536}
+
+
+def test_effective_policy_command_is_wired(tmp_path):
+    config = write_test_config(tmp_path)
+    shown = run("effective-policy", "--config", str(config), "--service", "omniroute")
+    assert shown.returncode == 0, shown.stderr
+    assert json.loads(shown.stdout)["memory_max_mib"] == 2048
+    assert run("effective-policy", "--config", str(config), "--service", "nginx").returncode == 2
+
+
+def test_render_compose_on_a_host_below_the_resource_floor_fails_with_a_clear_error(
+    tmp_path, monkeypatch, capsys
+):
+    """render-compose now reads the host (limits_for); ResourceError/DetectError must surface, not crash."""
+    import llmenv
+
+    cfg = _resources_cfg(tmp_path)
+    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
+    monkeypatch.setattr(llmenv, "host_resources", lambda: {"cpu_count": 1, "memory_total_mib": 512})
+    output = tmp_path / "compose.yml"
+    code = llmenv.main([
+        "--config", "cfg", "render-compose", "--models-dir", "/m",
+        "--presets-path", "/p", "--repo-root", "/r", "--output", str(output),
+    ])
+    assert code == 1  # `main` converts ResourceError into {"error": ...}, exit 1
+    assert "host has" in json.loads(capsys.readouterr().out)["error"]
+    assert not output.exists()
+
+
+def _override_call(config, action, **fields):
+    import llmenv
+
+    args = {
+        "config": str(config), "action": action, "service": None,
+        "cpus_min": None, "cpus_max": None, "memory_min_mib": None, "memory_max_mib": None,
+    }
+    args.update(fields)
+    return llmenv.cmd_resource_override(cast(Namespace, SimpleNamespace(**args)))
+
+
+def _saved_overrides(config):
+    return yaml.safe_load(config.read_text()).get("resources", {}).get("overrides")
+
+
+def _out(capsys):
+    return json.loads(capsys.readouterr().out)
+
+
+def test_override_lowering_a_cap_is_saved_with_a_benchmark_warning(tmp_path, capsys):
+    from pylib.resources import DEFAULT_POLICY
+
+    config = write_test_config(tmp_path)
+    lowered = DEFAULT_POLICY["omniroute"]["memory_max_mib"] - 512
+    assert _override_call(config, "set", service="omniroute", memory_max_mib=lowered) == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert _saved_overrides(config) == {"omniroute": {"memory_max_mib": lowered}}
+    assert out["effective"]["memory_max_mib"] == lowered
+    assert len(out["warnings"]) == 1 and "make resources-benchmark" in out["warnings"][0]
+    assert "make resources-benchmark" in captured.err  # visible, not only in the JSON
+
+
+def test_override_raising_a_cap_has_no_warning(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    assert _override_call(config, "set", service="omniroute", memory_max_mib=4096) == 0
+    assert _saved_overrides(config) == {"omniroute": {"memory_max_mib": 4096}}
+    out = _out(capsys)
+    assert out["warnings"] == []
+    apply = out["apply"]
+    assert "make restart" in apply
+    # render-unit.sh is "next start", not "apply now"; the disruption must be spelled out.
+    assert "does not touch running containers" in apply
+    assert "interrupted" in apply and "new cgroup lifetime" in apply
+
+
+def test_override_check_validates_and_writes_nothing(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    assert _override_call(config, "check", service="phoenix", memory_max_mib=512) == 0
+    out = _out(capsys)
+    assert out["effective"]["memory_max_mib"] == 512 and len(out["warnings"]) == 1
+    assert _override_call(config, "check", service="phoenix", memory_max_mib=64) == 1  # below memory_min_mib 192
+    assert "effective memory_min_mib" in _out(capsys)["error"]
+    assert _saved_overrides(config) is None
+
+
+def test_override_set_rejects_an_invalid_merge(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    assert _override_call(config, "set", service="omniroute", cpus_min=9) == 1
+    assert "effective cpus_min" in _out(capsys)["error"]
+    assert _saved_overrides(config) is None
+
+
+def test_override_set_requires_a_service_and_a_field(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    assert _override_call(config, "set", memory_max_mib=4096) == 1
+    assert _override_call(config, "set", service="omniroute") == 1
+
+
+def test_override_set_merges_with_the_existing_override(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    assert _override_call(config, "set", service="omniroute", memory_max_mib=4096) == 0
+    assert _override_call(config, "set", service="omniroute", cpus_max=3) == 0
+    assert _saved_overrides(config) == {"omniroute": {"memory_max_mib": 4096, "cpus_max": 3}}
+
+
+def test_override_clear_repairs_a_hand_broken_override(tmp_path, capsys):
+    import llmenv
+
+    config = write_test_config(tmp_path)
+    cfg = yaml.safe_load(config.read_text())
+    cfg.setdefault("resources", {})["overrides"] = {"omniroute": {"memory_max_mib": 0}}
+    config.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(llmenv.ConfigError):
+        llmenv.require_valid_config(llmenv.load_config(config))
+    assert _override_call(config, "clear", service="omniroute") == 0
+    assert _saved_overrides(config) is None
+
+
+def test_override_clear_drops_one_service_or_everything(tmp_path, capsys):
+    config = write_test_config(tmp_path)
+    _override_call(config, "set", service="omniroute", memory_max_mib=4096)
+    _override_call(config, "set", service="remote_setup", memory_max_mib=128)
+    assert _override_call(config, "clear", service="omniroute") == 0
+    assert _saved_overrides(config) == {"remote_setup": {"memory_max_mib": 128}}
+    assert _override_call(config, "clear") == 0
+    assert "overrides" not in yaml.safe_load(config.read_text())["resources"]
+
+
+def test_override_show_lists_overrides_and_defaults(tmp_path, capsys):
+    from pylib.resources import DEFAULT_POLICY
+
+    config = write_test_config(tmp_path)
+    _override_call(config, "set", service="omniroute", memory_max_mib=4096)
+    capsys.readouterr()
+    assert _override_call(config, "show") == 0
+    out = _out(capsys)
+    assert out["overrides"] == {"omniroute": {"memory_max_mib": 4096}}
+    assert out["defaults"] == DEFAULT_POLICY
+    assert out["defaults"]["omniroute"]["memory_max_mib"] == 2048
+
+
+def test_resource_override_subcommand_is_wired_and_the_gate_is_gone(tmp_path):
+    config = write_test_config(tmp_path)
+    shown = run("resource-override", "show", "--config", str(config))
+    assert shown.returncode == 0, shown.stderr
+    assert "defaults" in json.loads(shown.stdout)
+    base = ["resource-override", "set", "--config", str(config), "--service", "omniroute"]
+    assert run(*base, "--memory-max-mib", "0").returncode == 2
+    for retired in (["--evidence", "x.json"], ["--max-peak-ratio", "0.8"], ["--min-observation-hours", "24"]):
+        assert run(*base, "--memory-max-mib", "1536", *retired).returncode == 2, retired
+    assert run("resource-evidence", "--service", "omniroute").returncode == 2

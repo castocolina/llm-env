@@ -11,20 +11,7 @@ from typing import Any, TypeGuard
 
 import yaml
 
-from pylib.resources import (
-    OMNIROUTE_CPU_MAX,
-    OMNIROUTE_CPU_MIN,
-    OMNIROUTE_MEMORY_MAX_MIB,
-    OMNIROUTE_MEMORY_MIN_MIB,
-    PHOENIX_CPUS_MAX,
-    PHOENIX_CPUS_MIN,
-    PHOENIX_MEMORY_MAX_MIB,
-    PHOENIX_MEMORY_MIN_MIB,
-    REMOTE_SETUP_CPU_MAX,
-    REMOTE_SETUP_CPU_MIN,
-    REMOTE_SETUP_MEMORY_MAX_MIB,
-    REMOTE_SETUP_MEMORY_MIN_MIB,
-)
+from pylib.resources import validate_overrides
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "llm-env" / "models.yml"
 
@@ -81,56 +68,6 @@ def _positive_int(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _validate_min_max_resources(resources: dict[str, Any], key: str) -> list[str]:
-    """Validate a resources.<key> mapping shaped {cpus_min, cpus_max,
-    memory_min_mib, memory_max_mib}, including that each min <= its max."""
-    errors: list[str] = []
-    section = resources.get(key, {})
-    if not isinstance(section, dict):
-        return [f"resources.{key} must be a mapping"]
-
-    cpus_min = section.get("cpus_min", 0)
-    if isinstance(cpus_min, bool) or not (_finite_number(cpus_min) and cpus_min >= 0):
-        errors.append(f"resources.{key}.cpus_min must be a non-negative number")
-    cpus_max = section.get("cpus_max", 0)
-    if isinstance(cpus_max, bool) or not (_finite_number(cpus_max) and cpus_max >= 0):
-        errors.append(f"resources.{key}.cpus_max must be a non-negative number")
-    if (
-        f"resources.{key}.cpus_min must be a non-negative number" not in errors
-        and f"resources.{key}.cpus_max must be a non-negative number" not in errors
-        and cpus_max != 0
-        and cpus_min > cpus_max
-    ):
-        errors.append(
-            f"resources.{key}.cpus_min ({cpus_min}) must not exceed "
-            f"resources.{key}.cpus_max ({cpus_max})"
-        )
-
-    memory_min_mib = section.get("memory_min_mib", 0)
-    if not (memory_min_mib == 0 or _positive_int(memory_min_mib)):
-        errors.append(
-            f"resources.{key}.memory_min_mib must be zero or a positive integer"
-        )
-    memory_max_mib = section.get("memory_max_mib", 0)
-    if not (memory_max_mib == 0 or _positive_int(memory_max_mib)):
-        errors.append(
-            f"resources.{key}.memory_max_mib must be zero or a positive integer"
-        )
-    if (
-        f"resources.{key}.memory_min_mib must be zero or a positive integer"
-        not in errors
-        and f"resources.{key}.memory_max_mib must be zero or a positive integer"
-        not in errors
-        and memory_max_mib != 0
-        and memory_min_mib > memory_max_mib
-    ):
-        errors.append(
-            f"resources.{key}.memory_min_mib ({memory_min_mib}) must not exceed "
-            f"resources.{key}.memory_max_mib ({memory_max_mib})"
-        )
-    return errors
-
-
 def _finite_number(value: Any) -> bool:
     return (
         isinstance(value, int) and not isinstance(value, bool)
@@ -163,31 +100,16 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             llm_server_resources.setdefault("memory_ceiling_floor_pct", 30)
             llm_server_resources.setdefault("cpu_ceiling_pct", 60)
             llm_server_resources.setdefault("cpu_ceiling_floor_pct", 20)
-        omniroute_resources = resources.setdefault("omniroute", {})
-        if isinstance(omniroute_resources, dict):
-            omniroute_resources.setdefault("cpus_min", OMNIROUTE_CPU_MIN)
-            omniroute_resources.setdefault("cpus_max", OMNIROUTE_CPU_MAX)
-            omniroute_resources.setdefault("memory_min_mib", OMNIROUTE_MEMORY_MIN_MIB)
-            omniroute_resources.setdefault("memory_max_mib", OMNIROUTE_MEMORY_MAX_MIB)
-        remote_setup_resources = resources.setdefault("remote_setup", {})
-        if isinstance(remote_setup_resources, dict):
-            remote_setup_resources.setdefault("cpus_min", REMOTE_SETUP_CPU_MIN)
-            remote_setup_resources.setdefault("cpus_max", REMOTE_SETUP_CPU_MAX)
-            remote_setup_resources.setdefault(
-                "memory_min_mib", REMOTE_SETUP_MEMORY_MIN_MIB
-            )
-            remote_setup_resources.setdefault(
-                "memory_max_mib", REMOTE_SETUP_MEMORY_MAX_MIB
-            )
-        # Phoenix is not part of the rendered main-stack compose file (it
-        # owns a separate compose project); its policy constants live here
-        # so setup/start persist the same values phoenix.sh renders.
-        phoenix_resources = resources.setdefault("phoenix", {})
-        if isinstance(phoenix_resources, dict):
-            phoenix_resources.setdefault("cpus_min", PHOENIX_CPUS_MIN)
-            phoenix_resources.setdefault("cpus_max", PHOENIX_CPUS_MAX)
-            phoenix_resources.setdefault("memory_min_mib", PHOENIX_MEMORY_MIN_MIB)
-            phoenix_resources.setdefault("memory_max_mib", PHOENIX_MEMORY_MAX_MIB)
+        # Retired generated data: the `resources.<service>` mirror (nothing reads it;
+        # `make resources` shows the effective policy) and the evidence-gate reference
+        # removed on 2026-10-24. Existing files may still carry them.
+        for service in ("omniroute", "remote_setup", "phoenix", "system_one"):
+            resources.pop(service, None)
+        overrides = resources.get("overrides")
+        if isinstance(overrides, dict):
+            for override in overrides.values():
+                if isinstance(override, dict):
+                    override.pop("memory_max_evidence", None)
 
     omniroute = cfg.setdefault("omniroute", {})
     if isinstance(omniroute, dict):
@@ -391,13 +313,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                         "resources.llm_server.cpu_ceiling_floor_pct must be a "
                         "finite number greater than 0 and at most 100"
                     )
-            errors.extend(
-                _validate_min_max_resources(resources, "omniroute")
-            )
-            errors.extend(
-                _validate_min_max_resources(resources, "remote_setup")
-            )
-            errors.extend(_validate_min_max_resources(resources, "phoenix"))
+            errors.extend(validate_overrides(resources.get("overrides")))
 
     if "omniroute" in cfg:
         omniroute = cfg["omniroute"]

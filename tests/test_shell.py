@@ -819,16 +819,12 @@ def test_setup_no_gpu_skips_gpu_model_and_vulkan_steps(tmp_path: pathlib.Path) -
 
 
 def test_setup_no_gpu_still_reserves_omniroute_resources(tmp_path: pathlib.Path) -> None:
+    """The policy is computed and reported, but no `resources.<service>` mirror is written any more."""
     result, _calls, config = run_setup_no_gpu(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert yq_value(config, ".resources.omniroute.cpus_min") == "1"
-    assert yq_value(config, ".resources.omniroute.cpus_max") == "4"
-    assert yq_value(config, ".resources.omniroute.memory_min_mib") == "1024"
-    assert yq_value(config, ".resources.omniroute.memory_max_mib") == "4096"
-    assert yq_value(config, ".resources.remote_setup.cpus_min") == "1"
-    assert yq_value(config, ".resources.remote_setup.cpus_max") == "1"
-    assert yq_value(config, ".resources.remote_setup.memory_min_mib") == "32"
-    assert yq_value(config, ".resources.remote_setup.memory_max_mib") == "64"
+    assert "reserved 1-4 CPUs, 1024-4096 MiB RAM for omniroute" in result.stdout
+    assert yq_value(config, ".resources.omniroute") == "null"
+    assert yq_value(config, ".resources.remote_setup") == "null"
 
 
 def test_setup_defaults_to_gpu_enabled_when_no_gpu_env_unset(tmp_path: pathlib.Path) -> None:
@@ -1421,22 +1417,11 @@ def test_setup_writes_computed_resource_limits(tmp_path: pathlib.Path) -> None:
     assert yq_value(config, ".resources.llm_server.memory_mib") == "27648"
 
 
-def test_setup_writes_computed_omniroute_resource_limits(tmp_path: pathlib.Path) -> None:
+def test_setup_writes_no_service_resource_mirror(tmp_path: pathlib.Path) -> None:
     result, _, config = run_setup_with_numbered_selection(tmp_path, "1\n1\n2\n")
     assert result.returncode == 0, result.stdout + result.stderr
     cfg = yaml.safe_load(config.read_text())
-    assert cfg["resources"]["omniroute"] == {
-        "cpus_min": 1,
-        "cpus_max": 4,
-        "memory_min_mib": 1024,
-        "memory_max_mib": 4096,
-    }
-    assert cfg["resources"]["remote_setup"] == {
-        "cpus_min": 1,
-        "cpus_max": 1,
-        "memory_min_mib": 32,
-        "memory_max_mib": 64,
-    }
+    assert set(cfg["resources"]) <= {"llm_server", "overrides"}
 
 
 def test_setup_fails_instead_of_leaving_resources_uncapped(
@@ -3953,6 +3938,7 @@ def test_disable_boot_removes_install_section_from_the_wrapper_unit(
 def run_render_unit_with_legacy_rocm_config(
     tmp_path: pathlib.Path,
     llm_server_enabled: bool = True,
+    extra_config: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     """Render a manually retained legacy backend config in an isolated home."""
     real_yq = shutil.which("yq")
@@ -4004,6 +3990,7 @@ def run_render_unit_with_legacy_rocm_config(
         "    ctx_size: 8192\n"
         "    client_max_output_tokens: 8192\n"
         "    n_gpu_layers: 99\n"
+        + extra_config
     )
 
     for name in ("podman", "systemctl"):
@@ -4038,6 +4025,58 @@ def run_render_unit_with_legacy_rocm_config(
         check=False,
     )
     return result, home / ".config/systemd/user/llm-server.service"
+
+
+def rerun_render_unit(tmp_path: pathlib.Path) -> subprocess.CompletedProcess[str]:
+    """Run setup/render-unit.sh again on the config/home the helper above prepared."""
+    return subprocess.run(
+        ["/usr/bin/bash", "setup/render-unit.sh"],
+        cwd=ROOT,
+        env=os.environ | {
+            "HOME": str(tmp_path / "home"),
+            "LLM_ENV_CONFIG": str(tmp_path / "models.yml"),
+            "LLM_ENV_COMPOSE_INSPECT_DIR": str(tmp_path / "compose-inspect"),
+            "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+            "REAL_UV": shutil.which("uv") or "",
+            "REAL_YQ": shutil.which("yq") or "",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _rendered_omniroute_limit(tmp_path: pathlib.Path) -> str:
+    import yaml
+
+    document = yaml.safe_load((tmp_path / "compose-inspect/docker-compose.yml").read_text())
+    return document["services"]["omniroute"]["mem_limit"]
+
+
+def test_render_unit_ignores_a_stale_resource_mirror(tmp_path: pathlib.Path) -> None:
+    """enable-boot runs render-unit.sh; the unit then starts the file it renders."""
+    stale = "resources:\n  omniroute: {cpus_min: 1, cpus_max: 4, memory_min_mib: 512, memory_max_mib: 999}\n"
+    result, _unit = run_render_unit_with_legacy_rocm_config(tmp_path, extra_config=stale)
+    assert result.returncode == 0, result.stderr
+    assert _rendered_omniroute_limit(tmp_path) == "2048m"  # the mirror (999) is ignored
+
+    # The first run re-serialized models.yml (migrate), so edit it with yq.
+    subprocess.run(
+        ["yq", "-i", ".resources.overrides.omniroute.memory_max_mib = 4096", str(tmp_path / "models.yml")],
+        check=True,
+    )
+    assert rerun_render_unit(tmp_path).returncode == 0
+    assert _rendered_omniroute_limit(tmp_path) == "4096m"
+
+
+def test_render_unit_shows_the_renderers_resource_error(tmp_path: pathlib.Path) -> None:
+    """An override that cannot fit this host must fail loudly, not as a silent exit 1."""
+    too_big = "resources:\n  overrides:\n    omniroute: {memory_min_mib: 8000000, memory_max_mib: 8000000}\n"
+    result, _unit = run_render_unit_with_legacy_rocm_config(tmp_path, extra_config=too_big)
+    assert result.returncode != 0
+    assert "render-compose failed" in result.stdout + result.stderr
+    assert "MiB is required to reserve" in result.stdout + result.stderr
+    assert not (tmp_path / "compose-inspect/docker-compose.yml").exists()
 
 
 def test_render_unit_never_adds_the_rocm_kernel_device(tmp_path: pathlib.Path) -> None:
@@ -4948,6 +4987,8 @@ def run_lifecycle_script(
     llm_server_enabled: bool = True,
     system_one_enabled: bool = False,
     system_one_port: int = 8010,
+    extra_config: str = "",
+    real_render_compose: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -5018,6 +5059,7 @@ def run_lifecycle_script(
         "  image: localhost/llm-env-system-one:rocm\n"
         "  models: english\n"
         "  vram_reserve_mib: 4096\n"
+        + extra_config
     )
     config.chmod(config_mode)
 
@@ -5062,7 +5104,7 @@ def run_lifecycle_script(
     resources_case = (
         "printf '%s\\n' '{\"error\": \"host has 3 CPUs; more than 3 are required\"}'; exit 1"
         if resources_failure
-        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, \"phoenix\": {\"cpus_min\": 0.25, \"cpus_max\": 2, \"memory_min_mib\": 256, \"memory_max_mib\": 1024}}'"
+        else "printf '%s\\n' '{\"llm_server\": {\"cpus\": 4, \"memory_mib\": 8000}, \"omniroute\": {\"cpus_min\": 1, \"cpus_max\": 4, \"memory_min_mib\": 1024, \"memory_max_mib\": 4096}, \"remote_setup\": {\"cpus_min\": 1, \"cpus_max\": 1, \"memory_min_mib\": 32, \"memory_max_mib\": 64}, \"phoenix\": {\"cpus_min\": 0.25, \"cpus_max\": 2, \"memory_min_mib\": 256, \"memory_max_mib\": 1024}, \"summary\": [\"stub resource summary\"]}'"
     )
     uv = commands / "uv"
     uv.write_text(
@@ -5075,9 +5117,11 @@ def run_lifecycle_script(
         "case \"$*\" in *' rocr-index '*) printf '0\\n' ;; esac\n"
         "case \"$*\" in *' process-vram '*) printf '%s\\n' \"${SYSTEM_ONE_VRAM:-4245}\" ;; esac\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
+        "case \"$*\" in *' render-compose'*) [ \"$REAL_RENDER_COMPOSE\" = 1 ] && exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
         "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
         f"case \"$*\" in *' resources') {resources_case} ;; esac\n"
+        "case \"$*\" in *' effective-policy'*) printf '%s\\n' '{\"cpus_min\": 0.25, \"cpus_max\": 2, \"memory_min_mib\": 256, \"memory_max_mib\": 1024}' ;; esac\n"
     )
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
     podman = commands / "podman"
@@ -5136,6 +5180,7 @@ def run_lifecycle_script(
         "PATH": f"{commands}:/usr/bin:/bin",
         "REAL_YQ": real_yq,
         "REAL_UV": real_uv,
+        "REAL_RENDER_COMPOSE": "1" if real_render_compose else "0",
         "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
         "PHOENIX_NETWORK_EXISTS": "1" if system_one_enabled else "0",
     } | (env_overrides or {})
@@ -12604,3 +12649,234 @@ def test_phoenix_trial_recreation_refuses_volume_drift(tmp_path: pathlib.Path):
     assert "--force-recreate phoenix" in calls
     assert calls.count("phoenix-trial verify") == 1
     assert "phoenix-trial seed" not in calls
+
+
+def _phoenix_resource_env(tmp_path: pathlib.Path, extra_config: str) -> subprocess.CompletedProcess[str]:
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        "server: {host: 0.0.0.0, port: 8000, api_key: k, mdns_name: llm, sleep_idle_seconds: 300}\n"
+        "gpu: {pci_address: '0000:03:00.0', device_name: d, backend: vulkan, image: i,"
+        " vram_total_mib: 16304, reserve_mode: auto, reserve_floor_mib: 1024}\n"
+        "runtime: {models_max: 1, parallel_slots: 1, ubatch_size: 512, flash_attn: true,"
+        " cache_type_k: q8_0, cache_type_v: q8_0}\n"
+        "models:\n"
+        "  - {alias: a, label: A, parameters: 1B, quantization: Q4_K_M, enabled: true, file: a.gguf,"
+        " url: u, size_bytes: 1, vram_budget: 10%, ctx_size: 4096, client_max_output_tokens: 4096,"
+        " n_gpu_layers: 99}\n"
+        + extra_config
+    )
+    return subprocess.run(
+        ["/usr/bin/bash", "scripts/phoenix.sh", "resource-env"], cwd=ROOT,
+        env=os.environ | {"LLM_ENV_CONFIG": str(config), "HOME": str(tmp_path / "home"),
+                          "XDG_STATE_HOME": str(tmp_path / "state")},
+        text=True, capture_output=True, check=False,
+    )
+
+
+def test_phoenix_resource_env_uses_the_effective_policy(tmp_path: pathlib.Path) -> None:
+    result = _phoenix_resource_env(
+        tmp_path, "resources:\n  overrides:\n    phoenix: {cpus_max: 1.5, memory_max_mib: 1536}\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = dict(line.split("=", 1) for line in result.stdout.split() if "=" in line)
+    assert lines["PHOENIX_CPUS_MAX"] == "1.5"
+    assert lines["PHOENIX_MEMORY_MAX_MIB"] == "1536"
+    assert lines["PHOENIX_MEMORY_MIN_MIB"] == "192"
+    assert lines["PHOENIX_CPU_SHARES"] == "256"
+
+
+def test_phoenix_resource_env_ignores_a_stale_mirror(tmp_path: pathlib.Path) -> None:
+    result = _phoenix_resource_env(
+        tmp_path, "resources:\n  phoenix: {cpus_min: 0.5, cpus_max: 3, memory_min_mib: 512, memory_max_mib: 4096}\n"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PHOENIX_MEMORY_MAX_MIB=1024" in result.stdout
+    assert "PHOENIX_CPUS_MAX=1" in result.stdout
+
+
+def test_phoenix_start_and_resource_env_share_one_loader() -> None:
+    script = (ROOT / "scripts/phoenix.sh").read_text()
+    assert script.count("load_resource_env") >= 3  # definition, start, resource-env
+    assert "yq -r '.resources.phoenix" not in script
+
+
+def test_start_keeps_resource_overrides_and_prints_the_policy_summary(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, config, _calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        extra_config="resources:\n  overrides:\n    omniroute:\n      memory_max_mib: 4096\n",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".resources.overrides.omniroute.memory_max_mib") == "4096"
+    assert "stub resource summary" in result.stdout
+
+
+def _start_and_read_omniroute_limit(
+    tmp_path: pathlib.Path, extra_config: str
+) -> str:
+    import yaml
+
+    tmp_path.mkdir()
+    result, _config, _calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        llm_server_enabled=False,  # keeps the real render host-independent
+        real_render_compose=True,
+        extra_config=extra_config,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    document = yaml.safe_load((tmp_path / "compose-inspect/docker-compose.yml").read_text())
+    return document["services"]["omniroute"]["mem_limit"]
+
+
+STALE_MIRROR = (
+    "resources:\n"
+    "  omniroute: {cpus_min: 1, cpus_max: 4, memory_min_mib: 512, memory_max_mib: 999}\n"
+)
+
+
+def test_start_renders_a_resource_override(tmp_path: pathlib.Path) -> None:
+    limit = _start_and_read_omniroute_limit(
+        tmp_path / "set", STALE_MIRROR + "  overrides:\n    omniroute: {memory_max_mib: 4096}\n"
+    )
+    assert limit == "4096m"
+
+
+def test_start_after_an_override_is_cleared_renders_the_default(tmp_path: pathlib.Path) -> None:
+    """The cleared config still carries a stale generated mirror (999 MiB) and the
+    canned stub rewrites it to 4096 MiB; neither may reach the container."""
+    limit = _start_and_read_omniroute_limit(tmp_path / "clear", STALE_MIRROR)
+    assert limit == "2048m"
+
+
+def _override_cli(tmp_path: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # AGENTS.md: Python is invoked only as `uv run llmenv.py <subcommand>`.
+    return subprocess.run(
+        ["uv", "run", "llmenv.py", "resource-override", *args,
+         "--config", str(tmp_path / "models.yml")],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+
+
+def test_render_unit_follows_resource_override_set_and_clear(tmp_path: pathlib.Path) -> None:
+    """set -> render-unit.sh (what enable-boot runs) -> clear -> render-unit.sh, with a stale mirror present."""
+    stale = "resources:\n  omniroute: {cpus_min: 1, cpus_max: 4, memory_min_mib: 512, memory_max_mib: 999}\n"
+    first, _unit = run_render_unit_with_legacy_rocm_config(tmp_path, extra_config=stale)
+    assert first.returncode == 0, first.stderr
+    assert _rendered_omniroute_limit(tmp_path) == "2048m"
+
+    setting = _override_cli(tmp_path, "set", "--service", "omniroute", "--memory-max-mib", "4096")
+    assert setting.returncode == 0, setting.stdout + setting.stderr
+    assert rerun_render_unit(tmp_path).returncode == 0
+    assert _rendered_omniroute_limit(tmp_path) == "4096m"
+
+    clearing = _override_cli(tmp_path, "clear", "--service", "omniroute")
+    assert clearing.returncode == 0, clearing.stdout + clearing.stderr
+    assert rerun_render_unit(tmp_path).returncode == 0
+    assert _rendered_omniroute_limit(tmp_path) == "2048m"
+
+
+def test_render_unit_renders_a_hand_edited_lowered_cap(tmp_path: pathlib.Path) -> None:
+    """Lowering below the default is allowed since the evidence gate was removed (2026-10-24)."""
+    hand_edit = "resources:\n  overrides:\n    omniroute: {memory_max_mib: 1536}\n"
+    result, _unit = run_render_unit_with_legacy_rocm_config(tmp_path, extra_config=hand_edit)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _rendered_omniroute_limit(tmp_path) == "1536m"
+
+
+def _stub_uv(bin_dir: pathlib.Path, body: str) -> None:
+    bin_dir.mkdir(exist_ok=True)
+    uv = bin_dir / "uv"
+    uv.write_text("#!/usr/bin/bash\n" + body)
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+
+def _script_env(tmp_path: pathlib.Path, **extra: str) -> dict[str, str]:
+    import os
+
+    return {
+        **os.environ,
+        "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+        "LLM_ENV_CONFIG": str(tmp_path / "models.yml"),
+        **extra,
+    }
+
+
+def test_resources_script_prints_the_policy_table_and_summary(tmp_path: pathlib.Path) -> None:
+    payload = {
+        "llm_server": {"cpus": 0, "memory_mib": 0},
+        "omniroute": {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 2048},
+        "remote_setup": {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
+        "system_one": {"cpus_min": 0, "cpus_max": 0, "memory_min_mib": 0, "memory_max_mib": 0},
+        "phoenix": {"cpus_min": 0, "cpus_max": 0, "memory_min_mib": 0, "memory_max_mib": 0},
+        "overrides_applied": {"omniroute": ["memory_max_mib"]},
+        "summary": ["hard memory caps total 2112 MiB; soft reservations total 1056 MiB"],
+    }
+    (tmp_path / "models.yml").write_text("version: 1\n")
+    _stub_uv(tmp_path / "bin", f"cat <<'EOF'\n{json.dumps(payload)}\nEOF\n")
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/resources.sh"], cwd=ROOT, env=_script_env(tmp_path),
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "override: memory_max_mib" in result.stdout
+    assert "remote_setup" in result.stdout and "default" in result.stdout
+    assert "system_one" not in result.stdout.replace("service", "")  # disabled rows hidden
+    assert "hard memory caps total 2112 MiB" in result.stdout
+
+
+def _resources_benchmark(tmp_path: pathlib.Path, **env: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    calls = tmp_path / "calls"
+    _stub_uv(tmp_path / "bin", "printf '%s\\n' \"$*\" >> \"$STUB_CALLS\"\nprintf '{}\\n'\n")
+    podman = tmp_path / "bin" / "podman"
+    podman.write_text("#!/usr/bin/bash\necho \"podman $*\" >> \"$STUB_CALLS\"\nexit 99\n")
+    podman.chmod(0o755)
+    (tmp_path / "models.yml").write_text("version: 1\n")
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/resources-benchmark.sh"], cwd=ROOT,
+        env=_script_env(tmp_path, STUB_CALLS=str(calls), **env), capture_output=True, text=True, check=False,
+    )
+    return result, calls.read_text() if calls.exists() else ""
+
+
+def test_resources_benchmark_defaults_to_the_throwaway_omniroute_run(tmp_path: pathlib.Path) -> None:
+    result, calls = _resources_benchmark(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"--config {tmp_path / 'models.yml'} resource-benchmark omniroute" in calls
+    assert "podman " not in calls  # the script itself never drives podman
+
+
+def test_resources_benchmark_attach_passes_containers_load_and_gpu(tmp_path: pathlib.Path) -> None:
+    result, calls = _resources_benchmark(
+        tmp_path, SERVICE="attach", CONTAINERS="system-one llm-env-phoenix_phoenix_1",
+        RUN="make system-one-benchmark", DURATION="30", COOLDOWN="20", RENDER="renderD128",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("resource-benchmark attach --container system-one --container llm-env-phoenix_phoenix_1 "
+            "--run make system-one-benchmark --seconds 30 --cooldown 20 --render renderD128") in calls
+
+
+@pytest.mark.parametrize(("env", "fragment"), [
+    ({"SERVICE": "attach"}, "CONTAINERS"),
+    ({"SERVICE": "report"}, "FILE"),
+    ({"SERVICE": "phoenix"}, "SERVICE must be omniroute, attach or report"),
+])
+def test_resources_benchmark_rejects_incomplete_arguments(tmp_path: pathlib.Path, env, fragment) -> None:
+    result, calls = _resources_benchmark(tmp_path, **env)
+    assert result.returncode != 0 and fragment in result.stdout + result.stderr
+    assert "resource-benchmark" not in calls
+
+
+def test_makefile_exposes_resources_targets() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    help_text = (ROOT / "scripts/help.sh").read_text()
+    assert "bash scripts/resources.sh" in makefile
+    assert "resources-benchmark:\n\t@bash tools/run-target.sh resources-benchmark -- bash scripts/resources-benchmark.sh" in makefile
+    assert '_help_line "resources"' in help_text
+    assert '_help_line "resources-benchmark"' in help_text
+    # The retired evidence gate is gone from every entry point.
+    assert "resources-measure" not in makefile + help_text
+    assert not (ROOT / "scripts/resources-measure.sh").exists()

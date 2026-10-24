@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""OpenAI-compatible stub for characterization: GET /v1/models, POST /v1/chat/completions (stream or not). No inference."""
+"""OpenAI-compatible stub for characterization: GET /v1/models, POST /v1/chat/completions (stream or not),
+POST /v1/embeddings. No inference."""
 import argparse
 import json
 import time
@@ -36,6 +37,9 @@ def main() -> None:
             if s.get("mode") == "fail":
                 return self._json(500, {"error": {"message": "fixture failure"}})
             chunks, delay = int(s.get("chunks", 3)), float(s.get("delay", 0.05))
+            if self.path.split("?")[0] == "/v1/embeddings":
+                return self._json(200, {"object": "list", "model": req.get("model", ""), "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                                        "data": [{"object": "embedding", "index": 0, "embedding": [0.0, 0.1, 0.2]}]})
             if not req.get("stream"):
                 time.sleep(chunks * delay)
                 return self._json(200, {"id": "c", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "x" * chunks}, "finish_reason": "stop"}]})
@@ -51,7 +55,10 @@ def main() -> None:
         def log_message(self, *a):
             pass
 
-    ThreadingHTTPServer((args.host, args.port), H).serve_forever()
+    class Server(ThreadingHTTPServer):
+        request_queue_size = 256                       # the default backlog of 5 drops SYNs under concurrent load
+
+    Server((args.host, args.port), H).serve_forever()
 
 
 if __name__ == "__main__":

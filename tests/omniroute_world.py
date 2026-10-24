@@ -5,6 +5,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import time
 
 import yaml
 from omniroute_fakes import (
@@ -37,7 +38,7 @@ def make_repo_copy(tmp_path, profile_entries):
     dst = tmp_path / "repo"
     if not dst.exists():  # a second call in the same test only rewrites the profile list
         shutil.copytree(REPO, dst, ignore=shutil.ignore_patterns(
-            ".git", ".venv", "tmp", ".docs", "__pycache__", ".pytest_cache", "node_modules", ".codegraph"),
+            ".git", ".venv", "tmp", "docs", ".docs", "__pycache__", ".pytest_cache", "node_modules", ".codegraph"),
             ignore_dangling_symlinks=True)
     (dst / "pylib/omniroute_activity_profiles.json").write_text(json.dumps({"schema": 1, "profiles": profile_entries}))
     return dst
@@ -45,8 +46,14 @@ def make_repo_copy(tmp_path, profile_entries):
 
 class World:
     def __init__(self, tmp_path, *, staged=STAGED, staged_inspect_id=None, dependent=False, drift_after_observer=False,
-                 up_rc=0, stop_sleep=0, prior_tag_sleep=0, env=None, busy=False):
+                 up_rc=0, stop_sleep=0, prior_tag_sleep=0, env=None, busy=False, old_state="running",
+                 old_health="healthy", absent=False, new_health="healthy", busy_at_last_look=False,
+                 pull_rc=0, pull_sleep=0):
         self.tmp, self.env_extra = tmp_path, env or {}
+        # The scripts' private work-dir parent ($XDG_RUNTIME_DIR, 0700) and TMPDIR: every work dir a run leaves
+        # behind lands here, and close() fails the test when one with a password or deployment file survives.
+        self.runtime = tmp_path / "run"
+        self.runtime.mkdir(mode=0o700)
         self.port = free_port()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
@@ -70,10 +77,10 @@ class World:
         self.immutable_ref = "docker.io/diegosouzapw/omniroute@sha256:" + \
             hashlib.sha256(manifest(staged).encode()).hexdigest()
         inspect_id = (staged_inspect_id or staged).removeprefix("sha256:")
-        old = omni(port=self.port, env=[f"INITIAL_PASSWORD={PASSWORD}", f"PORT={self.port}",
-                                        "REQUIRE_API_KEY=true", "NODE_ENV=production"])
+        old = omni(port=self.port, state=old_state, health=old_health,
+                   env=[f"INITIAL_PASSWORD={PASSWORD}", f"PORT={self.port}", "REQUIRE_API_KEY=true", "NODE_ENV=production"])
         new = inspect_doc(NEW, name="omniroute", port=self.port, image=staged.removeprefix("sha256:"),
-                          env=old["Config"]["Env"])
+                          env=old["Config"]["Env"], health=new_health)
         rs = inspect_doc(RS, name="remote-setup", deps=[OMNI])
         eff = {"services": {"omniroute": {"image": "docker.io/diegosouzapw/omniroute:latest",
                                           "container_name": "omniroute",
@@ -84,7 +91,7 @@ class World:
                "networks": {"default": {}}, "volumes": {"omniroute-data": {}}}
         old["Mounts"] = [{"Type": "volume", "Name": f"{PROJECT}_omniroute-data"}]
         new["Mounts"] = old["Mounts"]
-        start_ids = [OMNI] + ([RS] if dependent else [])
+        start_ids = ([] if absent else [OMNI]) + ([RS] if dependent else [])
 
         def ps(ids):
             return json.dumps([{"Id": i} for i in ids])
@@ -93,7 +100,8 @@ class World:
         rules = [
             {T: "podman", "prefix": ["info"],
              "stdout": json.dumps({"store": {"graphRoot": str(tmp_path / "g"), "runRoot": str(tmp_path / "r")},
-                                   "host": {"security": {"rootless": True}, "serviceIsRemote": False}})},
+                                   "host": {"security": {"rootless": True}, "serviceIsRemote": False,
+                                            "os": "linux", "arch": "amd64"}})},
             {T: "podman", "prefix": ["ps", "--all", "--filter"], "stdout": ""},
             {T: "podman", "prefix": ["ps"], "phase": ["start"], "stdout": ps(start_ids)},
             {T: "podman", "prefix": ["ps"], "phase": ["post-observer"],
@@ -108,8 +116,11 @@ class World:
             {T: "podman", "prefix": ["image", "inspect", "--format", "json"],
              "stdout": json.dumps([{"Id": inspect_id, "Os": "linux", "Architecture": "amd64", "Variant": ""}])},
             {T: "podman", "prefix": ["image", "inspect", "--format", "{{.Id}}"], "sleep": prior_tag_sleep,
-             "stdout": IMG + "\n"},
+             "stdout": IMG + "\n",  # the worker's prior-tag read: after the observer, just before its last look
+             **({"write_file": [str(self.state), json.dumps({"active": 1, "cache_ms": 1000})]}
+                if busy_at_last_look else {})},
             {T: "podman", "prefix": ["stop"], "sleep": stop_sleep},
+            {T: "podman", "prefix": ["pull"], "rc": pull_rc, "sleep": pull_sleep},
             {T: "podman", "prefix": ["rm"], "set_phase": "post-rm"},
             {T: "skopeo", "prefix": ["inspect", "--raw"], "stdout": manifest(staged)},
             {T: "podman-compose", "prefix": ["--version"], "stdout": "podman-compose 1.6.0\n"},
@@ -136,7 +147,8 @@ class World:
         return {**base, "HOME": str(self.home), "PATH": f"{self.bin}:{base['PATH']}",
                 "UV_PROJECT_ENVIRONMENT": str(REPO / ".venv"),
                 "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR", str(pathlib.Path.home() / ".cache/uv")),
-                **self.env_extra}
+                "XDG_RUNTIME_DIR": str(self.runtime), "TMPDIR": str(self.runtime),
+                "XDG_STATE_HOME": str(self.tmp / "state"), **self.env_extra}
 
     def run(self, **env):
         return subprocess.run(["bash", str(self.repo / "scripts/update-omniroute.sh")],
@@ -161,6 +173,17 @@ class World:
                 out.append((c["tool"], *a))
         return out
 
+    def work_dirs(self):
+        """Updater/migration work dirs still present (any mktemp-style name) that hold secrets or deployment state."""
+        return [d for d in self.runtime.iterdir() if d.is_dir() and d.name.startswith(("llm-env-update.", "tmp."))
+                and any((d / f).exists() for f in ("pw", "deploy.env", "projection.yml"))]
+
     def close(self):
         self.server.kill()
         self.server.wait()
+        end = time.monotonic() + 10  # an orphaned observer notices its dead lease within a fraction of a second
+        while self.work_dirs() and time.monotonic() < end:
+            time.sleep(0.2)
+        assert not self.work_dirs(), f"a run left its work dir (password/deployment files): {self.work_dirs()}"
+        left = list((self.repo / "tmp").glob("characterize-*"))
+        assert not left, f"a characterization left its isolated backend: {left}"

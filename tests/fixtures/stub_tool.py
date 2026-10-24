@@ -66,6 +66,8 @@ sys.stdout.write(rule.get("stdout") or ""); sys.stdout.flush()  # output precede
 time.sleep(rule.get("sleep") or 0)
 if "set_phase" in rule:
     set_phase(rule["set_phase"])
+if "write_file" in rule:  # [path, text]: change the fake OmniRoute's state at a scripted point
+    Path(rule["write_file"][0]).write_text(rule["write_file"][1])
 if "echo_file_after" in rule:  # emulate `provider -f FILE config` on a real file
     sys.stdout.write(Path(argv[argv.index(rule["echo_file_after"]) + 1]).read_text())
 sys.exit(rule.get("rc", 0))

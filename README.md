@@ -78,10 +78,10 @@ protection) and `memory.min` (hard protection) are distinct; neither should be
 read as the other. CPU quota is reported from `NanoCpus` when available, with
 `CpuQuota/CpuPeriod` as the compatible fallback.
 
-The current resource policy reserves 256 MiB soft memory and caps Phoenix at
-1 GiB memory and 2 CPUs. CPU shares are 256 relative shares under contention,
-not guaranteed cores. These are policy limits, not a load or capacity
-benchmark. Browser E2E discovery uses an installed Playwright package or a
+The current resource policy gives Phoenix a 192 MiB soft memory hint and caps
+it at 1 GiB memory and 1 CPU. CPU shares are 256 relative shares under
+contention, not guaranteed cores. The cap is benchmark-derived (804 MiB peak
++ 20 %); re-derive it with `make resources-benchmark`. Browser E2E discovery uses an installed Playwright package or a
 local npm cache; set `LLM_ENV_PLAYWRIGHT_ROOT` to a Playwright package
 location or `LLM_ENV_CHROMIUM_EXECUTABLE` to an existing Chromium binary when
 automatic discovery is unavailable. The test does not install packages.
@@ -153,9 +153,24 @@ OmniRoute container. It only acts when **all** of these hold:
 
 - The configured image tag resolves to a different immutable digest than the
   running container's image (otherwise it prints `unchanged` and exits 0).
-- The OmniRoute activity profile for the running image is reviewed and
-  checked in (`pylib/omniroute_activity_profiles.json`). A running image
-  without a reviewed profile **always defers** with `deferred: capability`.
+- The running image has an OmniRoute activity profile: a reviewed one
+  shipped in `pylib/omniroute_activity_profiles.json` (today `:latest`
+  `038b2aba95a6` and `:next` `2a7a68e89fe5`), or one the updater derived
+  itself. **A running image without one is characterized first**, under the
+  update lock: the updater runs it unmodified in a disposable, isolated
+  rootless Podman store under `tmp/` (never the live stack) against a fake
+  provider, derives the profile from that evidence, and keeps it, with the
+  evidence, in the user-local store
+  `${XDG_STATE_HOME:-~/.local/state}/llm-env/omniroute-profiles/`
+  (`<config-id>.profile.json`, `.evidence.json`, `.candidate.json`; never
+  the git tree). Budget: 1200 s (a run takes about 8 minutes); stdout shows
+  `phase: characterizing ...`, `phase: deriving`, `phase: storing ...`,
+  then `phase: observing ...`. An incomplete derivation defers with
+  `deferred: capability` and `detail:` lines naming each reason and the
+  evidence file; a harness failure exits 1 and stores nothing. The loader
+  reads shipped profiles first and the local store second; a local profile is
+  used only while its evidence still hashes to the recorded sha256 and the
+  store is a private 0700 directory (otherwise the next run re-characterizes).
 - The dashboard's activity feed and health endpoint show the router idle for
   `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300) and stay idle while it
   re-samples; a single deployment-wide deadline bounds the whole wait
@@ -164,9 +179,55 @@ OmniRoute container. It only acts when **all** of these hold:
   running container all agree (fingerprints and digests are rechecked at
   commit time by a detached worker that holds the update lock).
 
-Exit codes: `0` updated or unchanged, `1` sanitized failure (never rolls
-back), `75` `deferred: <reason>` — a closed set: `io`, `schema`, `auth`,
-`clock`, `feed`, `busy`, `lock`, `ownership`, `deadline`, `capability`.
+When OmniRoute is **stopped or absent** (for example after `make stop`),
+nothing can be interrupted: the idle gate, the activity profile and the
+observer are skipped, the image is still resolved and pulled immutably, and
+only `omniroute` is recreated (`--no-deps`) and verified. Note that this
+**starts** it: a stopped container is replaced by a running one on the new
+image, and an absent one is created and started from the deployed compose file. The ownership checks
+(compose project/service labels, port, password, image reference) still
+apply. A running container that Podman reports `unhealthy` or `starting` is
+accepted only if the authenticated `/api/monitoring/health` answers;
+otherwise the update defers with `health`.
+
+Exit codes of `bash scripts/update-omniroute.sh`: `0` updated or unchanged,
+`1` sanitized failure (never rolls back; a failed `podman pull` is one),
+`75` `deferred: <reason>`. The last stdout line is the machine-readable
+result (`unchanged`, `updated <old> -> <new>`, `deferred: <reason>`); errors
+print `error: ...` on stderr. `make update-omniroute` cannot pass `75` through:
+GNU make exits `2` for every failing recipe (its own message still reads
+`Error 75` or `Error 1`, and the banner says `deferred, exit 75`), so
+automation runs the script directly. The deferral reasons are a closed set:
+`busy` (client activity), `deadline` (the wait budget ran out), `lock`
+(another update holds the lock), `age`, `clock`, `io` (transient: health
+timestamp too old, clock mismatch, an unreachable API), `auth`, `schema`,
+`feed`, `continuity`, `overflow`, `coverage` (an unprofiled route; `detail:`
+on stderr names it), `capability` (no reviewed profile), `logging`,
+`ownership`, `health`, `input` and `state` (the observer cannot write its own
+verdict file, e.g. disk quota).
+
+Activity routes (both profiles, measured): `POST /v1/chat/completions`,
+`/v1/messages` and `/v1/responses` are client inference (each writes its own
+access-log line and call-log rows); `POST /api/providers/test` rows are
+OmniRoute's own connection tests and never count; `GET /v1/models` leaves no
+activity signal at all and is not activity; `POST /v1/embeddings` writes
+call-log rows but no access-log line, so it is unprofiled and defers
+`coverage` while one of its rows is on the call-log page read. The call log is read as a small newest-first page (the profile's
+`rows_page_limit`): an in-flight client call, or a newest client call younger
+than the idle threshold (`LLM_ENV_UPDATE_IDLE_SECONDS`, default 300 s), is
+busy. A full call log is not an error. Right before `podman stop` the commit
+worker takes one more API-only sample (health, history, call log; same rule)
+and defers `busy` (or the unknown reason) with nothing changed. `GET
+/api/monitoring/health` is stale-while-revalidate: a response carries the
+snapshot the previous health request computed, so a lone read at idle is as
+old as the poll interval. Every sample (observer, last look, healer) primes it
+with one discarded GET and reads it again 0.2 s later; an `age` deferral's
+`detail:` gives the age seen and the limit. When the health
+clock lags (it can lag by seconds under load) but the journal, counters or the
+call log show activity, the sample counts as busy. A sample that is unknown for a transient reason (`age`, `io`, `clock`)
+with no such activity does not end the wait. It restarts the idle window, and the run defers only if
+such samples continue for more than 60 s. Any other unknown reason defers at
+once.
 Deferral is the normal safe outcome; nothing mutates before every check
 passes, and the replacement itself is not transactional and is never rolled
 back (the previous image stays in the local store; recovery is manual).
@@ -188,9 +249,9 @@ answers `503` + `Retry-After: 5` (bounded, single-flight, never a hang);
 OmniRoute itself is untouched.
 
 Cgroup resource caps in the rendered compose are soft/hard policy, not
-reservations. The OmniRoute 2 GiB cap is an untested candidate — the prior
-1 GiB limit tripped OmniRoute's 503 memory guard under load. No limits were
-changed by the updater work.
+reservations. The OmniRoute 2 GiB cap is benchmark-derived (1,651 MiB peak
++ 20 %) -- the prior 1 GiB limit tripped OmniRoute's 503 memory guard under
+load. See `make resources-benchmark` and the sizing rule in AGENTS.md.
 
 How the updater itself is verified: normal `make test` runs stubbed worlds plus
 unit coverage of the derivation rules. Two opt-in suites exercise real
@@ -204,7 +265,52 @@ LLM_ENV_UPDATE_CHARACTERIZE=1 uv run pytest tests/test_omniroute_characterize.py
 ```
 
 Measurements and their review outcome live in
-`docs/superpowers/research/2026-10-23-updater-characterization.md`.
+`docs/superpowers/research/2026-10-23-updater-characterization.md`. The second
+command runs the same harness as the updater's self-characterization
+(`pylib/omniroute_characterize.py`) and writes reviewable evidence under
+`docs/superpowers/research/`; set `LLM_ENV_UPDATE_CHARACTERIZE_IMAGE=<image>`
+for another image. A complete run also writes
+`<date>-omniroute-profile-<config12>.json`, which a reviewer may append to
+`pylib/omniroute_activity_profiles.json` to ship it (the test suite re-derives
+every shipped entry from its committed evidence).
+
+Work files: each updater, migration and healer run keeps its artifacts (the
+dashboard password file, the projection with environment values) in a fresh
+0700 directory under `$XDG_RUNTIME_DIR` (per-user tmpfs), else under `$TMPDIR`
+or `/tmp`. TERM, HUP and INT exit with 128+signal after removing it; after the
+hand-off the commit worker owns and removes it on every exit path; a SIGKILLed
+updater shell is cleaned up by its orphaned observer. The password file exists
+only while a reader needs it (until the observer's first verdict, then again
+from the hand-off). A SIGKILL before observation starts can still leave a
+directory behind (no password file yet, but the projection can hold environment values); it lives on the tmpfs until logout.
+
+### OmniRoute healer
+
+`make start` installs a 5-minute `llm-env-omniroute-heal` systemd user timer
+that runs `scripts/heal-omniroute-admission.sh` on the host. It restarts
+OmniRoute (`podman restart omniroute`) in two cases only:
+
+- a stuck chat-admission lease (upstream #14456): `activeHeavy` pinned while
+  `shedTotal` keeps climbing for `OMNIROUTE_HEAL_STRIKE_THRESHOLD` runs;
+- a memory recycle: the router is idle by the updater's own rule (`uv run
+  llmenv.py omniroute-update activity`: the running image's reviewed profile,
+  probe rows ignored, no admitted, queued or in-flight request, no client call
+  in the last 120 s; an unprofiled image or route counts as unknown) and no
+  OmniRoute update holds the update lock (the healer holds it through the
+  restart), and its cgroup memory, read from
+  `/sys/fs/cgroup` without exec and excluding file cache, stays above the
+  threshold -- 60 % of the container's `memory.max` (1228 MiB at the 2048 MiB
+  default, below the guard's 0.85/0.92 shedding marks), or an absolute
+  `OMNIROUTE_HEAL_MEMORY_MIB` -- for
+  `OMNIROUTE_HEAL_MEMORY_SAMPLES` runs (default 3). Memory restarts are at
+  least `OMNIROUTE_HEAL_MEMORY_COOLDOWN_HOURS` apart (default 6) and at most 2
+  per rolling 24 h. A skip is logged. `OMNIROUTE_HEAL_MEMORY_MIB=0` disables
+  it. If activity or memory cannot be read, it does not restart. A missing,
+  truncated or garbage state file counts as zeros (it is rewritten atomically),
+  so the stuck-lease check keeps working.
+
+Set these in a drop-in (`systemctl --user edit llm-env-omniroute-heal.service`,
+`[Service]` `Environment=` lines); `make start` rewrites the unit itself.
 
 ## Remote setup
 

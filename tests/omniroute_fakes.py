@@ -47,7 +47,8 @@ def fake_backend(containers, *, rootless=True, remote=False, extra=None):
     def run(argv, timeout=None):
         if argv[:2] == ["podman", "info"]:
             return json.dumps({"store": {"graphRoot": "/g", "runRoot": "/r"},
-                               "host": {"security": {"rootless": rootless}, "serviceIsRemote": remote}}).encode()
+                               "host": {"security": {"rootless": rootless}, "serviceIsRemote": remote,
+                                        "os": "linux", "arch": "amd64"}}).encode()
         if argv[:2] == ["podman", "ps"]:
             return json.dumps([{"Id": cid} for cid in containers]).encode()
         if argv[:3] == ["podman", "container", "inspect"]:
@@ -103,7 +104,8 @@ from pylib.omniroute_update import Reason
 
 API = {"health_timestamp": "/timestamp", "admission": ["/chatAdmission/activeHeavy", "/chatAdmission/activeHealthyHeadroom",
        "/chatAdmission/waiting", "/chatAdmission/queuedBytes"], "active": "/active",
-       "pending_by_model": "/pending/byModel", "rows": "/logs", "row_id": "id", "row_memory_flag": "memory"}
+       "pending_by_model": "/pending/byModel", "rows": "/logs", "row_path": "path", "row_timestamp": "ts", "row_memory_flag": "memory",
+       "rows_page_limit": 3}
 ROUTES = [
     {"method": "POST", "path_pattern": "/v1/chat/completions", "class": "inference",
      "arrival": {"signal": "journal-info-http", "evidence": "c1"},
@@ -111,6 +113,7 @@ ROUTES = [
      "queue": {"signal": "health-admission", "evidence": "c1"}},
     {"method": "GET", "path_pattern": "/api/monitoring/health", "class": "probe", "evidence": "c1"},
     {"method": "POST", "path_pattern": "/api/auth/login", "class": "probe", "evidence": "c1"},
+    {"method": "POST", "path_pattern": "/api/providers/test", "class": "probe", "evidence": "c1"},
 ]
 
 

@@ -78,11 +78,12 @@ if [ "$system_one_enabled" = "true" ]; then
     LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE="$(bash "${REPO_DIR}/scripts/system-one-observer-build.sh")"
     export LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE
 fi
-llmenv --config "$CONFIG_PATH" render-compose \
+render_output="$(llmenv --config "$CONFIG_PATH" render-compose \
     --models-dir "$MODELS_DIR" --presets-path "$presets_path" \
     --repo-root "$REPO_DIR" --env-file "${REPO_DIR}/.env" \
     --system-one-rocr-index "$system_one_rocr_index" \
-    --output "$COMPOSE_FILE" >/dev/null
+    --output "$COMPOSE_FILE")" \
+    || die "render-compose failed: $(jq -r '.error // "unknown error"' <<<"$render_output" 2>/dev/null || printf '%s' "$render_output")"
 log_info "wrote ${COMPOSE_FILE}"
 
 # Kept alongside the repo (gitignored) so the rendered compose file can be

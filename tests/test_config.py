@@ -19,12 +19,6 @@ from pylib.config import (
     sync_models_max,
     validate_config,
 )
-from pylib.resources import (
-    OMNIROUTE_CPU_MAX,
-    OMNIROUTE_CPU_MIN,
-    OMNIROUTE_MEMORY_MAX_MIB,
-    OMNIROUTE_MEMORY_MIN_MIB,
-)
 
 
 def make_cfg(**overrides):
@@ -65,18 +59,6 @@ def make_cfg(**overrides):
                 "memory_ceiling_floor_pct": 30,
                 "cpu_ceiling_pct": 60,
                 "cpu_ceiling_floor_pct": 20,
-            },
-            "omniroute": {
-                "cpus_min": 1,
-                "cpus_max": 4,
-                "memory_min_mib": 1024,
-                "memory_max_mib": 4096,
-            },
-            "remote_setup": {
-                "cpus_min": 1,
-                "cpus_max": 1,
-                "memory_min_mib": 32,
-                "memory_max_mib": 64,
             },
         },
         "omniroute": {
@@ -807,20 +789,6 @@ def test_validate_config_rejects_infinite_llm_server_cpus():
     assert "resources.llm_server.cpus must be a non-negative number" in validate_config(cfg)
 
 
-def test_validate_config_rejects_infinite_omniroute_cpus():
-    cfg = make_cfg(
-        resources={
-            "omniroute": {
-                "cpus_min": 1,
-                "cpus_max": float("inf"),
-                "memory_min_mib": 1024,
-                "memory_max_mib": 4096,
-            }
-        }
-    )
-    assert "resources.omniroute.cpus_max must be a non-negative number" in validate_config(cfg)
-
-
 def test_migrate_config_adds_default_resources_section_when_gpu_absent():
     """The resources default must not be skipped by the gpu early-return branch."""
     cfg = make_cfg()
@@ -896,30 +864,6 @@ def test_migrate_config_preserves_existing_omniroute_values():
     assert migrated["omniroute"]["initial_password"] == "existing-password"
 
 
-def test_migrate_config_adds_default_resources_omniroute_section():
-    cfg = make_cfg()
-    del cfg["resources"]["omniroute"]
-    migrated = migrate_config(cfg)
-    assert migrated["resources"]["omniroute"] == {
-        "cpus_min": OMNIROUTE_CPU_MIN,
-        "cpus_max": OMNIROUTE_CPU_MAX,
-        "memory_min_mib": OMNIROUTE_MEMORY_MIN_MIB,
-        "memory_max_mib": OMNIROUTE_MEMORY_MAX_MIB,
-    }
-
-
-def test_migrate_config_adds_default_resources_remote_setup_section():
-    cfg = make_cfg()
-    del cfg["resources"]["remote_setup"]
-    migrated = migrate_config(cfg)
-    assert migrated["resources"]["remote_setup"] == {
-        "cpus_min": 1,
-        "cpus_max": 1,
-        "memory_min_mib": 32,
-        "memory_max_mib": 64,
-    }
-
-
 def test_config_accepts_valid_omniroute_section():
     cfg = make_cfg()
     assert validate_config(cfg) == []
@@ -957,51 +901,6 @@ def test_config_rejects_invalid_omniroute_values(field, value, expected_error):
     cfg = make_cfg(omniroute=omniroute)
     errors = validate_config(cfg)
     assert expected_error in errors
-
-
-@pytest.mark.parametrize(
-    "omniroute_resources",
-    [
-        {"cpus_min": -1, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
-        {"cpus_min": True, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
-        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": -1, "memory_max_mib": 4096},
-        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 0.5, "memory_max_mib": 4096},
-        # min exceeds max on each dimension
-        {"cpus_min": 5, "cpus_max": 4, "memory_min_mib": 1024, "memory_max_mib": 4096},
-        {"cpus_min": 1, "cpus_max": 4, "memory_min_mib": 8192, "memory_max_mib": 4096},
-    ],
-)
-def test_config_rejects_invalid_resources_omniroute_values(omniroute_resources):
-    cfg = make_cfg(
-        resources={
-            "llm_server": {"cpus": 0, "memory_mib": 0},
-            "omniroute": omniroute_resources,
-        }
-    )
-    errors = validate_config(cfg)
-    assert any("resources.omniroute" in error for error in errors)
-
-
-@pytest.mark.parametrize(
-    "remote_setup_resources",
-    [
-        {"cpus_min": -1, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
-        {"cpus_min": True, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
-        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": -1, "memory_max_mib": 64},
-        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 0.5, "memory_max_mib": 64},
-        {"cpus_min": 2, "cpus_max": 1, "memory_min_mib": 32, "memory_max_mib": 64},
-        {"cpus_min": 1, "cpus_max": 1, "memory_min_mib": 128, "memory_max_mib": 64},
-    ],
-)
-def test_config_rejects_invalid_resources_remote_setup_values(remote_setup_resources):
-    cfg = make_cfg(
-        resources={
-            "llm_server": {"cpus": 0, "memory_mib": 0},
-            "remote_setup": remote_setup_resources,
-        }
-    )
-    errors = validate_config(cfg)
-    assert any("resources.remote_setup" in error for error in errors)
 
 
 def test_migrate_config_adds_default_remote_setup_section():
@@ -1178,3 +1077,61 @@ def test_validate_config_rejects_bad_idle_unload_seconds(valid_cfg):
 def test_validate_config_accepts_idle_unload_seconds_zero(valid_cfg):
     valid_cfg["system_one"]["idle_unload_seconds"] = 0
     assert validate_config(valid_cfg) == []
+
+
+def test_migrate_config_never_creates_resource_overrides():
+    assert "overrides" not in migrate_config(make_cfg())["resources"]
+
+
+def test_migrate_config_preserves_resource_overrides_untouched():
+    overrides = {"omniroute": {"memory_max_mib": 4096}}
+    cfg = make_cfg(resources={"overrides": overrides})
+    assert migrate_config(cfg)["resources"]["overrides"] == overrides
+
+
+def test_config_accepts_valid_resource_overrides():
+    cfg = make_cfg()
+    cfg["resources"]["overrides"] = {"omniroute": {"memory_max_mib": 4096}}
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"omniroute": {"memory_max_mib": 0}}, "resources.overrides.omniroute.memory_max_mib"),
+        ({"omniroute": {"memory_max": 2048}}, "resources.overrides.omniroute.memory_max is not"),
+        ({"nginx": {"memory_max_mib": 64}}, "resources.overrides.nginx is not an overridable service"),
+        ({"omniroute": {"memory_max_mib": 512}}, "effective memory_min_mib"),
+        ([], "resources.overrides must be a mapping"),
+    ],
+)
+def test_config_rejects_invalid_resource_overrides(overrides, fragment):
+    cfg = make_cfg()
+    cfg["resources"]["overrides"] = overrides
+    assert any(fragment in error for error in validate_config(cfg))
+
+
+def test_config_accepts_a_cap_below_the_default():
+    """Lowering is allowed since the evidence gate was removed (2026-10-24); summarize_policy warns."""
+    cfg = make_cfg()
+    cfg["resources"]["overrides"] = {"omniroute": {"memory_max_mib": 1536}}
+    assert validate_config(cfg) == []
+
+
+def test_load_drops_the_retired_mirror_and_evidence_reference(tmp_path):
+    """An existing models.yml keeps working: the stale `resources.<service>` mirror (even a broken one)
+    and a `memory_max_evidence` reference are dropped on load; llm_server and the override stay."""
+    cfg = make_cfg()
+    cfg["resources"]["omniroute"] = {"cpus_min": 1, "cpus_max": float("inf"), "memory_min_mib": 1024, "memory_max_mib": 3072}
+    cfg["resources"]["phoenix"] = {"cpus_min": 2, "cpus_max": 1, "memory_min_mib": 256, "memory_max_mib": 1024}
+    cfg["resources"]["remote_setup"] = {"cpus_min": 1, "cpus_max": 1}
+    cfg["resources"]["overrides"] = {
+        "omniroute": {"memory_max_mib": 2560, "memory_max_evidence": {"path": "/gone.json", "sha256": "x"}}
+    }
+    path = tmp_path / "models.yml"
+    path.write_text(yaml.safe_dump(cfg))
+    loaded = load_config(path)
+    assert validate_config(loaded) == []
+    assert loaded["resources"]["overrides"] == {"omniroute": {"memory_max_mib": 2560}}
+    assert set(loaded["resources"]) == {"llm_server", "overrides"}
+    assert loaded["resources"]["llm_server"] == make_cfg()["resources"]["llm_server"]

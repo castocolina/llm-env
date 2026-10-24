@@ -54,9 +54,14 @@ resources:
     memory_ceiling_floor_pct: 30
     cpu_ceiling_pct: 60
     cpu_ceiling_floor_pct: 20
-  omniroute:
-    cpus: 1
-    memory_mib: 1024
+  # Optional persistent per-service overrides of the built-in policy
+  # (pylib/resources.py DEFAULT_POLICY). Manage with `uv run llmenv.py
+  # resource-override`. Values must be positive; 0 would mean "no limit".
+  # Lowering a cap below its default is allowed but warns: re-derive it first
+  # with `make resources-benchmark`.
+  # overrides:
+  #   omniroute:
+  #     memory_max_mib: 4096
 
 omniroute:
   image: docker.io/diegosouzapw/omniroute:latest

@@ -27,10 +27,12 @@ def offline_check(tmp_path: pathlib.Path, mode: str = "owned") -> subprocess.Com
     digest = hashlib.sha256(body).hexdigest()
     key = hashlib.sha256(f"{base}\n{digest}\n".encode()).hexdigest()[:12]
     config = tmp_path / "models.yml"
-    config.write_text(yaml.safe_dump({"system_one": {"image": "localhost/fixture-base:rocm"},
-                                    "resources": {"phoenix": {"cpus_min": 0.25,
-                                                               "cpus_max": 0 if mode == "invalid-resource-policy" else 2,
-                                                               "memory_min_mib": 256, "memory_max_mib": 1024}}}))
+    config.write_text(yaml.safe_dump({"system_one": {"image": "localhost/fixture-base:rocm"}}))
+    # The offline check asks `llmenv effective-policy`; the fixture stands in for its JSON.
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"cpus_min": 0.25,
+                                  "cpus_max": 0 if mode == "invalid-resource-policy" else 2,
+                                  "memory_min_mib": 256, "memory_max_mib": 1024}))
     rendered = tmp_path / "compose.yml"
     rendered.write_text(yaml.safe_dump({"services": {"system-one": {
         "image": f"localhost/llm-env-system-one-phoenix:{'stale' if mode == 'stale-image' else key}",
@@ -59,9 +61,10 @@ case "$*" in
 esac
 """)
     podman.chmod(0o700)
-    result = subprocess.run(["bash", "-c", definition + "\nphoenix_offline_check\n"],
+    result = subprocess.run(["bash", "-c", 'llmenv() { cat "$POLICY_JSON"; }\n' + definition + "\nphoenix_offline_check\n"],
                             env=os.environ | {"PATH": f"{commands}:{os.environ['PATH']}",
                                               "REPO_DIR": str(ROOT), "CONFIG_PATH": str(config),
+                                              "POLICY_JSON": str(policy),
                                               "COMPOSE_FILE": str(rendered), "BASE": base,
                                               "KEY": key, "MODE": mode, "JOURNAL": str(journal)},
                             text=True, capture_output=True, timeout=20, check=False)

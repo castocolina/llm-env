@@ -73,82 +73,38 @@ if [ "$llm_server_enabled" = "true" ]; then
 fi
 
 log_step "Computing resource limits"
+# Render paths (`llmenv render-compose`, `phoenix.sh`) recompute the effective
+# policy (defaults + resources.overrides) on every run; nothing is copied back
+# into models.yml except the llm_server remainder.
 resources_json="$(mktemp)"
 trap 'rm -f "$resources_json"' EXIT
-if llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
-    omniroute_cpus_min="$(jq -r '.omniroute.cpus_min' "$resources_json")"
-    omniroute_cpus_max="$(jq -r '.omniroute.cpus_max' "$resources_json")"
-    omniroute_memory_min_mib="$(jq -r '.omniroute.memory_min_mib' "$resources_json")"
-    omniroute_memory_max_mib="$(jq -r '.omniroute.memory_max_mib' "$resources_json")"
-    remote_setup_cpus_min="$(jq -r '.remote_setup.cpus_min' "$resources_json")"
-    remote_setup_cpus_max="$(jq -r '.remote_setup.cpus_max' "$resources_json")"
-    remote_setup_memory_min_mib="$(jq -r '.remote_setup.memory_min_mib' "$resources_json")"
-    remote_setup_memory_max_mib="$(jq -r '.remote_setup.memory_max_mib' "$resources_json")"
-    if [ "$llm_server_enabled" = "true" ]; then
-        cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
-        memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
-        CPUS="$cpus" MEMORY_MIB="$memory_mib" \
-          OMNIROUTE_CPUS_MIN="$omniroute_cpus_min" OMNIROUTE_CPUS_MAX="$omniroute_cpus_max" \
-          OMNIROUTE_MEMORY_MIN_MIB="$omniroute_memory_min_mib" OMNIROUTE_MEMORY_MAX_MIB="$omniroute_memory_max_mib" \
-          REMOTE_SETUP_CPUS_MIN="$remote_setup_cpus_min" REMOTE_SETUP_CPUS_MAX="$remote_setup_cpus_max" \
-          REMOTE_SETUP_MEMORY_MIN_MIB="$remote_setup_memory_min_mib" REMOTE_SETUP_MEMORY_MAX_MIB="$remote_setup_memory_max_mib" \
-          yq -i '
-            .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
-            .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber) |
-            .resources.omniroute.cpus_min = (strenv(OMNIROUTE_CPUS_MIN) | tonumber) |
-            .resources.omniroute.cpus_max = (strenv(OMNIROUTE_CPUS_MAX) | tonumber) |
-            .resources.omniroute.memory_min_mib = (strenv(OMNIROUTE_MEMORY_MIN_MIB) | tonumber) |
-            .resources.omniroute.memory_max_mib = (strenv(OMNIROUTE_MEMORY_MAX_MIB) | tonumber) |
-            .resources.remote_setup.cpus_min = (strenv(REMOTE_SETUP_CPUS_MIN) | tonumber) |
-            .resources.remote_setup.cpus_max = (strenv(REMOTE_SETUP_CPUS_MAX) | tonumber) |
-            .resources.remote_setup.memory_min_mib = (strenv(REMOTE_SETUP_MEMORY_MIN_MIB) | tonumber) |
-            .resources.remote_setup.memory_max_mib = (strenv(REMOTE_SETUP_MEMORY_MAX_MIB) | tonumber)
-          ' "$CONFIG_PATH"
-        log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
-    else
-        OMNIROUTE_CPUS_MIN="$omniroute_cpus_min" OMNIROUTE_CPUS_MAX="$omniroute_cpus_max" \
-          OMNIROUTE_MEMORY_MIN_MIB="$omniroute_memory_min_mib" OMNIROUTE_MEMORY_MAX_MIB="$omniroute_memory_max_mib" \
-          REMOTE_SETUP_CPUS_MIN="$remote_setup_cpus_min" REMOTE_SETUP_CPUS_MAX="$remote_setup_cpus_max" \
-          REMOTE_SETUP_MEMORY_MIN_MIB="$remote_setup_memory_min_mib" REMOTE_SETUP_MEMORY_MAX_MIB="$remote_setup_memory_max_mib" \
-          yq -i '
-            .resources.omniroute.cpus_min = (strenv(OMNIROUTE_CPUS_MIN) | tonumber) |
-            .resources.omniroute.cpus_max = (strenv(OMNIROUTE_CPUS_MAX) | tonumber) |
-            .resources.omniroute.memory_min_mib = (strenv(OMNIROUTE_MEMORY_MIN_MIB) | tonumber) |
-            .resources.omniroute.memory_max_mib = (strenv(OMNIROUTE_MEMORY_MAX_MIB) | tonumber) |
-            .resources.remote_setup.cpus_min = (strenv(REMOTE_SETUP_CPUS_MIN) | tonumber) |
-            .resources.remote_setup.cpus_max = (strenv(REMOTE_SETUP_CPUS_MAX) | tonumber) |
-            .resources.remote_setup.memory_min_mib = (strenv(REMOTE_SETUP_MEMORY_MIN_MIB) | tonumber) |
-            .resources.remote_setup.memory_max_mib = (strenv(REMOTE_SETUP_MEMORY_MAX_MIB) | tonumber)
-          ' "$CONFIG_PATH"
-    fi
-else
+if ! llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
     # A host too small to reserve the fixed floors is exactly the host
     # where an uncapped container is most dangerous -- render_compose()
     # treats cpus/memory_mib == 0 as "no explicit limit", so proceeding to
-    # render with a stale or absent persisted value here would silently
-    # disable the safety mechanism precisely when it matters most. Fail
-    # loudly instead, exactly like setup/setup.sh's Step 8 already does.
+    # render here would silently disable the safety mechanism precisely when
+    # it matters most. Fail loudly instead, exactly like setup/setup.sh's
+    # Step 8 already does.
     die "$(jq -r '.error' "$resources_json")"
 fi
-
-# Phoenix resources are fixed policy (pylib/resources.py PHOENIX_*), not a
-# share of the remainder; llmenv resources still validates that the host
-# can afford them whenever System One is enabled.
-if [ "$system_one_enabled" = "true" ]; then
-    phoenix_cpus_min="$(jq -r '.phoenix.cpus_min' "$resources_json")"
-    phoenix_cpus_max="$(jq -r '.phoenix.cpus_max' "$resources_json")"
-    phoenix_memory_min_mib="$(jq -r '.phoenix.memory_min_mib' "$resources_json")"
-    phoenix_memory_max_mib="$(jq -r '.phoenix.memory_max_mib' "$resources_json")"
-    PHOENIX_CPUS_MIN="$phoenix_cpus_min" PHOENIX_CPUS_MAX="$phoenix_cpus_max" \
-      PHOENIX_MEMORY_MIN_MIB="$phoenix_memory_min_mib" PHOENIX_MEMORY_MAX_MIB="$phoenix_memory_max_mib" \
-      yq -i '
-        .resources.phoenix.cpus_min = (strenv(PHOENIX_CPUS_MIN) | tonumber) |
-        .resources.phoenix.cpus_max = (strenv(PHOENIX_CPUS_MAX) | tonumber) |
-        .resources.phoenix.memory_min_mib = (strenv(PHOENIX_MEMORY_MIN_MIB) | tonumber) |
-        .resources.phoenix.memory_max_mib = (strenv(PHOENIX_MEMORY_MAX_MIB) | tonumber)
+if [ "$llm_server_enabled" = "true" ]; then
+    cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
+    memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
+    CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
+        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
       ' "$CONFIG_PATH"
-    log_info "Phoenix policy: ${phoenix_memory_min_mib} MiB soft memory reservation, ${phoenix_memory_max_mib} MiB hard cap, ${phoenix_cpus_max} CPUs max"
+    log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
 fi
+if [ "$system_one_enabled" = "true" ]; then
+    log_info "$(jq -r '.phoenix | "Phoenix policy: \(.memory_min_mib) MiB soft memory reservation, \(.memory_max_mib) MiB hard cap, \(.cpus_max) CPUs max"' "$resources_json")"
+fi
+
+# Effective policy (totals and any active overrides), computed by llmenv so the
+# wording is unit-tested; resources.overrides itself is never rewritten here.
+jq -r '.summary[]?' "$resources_json" | while IFS= read -r summary_line; do
+    log_info "$summary_line"
+done
 
 bash "${REPO_DIR}/setup/render-unit.sh"
 

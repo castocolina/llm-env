@@ -6,14 +6,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pylib.resources import (
+    DEFAULT_POLICY,
     HOST_CPU_FLOOR,
     HOST_MEMORY_FLOOR_MIB,
     OMNIROUTE_CPU_MAX,
     OMNIROUTE_CPU_MIN,
     OMNIROUTE_MEMORY_MAX_MIB,
     OMNIROUTE_MEMORY_MIN_MIB,
+    OVERRIDABLE_SERVICES,
+    PHOENIX_CPUS_MAX,
     PHOENIX_CPUS_MIN,
+    PHOENIX_MEMORY_MAX_MIB,
     PHOENIX_MEMORY_MIN_MIB,
+    POLICY_KEYS,
     REMOTE_SETUP_CPU_MAX,
     REMOTE_SETUP_CPU_MIN,
     REMOTE_SETUP_MEMORY_MAX_MIB,
@@ -24,6 +29,10 @@ from pylib.resources import (
     SYSTEM_ONE_MEMORY_MIN_MIB,
     ResourceError,
     compute_resource_limits,
+    effective_policy,
+    lowered_cap_warnings,
+    summarize_policy,
+    validate_overrides,
 )
 
 # The fixed floor consumed by OmniRoute + remote-setup's MIN reservations
@@ -253,7 +262,7 @@ def test_system_one_reservation_shrinks_llm_server_remainder():
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
     )
     # Caps stay on the service; the host floor subtracts the reservation, same as OmniRoute's min.
-    assert with_one["system_one"] == {"cpus": SYSTEM_ONE_CPUS, "memory_mib": SYSTEM_ONE_MEMORY_MIB}
+    assert with_one["system_one"] == DEFAULT_POLICY["system_one"]
     assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIN_MIB - PHOENIX_MEMORY_MIN_MIB
     assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - SYSTEM_ONE_CPUS_MIN - PHOENIX_CPUS_MIN
     assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - 2560
@@ -271,7 +280,7 @@ def test_system_one_host_floor_uses_the_reservation_not_the_cap():
 
 
 def test_system_one_reservation_absent_when_disabled():
-    assert compute_resource_limits(16, 32768)["system_one"] == {"cpus": 0, "memory_mib": 0}
+    assert compute_resource_limits(16, 32768)["system_one"] == dict.fromkeys(POLICY_KEYS, 0)
 
 
 def test_system_one_resource_error_names_its_reservation():
@@ -289,3 +298,181 @@ def test_system_one_resource_error_names_its_reservation():
     ):
         with pytest.raises(ResourceError, match=message):
             compute_resource_limits(cpus, memory, system_one_enabled=True, llm_server_enabled=llm)
+
+
+def test_default_policy_matches_the_module_constants():
+    assert DEFAULT_POLICY["omniroute"] == _omniroute_expected()
+    assert DEFAULT_POLICY["remote_setup"] == _remote_setup_expected()
+    assert DEFAULT_POLICY["system_one"] == {
+        "cpus_min": SYSTEM_ONE_CPUS_MIN,
+        "cpus_max": SYSTEM_ONE_CPUS,
+        "memory_min_mib": SYSTEM_ONE_MEMORY_MIN_MIB,
+        "memory_max_mib": SYSTEM_ONE_MEMORY_MIB,
+    }
+    assert DEFAULT_POLICY["phoenix"]["cpus_max"] == PHOENIX_CPUS_MAX
+    assert DEFAULT_POLICY["phoenix"]["memory_max_mib"] == PHOENIX_MEMORY_MAX_MIB
+    assert set(OVERRIDABLE_SERVICES) == set(DEFAULT_POLICY)
+    assert all(set(policy) == set(POLICY_KEYS) for policy in DEFAULT_POLICY.values())
+
+
+def test_shipped_defaults_are_the_benchmark_derived_policy():
+    # docs/superpowers/research/2026-10-24-benchmark-derived-sizing.md. Update deliberately with the doc.
+    assert DEFAULT_POLICY == {
+        "omniroute": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 768, "memory_max_mib": 2048},
+        "remote_setup": {"cpus_min": 0.25, "cpus_max": 0.5, "memory_min_mib": 32, "memory_max_mib": 64},
+        # Explicit exception to the sizing rule (peak clipped by its own cap); see pylib/resources.py.
+        "system_one": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 2560, "memory_max_mib": 4608},
+        # Live peak 804 MiB 2 h after a restart: 804 * 1.2 = 965 -> 1024.
+        "phoenix": {"cpus_min": 0.25, "cpus_max": 1, "memory_min_mib": 192, "memory_max_mib": 1024},
+    }
+
+
+def test_baseline_hard_memory_caps_sum_to_7744_mib():
+    assert sum(p["memory_max_mib"] for p in DEFAULT_POLICY.values()) == 2048 + 64 + 4608 + 1024 == 7744
+
+
+def test_effective_policy_without_overrides_is_the_default_and_a_copy():
+    policy = effective_policy("omniroute", None)
+    assert policy == DEFAULT_POLICY["omniroute"]
+    policy["memory_max_mib"] = 1
+    assert DEFAULT_POLICY["omniroute"]["memory_max_mib"] == OMNIROUTE_MEMORY_MAX_MIB
+
+
+def test_effective_policy_merges_only_the_overridden_keys():
+    policy = effective_policy("omniroute", {"omniroute": {"memory_max_mib": 4096}})
+    assert policy == {**DEFAULT_POLICY["omniroute"], "memory_max_mib": 4096}
+    other = effective_policy("remote_setup", {"omniroute": {"memory_max_mib": 4096}})
+    assert other == DEFAULT_POLICY["remote_setup"]
+
+
+def test_valid_overrides_produce_no_errors():
+    assert validate_overrides(None) == []
+    assert validate_overrides({}) == []
+    assert validate_overrides({"omniroute": {"memory_max_mib": 4096, "cpus_max": 2.5}}) == []
+    # Lowering a cap below the default is allowed (it is warned about, not refused).
+    assert validate_overrides({"omniroute": {"memory_max_mib": 1536}}) == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ([], "resources.overrides must be a mapping"),
+        ({"llm_server": {"memory_max_mib": 1}}, "resources.overrides.llm_server is not an overridable service"),
+        ({"omniroute": []}, "resources.overrides.omniroute must be a mapping"),
+        ({"omniroute": {"memory_max": 2048}}, "resources.overrides.omniroute.memory_max is not an overridable field"),
+        ({"omniroute": {"memory_max_mib": 0}}, "resources.overrides.omniroute.memory_max_mib must be a positive integer"),
+        ({"omniroute": {"memory_max_mib": -1}}, "resources.overrides.omniroute.memory_max_mib must be a positive integer"),
+        ({"omniroute": {"memory_max_mib": True}}, "resources.overrides.omniroute.memory_max_mib must be a positive integer"),
+        ({"omniroute": {"memory_max_mib": "2048"}}, "resources.overrides.omniroute.memory_max_mib must be a positive integer"),
+        ({"omniroute": {"memory_max_mib": 2048.5}}, "resources.overrides.omniroute.memory_max_mib must be a positive integer"),
+        ({"omniroute": {"cpus_max": 0}}, "resources.overrides.omniroute.cpus_max must be a positive number"),
+        ({"omniroute": {"cpus_max": float("inf")}}, "resources.overrides.omniroute.cpus_max must be a positive number"),
+        ({"omniroute": {"memory_max_mib": 512}}, "effective memory_min_mib (768) must not exceed effective memory_max_mib (512)"),
+        ({"omniroute": {"cpus_min": 8}}, "effective cpus_min (8) must not exceed effective cpus_max (2)"),
+        # The retired evidence-gate reference is no longer a field (migrate_config drops it on load).
+        ({"omniroute": {"memory_max_evidence": {}}}, "memory_max_evidence is not an overridable field"),
+    ],
+)
+def test_invalid_overrides_are_reported(overrides, fragment):
+    errors = validate_overrides(overrides)
+    assert any(fragment in error for error in errors), errors
+
+
+def test_overrides_apply_and_are_reported():
+    result = compute_resource_limits(
+        16, 32768, llm_server_enabled=False,
+        overrides={"omniroute": {"memory_max_mib": 4096}},
+    )
+    assert result["omniroute"]["memory_max_mib"] == 4096
+    assert result["omniroute"]["memory_min_mib"] == OMNIROUTE_MEMORY_MIN_MIB
+    assert result["remote_setup"] == _remote_setup_expected()
+    assert result["overrides_applied"] == {"omniroute": ["memory_max_mib"]}
+
+
+def test_override_of_a_disabled_service_is_inert():
+    base = compute_resource_limits(16, 32768)
+    result = compute_resource_limits(
+        16, 32768, overrides={"system_one": {"memory_max_mib": 5120, "memory_min_mib": 3000}}
+    )
+    assert result["system_one"] == dict.fromkeys(POLICY_KEYS, 0)
+    assert result["phoenix"] == dict.fromkeys(POLICY_KEYS, 0)
+    assert result["overrides_applied"] == {}
+    assert result["totals"] == base["totals"]
+    assert result["llm_server"] == base["llm_server"]
+
+
+def test_raised_minimum_shrinks_the_llm_server_remainder():
+    base = compute_resource_limits(16, 32768, memory_ceiling_pct=100)
+    raised = compute_resource_limits(
+        16, 32768, memory_ceiling_pct=100,
+        overrides={"omniroute": {"memory_min_mib": 2048}},
+    )
+    assert raised["llm_server"]["memory_mib"] == (
+        base["llm_server"]["memory_mib"] - (2048 - OMNIROUTE_MEMORY_MIN_MIB)
+    )
+
+
+def test_raised_minimum_on_a_too_small_host_raises_resource_error():
+    floor = HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MAX_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+    with pytest.raises(ResourceError, match=f"at least {floor} MiB"):
+        compute_resource_limits(
+            16, floor - 1, llm_server_enabled=False,
+            overrides={"omniroute": {"memory_min_mib": OMNIROUTE_MEMORY_MAX_MIB}},
+        )
+
+
+def test_invalid_overrides_raise_resource_error():
+    with pytest.raises(ResourceError, match=r"resources\.overrides\.omniroute\.memory_max_mib"):
+        compute_resource_limits(16, 32768, overrides={"omniroute": {"memory_max_mib": 0}})
+
+
+def test_totals_report_hard_caps_and_soft_reservations():
+    result = compute_resource_limits(
+        16, 65536, llm_server_enabled=False, system_one_enabled=True
+    )
+    assert result["totals"]["hard_memory_cap_mib"] == 7744
+    assert result["totals"]["soft_memory_reservation_mib"] == (
+        OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
+        + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
+    )
+
+
+def test_totals_include_the_llm_server_cap_when_enabled():
+    result = compute_resource_limits(16, 32768)
+    assert result["totals"]["hard_memory_cap_mib"] == (
+        result["llm_server"]["memory_mib"]
+        + OMNIROUTE_MEMORY_MAX_MIB + REMOTE_SETUP_MEMORY_MAX_MIB
+    )
+
+
+def test_summarize_policy_names_totals_and_overrides():
+    plain = summarize_policy(compute_resource_limits(16, 32768, llm_server_enabled=False))
+    assert len(plain) == 1
+    assert "hard memory caps total" in plain[0] and "not allocated RAM" in plain[0]
+    overridden = summarize_policy(
+        compute_resource_limits(
+            16, 32768, llm_server_enabled=False,
+            overrides={"omniroute": {"memory_max_mib": 4096}},
+        )
+    )
+    assert overridden[1] == "resource overrides applied: omniroute=memory_max_mib"
+
+
+def test_a_cap_below_the_default_is_warned_about_with_the_benchmark_target():
+    lowered = compute_resource_limits(
+        16, 32768, llm_server_enabled=False, overrides={"omniroute": {"memory_max_mib": 1536}}
+    )
+    warnings = [line for line in summarize_policy(lowered) if line.startswith("WARNING")]
+    assert len(warnings) == 1
+    assert "omniroute memory_max_mib 1536 MiB" in warnings[0] and "default 2048 MiB" in warnings[0]
+    assert "make resources-benchmark" in warnings[0]
+    raised = compute_resource_limits(
+        16, 32768, llm_server_enabled=False, overrides={"omniroute": {"memory_max_mib": 4096}}
+    )
+    assert not any(line.startswith("WARNING") for line in summarize_policy(raised))
+
+
+def test_lowered_cap_warnings_skip_disabled_services():
+    # A disabled service carries an all-zero policy: nothing to warn about.
+    assert lowered_cap_warnings({"system_one": dict.fromkeys(POLICY_KEYS, 0)}) == []
+    assert len(lowered_cap_warnings({"phoenix": {**DEFAULT_POLICY["phoenix"], "memory_max_mib": 512}})) == 1

@@ -395,8 +395,9 @@ PIN_A, PIN_B = "docker.io/diegosouzapw/omniroute@sha256:" + "a" * 64, "docker.io
     ("password-mismatch", {"omni_kw": {"env": ["INITIAL_PASSWORD=wrong", "REQUIRE_API_KEY=true"]}}, Reason.ownership),
     ("dollar-password-ok", {"password": "pa$s", "omni_kw": {"env": ["INITIAL_PASSWORD=pa$s", "REQUIRE_API_KEY=true"]}}, None),
     ("require-key-off", {"omni_kw": {"env": [f"INITIAL_PASSWORD={PASSWORD}", "REQUIRE_API_KEY=false"]}}, Reason.ownership),
-    ("unhealthy", {"omni_kw": {"health": "unhealthy"}}, Reason.ownership),
-    ("stopped", {"omni_kw": {"state": "exited"}}, Reason.ownership),
+    ("unhealthy-without-api-probe", {"omni_kw": {"health": "unhealthy"}}, Reason.health),
+    ("stopped-is-updatable", {"omni_kw": {"state": "exited"}}, None),
+    ("paused", {"omni_kw": {"state": "paused"}}, Reason.ownership),
     ("no-project-label", {"omni_kw": {"project": ""}}, Reason.ownership),
     ("incoming-dependent", {"extra_containers": {RS: inspect_doc(RS, name="remote-setup", deps=[OMNI])}}, Reason.ownership),
     ("scale-2", {"svc_patch": {"scale": 2}}, Reason.input),
@@ -731,3 +732,121 @@ def test_preflight_remote_setup_defers_on_incoming_dependent(tmp_path):
     with pytest.raises(Deferral) as e:
         preflight(cfg, cp, comp, env, run, provider=prov, service="remote-setup")
     assert e.value.reason is Reason.ownership
+
+
+# ---- 2026-10-24 addendum: a down target is updatable; Podman health alone is not the deciding signal ----
+
+@pytest.mark.parametrize("status", ["exited", "created", "stopped"])
+def test_stopped_target_preflight_reports_the_stopped_state(tmp_path, status):
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path, omni_kw={"state": status, "health": "unhealthy"})
+    probed = []
+    dep, _snap, _fp, _eff = preflight(cfg, cp, comp, env, run, provider=prov,
+                                      api_ok=lambda *a: probed.append(a) or False)
+    assert dep.state == "stopped" and dep.container_id == OMNI and dep.image_id == "sha256:" + IMG
+    assert probed == []  # nothing is running, so the API is never consulted
+
+
+@pytest.mark.parametrize("name,kw", [
+    ("image", {"omni_kw": {"state": "exited", "image_name": "docker.io/other/img:latest"}}),
+    ("port", {"omni_kw": {"state": "exited", "port": 9999}}),
+    ("password", {"omni_kw": {"state": "exited", "env": ["INITIAL_PASSWORD=wrong", "REQUIRE_API_KEY=true"]}}),
+    ("require-key", {"omni_kw": {"state": "exited", "env": [f"INITIAL_PASSWORD={PASSWORD}", "REQUIRE_API_KEY=false"]}}),
+    ("project-label", {"omni_kw": {"state": "exited", "project": ""}}),
+    ("incoming-dependent", {"omni_kw": {"state": "exited"},
+                            "extra_containers": {RS: inspect_doc(RS, name="remote-setup", deps=[OMNI], state="exited")}}),
+    ("effective-image", {"omni_kw": {"state": "exited"}, "svc_patch": {"image": "docker.io/other/img:latest"}}),
+])
+def test_stopped_target_still_defers_on_ownership_mismatch(tmp_path, name, kw):
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path, **kw)
+    with pytest.raises(Deferral) as e:
+        preflight(cfg, cp, comp, env, run, provider=prov)
+    assert e.value.reason is Reason.ownership
+    assert PASSWORD not in str(e.value)
+
+
+def _absent_world(tmp_path, **kw):
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path, **kw)
+    def without_omniroute(argv, timeout=None):
+        if argv[:2] == ["podman", "ps"]:
+            return json.dumps([c for c in json.loads(run(argv, timeout)) if c["Id"] != OMNI]).encode()
+        return run(argv, timeout=timeout)
+    return cfg, cp, comp, prov, env, without_omniroute
+
+
+def test_absent_target_preflight_uses_the_compose_directory_project_and_host_platform(tmp_path):
+    cfg, cp, comp, prov, env, run = _absent_world(tmp_path)
+    dep, snap, _fp, _eff = preflight(cfg, cp, comp, env, run, provider=prov)
+    assert dep.state == "absent" and dep.container_id == "" and dep.image_id == ""
+    assert dep.project == tmp_path.name.lower() and (dep.os, dep.architecture) == ("linux", "amd64")
+    assert dep.port == 20128 and dep.stop_seconds == 40 and OMNI not in snap.docs
+
+
+@pytest.mark.parametrize("name,kw,reason", [
+    ("unlabeled-same-name", {"extra_containers": {SIB: inspect_doc(SIB, name="omniroute", project="")}}, Reason.ownership),
+    ("effective-password", {"svc_patch": {"environment": {"INITIAL_PASSWORD": "wrong", "REQUIRE_API_KEY": "true"}}},
+     Reason.ownership),
+    ("effective-port", {"svc_patch": {"ports": ["0.0.0.0:9999:9999"]}}, Reason.ownership),
+])
+def test_absent_target_keeps_the_compose_agreement_checks(tmp_path, name, kw, reason):
+    if name == "unlabeled-same-name":
+        kw["extra_containers"][SIB]["Config"]["Labels"] = {}
+    cfg, cp, comp, prov, env, run = _absent_world(tmp_path, **kw)
+    with pytest.raises(Deferral) as e:
+        preflight(cfg, cp, comp, env, run, provider=prov)
+    assert e.value.reason is reason
+
+
+def test_absent_target_defers_when_its_compose_directory_belongs_to_another_project(tmp_path):
+    other = inspect_doc(SIB, name="remote-setup", project="someone-else")
+    other["Config"]["Labels"]["com.docker.compose.project.working_dir"] = str(tmp_path)
+    cfg, cp, comp, prov, env, run = _absent_world(tmp_path, extra_containers={SIB: other})
+    with pytest.raises(Deferral) as e:
+        preflight(cfg, cp, comp, env, run, provider=prov)
+    assert e.value.reason is Reason.ownership
+
+
+def test_running_unhealthy_target_is_accepted_only_when_the_api_answers(tmp_path):
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path, omni_kw={"health": "unhealthy"})
+    probed = []
+    dep, *_ = preflight(cfg, cp, comp, env, run, provider=prov, api_ok=lambda *a: probed.append(a) or True)
+    assert dep.state == "running" and probed == [(20128, PASSWORD)]
+    with pytest.raises(Deferral) as e:
+        preflight(cfg, cp, comp, env, run, provider=prov, api_ok=lambda *a: False)
+    assert e.value.reason is Reason.health and PASSWORD not in str(e.value)
+
+
+def test_running_healthy_target_never_needs_the_api_probe(tmp_path):
+    cfg, cp, comp, prov, env, run = preflight_world(tmp_path)
+    dep, *_ = preflight(cfg, cp, comp, env, run, provider=prov, api_ok=lambda *a: pytest.fail("probed"))
+    assert dep.state == "running"
+
+
+def test_verify_commit_accepts_a_running_container_whose_api_answers(tmp_path):
+    d = art(tmp_path, {OMNI: omni()})
+    clock, sleep = ticking()
+    run = stepping_backend({NEW: new_omni(health="unhealthy")})
+    assert verify_commit(run, d, "omniroute", OMNI, "sha256:" + "2" * 64, 5, clock=clock, sleep=sleep,
+                         api_ok=lambda: True) == NEW
+    with pytest.raises(UpdateError, match="not healthy within 5s"):
+        verify_commit(run, d, "omniroute", OMNI, "sha256:" + "2" * 64, 5, clock=clock, sleep=sleep,
+                      api_ok=lambda: False)
+    stopped = stepping_backend({NEW: new_omni(health="unhealthy", state="exited")})
+    with pytest.raises(UpdateError, match="not healthy"):  # a stopped container never counts, whatever the probe says
+        verify_commit(stopped, d, "omniroute", OMNI, "sha256:" + "2" * 64, 5, clock=clock, sleep=sleep,
+                      api_ok=lambda: True)
+
+
+def test_verify_commit_for_an_absent_target_matches_by_project_and_image(tmp_path):
+    d = art(tmp_path, {OMNI: omni()})
+    Path(d, "target.json").write_text("[]")
+    Path(d, "deployment.json").write_text(json.dumps({"project": PROJECT}))
+    snap = take_snapshot(fake_backend({}))
+    Path(d, "snapshot.json").write_text(snap.to_json())
+    clock, sleep = ticking()
+    assert verify_commit(stepping_backend({NEW: new_omni()}), d, "omniroute", "", "sha256:" + "2" * 64, 5,
+                         clock=clock, sleep=sleep) == NEW
+    with pytest.raises(UpdateError, match="unexpected image"):
+        verify_commit(stepping_backend({NEW: new_omni(image="3" * 64)}), d, "omniroute", "", "sha256:" + "2" * 64, 5,
+                      clock=clock, sleep=sleep)
+    with pytest.raises(UpdateError, match="config id"):
+        verify_commit(stepping_backend({NEW: new_omni()}), d, "omniroute", "", None, 5, clock=clock, sleep=sleep)

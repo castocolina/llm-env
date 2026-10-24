@@ -14,7 +14,13 @@ sys.path.insert(0, str(REPO_ROOT))
 from omniroute_fakes import PASSWORD, mk_sample, preflight_world
 
 from pylib.omniroute_activity import IdleGate
-from pylib.omniroute_observer import lease_alive, lock_path, observe_loop
+from pylib.omniroute_observer import (
+    STATE_EXIT,
+    StateWriteError,
+    lease_alive,
+    lock_path,
+    observe_loop,
+)
 from pylib.omniroute_update import (
     Deferral,
     Reason,
@@ -171,7 +177,7 @@ def test_unsafe_lock_directory_or_file_defers_lock(tmp_path, monkeypatch, breaka
 
 def test_flock_is_released_when_the_holder_is_sigkilled(tmp_path):
     path = lock_path(info_run(tmp_path))
-    holder = subprocess.Popen(["bash", "-c", f'exec 9>>"{path}"; flock -n 9 && echo held && sleep 300'],
+    holder = subprocess.Popen(["bash", "-c", f'exec 9>>"{path}"; flock -n 9 && echo held && exec sleep 300'],
                               stdout=subprocess.PIPE, text=True)
     assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
     holder.kill()
@@ -228,11 +234,25 @@ def test_observe_loop_reports_defer_unknown_with_the_sample_reason(tmp_path):
     assert doc["verdict"] == "defer-unknown" and doc["reason"] == "feed"
 
 
+def test_observe_loop_keeps_waiting_through_a_transient_unknown_sample(tmp_path):
+    latest = tmp_path / "latest.json"
+    observe_loop(lambda d, f=False: mk_sample(unknown=True, reason=Reason.age, sample_monotonic=1.0),
+                 IdleGate(1, 1e9), str(latest), 0, _Stop(1), 1e9)
+    doc = json.loads(latest.read_text())
+    assert doc["verdict"] == "wait" and doc["reason"] == "age"
+
+
 def test_observe_loop_reports_deadline_reason(tmp_path):
     latest = tmp_path / "latest.json"
     observe_loop(lambda d, f=False: mk_sample(sample_monotonic=50.0), IdleGate(1, 50.0), str(latest), 0, _Stop(1), 1e9)
     doc = json.loads(latest.read_text())
     assert doc["verdict"] == "defer-deadline" and doc["reason"] == "deadline"
+
+
+def test_observe_loop_reports_its_own_failed_state_write_not_a_feed_problem(tmp_path):
+    with pytest.raises(StateWriteError):  # e.g. disk quota: the verdict file cannot be written
+        observe_loop(lambda d, f=False: mk_sample(sample_monotonic=1.0), IdleGate(1, 1e9),
+                     str(tmp_path / "missing-dir" / "latest.json"), 0, _Stop(1), 1e9)
 
 
 # ---- process lifecycle ----
@@ -325,3 +345,18 @@ def test_observer_does_not_inherit_lock_fd(tmp_path):
             except ProcessLookupError:
                 pass
         sh.kill()
+
+
+def test_supervisor_exits_with_the_state_code_when_its_verdict_file_cannot_be_written(tmp_path):
+    stubs = make_stub_path(tmp_path, podman="exit 1", journalctl="exit 1")
+    parent = subprocess.Popen(["sleep", "300"])
+    sup, latest = start_supervisor(tmp_path, parent.pid, 60, "0.2", stubs)
+    try:
+        assert wait_for(lambda: read_seq(latest) is not None, 20)
+        latest.parent.chmod(0o500)  # the next write_private cannot create its temp file
+        assert sup.wait(timeout=20) == STATE_EXIT
+    finally:
+        latest.parent.chmod(0o700)
+        parent.kill()
+        parent.wait()
+        _kill_group_quietly(sup.pid)

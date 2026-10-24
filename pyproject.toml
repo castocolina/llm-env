@@ -11,3 +11,8 @@ dev = ["pytest>=8.0", "ruff>=0.8", "pyright>=1.1", "pytest-xdist>=3.5"]
 include = ["llmenv.py", "pylib", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+# AGENTS.md "Test Processes and Containers": every test temp dir is removed by the same run, pass or fail (the
+# default keeps the last three runs on the /tmp tmpfs, ~1.6 GB each, and filled the quota).
+tmp_path_retention_policy = "none"

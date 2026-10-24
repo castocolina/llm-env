@@ -371,6 +371,21 @@ backend_env_init() {
     done
 }
 
+# A new private work dir for secret-bearing artifacts (password file, projection with env values). The parent is
+# $XDG_RUNTIME_DIR (per-user 0700 tmpfs, gone at logout/reboot) when it is a real directory we own with mode 700;
+# otherwise ${TMPDIR:-/tmp}. The dir itself is 0700 either way.
+private_work_dir() {
+    local parent="${XDG_RUNTIME_DIR:-}"
+    if [[ -z "$parent" || -L "$parent" || ! -d "$parent" || ! -O "$parent" || "$(stat -c %a "$parent")" != 700 ]]; then
+        parent="${TMPDIR:-/tmp}"
+    fi
+    (umask 077; mktemp -d "$parent/llm-env-update.XXXXXXXXXX")
+}
+
+# Fatal signals exit with the conventional 128+signal status through `exit`, so the EXIT trap (the cleanup) always
+# runs, whatever the bash version does by default (an INT sent to the shell alone is otherwise ignored).
+trap_signals_to_exit() { trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; }
+
 # Take the canonical update lock on FD 9 (kept until the process, or the detached worker that inherits it, exits).
 # Needs the `llm` array and a private $work directory. Exits 75 `deferred: lock` on contention.
 # shellcheck disable=SC2154 # llm/work are provided by the sourcing script.

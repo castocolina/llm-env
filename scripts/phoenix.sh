@@ -41,8 +41,8 @@ if [[ ! "$health_timeout" =~ ^[1-9][0-9]*$ ]]; then
     die "LLM_ENV_PHOENIX_HEALTH_TIMEOUT_SECONDS must be a positive integer"
 fi
 case "$ACTION" in
-    start|stop|status|endpoint|prepare|seed-synthetic|verify-synthetic) ;;
-    *) die "usage: phoenix.sh [start|stop|status|endpoint|prepare|seed-synthetic|verify-synthetic]" ;;
+    start|stop|status|endpoint|prepare|seed-synthetic|verify-synthetic|resource-env) ;;
+    *) die "usage: phoenix.sh [start|stop|status|endpoint|prepare|resource-env|seed-synthetic|verify-synthetic]" ;;
 esac
 
 volume="${project}-data"
@@ -95,20 +95,18 @@ phoenix_compose() (
         podman compose --env-file /dev/null -f "$COMPOSE_FILE" -p "$project" "$@"
 )
 
-# Export the resource environment for the compose render. Values come from
-# models.yml (written by setup/start from llmenv resources); the defaults
-# are the same pylib/resources.py PHOENIX_* policy constants.
+# Export the resource environment for the compose render. The policy is the
+# effective one (pylib/resources.py defaults + resources.overrides.phoenix)
+# resolved by llmenv on every call, including the boot-time ExecStartPost.
 load_resource_env() {
-    local cpus_min="0.25"
-    PHOENIX_CPUS_MAX="2"
-    PHOENIX_MEMORY_MIN_MIB="256"
-    PHOENIX_MEMORY_MAX_MIB="1024"
-    if [[ -f "$CONFIG_PATH" ]]; then
-        cpus_min="$(yq -r '.resources.phoenix.cpus_min // 0.25' "$CONFIG_PATH" 2>/dev/null || printf '0.25')"
-        PHOENIX_CPUS_MAX="$(yq -r '.resources.phoenix.cpus_max // 2' "$CONFIG_PATH" 2>/dev/null || printf '2')"
-        PHOENIX_MEMORY_MIN_MIB="$(yq -r '.resources.phoenix.memory_min_mib // 256' "$CONFIG_PATH" 2>/dev/null || printf '256')"
-        PHOENIX_MEMORY_MAX_MIB="$(yq -r '.resources.phoenix.memory_max_mib // 1024' "$CONFIG_PATH" 2>/dev/null || printf '1024')"
-    fi
+    local policy cpus_min
+    [[ -f "$CONFIG_PATH" ]] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
+    policy="$(llmenv --config "$CONFIG_PATH" effective-policy --service phoenix)" \
+        || die "cannot resolve the Phoenix resource policy: $(jq -r '.error // "unknown error"' <<<"$policy")"
+    cpus_min="$(jq -r '.cpus_min' <<<"$policy")"
+    PHOENIX_CPUS_MAX="$(jq -r '.cpus_max' <<<"$policy")"
+    PHOENIX_MEMORY_MIN_MIB="$(jq -r '.memory_min_mib' <<<"$policy")"
+    PHOENIX_MEMORY_MAX_MIB="$(jq -r '.memory_max_mib' <<<"$policy")"
     # cpu_shares is a RELATIVE WEIGHT (baseline 1024 per share unit), not
     # guaranteed cores; the hard caps are PHOENIX_CPUS_MAX/PHOENIX_MEMORY_MAX_MIB.
     PHOENIX_CPU_SHARES="$(jq -n --argjson c "$cpus_min" '($c * 1024 | round) as $shares | if $shares < 2 then 2 else $shares end')"
@@ -224,7 +222,7 @@ case "$ACTION" in
             exit 0
         fi
         with_lock
-        require_cmd podman podman-compose ss curl jq yq flock realpath
+        require_cmd podman podman-compose ss curl jq yq flock realpath uv
         # Idempotence: our own running server is a success, not a conflict.
         if [[ -n "$(owned_server_id)" ]]; then
             require_owned_server
@@ -248,6 +246,13 @@ case "$ACTION" in
         phoenix_compose up -d phoenix
         wait_ready
         log_info "Phoenix dashboard is ready at http://127.0.0.1:$port (project: laya; System One history enabled)"
+        ;;
+    resource-env)
+        # Read-only: print the resource environment `start` hands to Compose.
+        require_cmd uv jq
+        load_resource_env
+        printf 'PHOENIX_CPU_SHARES=%s\nPHOENIX_CPUS_MAX=%s\nPHOENIX_MEMORY_MIN_MIB=%s\nPHOENIX_MEMORY_MAX_MIB=%s\n' \
+            "$PHOENIX_CPU_SHARES" "$PHOENIX_CPUS_MAX" "$PHOENIX_MEMORY_MIN_MIB" "$PHOENIX_MEMORY_MAX_MIB"
         ;;
     stop)
         with_lock

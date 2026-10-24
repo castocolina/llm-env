@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -20,6 +21,21 @@ def main() -> None:
                 return json.load(handle)
         except (OSError, ValueError):
             return {}
+
+    snapshot: dict = {}
+    lock = threading.Lock()
+
+    def health(s: dict) -> dict:
+        """Stale-while-revalidate, as the real endpoint (measured 2026-10-24): answer the previous snapshot and, once
+        it is older than the cache window, recompute behind it, so a lone read's age is the gap since the last read."""
+        now = int(time.time() * 1000)
+        fresh = {"timestamp": now, "chatAdmission": {"activeHeavy": 0, "activeHealthyHeadroom": 0,
+                                                      "waiting": s.get("waiting", 0), "queuedBytes": 0}}
+        with lock:
+            previous = snapshot.get("body", fresh)
+            if previous is fresh or now - previous["timestamp"] >= int(s.get("cache_ms", 1000)):
+                snapshot["body"] = fresh
+        return previous
 
     class H(BaseHTTPRequestHandler):
         def _send(self, code, body, headers=()):
@@ -42,10 +58,7 @@ def main() -> None:
         def do_GET(self):
             s = state()
             if self.path.startswith("/api/monitoring/health"):
-                cache = int(s.get("cache_ms", 1000))
-                ts = int(time.time() * 1000) // cache * cache  # advances once per cache window
-                return self._send(200, {"timestamp": ts, "chatAdmission": {"activeHeavy": 0,
-                                        "activeHealthyHeadroom": 0, "waiting": s.get("waiting", 0), "queuedBytes": 0}})
+                return self._send(200, health(s))
             if self.path.startswith("/api/usage/history"):
                 by_model = s.get("by_model", {})
                 return self._send(200, {"active": s.get("active", 0),
