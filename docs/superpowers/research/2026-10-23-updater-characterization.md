@@ -92,3 +92,53 @@ LLM_ENV_UPDATE_CHARACTERIZE=1 uv run pytest tests/test_omniroute_characterize.py
 The derivation rules themselves are covered by always-run unit tests
 (`tests/test_omniroute_derive_candidate.py`, 8 cases) so `make test` exercises them without
 Podman.
+
+## Addendum 2026-10-24: decision taken and profile checked in
+
+The owner chose option 1: an array pointer is a legal in-flight source, and its length is the
+in-flight count (`pylib/omniroute_activity.py` `_inflight`). The derivation was corrected and
+re-run over the **same committed evidence** (sha256 unchanged); nothing was re-measured.
+
+- **Derivation fixes.** The baseline tick before a scenario could race the scenario's request
+  (the sampler stamps a tick before its fetches), and the first tick after a window could
+  already hold the next scenario's request. The rule now uses the last tick at or before the
+  window start as the baseline and the last in-window tick as the return-to-idle value. In-flight
+  pointers are judged over the union of `long_stream` and `queued_request`. A map child that
+  OmniRoute deletes at zero (`/pending/byModel/<model>`) counts as 0. A pointer that ever holds a
+  non-integer (`/adaptiveAdmission/utilization`) is never a counter.
+- **Freshness.** The brief proposed a 45000 ms tolerance "unless the data says otherwise", and the
+  data does say otherwise. `/adaptiveAdmission/resourceObservedAtMs` advances only around
+  traffic, with gaps of about 40 s, so it would go stale during the 300 s idle window. The
+  health document's `/timestamp` (an RFC3339 `Z` string) advances about every second whatever the
+  traffic. It is now accepted as epoch milliseconds, and the clock with the smallest worst
+  refresh step wins. Derived bounds: `health_cache_ms` 542, `health_refresh_bound_ms` 1100. No
+  hand-picked tolerance was needed.
+- **Result.** The derivation produces a complete candidate:
+  - `active` `/activeRequests`
+  - `pending_by_model` `/pending/byModel`
+  - `admission` `/adaptiveAdmission/activeCost` and `/adaptiveAdmission/activeCount`
+  - `health_timestamp` `/timestamp`
+  - logger level env `APP_LOG_LEVEL` at minimum level `info`
+  - reachable route `POST /v1/chat/completions` only
+
+  `promote_candidate` (in `tests/test_omniroute_characterize.py`) turned it into the entry for
+  config id `038b2aba95a6` in `pylib/omniroute_activity_profiles.json`. The entrypoint was read
+  with `podman image inspect`. The always-run test
+  `test_checked_in_profiles_are_reproduced_from_their_committed_evidence` re-derives every
+  checked-in entry from its evidence file and fails on any hand edit.
+- **Still deferring.** `docker.io/diegosouzapw/omniroute:next` (local config id `2a7a68e89fe5`)
+  has no profile and defers `capability`. To characterize it:
+
+  ```bash
+  podman image exists docker.io/diegosouzapw/omniroute:next || podman pull docker.io/diegosouzapw/omniroute:next
+  LLM_ENV_UPDATE_CHARACTERIZE=1 LLM_ENV_UPDATE_CHARACTERIZE_IMAGE=docker.io/diegosouzapw/omniroute:next \
+    uv run pytest tests/test_omniroute_characterize.py -q -s
+  # review docs/superpowers/research/<date>-omniroute-{characterization,candidate,profile}-<config12>.json,
+  # append the profile entry to pylib/omniroute_activity_profiles.json, then:
+  make validate && make test
+  ```
+
+- **Runtime caveats.**
+  - Any route other than chat that agents call (for example `GET /v1/models`) defers `coverage`.
+  - A host with 1000 or more persisted call logs reads as `overflow`, because the collector fetches `limit=1000`.
+    Superseded by plan addendum (f), 2026-10-24: the collector reads a small page and judges the newest client trace.

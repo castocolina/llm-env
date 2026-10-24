@@ -4177,3 +4177,343 @@ if __name__ == "__main__":
 - **Open decisions for the user (not guessed):** (1) there is no compose-only re-render path; Task 7 documents `setup/render-unit.sh`'s side effects and leaves the re-render to the user, so whether to add a narrow `render-compose` make target is a separate decision; (2) the Podman label keys and `serviceIsRemote` field are verified read-only in Task 2 Step 1 and the executor stops and asks if they differ; (3) the real OmniRoute access-log field names and API pointers come only from the Task 8 Step 3 characterization, which is a manual-review step.
 - **Known risks:** the profile list is empty until a human reviews a characterization, so the real updater defers with `capability`; the production dependency migration needs the user to schedule it; the Task 8 proofs require host-local `registry:2` and `python:3.12-slim` images, `podman-compose`, `skopeo` and a readable journal, and use the `vfs` driver (slow first build); Task 6 shell cases run on the real 5 s sampling cadence (5-20 s each); the `$`-escaping and projection semantics are checked against the running container's evidence and the provider round trip, but remain provider-version dependent (podman-compose 1.6.0 is the only verified version).
 
+
+---
+
+## Addendum 2026-10-24: down targets, Podman health, and the first profile
+
+These changes were approved by the owner after the first live run deferred. They take
+precedence over the task text above where the two differ.
+
+- **A stopped or absent target is updated without observation.**
+  - Preflight reports `state=running|stopped|absent`. `make stop` runs `compose down`, which
+    removes the containers, so `absent` is the usual down state.
+  - For a stopped or absent target, the updater skips:
+    - the idle gate;
+    - the observer;
+    - the activity profile.
+    It still resolves and pulls the image immutably, verifies the staged image, recreates only
+    `omniroute` (`--no-deps`), and verifies it.
+  - Ownership checks still apply.
+    - **Stopped target:**
+      - project and service labels;
+      - port;
+      - password;
+      - `REQUIRE_API_KEY`;
+      - image reference;
+      - effective-compose agreement;
+      - no incoming dependents.
+    - **Absent target:** the compose project is the top-level `name` or the lowercased basename
+      of the compose directory, which is podman-compose's own rule. It must agree with the
+      working-dir label of any existing project container. An unlabeled container named
+      `omniroute` defers `ownership`.
+  - An absent target uses the host platform from `podman info`.
+  - Exit codes, the lock, and the no-rollback rule are unchanged. An `unchanged` result leaves a
+    stopped container stopped.
+- **Podman health is not the readiness signal on this host.** The live container's
+  healthcheck exec fails (exit 125, `unable to find user node`), so it reports `unhealthy`
+  even while it serves traffic.
+  - A running target whose Podman health is not `healthy` is accepted only when the
+    authenticated `/api/monitoring/health` answers. Otherwise the run defers with the new
+    reason `health`.
+  - Post-commit verification uses the same rule: Podman `healthy`, OR the container is running
+    and the API answers.
+- **Password file.** It is now written without a trailing newline (`printf '%s'`). The `yq`
+  output was being sent to the login with a trailing newline.
+- **Activity profile.**
+  - The signal contract accepts an array whose length is the in-flight count.
+  - Health freshness uses the derived `/timestamp` bounds (542 / 1100 ms) instead of a fixed
+    45 s tolerance. The data showed the alternative clock goes stale while the router is idle.
+  - The `:latest` image with config id `038b2aba95a6` now has a machine-promoted,
+    reproduction-tested entry.
+  - `:next` keeps deferring `capability` until it is characterized. The harness takes
+    `LLM_ENV_UPDATE_CHARACTERIZE_IMAGE` and writes a promoted entry when the candidate is
+    complete.
+  - Details are in `docs/superpowers/research/2026-10-23-updater-characterization.md`
+    (addendum).
+- **Healer memory recycle (separate script, same day).** `scripts/heal-omniroute-admission.sh`
+  also restarts OmniRoute when all of these hold:
+  - it is idle;
+  - its host-read cgroup memory (`memory.current` minus file cache) is above
+    `OMNIROUTE_HEAL_MEMORY_MIB` (default 1536; `0` disables);
+  - both have held for `OMNIROUTE_HEAL_MEMORY_SAMPLES` runs (default 3).
+
+  Memory restarts are at least 6 h apart (`OMNIROUTE_HEAL_MEMORY_COOLDOWN_HOURS`) and at most
+  2 per rolling 24 h. The restart history is kept in the healer state file.
+
+## Addendum 2026-10-24 (b): transient unknown samples no longer abort the wait
+
+The live run against `:next` (config `2a7a68e89fe5`) ended after about 60 s with `deferred: age`. At receipt, the
+health `timestamp` age clusters at about 0, 710 and 1420 ms, which is up to two server cache periods. One sample
+over `health_cache_ms + health_refresh_bound_ms + tolerance` (530 + 1100 + a few ms) made the sample unknown, and
+`IdleGate.step` deferred on the first unknown sample. That ended a wait that may last up to 10800 s.
+
+**New rule** (`pylib/omniroute_activity.py`, `IdleGate.step(..., reason=)`, passed by the observer):
+
+| Unknown-sample reason | Class | Gate behaviour |
+|---|---|---|
+| `age`, `io`, `clock` **with independent activity evidence** in the same sample (journal inference arrival this poll, `active` > 0, pending-by-model > 0, admission counters > 0, or an in-memory call-log row) and no structural failure | not unknown: the collector publishes a normal `busy` sample (`unknown=False`) | `wait`, resets the quiet window *and* the unknown budget (positive evidence can only delay a commit) |
+| `age`, `io`, `clock` with **no** activity evidence | transient (timing/load) | `wait`. It clears the quiet window and the pending resample. It defers only when unknown samples run continuously for more than `UNKNOWN_BUDGET_S` = 60 s (a constant, with no env override). The deferral carries the last sample's reason. |
+| `capability`, `coverage`, `logging`, `feed`, `overflow`, `continuity`, `auth`, `schema`, `ownership`, `input`, `lock`, `health`, any other, or no reason | structural | `defer-unknown` on the first sample, as before |
+
+- **Kept fail-closed properties:**
+  - The exclusive deadline is still checked first.
+  - A commit never happens on, or straight after, an unknown sample. The next complete non-busy sample only *starts* a new window, so the commit still needs a full `min_wait` of complete non-busy samples plus the complete resample.
+  - An unknown sample during the resample resets it.
+  - A complete sample (idle or busy) resets the 60 s unknown budget.
+  - A structural sample inside a run of transient ones defers at once.
+- **`feed` stays structural**, as the owner listed it. It covers both "logs not on journald" and "barrier not seen in this poll"; the second could be journald lag under load. If live runs show `deferred: feed` that lag explains, moving `feed` to the transient set is the next decision. It is not taken here.
+- **`continuity` and `overflow` are structural:** lost journal lines, an evicted call-log row, or 1000 or more persisted rows do not clear by waiting 60 s.
+- **The clock bounds are unchanged.** The bound stays evidence-derived. The margin analysis is in `tmp/subagent-updater-report.md`.
+- **Tests:**
+  - `tests/test_omniroute_activity.py`:
+    - a single transient unknown restarts a full window;
+    - 60 s of continuous unknown defers with the last reason;
+    - a structural reason defers at once, parametrized over every non-transient reason;
+    - an unknown during the resample resets it;
+    - a complete sample resets the budget;
+    - the deadline still wins.
+  - `tests/test_omniroute_observer.py`: a transient sample publishes `wait`.
+
+### Addendum 2026-10-24 (c): busy evidence beats a stale health clock
+
+A second live run, with ai-kit streaming through OmniRoute, deferred `age` after 142 s. Continuous stale samples
+used up the 60 s budget while the router was busy. The coordinator's read-only probe (`tmp/age-probe.py`) took
+150 samples at 0.4 s under traffic and measured the health timestamp age at receipt:
+
+| min | p50 | p90 | p99 | max | failures |
+|---|---|---|---|---|---|
+| 402 ms | 807 ms | 1211 ms | 1213 ms | **11 256 ms** | 1 of 150 |
+
+The profile limit is 1631 ms. Health staleness therefore correlates with load, and treating it as `unknown`
+deferred exactly when the right action is to keep waiting.
+
+**Change in `Collector.sample`.**
+- Independent activity evidence is gathered before the clock and freshness checks:
+  - inference arrivals in this journal poll;
+  - the `active`, pending and admission counters;
+  - in-memory call-log rows.
+- When a transient failure (`age`, `clock`, or `io` after the journal poll) meets that evidence, the sample is a
+  normal `busy` sample. `classify` honours `reason=busy` on a non-unknown sample.
+- **Structural checks run first and are never overridden.** These are `overflow`, `continuity`, `feed` and
+  `coverage`, now checked ahead of `clock` and `age`. A busy sample with a structural failure stays unknown and defers
+  at once, so the journal and row contract still holds whenever the gate trusts a sample.
+- The in-memory row counts only as override evidence. A fresh, idle sample still ignores it, as before, so a stuck
+  row cannot block updates forever.
+- **Unknown budget unchanged at 60 s, with this evidence behind it.** The longest single lag observed is about 11 s. The
+  budget now only counts *continuous* stale samples with no activity evidence at all, so 60 s is more than five times
+  the worst observed lag. Every busy sample resets it.
+
+**Tests in `tests/test_omniroute_activity.py`.**
+- Stale health with an active request, admission, a journal arrival or an in-memory row gives `busy`.
+- Stale health with nothing else gives transient `unknown(age)`.
+- A structural failure with activity stays `unknown(feed)`.
+- `io` after an arrival gives `busy`; without one it gives `unknown(io)`.
+- A fresh idle sample ignores an in-memory row.
+- 200 s of stale health while requests arrive never defers, and the quiet window stays cleared.
+
+### Addendum 2026-10-24 (f): the newest client trace replaces the call-log row sets
+
+The live run deferred `overflow` after 12 s because the store holds more than 1000 call logs. The owner's
+correction: a full log is nothing. What matters is whether a client call is in flight, or how long ago the newest
+client call started. This addendum supersedes the row-set rules of the original Task 3 and the overflow design (d).
+
+**Source-verified page contract** (`/api/usage/call-logs` route and `getCallLogs`, both `038b2aba95a6` and
+`2a7a68e89fe5`):
+- Every page holds every in-memory row: first the in-flight rows (`active: true`, `method: ""`, `status: 0`), then the
+  completed rows not yet persisted (`completed: true`, `detailState: "in-memory"`). Both carry
+  `timestamp = startedAt` and `path = clientEndpoint`, which may be empty.
+- Then come the persisted rows, `ORDER BY timestamp DESC LIMIT limit OFFSET offset`, with `active: false`.
+- So the page is newest-first only inside each group. The last row is the oldest persisted row on the page, and a
+  page shorter than `limit` holds every remaining persisted row.
+- The 6 live rows with path `/v1/chat/completions`, no method and no `apiKeyName` are in-memory rows.
+- Internal connection tests (`POST /api/providers/{id}/test` and the credential-health scheduler) write persisted rows
+  `POST /api/providers/test`, model `connection-test`. They never appear as a JSON access-log line.
+
+**Rule** (`Collector._call_logs`, `Collector(min_wait=...)`):
+
+| Page content | Sample |
+|---|---|
+| a client row (`row_path` class `inference`) with the in-flight flag set | busy |
+| newest client `row_timestamp` younger than `min_wait` (default 300 s) | busy |
+| no in-flight client row, newest client trace at least `min_wait` old, or no client rows at all | idle, if the journal, counters and health also agree |
+| probe rows (class `probe`, for example `/api/providers/test`), in flight or not | ignored: never activity, never resets the quiet window |
+| a row path that is not in the profile (including the empty path) | `coverage`, structural |
+| a trace time that does not parse | `age`, transient |
+| a trace time more than the clock tolerance ahead of the wall clock | `clock`, transient, and never evidence |
+| a missing or mistyped page, or a row without its profiled fields | `schema`, structural |
+
+- **Paging.** Fetch `limit = rows_page_limit` (profile; 10 for both images), offset 0. Page on with `offset += limit`
+  only while there is no busy evidence, the page is full, and its last row is still younger than the threshold.
+  Stop at `ROW_PAGES` = 5 pages. Reaching the bound without proof is transient `age`, never idle.
+- **Classification by path only**, because in-memory rows have an empty method. A path must map to exactly one class.
+- **Generation.** `row_generation` bumps whenever the newest client trace changes, so a quiet window restarts on a new
+  trace even when both samples look idle.
+- **Removed:** the row id hashes, the persisted and in-memory sets, `lost` continuity on rows and the 1000-row
+  `overflow`. `overflow` and `continuity` now come from the journal only.
+- **Gate kept as is.** Starting the quiet window at the newest trace time was rejected. Time before the observer
+  started was never journal-observed, so backdating would let a commit rest on a window the gate did not watch.
+  The gate still needs `min_wait` of complete non-busy samples plus the resample.
+- **A stuck in-flight row now blocks.** Addendum (c) ignored in-memory rows on fresh idle samples. The owner's rule
+  makes an in-flight client row busy. OmniRoute sweeps stale in-flight rows (`stale`, `sweptAt`); until then the
+  exclusive deadline bounds the wait (`deferred: deadline`).
+
+**Profile fields, derived by the characterization tooling** (`tests/test_omniroute_characterize.py`):
+- The sampler reads `call-logs?limit=10&offset=0` and records every row of that page. `rows_page_limit` is read back
+  from that series key.
+- `row_path`: the one row key carrying the measured client route.
+- `row_timestamp`: the one row key that every recorded row carries as an epoch-ms time the runtime reads, never ahead
+  of the sampler tick. `completedAt` fails, because it is null on in-flight rows.
+- Probe routes: a new `provider_test` scenario calls `POST /api/providers/{id}/test`. A non-client row path written
+  inside that window, which the access log never shows, becomes a `probe` route carrying the evidence hash.
+- `row_id` is gone. `load_profile` requires `rows`, `row_path`, `row_timestamp`, `row_memory_flag` and a positive
+  `rows_page_limit`, or defers `capability`.
+- Both entries were re-characterized and re-promoted. `test_checked_in_profiles_are_reproduced_from_their_committed_evidence`
+  re-derives them.
+
+**Tests** (`tests/test_omniroute_activity.py`):
+- full store → idle on one page;
+- empty page → idle;
+- old trace → idle; recent trace → busy; in-flight client row → busy;
+- a probe newer than an old client row → idle;
+- probes only, then an old client row on the next page → idle;
+- an in-flight probe → idle;
+- an oldest probe past the threshold → idle;
+- probes only and still young up to the bound → transient `age`, after exactly 5 pages;
+- garbage, impossible or null trace time → `age`; a future trace time → `clock`;
+- unknown or empty row path → `coverage`;
+- missing row fields → `schema`;
+- a new client trace between two idle samples bumps the generation.
+
+`tests/test_omniroute_derive_candidate.py` covers the new derivation rules.
+
+**Measured** (2026-10-24 characterizations of `:next` `2a7a68e89fe5` and `:latest` `038b2aba95a6`, both complete):
+- Derived for both: `row_path` = `path`, `row_timestamp` = `timestamp`, `row_memory_flag` = `active`, `rows` = the
+  root array, `rows_page_limit` = 10, and probe route `POST /api/providers/test`. The `provider_test` scenario
+  returned 200 three times and wrote no access-log line.
+- Persisted rows were newest-first on all 499 pages of each run (`review_notes.row_order`).
+- "Small" means 10 persisted rows *plus every in-memory row*. Under the 200-request burst, completed in-memory rows
+  piled up to 187 rows per page (median 130). The live page had 6.
+- Distinct rows in each run: about 920 in-flight variants, 271 persisted client rows, 268 completed in-memory rows
+  and 5 `/api/providers/test` rows.
+- Recording every row of every tick gave an 80 MB file. The sampler now stores each distinct row once in
+  `row_table`, and every tick lists digests in `#rows`. Each evidence file is about 10 MB.
+- Health bounds re-derived by the same rules: `2a7a` 666/1000 ms (was 530/1100), `038b` 667/900 ms (was 542/1100).
+  These numbers come from the evidence. None was edited by hand.
+
+## Addendum (g), 2026-10-24: independent review fixes (`tmp/review-updater.md`)
+
+- **Hand-off signals.** `trap - EXIT` before the detached worker hand-off in `update-omniroute.sh` and
+  `migrate-remote-setup.sh`: a TERM/HUP to the shell no longer deletes the work folder the worker still needs.
+  Tests send SIGKILL, SIGTERM and SIGHUP at the hand-off; the TERM/HUP cases failed before.
+- **Healer.** Every state value is validated (a truncated, garbage or multi-value file counts as zeros) and the
+  file is written with temp + rename, so the stuck-lease path can no longer die on `write_state`. "Idle" is now the
+  updater's own API-only rule (`omniroute-update activity`, real profile, probe rows ignored). An unprofiled image or
+  route is unknown, so there is no recycle (safer than counting every row). A memory recycle takes the update lock
+  with `flock -n` and holds it through the restart, or skips and logs.
+- **Last look.** The commit worker runs `omniroute-update activity` right before the first mutation (running target
+  only): busy or unknown defers 75 with nothing changed. The unwatched gap is now the `podman tag` call only.
+- **Exit codes.** `make` cannot pass 75 through (GNU make exits 2), so the script's last stdout line is the contract,
+  the `run-target.sh` banner says `deferred, exit 75`, and a failed `podman pull` exits 1 with a message.
+- **Routes** (measured in both images, `client_routes` scenario): `/v1/messages` and `/v1/responses` write their own
+  access-log line and call-log rows, so they are inference routes with the chat route's signals (one shared chat
+  handler, source-verified). `GET /v1/models` writes neither and is not activity. `/v1/embeddings` writes rows only,
+  so it stays unprofiled; the runtime defers `coverage` with `detail: unprofiled route: /v1/embeddings`. The live
+  call log (1006 rows) had only `/v1/chat/completions` and `/api/providers/test`.
+- **Replay.** The sampler now records empty objects (`/pending/byModel: {}`). Before, an idle recorded sample could
+  not be replayed: it came back `schema`. A test replays the shipped profiles over recorded ticks through
+  `Collector.sample`.
+- **Observer state.** A failed `latest.json` write exits the observer with 74 and the shell defers `state` (new
+  reason) instead of `feed`. Teardown spares the `uv` launcher so the code reaches the shell.
+- **Tests.** Repo copies skip `docs/` and pytest keeps no temp dirs (`tmp_path_retention_policy = "none"`).
+- Health bounds after the rerun: `038b` 661/900 ms, `2a7a` 661/1000 ms. Both are derived; none was hand-edited.
+
+## Addendum (h), 2026-10-24: the health endpoint is stale-while-revalidate (prime, then read)
+
+- **Root cause of live attempt #6 (`deferred: age` at full idle).** `GET /api/monitoring/health` answers the snapshot
+  the PREVIOUS health request computed (its `timestamp` and its counters) and recomputes behind its answer. A lone
+  read's age is therefore the gap since the previous health request: our own 5 s poll at idle (measured live
+  6-18 s on a first call, 8 ms on an immediate second call, 310/810/1209 ms after 0.3/0.8/1.2 s). It only passed
+  during client activity because other clients kept the snapshot fresh; the earlier 11 s "lag" is the same effect.
+- **Fix, in the one shared place (`Collector.sample`).** One discarded GET (the prime starts the recompute), then
+  the real read `PRIME_GAP_S` = 0.2 s later (capped at half of `health_cache_ms`, so strictly below the cache window
+  and the read is served the snapshot the prime computed). That read's timestamp and counters feed freshness,
+  `advanced` and the busy fields; the wall/monotonic bracket is around the read only. Both GETs are inside the sample
+  deadline (no time left for the gap is `io`); a failed prime is `io` (transient), whatever its own reason. Cost:
+  one extra GET per sample. Every consumer goes through it: the observer, `omniroute-update activity` (the commit
+  worker's last look before `podman stop`, where a lone read would be as old as the observer's stop, and the
+  healer's idle check). The healer's own stuck-lease read (`chatAdmission.activeHeavy`/`shedTotal`) primes too.
+- **Diagnosis.** An `age` deferral's detail is `health timestamp age <seen> ms outside 0..<limit> ms`
+  (limit = `health_cache_ms + health_refresh_bound_ms + tolerance`); the updater prints it as `detail:` on stderr.
+- **Tests.** A fake that really is stale-while-revalidate (response = previous snapshot) proves: a lone read at idle
+  is `age`; prime+read over 30 s of 5 s polls is idle with age 200 ms and advancing timestamps; busy counters come
+  from the primed snapshot; a request that starts between the two calls is visible (history is read after). The
+  test fake server (`tests/fixtures/fake_omniroute.py`) and the healer's test server now behave the same way, and a
+  healer test fails with the prime removed.
+- **Characterization.** New `idle_poll` scenario (sampler held, no traffic, health polled every 5 s: a lone read,
+  then the read 0.2 s later). The derivation requires it: every primed age within `0..health_cache_ms +
+  health_refresh_bound_ms` and the prime gap below `health_cache_ms`, or the candidate is incomplete. Measured in the
+  isolated backend: lone ages 5.2-5.7 s, primed ages 202-204 ms, for both images. Profiles regenerated by the tooling:
+  `038b` 660/900 ms, `2a7a` 659/900 ms.
+
+## Addendum (i), 2026-10-24: private work dirs, the password's lifetime, and the 30 s health cache of 7d2169fb2bd6
+
+- **Leak (74 work dirs with `pw` and the projection in /tmp).** The EXIT trap is the only cleanup; SIGKILL skips it
+  (the suite's own SIGKILL test and killed runs), and bash ignores a SIGINT sent to the shell alone while a
+  foreground child runs. Fix: `private_work_dir` (tools/lib.sh) creates the dir under `$XDG_RUNTIME_DIR` when it is
+  our own 0700 non-symlink dir, else `${TMPDIR:-/tmp}`, with umask 077; `trap_signals_to_exit` turns HUP/INT/TERM
+  into exit 129/130/143 so the EXIT trap runs. At the hand-off the shell drops its traps and the commit worker owns
+  the dir (its EXIT trap is set before anything else, signals map the same way, so failures, its own signals and a
+  last-look deferral all delete it); the shell removes it again after the worker returns (a budget SIGKILL). An
+  observer whose lease died removes its artifact dir (`supervise(..., orphaned=...)`). The migrate script and the
+  healer use the same helpers.
+- **Password lifetime.** `pw` is written only right before the observer starts, deleted at the observer's first
+  verdict (it reads the file once, at start), and rewritten at the hand-off for the worker.
+- **Residual (not closed, documented).** A SIGKILL of the shell during preflight/resolve/pull leaves a dir with
+  the projection inputs but no `pw`, in the tmpfs runtime dir (gone at logout/reboot). No sweeper was added.
+- **Tests.** TERM/HUP/INT during pull and during observation leave no work dir and exit 128+n; SIGKILL while
+  waiting leaves none; `pw` is gone while the observer waits; the world fixture points `XDG_RUNTIME_DIR`/`TMPDIR`
+  at a per-test dir and asserts at teardown that no dir holding `pw`, `deploy.env` or `projection.yml` survives.
+  Removing the signal traps and the early `pw` removal makes 7 of them fail.
+- **Why the 7d2169fb2bd6 candidate was incomplete (a real build difference, not noise).** This build caches the
+  health payload for 30 s (`expiresAt: Date.now() + 3e4` in the health route; its DELETE resets the cache and the
+  circuit breakers, so it is never used). Every clock in the payload therefore refreshes together (a tie on the
+  worst step, so `health_timestamp` had several candidates), the admission counters lag up to 30 s (the load
+  scenarios ended before the snapshot showed them), and the cache/bound pair followed from the tie.
+  Derivation fixes: a tie on the worst step is broken by the smallest lag between the wall clock and the value at
+  its first sight (`health_timestamp_worst_first_seen_lag_ms` review note); every scenario waits, after its idle
+  tail, for a health snapshot newer than its load (`health_settled`, cap 75 s). Two reruns, both complete, same
+  fields: 678/30000 and 537/30100 ms; the second was promoted with the tooling (`038b` 660/900, `2a7a` 659/900,
+  `7d21` 537/30100). The `idle_poll` primed ages reached 26.9 s against a 30.6 s limit (tight).
+- **Routine.** `make characterize-omniroute` (scripts/characterize-omniroute.sh) characterizes the configured image
+  (or `LLM_ENV_UPDATE_CHARACTERIZE_IMAGE`) from the host store in the isolated backend, lists incomplete reasons,
+  or prints the profile-list diff and the exact promote command. The updater's `capability` detail names it.
+
+## Addendum (j), 2026-10-24: the updater characterizes an unprofiled running image itself (owner decision)
+
+Supersedes the "Routine" bullet of addendum (i): there is no `make characterize-omniroute`; `make update-omniroute`
+is the only target for this area.
+
+- **Flow.** After preflight, a *running* target whose config id has no profile (shipped, or user-local and still
+  bound to its evidence) is characterized first, under the update lock: `omniroute-update characterize` runs
+  `pylib/omniroute_characterize.collect` (the harness moved out of `tests/test_omniroute_characterize.py`; the
+  opt-in test and the CLI share it, product code imports nothing from `tests/`), stores the evidence, derives the
+  candidate from the stored bytes with the existing rules and promotes it; the profile is kept only when the
+  candidate is complete and `load_profile` accepts it from the store. Then the normal update continues (resolve,
+  pull, observe, hand-off). An incomplete candidate defers `capability` (`detail:` lines: each reason and the
+  evidence path); a harness failure exits 1 and stores no profile. Stopped/absent targets skip it (nothing is
+  observed).
+- **Local store.** `${XDG_STATE_HOME:-~/.local/state}/llm-env/omniroute-profiles/` (0700):
+  `<hex>.evidence.json`, `<hex>.candidate.json`, `<hex>.profile.json`. The loader reads the shipped list first and
+  the store second; both go through the same entry checks, and a local entry must name `<hex>.evidence.json` and
+  match its sha256 on every load (shipped entries are bound by the reproduction test). A damaged entry is treated
+  as absent, so the next run re-characterizes.
+- **Bounds and cleanup.** Budget 1200 s (SIGALRM in the CLI; TERM/HUP raise SystemExit), enforced in the main
+  thread so the harness's `finally` stops the journal follower, the fake provider (pylib/fake_inference.py, moved
+  from tests/fixtures) and removes the isolated store and its containers. The backend publishes OmniRoute on
+  loopback only and uses a throwaway password. A SIGKILLed run leaves a root with a dead lease (pid + start tick);
+  the next run reaps it (`IsolatedBackend.sweep`, only directories with a `storage.conf`, ownership-checked).
+- **Shipped profiles.** `038b` and `2a7a` stay; `7d2169fb2bd6` is not shipped and reaches the local store through
+  this path (a unit test stores it from the recorded research evidence and checks it equals the research profile).
+- **Phases on stdout.** `phase: characterizing ...` (with sub-steps), `phase: deriving`, `phase: storing <path>`,
+  `phase: stored ...`, then `phase: observing ...`; the last stdout line stays the machine-readable result.

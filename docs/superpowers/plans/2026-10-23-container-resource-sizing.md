@@ -4452,3 +4452,33 @@ git commit -m "docs(research): record the OmniRoute memory cap validation result
 **Review Focus coverage:** 1-2 Tasks 1/3 parametrized tests; 3 Task 2 `test_override_of_a_disabled_service_is_inert`; 4 Task 2 and Task 4 tests; 5 Tasks 5, 6, 9 (`render-unit`, `start`, `phoenix.sh resource-env`); 6 Tasks 1, 8, 9 (hand edit, missing/edited file, `clear` repair); 7 Tasks 7 and 9 (container binding, age, window, rising peak, counters, types, missing swap/PSI); 8 Tasks 7 and 9 (flag floors, ratio ceiling, guard missing); 9 Task 7 demand-bound and PSI tests; 10 Task 12 Steps 1-6 (`judge.sh` C0 coverage exits 2 on NA, missing, short, gapped or stalled windows and on a ledger without post-change samples, before C1-C4 are evaluated); 11 Tasks 7 and 9 (declared-container table pinned to the rendered compose, main-stack project derived from `tools/lib.sh` and the unit, project and working-directory labels pinned for every service, ledger naming another workload, label mismatch); 12 Task 7 (spike in a non-newest sample, a guard missing or different in one sample); 13 Tasks 9, 11 and 12 (`_APPLY_HINT`, AGENTS.md text, change timestamp and whole-window judgment); 14 Tasks 1, 7, 8 and 9 (absolute path shape, relative `--config`, verification from any working directory); 15 Task 7 (hash-chain tamper cases, refusal to extend a cut ledger) and Task 8 (config rejects a broken chain).
 
 **Known limits, stated rather than hidden:** the evidence gate is a safety rail against mistakes and hand edits, not a security boundary. The ledger's hash chain makes silent loss visible (an edited, removed or reordered sample fails the loader and `record_evidence` refuses to extend such a ledger; truncating the tail or replacing the file fails the reference's sha256), but the chain holds no secret, so someone who recomputes the whole chain and the sha256 on purpose can still forge history; the ledger is replaceable by design and the gate's assurance is exactly "detects accidents and casual edits"; PSI averages are judged as the maximum over every recorded sample of the container lifetime plus the soak's continuous host sampling, so a transient spike between samples can still go unseen by the gate (a sample is a 10/60/300 s average at one instant) and only the soak criteria cover it; the generated `resources.<service>` mirror still exists and is still rewritten by start/setup (removing it is a follow-up); a changed override reaches boot only after the next render.
+
+---
+
+## Addendum 2026-10-24: evidence gate SUPERSEDED/REMOVED
+
+Owner decision, 2026-10-24. The evidence gate could not accept any real lowered cap: its 24 h stable-peak
+window, the running-container identity check and the `highRatio` bound together refused every cap below
+the default that live data supported, so it only ever blocked. The system is now: benchmark -> numbers ->
+`DEFAULT_POLICY` or per-user overrides. The sections below are kept for history; these parts are
+**SUPERSEDED/REMOVED**:
+
+- **Task 7** (the evidence ledger, `pylib/resource_evidence.py`): REMOVED.
+- **Task 8** (enforce the evidence gate on every write path, `validate_config` re-verification of the
+  stored ledger): REMOVED. Lowering `memory_max_mib` below the default is allowed and prints a warning
+  pointing at `make resources-benchmark`.
+- **Task 9**, evidence parts only (`resource-evidence` subcommand, `resource-override set --evidence`,
+  `--max-peak-ratio`, `--min-observation-hours`): REMOVED. `resource-override show|set|check|clear` stays.
+- **Task 10**, `make resources-measure` and `scripts/resources-measure.sh`: REMOVED, replaced by
+  `make resources-benchmark` (`scripts/resources-benchmark.sh`). `make resources` stays.
+- **Task 12** (validating the OmniRoute cap through the gate/soak judge): SUPERSEDED by the benchmark
+  derivation in `docs/superpowers/research/2026-10-24-benchmark-derived-sizing.md`.
+- The `memory_max_evidence` override field: REMOVED; a stale one is dropped silently on load.
+- The test pin of a 3072 MiB OmniRoute default (`conftest` gate scenarios): REMOVED; tests assert the
+  real defaults.
+- The generated `resources.<service>` mirror written by `scripts/start.sh` and `setup/setup.sh`: REMOVED;
+  it is dropped on load (`resources.llm_server` stays).
+
+Also changed on 2026-10-24: Phoenix `memory_max_mib` 960 -> 1024 (live peak 804 MiB + 20 %); `system_one`
+is documented as an explicit exception to the sizing rule; the OmniRoute healer threshold defaults to 60 %
+of the container's `memory.max` (1228 MiB at 2048).

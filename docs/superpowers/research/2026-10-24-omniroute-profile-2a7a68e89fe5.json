@@ -1,0 +1,105 @@
+{
+  "api_fields": {
+    "active": "/activeRequests",
+    "admission": [
+      "/adaptiveAdmission/activeCost",
+      "/adaptiveAdmission/activeCount"
+    ],
+    "health_timestamp": "/timestamp",
+    "pending_by_model": "/pending/byModel",
+    "row_memory_flag": "active",
+    "row_path": "path",
+    "row_timestamp": "timestamp",
+    "rows": "",
+    "rows_page_limit": 10
+  },
+  "config_id": "sha256:2a7a68e89fe514f15380219edc0df22f46a79614995fd0155731cfa0238e58da",
+  "entrypoint": [
+    "/app/check-permissions.sh"
+  ],
+  "env_allowlist": {},
+  "evidence": {
+    "characterization": "docs/superpowers/research/2026-10-24-omniroute-characterization-2a7a68e89fe5.json",
+    "characterization_sha256": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae"
+  },
+  "health_cache_ms": 659,
+  "health_refresh_bound_ms": 900,
+  "logger": {
+    "fields": {
+      "method": "method",
+      "path": "path"
+    },
+    "level_env": "APP_LOG_LEVEL",
+    "loss_detection": {
+      "lines": 200,
+      "loss_detected": false,
+      "requests": 200
+    },
+    "min_level": "info"
+  },
+  "reachable_routes": [
+    "POST /v1/chat/completions",
+    "POST /v1/messages",
+    "POST /v1/responses",
+    "POST /api/providers/test"
+  ],
+  "routes": [
+    {
+      "arrival": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "journal-access-log"
+      },
+      "class": "inference",
+      "inflight": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "usage-history/activeRequests"
+      },
+      "method": "POST",
+      "path_pattern": "/v1/chat/completions",
+      "queue": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "health-admission+usage-pending-by-model"
+      }
+    },
+    {
+      "arrival": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "journal-access-log"
+      },
+      "class": "inference",
+      "inflight": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "usage-history/activeRequests"
+      },
+      "method": "POST",
+      "path_pattern": "/v1/messages",
+      "queue": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "health-admission+usage-pending-by-model"
+      }
+    },
+    {
+      "arrival": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "journal-access-log"
+      },
+      "class": "inference",
+      "inflight": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "usage-history/activeRequests"
+      },
+      "method": "POST",
+      "path_pattern": "/v1/responses",
+      "queue": {
+        "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+        "signal": "health-admission+usage-pending-by-model"
+      }
+    },
+    {
+      "class": "probe",
+      "evidence": "1f4999b6b18c753f7ab21e74c23a7736263b56a35a535878492a272cff117cae",
+      "method": "POST",
+      "path_pattern": "/api/providers/test"
+    }
+  ]
+}
