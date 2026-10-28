@@ -29,14 +29,14 @@ if ! wait_for_tcp_port "$omniroute_port"; then
 fi
 log_info "OmniRoute is ready"
 
-log_step "Correcting codex GPT-5.6 context-window overrides"
+log_step "Correcting codex GPT-5.6 and kimi-coding K3 context-window overrides"
 result="$(llmenv --config "$CONFIG_PATH" omniroute fix-codex-context)" \
     || die "$(echo "$result" | jq -r '.error // "fix-codex-context failed"')"
 
 count="$(echo "$result" | jq '.fixed | length')"
 if [ "$count" -eq 0 ]; then
-    log_info "no codex GPT-5.6 models found in the catalog; nothing to fix"
+    log_info "no codex GPT-5.6 or kimi-coding K3 models found in the catalog; nothing to fix"
 else
     echo "$result" | jq -r '.fixed[] | "  \(.model) -> \(.context_window) tokens"'
-    log_info "corrected ${count} codex GPT-5.6 model(s)"
+    log_info "corrected ${count} model(s)"
 fi

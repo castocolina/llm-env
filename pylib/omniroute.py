@@ -49,6 +49,14 @@ CODEX_GPT_5_6_CONTEXT_WINDOW = 1_050_000
 CODEX_GPT_5_6_FAMILIES = ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 CODEX_EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max", "ultra")
 
+# Kimi K3 (platform.kimi.ai docs: 1,048,576 tokens). The kimi-coding sync
+# (source "auto:discovery") records 262,144 for "k3" and "k3.1-pro" while the
+# same discovery gives 1,048,576 to "k3.1-pro-highspeed" and "kimi-for-coding",
+# and other providers list k3.1-pro at 1,048,576 (opencode-go). "k3-256k" is
+# genuinely 256K and is left alone. A "manual" override survives later syncs.
+KIMI_K3_CONTEXT_WINDOW = 1_048_576
+KIMI_CODING_K3_MODELS = ("k3", "k3.1-pro")
+
 # grok-composer-2.5-fast is genuinely served through xAI's "Grok Build" CLI/API
 # integration at a 200,000-token window (confirmed via live web research,
 # August 2026 sources) -- this is correct, not a bug, and matches OmniRoute's
@@ -388,7 +396,8 @@ def _codex_gpt_5_6_family(root_model_id: str) -> str | None:
 def fix_codex_context_overrides(base_url: str, dashboard_password: str) -> list[dict[str, Any]]:
     """Correct OmniRoute's understanding of the codex GPT-5.6 family's real
     context window (see CODEX_GPT_5_6_CONTEXT_WINDOW's comment for why this
-    is needed and how it was verified). Scans the live catalog for every
+    is needed and how it was verified) and of kimi-coding's k3/k3.1-pro
+    (KIMI_K3_CONTEXT_WINDOW). Scans the live catalog for every
     codex-owned model id -- current and future effort-tier variants alike --
     and sets a manual context-window override for each GPT-5.6 family member
     found, so this never needs to be repeated by hand per combo/model.
@@ -402,27 +411,28 @@ def fix_codex_context_overrides(base_url: str, dashboard_password: str) -> list[
     if not isinstance(entries, list):
         raise OmniRouteError("unexpected /v1/models response shape")
 
-    seen_roots: set[str] = set()
+    seen_roots: set[tuple[str, str]] = set()
     results: list[dict[str, Any]] = []
     for entry in entries:
-        if not isinstance(entry, dict) or entry.get("owned_by") != "codex":
+        if not isinstance(entry, dict):
             continue
+        provider = entry.get("owned_by")
         root = entry.get("root")
-        if not isinstance(root, str) or root in seen_roots:
+        if not isinstance(provider, str) or not isinstance(root, str) or (provider, root) in seen_roots:
             continue
-        seen_roots.add(root)
-        family = _codex_gpt_5_6_family(root)
+        seen_roots.add((provider, root))
+        if provider == "codex":
+            family = _codex_gpt_5_6_family(root)
+            window = CODEX_GPT_5_6_CONTEXT_WINDOW
+        elif provider == "kimi-coding" and root in KIMI_CODING_K3_MODELS:
+            family, window = "kimi-k3", KIMI_K3_CONTEXT_WINDOW
+        else:
+            continue
         if family is None:
             continue
-        payload = {
-            "provider": "codex",
-            "modelId": root,
-            "contextWindowOverride": CODEX_GPT_5_6_CONTEXT_WINDOW,
-        }
+        payload = {"provider": provider, "modelId": root, "contextWindowOverride": window}
         _request("PUT", f"{base_url}/api/provider-models", session_token, payload)
-        results.append(
-            {"model": root, "family": family, "context_window": CODEX_GPT_5_6_CONTEXT_WINDOW}
-        )
+        results.append({"model": root, "family": family, "context_window": window})
     return results
 
 
@@ -441,6 +451,8 @@ def _resolve_member_context_window(
     """
     if provider_id == "codex" and _codex_gpt_5_6_family(model_id) is not None:
         return CODEX_GPT_5_6_CONTEXT_WINDOW
+    if provider_id == "kimi-coding" and model_id in KIMI_CODING_K3_MODELS:
+        return KIMI_K3_CONTEXT_WINDOW
     if provider_id == "grok-cli" and model_id == "grok-composer-2.5-fast":
         return GROK_COMPOSER_2_5_FAST_CONTEXT_WINDOW
     return catalog_context_by_root.get(model_id)

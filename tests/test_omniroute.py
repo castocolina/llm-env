@@ -476,6 +476,34 @@ def test_fix_codex_context_overrides_corrects_every_gpt_5_6_variant(monkeypatch)
     assert {p["modelId"] for p in puts} == {"gpt-5.6-sol-high", "gpt-5.6-terra-low", "gpt-5.6-luna"}
 
 
+def test_fix_context_overrides_raises_kimi_k3_but_not_the_256k_variant(monkeypatch):
+    login = _fake_login_ok()
+    catalog = {"object": "list", "data": [
+        _catalog_entry("kmc/k3.1-pro", "k3.1-pro", owned_by="kimi-coding"),
+        _catalog_entry("kimi-coding/k3.1-pro", "k3.1-pro", owned_by="kimi-coding"),
+        _catalog_entry("kimi-coding/k3", "k3", owned_by="kimi-coding"),
+        _catalog_entry("kimi-coding/k3-256k", "k3-256k", owned_by="kimi-coding"),
+        _catalog_entry("opencode-go/kimi-k3", "k3", owned_by="opencode-go"),
+    ]}
+    puts = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        if request.get_method() == "GET":
+            return FakeResponse(catalog)
+        puts.append(json.loads(request.data))
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    result = fix_codex_context_overrides("http://127.0.0.1:20128", "dashboard-pw")
+    assert [r["model"] for r in result] == ["k3.1-pro", "k3"]
+    assert puts == [
+        {"provider": "kimi-coding", "modelId": "k3.1-pro", "contextWindowOverride": 1_048_576},
+        {"provider": "kimi-coding", "modelId": "k3", "contextWindowOverride": 1_048_576},
+    ]
+
+
 def test_fix_codex_context_overrides_is_a_noop_without_gpt_5_6_models(monkeypatch):
     login = _fake_login_ok()
     catalog = {"object": "list", "data": [_catalog_entry("cx/gpt-5.4", "gpt-5.4")]}

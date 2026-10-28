@@ -1942,7 +1942,7 @@ def test_fix_codex_context_reports_each_corrected_model(tmp_path: pathlib.Path) 
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "gpt-5.6-sol-high -> 1050000 tokens" in result.stdout
-    assert "corrected 1 codex GPT-5.6 model(s)" in result.stdout
+    assert "corrected 1 model(s)" in result.stdout
 
 
 def test_fix_codex_context_reports_a_noop_cleanly(tmp_path: pathlib.Path) -> None:
