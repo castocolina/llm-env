@@ -17,7 +17,7 @@ make system-one-build        # Build the local System One (Laya) GPU image
 make system-one-benchmark    # Benchmark the running System One server and record the load table
 make resources-snapshot      # Point-in-time snapshot: per-service CPU/RAM policy, overrides and live cgroup counters (OK/WATCH/ALERT, read-only, no load)
 make resources-benchmark SERVICE=omniroute  # Measure a container to re-derive its limits (omniroute|attach|report)
-make start                   # Start the server (or omniroute + remote-setup only); installs the OmniRoute healer timer
+make start                   # Start the server (or omniroute + remote-setup only); installs the OmniRoute healer and z.ai weekly-reset timers
 make stop                    # Stop the server
 make restart                 # Stop then start
 make check-setup             # Offline validation

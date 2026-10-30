@@ -98,6 +98,7 @@ from pylib.resources import (
     validate_overrides,
 )
 from pylib.transcript import classify_transcript
+from pylib.zai_reset import check as zai_reset_check
 
 DEVICE_LINE_RE = re.compile(
     r"^\s*(?P<id>\S+):\s*(?P<name>.*?)\s*\((?P<total_mib>\d+)\s*MiB.*\)$",
@@ -574,6 +575,9 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
     if args.action == "fix-codex-context":
         fixed = fix_codex_context_overrides(base_url, initial_password)
         return emit({"fixed": fixed})
+    if args.action == "zai-reset":
+        results = zai_reset_check(base_url, initial_password, Path(args.state_file).expanduser(), dry_run=args.dry_run)
+        return emit({"results": results}, 1 if any(r["action"] == "error" for r in results) else 0)
     if args.action == "combo-context":
         combos = compute_combo_context(base_url, initial_password, combo_name=args.combo)
         return emit({"combos": combos})
@@ -820,7 +824,16 @@ def build_parser() -> argparse.ArgumentParser:
             "backup-combos",
             "restore-combos",
             "backup-connections",
+            "zai-reset",
         ],
+    )
+    omniroute_parser.add_argument(
+        "--state-file",
+        default="~/.cache/llm-env/zai-reset-state.json",
+        help="zai-reset: where the redeemed weekly window is recorded",
+    )
+    omniroute_parser.add_argument(
+        "--dry-run", action="store_true", help="zai-reset: report what would be redeemed, redeem nothing"
     )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
     omniroute_parser.add_argument(

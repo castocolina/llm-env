@@ -329,6 +329,15 @@ only while a reader needs it (until the observer's first verdict, then again
 from the hand-off). A SIGKILL before observation starts can still leave a
 directory behind (no password file yet, but the projection can hold environment values); it lives on the tmpfs until logout.
 
+### z.ai weekly-quota reset
+
+`make start` also installs a 5-minute `llm-env-zai-reset` systemd user timer that runs
+`scripts/zai-reset-weekly.sh`. When an active z.ai connection's weekly quota (OmniRoute `GET /api/usage/<id>`)
+reaches 99 %, it redeems one `WEEK` reset card through OmniRoute (`POST /api/usage/glm-reset-card`), at most once
+per weekly window (the window's `resetAt` is recorded in `~/.cache/llm-env/zai-reset-state.json`; the idempotency key
+is derived from it). Without a card it does nothing. `bash scripts/zai-reset-weekly.sh --dry-run` reports what it
+would do without redeeming; `journalctl --user -u llm-env-zai-reset` has each run.
+
 ### OmniRoute healer
 
 `make start` installs a 5-minute `llm-env-omniroute-heal` systemd user timer

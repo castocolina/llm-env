@@ -10,7 +10,7 @@ _help_line() {
 _help_line "prerequisites" "Confirm and install host prerequisites"
 _help_line "setup" "Interactive configuration"
 _help_line "setup-local-llm-agents" "Configure normal Pi and OpenCode local providers"
-_help_line "start" "Start the LLM server (and install the OmniRoute lease/memory healer timer)"
+_help_line "start" "Start the LLM server (and install the OmniRoute lease/memory healer and z.ai weekly-reset timers)"
 _help_line "stop" "Stop the LLM server"
 _help_line "restart" "Restart the LLM server"
 _help_line "check-setup" "Validate config, image, models, GPU (offline)"
