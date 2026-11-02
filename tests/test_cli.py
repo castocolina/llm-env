@@ -2929,3 +2929,36 @@ def test_resource_override_subcommand_is_wired_and_the_gate_is_gone(tmp_path):
     for retired in (["--evidence", "x.json"], ["--max-peak-ratio", "0.8"], ["--min-observation-hours", "24"]):
         assert run(*base, "--memory-max-mib", "1536", *retired).returncode == 2, retired
     assert run("resource-evidence", "--service", "omniroute").returncode == 2
+
+
+def test_interference_evaluate_cli_exits_one_on_failure(tmp_path):
+    zero = {"high": 0, "max": 0, "oom": 0, "oom_kill": 0}
+    row = {"state": "running", "uptime_s": 10, "events": zero}
+    (tmp_path / "live-before.json").write_text(json.dumps({"services": {"omniroute": row}}))
+    (tmp_path / "live-after.json").write_text(json.dumps({"services": {"omniroute": {"state": "not running"}}}))
+    (tmp_path / "load.jsonl").write_text('{"status": 200, "seconds": 1}\n')
+    result = run("interference", "evaluate", "--dir", str(tmp_path))
+    assert result.returncode == 1, result.stderr
+    assert json.loads((tmp_path / "report.json").read_text())["passed"] is False
+
+
+def test_interference_snapshot_cli_appends_one_compact_line_per_call(tmp_path):
+    config, samples = write_test_config(tmp_path), tmp_path / "samples.jsonl"
+    for _ in range(2):
+        result = run("interference", "snapshot", "--config", str(config), "--append", str(samples))
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"appended": str(samples)}
+    lines = samples.read_text().splitlines()
+    assert len(lines) == 2
+    assert all({"taken_at", "services", "host", "gpu"} <= set(json.loads(line)) for line in lines)
+
+
+def test_capacity_show_without_a_card_fails_with_the_make_hint(tmp_path: Path) -> None:
+    config = write_test_config(tmp_path)
+    data = yaml.safe_load(config.read_text())
+    data["models"].append(dict(data["models"][0], alias="qwen", file="qwen.gguf"))
+    config.write_text(yaml.safe_dump(data))
+    result = run("--config", str(config), "capacity", "show", "--alias", "qwen")
+    assert result.returncode == 1
+    assert "make model-capacity MODEL=qwen" in json.loads(result.stdout)["error"]
+    assert not (tmp_path / "capacity").exists()

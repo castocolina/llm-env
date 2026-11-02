@@ -11,6 +11,7 @@ import socket
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -13256,3 +13257,378 @@ def test_llama_config_rejects_an_unknown_action(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 2
     assert "usage: llama-config.sh enable <alias> | disable" in result.stderr
     assert _backups(config) == []
+
+
+MODEL_INTERFERENCE_SNAPSHOT = '{"taken_at":1.0,"services":{},"host":{},"gpu":{}}'
+
+
+def run_model_interference(
+    tmp_path: pathlib.Path,
+    *,
+    llm_server_enabled: bool = True,
+    running: bool = True,
+    system_one_enabled: bool = True,
+    evaluate_rc: int = 0,
+    warmup_code: str = "200",
+    system_one_running: bool = True,
+    health_ok: bool = True,
+    window_seconds: int = 1,
+    slow_laya_probe_seconds: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+    """Run scripts/model-interference.sh with stubbed podman/curl/uv/sleep.
+
+    Returns (result, calls file, output root). The output root is a tmp dir (LLM_ENV_SCOUT_OUT),
+    so the real <repo>/tmp/model-interference is never written; the caller asserts that.
+    """
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    calls.touch()
+    out_root = tmp_path / "scout"
+
+    def stub(name: str, body: str) -> None:
+        path = commands / name
+        path.write_text("#!/usr/bin/bash\n" + body)
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+    stub("yq", f'exec {real_yq} "$@"\n')
+    stub("sleep", "exit 0\n")
+    stub(
+        "podman",
+        'case "$*" in\n'
+        "  *State.Running*llm-server) " + ('echo true' if running else "exit 1") + " ;;\n"
+        "  *State.Running*system-one) " + ("echo true" if system_one_running else "exit 1") + " ;;\n"
+        "esac\n",
+    )
+    stub(
+        "curl",
+        f"""calls={calls}
+# One write per call, so concurrent jobs never split a curl line from its BODY line.
+entry="$(printf 'curl %s' "$*")"
+out=""; w=""; prev=""; body=""
+for a in "$@"; do
+  case "$a" in
+    @*) body="$(cat "${{a#@}}")"; entry="$entry"$'\\n'"BODY $(tr -d '\\n' <<< "$body")" ;;
+  esac
+  [ "$prev" = -o ] && out="$a"
+  [ "$prev" = -w ] && w="$a"
+  [ "$a" = -K ] && cat > /dev/null
+  prev="$a"
+done
+printf '%s\\n' "$entry" >> "$calls"
+case "$*" in */health) exit {0 if health_ok else 22} ;; esac
+# The first 3 System One calls are the warm-up; later ones are probes made slow on the wall clock.
+case "$*" in
+  */v1/systemone*)
+    if [ "$(grep -c /v1/systemone "$calls")" -gt 3 ]; then /usr/bin/sleep {slow_laya_probe_seconds}; fi ;;
+esac
+[ -n "$w" ] || exit 0
+max="$(jq -r '.max_tokens // empty' <<< "$body" 2>/dev/null || true)"
+if [ "$max" = 1 ]; then
+  if [ {warmup_code} = 200 ]; then echo "200 0.05"; else echo "{warmup_code} 1.000"; fi
+elif [ "$max" = 1024 ]; then
+  printf '%s' '{{"usage":{{"prompt_tokens":1000,"completion_tokens":1024}}}}' > "$out"
+  echo "200 0.05"
+else
+  echo "200 0.012"
+fi
+""",
+    )
+    stub(
+        "uv",
+        f"""calls={calls}
+printf 'uv %s\\n' "$*" >> "$calls"
+case "$*" in
+  *' migrate-config')
+    python3 << PYEOF
+{MIGRATE_CONFIG_PYSTUB}PYEOF
+    printf '{{"written":true}}\\n' ;;
+  *'interference snapshot --append '*)
+    all="$*"; f="${{all##*--append }}"
+    printf '%s\\n' '{MODEL_INTERFERENCE_SNAPSHOT}' >> "$f"
+    printf '{{"appended":"%s"}}\\n' "$f" ;;
+  *'interference snapshot'*)
+    printf '{{\\n  "taken_at": 1.0,\\n  "services": {{}}\\n}}\\n' ;;
+  *'interference evaluate'*)
+    printf '{{"passed":false,"failures":["x"]}}\\n'
+    exit {evaluate_rc} ;;
+esac
+""",
+    )
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    config = tmp_path / "models.yml"
+    config.write_text(
+        "version: 1\n"
+        f"llm_server:\n  enabled: {str(llm_server_enabled).lower()}\n"
+        "server:\n  port: 8000\n  api_key: test-server-key-xyz\n"
+        "omniroute:\n  port: 20128\n"
+        f"system_one:\n  enabled: {str(system_one_enabled).lower()}\n  port: 8010\n"
+        "models:\n  - alias: test\n    enabled: true\n    ctx_size: 4096\n"
+    )
+    environment = os.environ | {
+        "HOME": str(home),
+        "LLM_ENV_CONFIG": str(config),
+        "LLM_ENV_SCOUT_OUT": str(out_root),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", "scripts/model-interference.sh",
+            "--seconds", str(window_seconds), "--baseline-seconds", str(window_seconds),
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    return result, calls, out_root
+
+
+@pytest.fixture
+def real_interference_dir_untouched() -> Iterator[None]:
+    real = ROOT / "tmp" / "model-interference"
+
+    def listing() -> list[str]:
+        return sorted(p.name for p in real.iterdir()) if real.is_dir() else []
+
+    before = listing()
+    yield
+    assert listing() == before
+
+
+def _interference_run_dirs(out_root: pathlib.Path) -> list[pathlib.Path]:
+    base = out_root / "model-interference"
+    return sorted(base.iterdir()) if base.is_dir() else []
+
+
+def _body_lines(calls: pathlib.Path) -> list[str]:
+    return [line for line in calls.read_text().splitlines() if line.startswith("BODY ")]
+
+
+def test_model_interference_refuses_when_llm_server_disabled(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, _calls, out_root = run_model_interference(tmp_path, llm_server_enabled=False)
+    assert result.returncode != 0
+    assert "make llama-enable" in result.stderr
+    assert _interference_run_dirs(out_root) == []
+
+
+def test_model_interference_refuses_when_llm_server_not_running(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, _calls, out_root = run_model_interference(tmp_path, running=False)
+    assert result.returncode != 0
+    assert "make start-llama" in result.stderr
+    assert _interference_run_dirs(out_root) == []
+
+
+def test_model_interference_writes_the_run_files_and_returns_the_gate_status(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, out_root = run_model_interference(tmp_path, evaluate_rc=1)
+    assert result.returncode == 1, result.stdout + result.stderr
+    runs = _interference_run_dirs(out_root)
+    assert len(runs) == 1
+    run = runs[0]
+    assert re.fullmatch(r"[0-9]{8}T[0-9]{6}-[0-9]+", run.name)
+    for name in (
+        "warmup.txt", "laya-before.txt", "laya-during.txt", "omniroute-before.txt",
+        "omniroute-during.txt", "live-before.json", "live-after.json", "samples.jsonl", "load.jsonl",
+    ):
+        assert (run / name).is_file(), name
+
+    lines = calls.read_text().splitlines()
+    first_body = next(i for i, line in enumerate(lines) if line.startswith("BODY "))
+    assert json.loads(lines[first_body][len("BODY "):])["max_tokens"] == 1
+    assert "--max-time" in lines[first_body - 1]
+    first_snapshot = next(i for i, line in enumerate(lines) if "interference snapshot" in line)
+    assert first_body < first_snapshot
+
+    appends = [line for line in lines if "interference snapshot --append" in line]
+    assert appends
+    assert all(line.endswith(f"interference snapshot --append {run}/samples.jsonl") for line in appends)
+    sample_lines = (run / "samples.jsonl").read_text().splitlines()
+    assert sample_lines
+    assert all(isinstance(json.loads(line), dict) for line in sample_lines)
+    assert isinstance(json.loads((run / "live-before.json").read_text()), dict)
+    assert "test" in result.stdout
+    assert str(run) in result.stdout
+
+
+def test_model_interference_load_bodies_start_with_a_unique_prefix(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, _out_root = run_model_interference(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = calls.read_text().splitlines()
+    loads = [
+        (i, json.loads(line[len("BODY "):]))
+        for i, line in enumerate(lines)
+        if line.startswith("BODY ") and json.loads(line[len("BODY "):]).get("max_tokens") == 1024
+    ]
+    assert len(loads) >= 2
+    prefixes = [body["messages"][0]["content"][:64] for _i, body in loads]
+    assert len(set(prefixes)) == len(prefixes)
+    assert all("--max-time" in lines[i - 1] for i, _body in loads)
+
+
+def test_model_interference_stops_when_the_warm_up_fails(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, _out_root = run_model_interference(tmp_path, warmup_code="000")
+    assert result.returncode != 0
+    assert "warm-up chat failed (000)" in result.stderr
+    assert "rerun with a larger --seconds" in result.stderr
+    assert "interference snapshot" not in calls.read_text()
+
+
+def test_model_interference_skips_laya_when_system_one_disabled(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, out_root = run_model_interference(tmp_path, system_one_enabled=False, evaluate_rc=1)
+    assert result.returncode == 1, result.stdout + result.stderr
+    (run,) = _interference_run_dirs(out_root)
+    assert not list(run.glob("laya-*.txt"))
+    assert (run / "omniroute-before.txt").is_file()
+    assert "/v1/systemone" not in calls.read_text()
+
+
+def test_model_interference_never_passes_the_api_key_in_argv(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, out_root = run_model_interference(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test-server-key-xyz" not in calls.read_text()
+    (run,) = _interference_run_dirs(out_root)
+    for path in run.rglob("*"):
+        if path.is_file():
+            assert "test-server-key-xyz" not in path.read_text(errors="replace"), path
+
+
+def test_makefile_exposes_model_interference() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    phony = re.search(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+    assert phony is not None
+    assert "model-interference" in phony.group(1).split()
+    assert (
+        "model-interference:\n\t@bash tools/run-target.sh model-interference"
+        " -- bash scripts/model-interference.sh\n"
+    ) in makefile
+    assert '_help_line "model-interference"' in (ROOT / "scripts/help.sh").read_text()
+
+
+def test_model_interference_probe_loops_stop_at_the_window_end(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    # 2 s window = 8 Laya iterations, but every probe takes 1 s of wall clock: the loop must stop at ~2 s.
+    result, _calls, out_root = run_model_interference(
+        tmp_path, window_seconds=2, slow_laya_probe_seconds=1
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    (run,) = _interference_run_dirs(out_root)
+    for name in ("laya-before.txt", "laya-during.txt"):
+        count = len((run / name).read_text().splitlines())
+        assert 1 <= count <= 3, (name, count)
+
+
+def test_model_interference_refuses_when_system_one_not_running(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, _calls, out_root = run_model_interference(tmp_path, system_one_running=False)
+    assert result.returncode != 0
+    assert "make start" in result.stderr
+    assert _interference_run_dirs(out_root) == []
+
+
+def test_model_interference_refuses_when_llm_server_health_fails(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, _calls, out_root = run_model_interference(tmp_path, health_ok=False)
+    assert result.returncode != 0
+    assert "make start-llama" in result.stderr
+    assert _interference_run_dirs(out_root) == []
+
+
+def run_model_capacity(
+    tmp_path: pathlib.Path, *args: str
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    calls.touch()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        f'printf "uv %s\\n" "$*" >> {calls}\n'
+        'case "$*" in\n'
+        '  *"capacity show"*) printf \'{"usable":{"context_tokens":33280,"max_output_tokens":8192,'
+        '"basis":"verified"}}\\n\' ;;\n'
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    config = tmp_path / "models.yml"
+    config.write_text("version: 1\n")
+    environment = os.environ | {
+        "HOME": str(tmp_path / "home"),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/model-capacity.sh", *args],
+        cwd=ROOT, env=environment, text=True, capture_output=True, check=False, stdin=subprocess.DEVNULL,
+    )
+    return result, calls
+
+
+def test_model_capacity_requires_model(tmp_path: pathlib.Path) -> None:
+    result, calls = run_model_capacity(tmp_path, "")
+    assert result.returncode != 0
+    assert "MODEL=" in result.stderr
+    assert calls.read_text() == ""
+
+
+def test_model_capacity_passes_depth_and_score_files(tmp_path: pathlib.Path) -> None:
+    result, calls = run_model_capacity(tmp_path, "qwen", "--depth", "d.json", "--score", "s.json")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = calls.read_text().splitlines()
+    write = next(i for i, line in enumerate(lines) if line.endswith("capacity write --alias qwen --depth d.json --score s.json"))
+    assert lines[write + 1].endswith("capacity show --alias qwen")
+    assert "usable: 33280 ctx / 8192 out (verified)" in result.stdout
+
+
+def test_model_interference_updates_the_capacity_card(
+    tmp_path: pathlib.Path, real_interference_dir_untouched: None
+) -> None:
+    result, calls, out_root = run_model_interference(tmp_path, evaluate_rc=1)
+    assert result.returncode == 1, result.stdout + result.stderr
+    run = _interference_run_dirs(out_root)[0]
+    lines = calls.read_text().splitlines()
+    assert any(
+        line.endswith(f"capacity write --alias test --interference {run}/report.json") for line in lines
+    )
+    assert max(i for i, line in enumerate(lines) if "capacity write" in line) > max(
+        i for i, line in enumerate(lines) if "interference evaluate" in line
+    )
+
+
+def test_makefile_exposes_model_capacity() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    phony = re.search(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+    assert phony is not None
+    assert "model-capacity" in phony.group(1).split()
+    assert (
+        "model-capacity:\n\t@bash tools/run-target.sh model-capacity -- bash scripts/model-capacity.sh"
+        ' "$(MODEL)" $(if $(DEPTH),--depth "$(DEPTH)") $(if $(SCORE),--score "$(SCORE)")\n'
+    ) in makefile
+    assert '_help_line "model-capacity"' in (ROOT / "scripts/help.sh").read_text()
+    dry = subprocess.run(
+        ["make", "-n", "model-capacity", "MODEL=x", "DEPTH=d"], cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert 'bash scripts/model-capacity.sh "x" --depth "d"' in dry.stdout

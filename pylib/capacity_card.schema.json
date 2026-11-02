@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "llm-env capacity card (schema 1)",
+  "type": "object",
+  "required": [
+    "schema", "alias", "written_at", "fingerprint", "config", "benchmark", "depth", "ladder",
+    "interference", "ram", "quants", "usable"
+  ],
+  "properties": {
+    "schema": {"const": 1},
+    "alias": {"type": "string"},
+    "written_at": {"type": "string"},
+    "fingerprint": {"type": "string"},
+    "config": {
+      "type": "object",
+      "required": [
+        "file", "quantization", "ctx_size", "client_max_output_tokens", "n_gpu_layers", "n_cpu_moe",
+        "cache_type_k", "cache_type_v", "ubatch_size", "flash_attn"
+      ],
+      "properties": {
+        "file": {"type": "string"},
+        "quantization": {"type": ["string", "null"]},
+        "ctx_size": {"type": "integer"},
+        "client_max_output_tokens": {"type": ["integer", "null"]},
+        "n_gpu_layers": {"type": ["integer", "null"]},
+        "n_cpu_moe": {"type": ["integer", "null"]},
+        "cache_type_k": {"type": ["string", "null"]},
+        "cache_type_v": {"type": ["string", "null"]},
+        "ubatch_size": {"type": ["integer", "null"]},
+        "flash_attn": {"type": ["boolean", "null"]}
+      }
+    },
+    "benchmark": {
+      "type": ["object", "null"],
+      "required": ["pp_tps", "tg_tps", "measured_at"],
+      "properties": {
+        "pp_tps": {"type": ["number", "string", "null"]},
+        "tg_tps": {"type": ["number", "string", "null"]},
+        "measured_at": {"type": ["string", "null"]}
+      }
+    },
+    "depth": {
+      "type": ["object", "null"],
+      "required": [
+        "fingerprint", "written_at", "source", "points", "model_vram_mib", "peak_temp_c", "avg_sclk_mhz", "limits"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "source": {"type": "string"},
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["depth", "pp_tps", "tg_tps"],
+            "properties": {
+              "depth": {"type": "integer"},
+              "pp_tps": {"type": ["number", "null"]},
+              "tg_tps": {"type": ["number", "null"]}
+            }
+          }
+        },
+        "model_vram_mib": {"type": ["integer", "null"]},
+        "peak_temp_c": {"type": ["integer", "number", "null"]},
+        "avg_sclk_mhz": {"type": ["integer", "number", "null"]},
+        "limits": {"type": ["object", "null"]}
+      }
+    },
+    "ladder": {
+      "type": ["object", "null"],
+      "required": [
+        "fingerprint", "written_at", "source", "highest_layer", "lowest_effort", "pass_rate", "overall_score",
+        "tool_calls", "tool_errors", "tool_error_rate", "invalid_runs"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "source": {"type": "string"},
+        "highest_layer": {"type": ["integer", "null"]},
+        "lowest_effort": {"type": ["object", "null"], "additionalProperties": {"type": ["string", "null"]}},
+        "pass_rate": {"type": ["number", "null"]},
+        "overall_score": {"type": ["number", "null"]},
+        "tool_calls": {"type": ["integer", "null"]},
+        "tool_errors": {"type": ["integer", "null"]},
+        "tool_error_rate": {"type": ["number", "null"]},
+        "invalid_runs": {"type": ["integer", "null"]}
+      }
+    },
+    "interference": {
+      "type": ["object", "null"],
+      "required": [
+        "fingerprint", "written_at", "source", "passed", "failures", "notes", "system_one", "omniroute",
+        "events_changed", "vram"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "source": {"type": "string"},
+        "passed": {"type": "boolean"},
+        "failures": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "array", "items": {"type": "string"}},
+        "system_one": {"type": ["object", "null"]},
+        "omniroute": {"type": ["object", "null"]},
+        "events_changed": {"type": "array"},
+        "vram": {"type": ["object", "null"]}
+      }
+    },
+    "ram": {
+      "type": ["object", "null"],
+      "required": [
+        "fingerprint", "written_at", "llm_server_peak_mib", "llm_server_cap_mib", "host_available_min_mib",
+        "swap_delta_mib"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "llm_server_peak_mib": {"type": ["integer", "null"]},
+        "llm_server_cap_mib": {"type": ["integer", "null"]},
+        "host_available_min_mib": {"type": ["integer", "null"]},
+        "swap_delta_mib": {"type": ["integer", "null"]}
+      }
+    },
+    "quants": {
+      "type": ["object", "null"],
+      "required": [
+        "fingerprint", "written_at", "ctx", "ref_depth", "vram_available_mib", "current", "current_free_mib",
+        "candidates", "verdict"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "ctx": {"type": "integer"},
+        "ref_depth": {"type": "integer"},
+        "vram_available_mib": {"type": ["integer", "null"]},
+        "current": {
+          "type": "object",
+          "required": ["quant", "file", "weights_mib", "bpw", "sha256"]
+        },
+        "current_free_mib": {"type": ["integer", "null"]},
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "quant", "file", "size_bytes", "sha256", "weights_mib", "bpw", "delta_mib", "predicted_vram_mib",
+              "vram_free_mib", "ram_ok", "fits", "reason", "measured"
+            ]
+          }
+        },
+        "verdict": {"type": ["string", "null"]}
+      }
+    },
+    "usable": {
+      "type": "object",
+      "required": ["context_tokens", "max_output_tokens", "basis"],
+      "properties": {
+        "context_tokens": {"type": ["integer", "null"]},
+        "max_output_tokens": {"type": ["integer", "null"]},
+        "basis": {"type": "string"}
+      }
+    },
+    "stale_sections": {"type": "array", "items": {"type": "string"}}
+  }
+}
