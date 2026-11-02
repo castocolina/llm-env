@@ -80,12 +80,42 @@ def test_evaluate_passes_when_latency_and_events_hold(tmp_path):
     assert report["load"] == {"requests": 2, "ok": 2, "prompt_tokens_max": 1000, "completion_tokens_total": 110}
 
 
-def test_evaluate_fails_on_system_one_p95_regression_beyond_both_thresholds(tmp_path):
+def test_relative_p95_regression_is_only_a_warning(tmp_path):
     report = evaluate(make_run(tmp_path, laya=(0.012, 0.040)))
-    assert report["passed"] is False
-    assert any("system_one p95" in f for f in report["failures"])
+    assert report["passed"] is True
+    assert report["failures"] == []
+    assert "system_one p95" in report["regression_warning"]
     (tmp_path / "ok").mkdir()
-    assert evaluate(make_run(tmp_path / "ok", laya=(0.012, 0.020)))["passed"] is True
+    quiet = evaluate(make_run(tmp_path / "ok", laya=(0.012, 0.020)))
+    assert quiet["passed"] is True and quiet["regression_warning"] is None
+
+
+def test_evaluate_passes_a_laya_p95_of_160_ms_under_load(tmp_path):
+    run_dir = make_run(tmp_path, laya=(0.0177, 0.038))
+    (run_dir / "laya-during.txt").write_text("200 0.038\n" * 18 + "200 0.160\n" * 2)
+    report = evaluate(run_dir)
+    assert report["system_one"]["during"]["p95_ms"] == 160.0
+    assert report["passed"] is True
+    assert report["thresholds"]["max_p95_ms"] == 500.0 and report["thresholds"]["max_p50_ms"] == 150.0
+    assert report["regression_warning"]
+
+
+def test_evaluate_fails_when_laya_p95_exceeds_the_absolute_limit(tmp_path):
+    rows = "200 0.038\n" * 18 + "200 0.600\n" * 2
+    run_dir = make_run(tmp_path, laya=(0.012, 0.038))
+    (run_dir / "laya-during.txt").write_text(rows)
+    report = evaluate(run_dir)
+    assert report["passed"] is False
+    assert any("system_one p95" in f and "500" in f for f in report["failures"])
+    assert evaluate(run_dir, max_p95_ms=1000)["passed"] is True
+
+
+def test_evaluate_fails_when_laya_p50_exceeds_the_absolute_limit(tmp_path):
+    report = evaluate(make_run(tmp_path, laya=(0.012, 0.200)), max_p95_ms=5000)
+    assert report["passed"] is False
+    assert any("system_one p50" in f for f in report["failures"])
+    (tmp_path / "ok").mkdir()
+    assert evaluate(make_run(tmp_path / "ok", laya=(0.012, 0.200)), max_p95_ms=5000, max_p50_ms=250)["passed"] is True
 
 
 def test_evaluate_fails_on_any_memory_events_increase(tmp_path):

@@ -458,9 +458,7 @@ def cmd_interference(args: argparse.Namespace) -> int:
     if args.action == "evaluate":
         if not args.dir:
             raise SystemExit("evaluate needs --dir")
-        report = interference.evaluate(
-            Path(args.dir), max_regression_pct=args.max_regression_pct, min_regression_ms=args.min_regression_ms
-        )
+        report = interference.evaluate(Path(args.dir), max_p95_ms=args.max_p95_ms, max_p50_ms=args.max_p50_ms)
         (Path(args.dir) / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         return emit(report, 0 if report["passed"] else 1)
     cfg = require_valid_config(load_config(Path(args.config)))
@@ -490,6 +488,21 @@ def cmd_capacity(args: argparse.Namespace) -> int:
             sources={k: v for k, v in files.items() if v},
         )
         return emit(card)
+    if args.action == "headroom":
+        if not args.candidates or args.vram_available_mib is None:
+            return fail("capacity headroom needs --candidates and --vram-available-mib")
+        data = capacity.read_input(args.candidates)
+        if not isinstance(data.get("current"), dict) or not isinstance(data.get("candidates"), list):
+            return fail(f"{args.candidates} is not a quant-headroom.sh candidates.json")
+        card = capacity.headroom_card(
+            config_path, cfg, args.alias, vram_available_mib=args.vram_available_mib,
+            current=data["current"], candidates=data["candidates"],
+        )
+        return emit(card)
+    if args.action == "compare":
+        if not args.candidate:
+            return fail("capacity compare needs --candidate")
+        return emit(capacity.compare_quant(config_path, cfg, args.alias, args.candidate))
     card = capacity.read_card(config_path, cfg, args.alias)
     if card is None:
         return fail(f"no capacity card for {args.alias}; run make model-capacity MODEL={args.alias}")
@@ -903,17 +916,20 @@ def build_parser() -> argparse.ArgumentParser:
     interference_parser.add_argument("action", choices=["snapshot", "evaluate"])
     interference_parser.add_argument("--append", help="snapshot: append one compact line to this file")
     interference_parser.add_argument("--dir", help="evaluate: run directory")
-    interference_parser.add_argument("--max-regression-pct", type=float, default=50.0)
-    interference_parser.add_argument("--min-regression-ms", type=float, default=10.0)
+    interference_parser.add_argument("--max-p95-ms", type=float, default=500.0)
+    interference_parser.add_argument("--max-p50-ms", type=float, default=150.0)
     interference_parser.set_defaults(func=cmd_interference)
 
     capacity_parser = sub.add_parser("capacity")
     capacity_parser.add_argument("--config", default=argparse.SUPPRESS)
-    capacity_parser.add_argument("action", choices=["write", "show"])
+    capacity_parser.add_argument("action", choices=["write", "show", "headroom", "compare"])
     capacity_parser.add_argument("--alias", required=True)
     capacity_parser.add_argument("--depth", help="write: bench-fit.sh JSON")
     capacity_parser.add_argument("--score", help="write: score.sh JSON")
     capacity_parser.add_argument("--interference", help="write: interference report.json")
+    capacity_parser.add_argument("--candidates", help="headroom: candidates.json from quant-headroom.sh check")
+    capacity_parser.add_argument("--vram-available-mib", type=int, help="headroom: llmenv budget available_mib")
+    capacity_parser.add_argument("--candidate", help="compare: alias of the candidate quant's entry")
     capacity_parser.set_defaults(func=cmd_capacity)
 
     omniroute_parser = sub.add_parser("omniroute")

@@ -40,6 +40,9 @@ make migrate-remote-setup      # One-time remote-setup recreation without its Om
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
 make key-reset                 # Rotate the server API key
+make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>]  # Write/show the measured capacity card (~/.config/llm-env/capacity/<alias>.json)
+make model-interference  # Gate: does the local model slow System One or raise container memory events
+make local-combo         # Create/update the local-only OmniRoute combo my-coding-lite from the card
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
 make dev-setup                 # Install dev-only tooling
@@ -94,6 +97,10 @@ backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening
 - `LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS` — seconds `make start` waits
   for System One to become healthy (default 120; positive integer). Weights
   are on disk after `make setup`; this bounds load-to-GPU only.
+- `LLM_ENV_SCOUT_OUT` — output root for the run directories that
+  `scripts/model-interference.sh` (`model-interference/<stamp>-<pid>`) and the
+  skill's `quant-headroom.sh check` (`model-tune/quant-<stamp>-<pid>`) write.
+  Default `<repo>/tmp`; the tests point it at a temp dir.
 
 ### Resource overrides
 

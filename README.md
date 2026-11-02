@@ -223,6 +223,97 @@ Afterwards verify that `yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.y
 is unchanged. If it is not, restore from that backup and report it. Prefer the
 skill's `bench-fit.sh` for screening.
 
+## Local model capacity and my-coding-lite
+
+A local model's measured limits live in one card per alias,
+`~/.config/llm-env/capacity/<alias>.json` (directory 0700, file 0600, written
+atomically). Schema: `pylib/capacity_card.schema.json` (schema 1). Unknown
+values are `null`; the card never holds guesses. `make clean` keeps cards.
+`make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>]`
+writes the sections it is given (others are kept) and then shows the card.
+The alias must exist in `models.yml` and match `[a-z0-9][a-z0-9._-]{0,63}` as a
+whole; anything else is refused.
+
+Each section records a fingerprint of the model's config. A section written
+under another config is listed in `stale_sections` and never feeds `usable`.
+
+**Usable context.** `usable.context_tokens = min(ctx_size, d + 512)`, where `d`
+is the deepest depth-sweep point with a measured `tg_tps`. It is `null` when
+there is no current depth section or when the current interference section has
+`passed: false`. `usable.max_output_tokens = min(client_max_output_tokens,
+context_tokens)`, or `null`.
+
+**Interference gate (`make model-interference`).** It loads the local model for
+120 s after a 30 s baseline and fails when any of these holds:
+
+- a System One (Laya) request returns non-200 during load;
+- Laya p95 during load exceeds 500 ms (`--max-p95-ms`) or Laya p50 exceeds
+  150 ms (`--max-p50-ms`). Laya serves advisory typed judgments (`jev`) whose
+  clients time out after about 20 s, so these are service-level limits; a
+  relative p95 rise (more than 50 % and more than 10 ms over the baseline) is
+  only reported as `regression_warning`, never a failure;
+- a `memory.events` `high`, `max`, `oom` or `oom_kill` counter grows for
+  omniroute, remote-setup, system-one, phoenix or llm-server;
+- a container's counters reset (its uptime went down) between snapshots;
+- no load request completes inside the window;
+- a service running before the load is not running after it.
+
+OmniRoute health latency (`GET /api/health`, unauthenticated) is recorded but
+does not gate, nor do VRAM headroom, host MemAvailable and the swap delta.
+Each load request starts with a unique prefix so llama-server cannot reuse the
+KV cache; every request pays a full prefill.
+
+With System One disabled, the gate starts no Laya probe: the report has
+`system_one: null` and the note `system_one latency not measured (System One
+disabled)`, and the card keeps that note. With System One enabled but not
+running, the gate refuses (`run 'make start'`). Run directories land in
+`<root>/model-interference/<stamp>-<pid>`, where `<root>` is `tmp/` in the repo
+unless `LLM_ENV_SCOUT_OUT` names another root.
+
+**my-coding-lite (`make local-combo`).** An OmniRoute combo with one member,
+`llama-cpp/<alias>` on the `llm-env-local` connection, strategy `priority`, and
+`context_length` set to the usable context. It has no cloud fallbacks, so the
+local floor is never lowered. The tool owns the combo: drift is overwritten, as
+for `llm-env-local`. The combo is created or updated only when `llm_server.enabled`
+is true, llm-server is running, the `llm-env-local` connection exists, and the
+card has a current depth section and a current interference section with
+`passed: true` (a card whose interference section is missing or stale has
+`usable` null with basis `interference not measured`). Otherwise the target reports `skipped` with the reason and the
+make target to run, and exits 0. `make start` and `make start-llama` run it only
+when `llm_server.enabled` is true and OmniRoute provisioning succeeded. `make backup` includes the combo; restore remaps its member to
+`llm-env-local`.
+
+Observed on the pinned OmniRoute image with a throwaway instance, `/v1/models` did not list
+`llama-cpp/<model>`, so the card is the only source of a `llama-cpp` member's
+limits. A combo whose member carries `id` and `context_length` (no `config`) was
+accepted and persisted, and the combo itself is listed in `/v1/models` with its
+`context_length`. A chat to the combo routed to the local upstream, and a PUT of
+a new `context_length` persisted. With llm-server down, a chat to the combo
+returns 502 and the combo stays in OmniRoute.
+
+**Clients.** `make setup-local-llm-agents` lists `router-env/my-coding-lite` in
+pi and opencode only while llm-server is enabled and the card is current; a
+combo with no known minimum is dropped. Remote installers never list it: their
+`llama-cpp` members have no local limits, so the combo has no known minimum. The router
+key is written to `~/.config/router-env/api-key` (0600) and referenced from the
+client configs (pi `!cat`, opencode `{file:...}`), never written into them.
+
+**Quant headroom.** The onboard-local-model skill's
+`scripts/quant-headroom.sh check` asks whether the next quants of the same
+Hugging Face repo (default `Q5_K_M,Q6_K`) fit beside the current one, using the
+sizes the repo reports and the measured VRAM and RAM. Its sections go into the
+card's `quants` section, with the verdict per candidate. When every candidate is
+known not to fit, the verdict is written as `no headroom for Q5_K_M/Q6_K at ctx
+N, free MiB X`. A fitting candidate is trialled in ascending size with the same
+depths and ladder; the first one that fails the interference gate stops the
+trials. Each trial ends by restoring the original quant, so the default is never
+switched silently. `my-coding-lite` is unavailable while a candidate is served.
+Run outputs go to `<root>/model-tune/quant-<stamp>-<pid>`, using the same
+`LLM_ENV_SCOUT_OUT` root.
+The ladder challenges are the skill's bundled tasks, copied into isolated
+directories under `<repo>/tmp/`; the scripts refuse an `--out` outside it, and
+nothing runs in or against the owner's project.
+
 ## OmniRoute updates
 
 `make update-omniroute` is an idle-aware, dependency-aware updater for the

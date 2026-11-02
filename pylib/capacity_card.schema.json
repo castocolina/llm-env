@@ -134,7 +134,14 @@
         "vram_available_mib": {"type": ["integer", "null"]},
         "current": {
           "type": "object",
-          "required": ["quant", "file", "weights_mib", "bpw", "sha256"]
+          "required": ["quant", "file", "weights_mib", "bpw", "sha256"],
+          "properties": {
+            "quant": {"type": "string"},
+            "file": {"type": "string"},
+            "weights_mib": {"type": "integer"},
+            "bpw": {"type": ["number", "null"]},
+            "sha256": {"type": "string"}
+          }
         },
         "current_free_mib": {"type": ["integer", "null"]},
         "candidates": {
@@ -144,7 +151,36 @@
             "required": [
               "quant", "file", "size_bytes", "sha256", "weights_mib", "bpw", "delta_mib", "predicted_vram_mib",
               "vram_free_mib", "ram_ok", "fits", "reason", "measured"
-            ]
+            ],
+            "properties": {
+              "quant": {"type": "string"},
+              "file": {"type": ["string", "null"]},
+              "size_bytes": {"type": ["integer", "null"]},
+              "sha256": {"type": ["string", "null"]},
+              "weights_mib": {"type": ["integer", "null"]},
+              "bpw": {"type": ["number", "null"]},
+              "delta_mib": {"type": ["integer", "null"]},
+              "predicted_vram_mib": {"type": ["integer", "null"]},
+              "vram_free_mib": {"type": ["integer", "null"]},
+              "ram_ok": {"type": ["boolean", "null"]},
+              "fits": {"type": ["boolean", "null"]},
+              "reason": {"type": ["string", "null"]},
+              "budget_required_mib": {"type": ["integer", "null"]},
+              "budget_available_mib": {"type": ["integer", "null"]},
+              "measured": {
+                "type": ["object", "null"],
+                "required": [
+                  "alias", "quant", "bpw", "ctx", "ref_depth", "points", "model_vram_mib", "interference_passed",
+                  "highest_layer", "overall_score", "pass_rate", "delta"
+                ],
+                "properties": {
+                  "delta": {
+                    "type": "object",
+                    "required": ["pp_at_ref", "tg_at_ref", "model_vram_mib", "highest_layer", "overall_score"]
+                  }
+                }
+              }
+            }
           }
         },
         "verdict": {"type": ["string", "null"]}

@@ -3,7 +3,9 @@
 # container memory while it serves load, and gate on the result.
 #
 # Usage: scripts/model-interference.sh [--seconds 120] [--baseline-seconds 30]
-#                                      [--max-regression-pct 50] [--min-regression-ms 10]
+#                                      [--max-p95-ms 500] [--max-p50-ms 150]
+# Laya (System One) fails the gate on a non-200 or on p95/p50 under load above those absolute limits; a relative
+# p95 rise is only a `regression_warning` in the report (Laya answers advisory judgments with ~20 s client timeouts).
 # Output root: $LLM_ENV_SCOUT_OUT (default <repo>/tmp); the run dir is
 # <root>/model-interference/<YYYYmmddTHHMMSS>-<pid>. Exits with `llmenv interference evaluate`'s status.
 # OmniRoute is probed at the unauthenticated GET /api/health (the monitoring endpoint needs a login whose
@@ -16,14 +18,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 seconds=120
 baseline_seconds=30
-max_regression_pct=50
-min_regression_ms=10
+max_p95_ms=500
+max_p50_ms=150
 while [ $# -gt 0 ]; do
     case "$1" in
         --seconds) seconds="${2-}"; shift 2 ;;
         --baseline-seconds) baseline_seconds="${2-}"; shift 2 ;;
-        --max-regression-pct) max_regression_pct="${2-}"; shift 2 ;;
-        --min-regression-ms) min_regression_ms="${2-}"; shift 2 ;;
+        --max-p95-ms) max_p95_ms="${2-}"; shift 2 ;;
+        --max-p50-ms) max_p50_ms="${2-}"; shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -169,12 +171,12 @@ llmenv --config "$CONFIG_PATH" interference snapshot > "${run}/live-after.json"
 
 status=0
 verdict="$(llmenv --config "$CONFIG_PATH" interference evaluate --dir "$run" \
-    --max-regression-pct "$max_regression_pct" --min-regression-ms "$min_regression_ms")" || status=$?
+    --max-p95-ms "$max_p95_ms" --max-p50-ms "$max_p50_ms")" || status=$?
 
 llmenv --config "$CONFIG_PATH" capacity write --alias "$alias_name" --interference "$run/report.json" >/dev/null \
     || log_warn "could not update the capacity card"
 
 printf 'alias: %s\nrun dir: %s\n' "$alias_name" "$run"
-jq -r 'if .passed then "passed" else "failed: " + (.failures | join("; ")) end' <<< "$verdict" 2>/dev/null \
+jq -r 'if .passed then "passed" + (if .regression_warning then " (warning: " + .regression_warning + ")" else "" end) else "failed: " + (.failures | join("; ")) end' <<< "$verdict" 2>/dev/null \
     || echo "evaluate produced no verdict"
 exit "$status"

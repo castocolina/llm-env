@@ -211,3 +211,34 @@ def test_benchmark_docs_require_llama_stopped_and_config_unchanged() -> None:
         normalized = _normalized_markdown(ROOT / document)
         assert "only after `make stop-llama`" in normalized, document
         assert "`yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml`" in normalized, document
+
+
+def test_docs_describe_capacity_card_gate_and_local_combo() -> None:
+    agents = (ROOT / "AGENTS.md").read_text()
+    readme = (ROOT / "README.md").read_text()
+    architecture = (ROOT / ".agents/architecture.md").read_text()
+
+    assert "make model-capacity MODEL=<alias>" in agents
+    assert "make model-interference" in agents
+    assert "make local-combo" in agents
+
+    for fragment in (
+        "~/.config/llm-env/capacity/<alias>.json",
+        "my-coding-lite",
+        "router-env/my-coding-lite",
+        "quant-headroom.sh",
+        "no headroom for",
+        "LLM_ENV_SCOUT_OUT",
+        "GET /api/health",
+    ):
+        assert fragment in readme, fragment
+    assert "LLM_ENV_SCOUT_OUT" in agents
+
+    for fragment in (
+        "pylib/capacity.py",
+        "pylib/interference.py",
+        "scripts/model-interference.sh",
+        "scripts/omniroute-local-combo.sh",
+        "ALIAS_PATTERN",
+    ):
+        assert fragment in architecture, fragment

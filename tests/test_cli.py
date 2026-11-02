@@ -3026,6 +3026,36 @@ def _ensure_local_combo_cli(config: Path, monkeypatch, capsys) -> tuple[int, dic
     return code, json.loads(capsys.readouterr().out), calls
 
 
+def _headroom_args(tmp_path: Path, config: Path) -> list[str]:
+    cand = {"quant": "Q5_K_M", "file": "q-Q5_K_M.gguf", "size_bytes": 2 * 1048576, "sha256": "b" * 64, "params_total": None}
+    current = {"quant": "Q4_K_M", "file": "qwen.gguf", "size_bytes": 1048576, "sha256": "a" * 64, "params_total": None}
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps({"repo": "o/r", "sha": "0" * 40, "params_total": None, "current": current, "candidates": [cand]}))
+    return ["--config", str(config), "capacity", "headroom", "--alias", "qwen", "--candidates", str(candidates),
+            "--vram-available-mib", "8321"]
+
+
+def test_capacity_headroom_refuses_without_a_passed_gate(tmp_path: Path) -> None:
+    config = _lite_config(tmp_path)
+    _write_lite_card(config, interference=False)
+    result = run(*_headroom_args(tmp_path, config))
+    assert result.returncode == 1
+    assert "finish the main sweep first" in json.loads(result.stdout)["error"]
+
+
+def test_capacity_headroom_writes_the_quants_section_and_compare_needs_a_candidate_card(tmp_path: Path) -> None:
+    config = _lite_config(tmp_path)
+    _write_lite_card(config)
+    result = run(*_headroom_args(tmp_path, config))
+    assert result.returncode == 0, result.stdout
+    quants = json.loads(result.stdout)["quants"]
+    assert quants["candidates"][0]["fits"] is True and quants["ref_depth"] == 130560 and quants["current_free_mib"] == 8320
+    shown = json.loads(run("--config", str(config), "capacity", "show", "--alias", "qwen").stdout)
+    assert shown["quants"]["candidates"][0]["delta_mib"] == 1
+    compare = run("--config", str(config), "capacity", "compare", "--alias", "qwen", "--candidate", "Qwen3")
+    assert compare.returncode == 1 and "Qwen3" in json.loads(compare.stdout)["error"]
+
+
 def test_ensure_local_combo_cli_skips_when_llm_server_disabled(tmp_path, monkeypatch, capsys):
     code, out, calls = _ensure_local_combo_cli(_lite_config(tmp_path, llm_server=False), monkeypatch, capsys)
     assert code == 0 and out["action"] == "skipped" and out["reason"] == "llm_server disabled"

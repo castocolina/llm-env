@@ -1,8 +1,10 @@
 """Interference gate: cgroup snapshots taken around a local-model load and their evaluation.
 
-Rules (plan Decision 6): fail on (a) Laya non-200 during load, (b) Laya p95 regression beyond both
-thresholds, (c) any memory.events counter growth, (d) a counter reset, (e) no completed load request,
-(f) a service running before and not running after. Latency, VRAM and host memory are recorded only.
+Rules (plan Decision 6, revised 2026-10-31): fail on (a) Laya non-200 during load, (b) Laya p95 under
+load above an absolute service-level limit (500 ms) or p50 above 150 ms, (c) any memory.events counter
+growth, (d) a counter reset, (e) no completed load request, (f) a service running before and not running
+after. Laya serves advisory typed judgments with ~20 s client timeouts, so a relative p95 rise (> +50 %
+and > +10 ms) is only reported as `regression_warning`. VRAM and host memory are recorded only.
 """
 
 from __future__ import annotations
@@ -130,10 +132,18 @@ def _max(values: list[int]) -> int | None:
     return max(values) if values else None
 
 
-def evaluate(run_dir: Path, *, max_regression_pct: float = 50.0, min_regression_ms: float = 10.0) -> dict[str, Any]:
+def evaluate(
+    run_dir: Path,
+    *,
+    max_p95_ms: float = 500.0,
+    max_p50_ms: float = 150.0,
+    warn_regression_pct: float = 50.0,
+    warn_regression_ms: float = 10.0,
+) -> dict[str, Any]:
     run_dir = Path(run_dir)
     failures: list[str] = []
     notes: list[str] = []
+    regression_warning: str | None = None
 
     system_one = _latency_pair(run_dir, "laya")
     omniroute = _latency_pair(run_dir, "omniroute")
@@ -143,10 +153,15 @@ def evaluate(run_dir: Path, *, max_regression_pct: float = 50.0, min_regression_
         if system_one["during"]["non200"]:
             failures.append(f"system_one returned {system_one['during']['non200']} non-200 response(s) during load")
         b, d = system_one["before"]["p95_ms"], system_one["during"]["p95_ms"]
-        if b is not None and d is not None and d > b * (1 + max_regression_pct / 100) and d - b > min_regression_ms:
-            failures.append(
-                f"system_one p95 regressed from {b:.1f} ms to {d:.1f} ms during load "
-                f"(limits: {max_regression_pct:g} % and {min_regression_ms:g} ms)"
+        p50 = system_one["during"]["p50_ms"]
+        if d is not None and d > max_p95_ms:
+            failures.append(f"system_one p95 {d:.1f} ms under load exceeds the {max_p95_ms:g} ms limit")
+        if p50 is not None and p50 > max_p50_ms:
+            failures.append(f"system_one p50 {p50:.1f} ms under load exceeds the {max_p50_ms:g} ms limit")
+        if b is not None and d is not None and d > b * (1 + warn_regression_pct / 100) and d - b > warn_regression_ms:
+            regression_warning = (
+                f"system_one p95 rose from {b:.1f} ms to {d:.1f} ms during load "
+                f"(warning above {warn_regression_pct:g} % and {warn_regression_ms:g} ms; not a failure)"
             )
 
     before = json.loads((run_dir / "live-before.json").read_text())
@@ -196,7 +211,13 @@ def evaluate(run_dir: Path, *, max_regression_pct: float = 50.0, min_regression_
         "passed": not failures,
         "failures": failures,
         "notes": notes,
-        "thresholds": {"max_regression_pct": max_regression_pct, "min_regression_ms": min_regression_ms},
+        "regression_warning": regression_warning,
+        "thresholds": {
+            "max_p95_ms": max_p95_ms,
+            "max_p50_ms": max_p50_ms,
+            "warn_regression_pct": warn_regression_pct,
+            "warn_regression_ms": warn_regression_ms,
+        },
         "system_one": system_one,
         "omniroute": omniroute,
         "events_changed": events_changed,

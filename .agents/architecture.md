@@ -40,6 +40,12 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `pylib/detect.py` | GPU and compositor detection from sysfs |
 | `pylib/budget.py` | VRAM arithmetic and remedies |
 | `pylib/presets.py` | `presets.ini` via configparser |
+| `pylib/capacity.py` | Measured capacity card per alias (`~/.config/llm-env/capacity/<alias>.json`): alias check against `ALIAS_PATTERN`, fingerprinted sections, `usable` context, quant headroom arithmetic (`make model-capacity`, `make local-combo`) |
+| `pylib/capacity_card.schema.json` | JSON Schema (draft 2020-12, card schema 1) that the card and its tests are checked against |
+| `pylib/interference.py` | Interference gate: evaluates a `model-interference` run and appends one-line load samples (`llmenv interference`). Laya (System One) serves advisory typed `jev` judgments with ~20 s client timeouts, so the gate fails on a non-200, Laya p95 > 500 ms or p50 > 150 ms under load (`--max-p95-ms`, `--max-p50-ms`), a `memory.events` change, a counter reset, a stopped service or no completed load request; a relative p95 rise is only the report's `regression_warning` |
+| `scripts/model-capacity.sh` | `make model-capacity`: takes only `--depth` (bench-fit JSON) and `--score` (score JSON), writes the depth and ladder sections, then shows the card. Quants are written by `quant-headroom.sh check` (via `llmenv capacity headroom`); interference and ram by `model-interference.sh` |
+| `scripts/model-interference.sh` | `make model-interference`: load test of the local model against System One, OmniRoute and container memory counters; run dirs under `LLM_ENV_SCOUT_OUT` (default `tmp/`) |
+| `scripts/omniroute-local-combo.sh` | `make local-combo`: creates or updates the local-only OmniRoute combo `my-coding-lite` from the card; skips unless llm-server is enabled and running |
 
 ## Container Lifecycle
 
@@ -283,8 +289,9 @@ by hand (`Add Connection` on a provider's page, e.g.
   `check-server.sh` — therefore uses a scoped issued key.
 - Routing keys on the **provider slug** (e.g. `llama-cpp`), not the
   connection's own `name`. A request for model `llm-env-local/<alias>`
-  404s with `model_not_found`; the correct model ID is
-  `llama-cpp/<alias>`, confirmed via `GET /v1/models`.
+  404s with `model_not_found`; the correct model ID is `llama-cpp/<alias>`
+  (the provider slug routes it). `GET /v1/models` does not list `llama-cpp`
+  models, so their limits come only from capacity cards.
 
 ### check-server.sh's failure isolation
 
@@ -422,6 +429,15 @@ and the problem is specifically in OmniRoute's routing/provider config.
   outside the directories this tool searches, and even if found, its
   `DRI_PRIME` override prefix does not propagate into the Flatpak sandbox
   (`Exec=` there invokes `flatpak run ...`).
+- Capacity cards hold measured data only; unknown is null; stale sections never feed `usable`, and `usable` stays null
+  (basis `interference not measured`) until a current interference gate has been recorded.
+- Model aliases never name files, with two exceptions: the capacity card `<alias>.json`, named only after
+  `pylib/capacity.py` checked the alias against `ALIAS_PATTERN` (full match) and `models.yml`; and the skill's
+  `bench-fit.sh` per-run outputs (`bench-<alias>.json`, `gpu-<alias>.csv`, `llama-bench-<alias>.json`/`.err`)
+  inside a stamp- or run-id-named directory.
+- `llama-cpp` combo members take their limits only from current capacity cards, never from the OmniRoute catalog.
+- The `my-coding-lite` combo is owned by this tool (overwritten on drift, like `llm-env-local`).
+- Agent client configs reference the router key file, never the key.
 
 ## Platform
 
