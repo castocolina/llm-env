@@ -2849,6 +2849,8 @@ def test_override_raising_a_cap_has_no_warning(tmp_path, capsys):
     # render-unit.sh is "next start", not "apply now"; the disruption must be spelled out.
     assert "does not touch running containers" in apply
     assert "interrupted" in apply and "new cgroup lifetime" in apply
+    assert "for the next `make restart` or boot" in apply
+    assert "next start or boot" not in apply
 
 
 def test_override_check_validates_and_writes_nothing(tmp_path, capsys):

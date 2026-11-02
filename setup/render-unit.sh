@@ -190,8 +190,8 @@ ${mdns_wants}
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=$(dirname "$COMPOSE_FILE")
-ExecStart=podman compose -f $(basename "$COMPOSE_FILE") up -d
-ExecStop=podman compose -f $(basename "$COMPOSE_FILE") down
+ExecStart=podman compose -f $(basename "$COMPOSE_FILE") up -d --no-recreate
+ExecStop=podman compose -f $(basename "$COMPOSE_FILE") down --remove-orphans
 ${phoenix_lifecycle}
 TimeoutStartSec=300
 ${install_section}

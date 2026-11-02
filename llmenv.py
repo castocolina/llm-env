@@ -470,11 +470,11 @@ def cmd_resource_benchmark(args: argparse.Namespace) -> int:
     return emit(rb.report(Path(args.file), args.headroom))
 
 
-# set/clear only edit models.yml. Rendering for the next start and applying to
+# set/clear only edit models.yml. Rendering for the next restart and applying to
 # running containers are different steps with different impact; say so.
 _APPLY_HINT = (
     "saved to models.yml only; running containers keep their current limits. "
-    "`bash setup/render-unit.sh` re-renders the compose file and unit for the next start or boot "
+    "`bash setup/render-unit.sh` re-renders the compose file and unit for the next `make restart` or boot "
     "and does not touch running containers. To apply this to the running stack now, run "
     "`make restart` (stop, then start): OmniRoute, remote-setup, System One and, when System One "
     "is enabled, Phoenix are stopped and started again, so in-flight requests are interrupted, "

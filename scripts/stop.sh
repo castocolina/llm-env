@@ -5,6 +5,24 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+case "${1:-}" in
+    "") ;;
+    llm-server)
+        require_cmd podman
+        if container_running llm-server; then
+            podman stop llm-server >/dev/null
+            log_info "llm-server stopped"
+        else
+            log_warn "llm-server is not running"
+        fi
+        exit 0
+        ;;
+    *)
+        printf 'usage: stop.sh [llm-server]\n' >&2
+        exit 2
+        ;;
+esac
+
 require_cmd systemctl
 
 if ! systemctl --user list-unit-files "${UNIT_NAME}.service" >/dev/null 2>&1; then
@@ -19,5 +37,10 @@ if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
     systemctl --user stop "${UNIT_NAME}.service"
     log_info "server stopped"
 else
-    log_warn "server is not running"
+    log_warn "server unit is not active; removing any containers it left running"
+    # A failed unit can leave running containers that the --no-recreate ExecStart would never recreate.
+    if [ -f "$COMPOSE_FILE" ]; then
+        require_cmd podman
+        podman compose -f "$COMPOSE_FILE" down --remove-orphans
+    fi
 fi

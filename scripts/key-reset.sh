@@ -17,5 +17,5 @@ if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
     bash "${REPO_DIR}/scripts/stop.sh"
     bash "${REPO_DIR}/scripts/start.sh"
 else
-    log_info "the new API key will apply on the next start"
+    log_info "the new API key will apply on the next \`make restart\`"
 fi

@@ -1,4 +1,4 @@
-.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark \
+.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context backup \
         combo-backup combo-restore connections-backup update-omniroute migrate-remote-setup logs validate test test-phoenix clean prune
 
@@ -26,6 +26,18 @@ stop:
 restart:
 	@$(MAKE) --no-print-directory stop
 	@$(MAKE) --no-print-directory start
+
+start-llama:
+	@bash tools/run-target.sh start-llama -- bash scripts/start.sh llm-server
+
+stop-llama:
+	@bash tools/run-target.sh stop-llama -- bash scripts/stop.sh llm-server
+
+llama-enable:
+	@bash tools/run-target.sh llama-enable -- bash scripts/llama-config.sh enable "$(MODEL)"
+
+llama-disable:
+	@bash tools/run-target.sh llama-disable -- bash scripts/llama-config.sh disable
 
 check-setup:
 	@bash tools/run-target.sh check-setup -- bash scripts/check-setup.sh

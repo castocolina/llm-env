@@ -17,6 +17,10 @@ import pytest
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+RECOVER_LINE = (
+    "Recover: make stop-llama, restore the backup printed by make llama-enable "
+    "if the model changed, then make start-llama"
+)
 SCRIPT_DIR = ROOT / "scripts"
 SETUP_DIR = ROOT / "setup"
 TOOLS_DIR = ROOT / "tools"
@@ -4181,8 +4185,27 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
     assert result.returncode == 0, result.stderr
     assert compose_file.exists()
     assert "llm-server" in compose_file.read_text()
-    assert "ExecStart=podman compose -f docker-compose.yml up -d" in wrapper_unit.read_text()
-    assert "ExecStop=podman compose -f docker-compose.yml down" in wrapper_unit.read_text()
+    unit_text = wrapper_unit.read_text()
+    assert "ExecStart=podman compose -f docker-compose.yml up -d --no-recreate\n" in unit_text
+    assert "ExecStop=podman compose -f docker-compose.yml down --remove-orphans\n" in unit_text
+
+
+def test_stop_downs_leftover_containers_when_the_unit_is_inactive(tmp_path: pathlib.Path) -> None:
+    compose_file = tmp_path / "home/.config/llm-env/docker-compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n")
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/stop.sh", active=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert f"podman compose -f {compose_file} down --remove-orphans\n" in recorded
+    assert "systemctl --user stop" not in recorded
+    assert "server unit is not active" in result.stderr
+
+
+def test_stop_inactive_without_a_compose_file_runs_no_compose_down(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/stop.sh", active=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "down --remove-orphans" not in calls.read_text()
 
 
 def test_render_unit_no_gpu_skips_device_resolution_and_presets(
@@ -4989,6 +5012,7 @@ def run_lifecycle_script(
     system_one_port: int = 8010,
     extra_config: str = "",
     real_render_compose: bool = False,
+    args: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run a lifecycle script with real configuration writes and external stubs."""
     real_yq = shutil.which("yq")
@@ -4997,12 +5021,12 @@ def run_lifecycle_script(
     assert real_uv is not None
 
     commands = tmp_path / "bin"
-    commands.mkdir()
+    commands.mkdir(exist_ok=True)
     calls = tmp_path / "calls"
     calls.touch()
     home = tmp_path / "home"
     config = home / ".config/llm-env/models.yml"
-    config.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
         "version: 1\n"
         "llm_server:\n"
@@ -5110,6 +5134,7 @@ def run_lifecycle_script(
     uv.write_text(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in *' models '*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in\n"
         "  *' detect'*) printf '%s\\n' '{\"gpus\":[{\"card\":\"card1\",\"pci_address\":\"0000:03:00.0\",\"vram_total_mib\":16304,\"vram_used_mib\":0,\"render_node\":\"renderD128\",\"vendor\":\"0x1002\",\"connected_outputs\":[]}]}' ;;\n"
         "  *' gfx-arch '*) printf '%s\\n' 'gfx1201' ;;\n"
@@ -5118,7 +5143,7 @@ def run_lifecycle_script(
         "case \"$*\" in *' process-vram '*) printf '%s\\n' \"${SYSTEM_ONE_VRAM:-4245}\" ;; esac\n"
         "case \"$*\" in *' migrate-config'*) exec \"$REAL_UV\" \"$@\" ;; esac\n"
         "case \"$*\" in *' render-compose'*) [ \"$REAL_RENDER_COMPOSE\" = 1 ] && exec \"$REAL_UV\" \"$@\" ;; esac\n"
-        "case \"$*\" in *' budget '*) printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
+        "case \"$*\" in *' budget '*) if [ \"${BUDGET_INFEASIBLE:-}\" = 1 ]; then printf '%s\\n' '{\"available_mib\":8000,\"required_mib\":10000,\"shortfall_mib\":2000,\"vram_feasible\":false,\"ram_feasible\":true,\"remedies\":[\"lower models_max\"]}'; exit 1; fi; printf '%s\\n' '{\"available_mib\":12000,\"required_mib\":10000,\"vram_feasible\":true,\"ram_feasible\":true}' ;; esac\n"
         "case \"$*\" in *' omniroute import-codex'*) printf '%s\\n' '{\"action\":\"updated\",\"id\":\"x\",\"name\":\"cco-cl\"}' ;; esac\n"
         f"case \"$*\" in *' resources') {resources_case} ;; esac\n"
         "case \"$*\" in *' effective-policy'*) printf '%s\\n' '{\"cpus_min\": 0.25, \"cpus_max\": 2, \"memory_min_mib\": 256, \"memory_max_mib\": 1024}' ;; esac\n"
@@ -5130,7 +5155,7 @@ def run_lifecycle_script(
         "printf 'podman %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in *'network inspect --format {{.Internal}}'*) printf 'true\\n'; exit 0 ;; esac\n"
         "case \"$*\" in *'image exists localhost/llm-env-system-one-phoenix:'*) exit 1 ;; *'image exists'*) [ \"${PODMAN_IMAGE_MISSING:-}\" = 1 ] && exit 1 ;; *'volume exists llm-env-system-one-cache'*) [ \"${PODMAN_VOLUME_MISSING:-}\" = 1 ] && exit 1 ;; *'system-one-cache-check.py verify'*) [ \"${PODMAN_WEIGHTS_INCOMPLETE:-}\" = 1 ] && exit 1 ;; *'volume inspect --format'*) [ \"${PHOENIX_VOLUME_EXISTS:-}\" = 1 ] && printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\"}' || exit 1 ;; *'network inspect --format'*) [ \"${PHOENIX_NETWORK_EXISTS:-}\" = 1 ] && printf '%s\\n' '{\"llm-env.scope\":\"phoenix\",\"llm-env.project\":\"llm-env-phoenix\"}' || exit 1 ;; *'network inspect'*) [ \"${PHOENIX_NETWORK_EXISTS:-}\" = 1 ] || exit 1 ;; esac\n"
-        "case \"$*\" in *'{{.State.Pid}}'*) printf '%s\\n' \"${SYSTEM_ONE_PID:-4242}\" ;; *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
+        "case \"$*\" in *'{{.State.Pid}}'*) printf '%s\\n' \"${SYSTEM_ONE_PID:-4242}\" ;; *'inspect --format'*'system-one'*) [ \"${PODMAN_SYSTEM_ONE_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; *'inspect --format'*'llm-server'*) [ \"${PODMAN_LLM_SERVER_RUNNING:-}\" = 1 ] && printf '%s\\n' true ;; esac\n"
         "case \"$*\" in *'printenv LAYA_MAX_CONCURRENT'*) printf '%s\\n' 64 ;; esac\n"
         "case \"$*\" in *'cpu.stat'*) printf '%s\\n' 'usage_usec 1000000' ;; esac\n"
         "case \"$*\" in *'memory.current'*) printf '%s\\n' 2500000000 ;; esac\n"
@@ -5162,13 +5187,26 @@ def run_lifecycle_script(
         "printf 'systemctl %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'daemon-reload'*) [ \"$LLM_SERVER_ENABLED\" = \"false\" ] || [ -f \"$MDNS_UNIT\" ] || exit 66 ;;\n"
-        "  *'is-active --quiet'*) [ \"$ACTIVE\" = 1 ] ;;\n"
+        "  *'is-active --quiet'*) [ -f \"$UNIT_ACTIVE_FILE\" ] ;;\n"
+        "  *'--user stop llm-server.service'*) rm -f \"$UNIT_ACTIVE_FILE\" ;;\n"
+        "  *'--user start llm-server.service'*) : > \"$UNIT_ACTIVE_FILE\" ;;\n"
         "esac\n"
     )
     systemctl.chmod(systemctl.stat().st_mode | stat.S_IXUSR)
+    date = commands / "date"
+    date.write_text(
+        "#!/usr/bin/bash\n"
+        "[ -n \"${FIXED_DATE_STAMP:-}\" ] && { printf '%s\\n' \"$FIXED_DATE_STAMP\"; exit 0; }\n"
+        "exec /usr/bin/date \"$@\"\n"
+    )
+    date.chmod(date.stat().st_mode | stat.S_IXUSR)
+    unit_active = tmp_path / "unit-active"
+    unit_active.unlink(missing_ok=True)
+    if active:
+        unit_active.touch()
 
     environment = os.environ | {
-        "ACTIVE": "1" if active else "0",
+        "UNIT_ACTIVE_FILE": str(unit_active),
         "CALLS": str(calls),
         "HOME": str(home),
         "LLM_ENV_CONFIG": str(config),
@@ -5185,7 +5223,7 @@ def run_lifecycle_script(
         "PHOENIX_NETWORK_EXISTS": "1" if system_one_enabled else "0",
     } | (env_overrides or {})
     result = subprocess.run(
-        ["/usr/bin/bash", script],
+        ["/usr/bin/bash", script, *args],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -5193,6 +5231,58 @@ def run_lifecycle_script(
         check=False,
     )
     return result, config, calls
+
+
+def test_stop_llama_stops_only_the_llm_server_container(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/stop.sh", args=("llm-server",), active=True,
+        env_overrides={"PODMAN_LLM_SERVER_RUNNING": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "podman stop llm-server\n" in recorded
+    for absent in ("systemctl --user stop", "phoenix.sh stop", "podman rm", "compose"):
+        assert absent not in recorded
+
+
+def test_stop_llama_is_a_noop_when_not_running(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/stop.sh", args=("llm-server",), active=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "llm-server is not running" in result.stderr  # log_warn writes to stderr
+    assert "podman stop" not in calls.read_text()
+
+
+def test_stop_llama_does_not_need_llm_server_in_the_compose_file(tmp_path: pathlib.Path) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "scripts/stop.sh", args=("llm-server",), llm_server_enabled=False,
+        env_overrides={"PODMAN_LLM_SERVER_RUNNING": "1"},
+    )
+    assert not (config.parent / "docker-compose.yml").exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "podman stop llm-server\n" in recorded and "compose" not in recorded
+
+
+def test_stop_llama_rejects_an_unknown_scope(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/stop.sh", args=("omniroute",), active=True
+    )
+    assert result.returncode == 2
+    assert "usage: stop.sh [llm-server]" in result.stderr
+    assert "systemctl --user stop" not in calls.read_text()
+
+
+def test_stop_stops_phoenix_without_removing_its_volume(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/stop.sh", active=True, env_overrides={"PHOENIX_VOLUME_EXISTS": "1"}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "scripts/phoenix.sh stop" in recorded
+    assert "systemctl --user stop llm-server.service" in recorded
+    assert "down -v" not in recorded and "volume rm" not in recorded
 
 
 def test_clean_removes_the_system_one_image(tmp_path: pathlib.Path) -> None:
@@ -5312,16 +5402,13 @@ def test_makefile_exposes_system_one_benchmark() -> None:
     assert '_help_line "system-one-benchmark"' in (ROOT / "scripts/help.sh").read_text()
 
 
-def test_start_disabled_transition_stops_existing_phoenix_volume(tmp_path: pathlib.Path) -> None:
+def test_start_does_not_stop_phoenix_when_system_one_disabled(tmp_path: pathlib.Path) -> None:
     result, _config, calls = run_lifecycle_script(
         tmp_path, "scripts/start.sh", llm_server_enabled=False,
         env_overrides={"PHOENIX_VOLUME_EXISTS": "1"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    recorded = calls.read_text()
-    assert "scripts/phoenix.sh stop" in recorded
-    assert "podman compose" in recorded and " down" in recorded
-    assert "down -v" not in recorded and "volume rm" not in recorded
+    assert "scripts/phoenix.sh stop" not in calls.read_text()
 
 
 def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.Path) -> None:
@@ -7455,19 +7542,169 @@ def test_start_warns_when_omniroute_is_unreachable_but_still_succeeds(
     assert "OmniRoute did not become reachable" in result.stdout + result.stderr
 
 
-def test_start_stops_active_router_before_budgeting(tmp_path: pathlib.Path) -> None:
-    """A config change must unload the old router before measuring available VRAM."""
-    result, _, calls = run_lifecycle_script(
-        tmp_path, "scripts/start.sh", active=True
-    )
-
-    assert result.returncode == 0, result.stderr
+def test_start_never_stops_an_active_stack(tmp_path: pathlib.Path) -> None:
+    """Replaces test_start_stops_active_router_before_budgeting."""
+    result, config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh", active=True)
+    assert result.returncode == 0, result.stdout + result.stderr
     recorded = calls.read_text().splitlines()
-    active_check = recorded.index("systemctl --user is-active --quiet llm-server.service")
-    stop = recorded.index("systemctl --user stop llm-server.service")
-    budget = next(index for index, call in enumerate(recorded) if " budget " in call)
-    start = recorded.index("systemctl --user start llm-server.service")
-    assert active_check < stop < budget < start
+    up = recorded.index(
+        f"podman compose -f {config.parent / 'docker-compose.yml'} up -d --no-recreate --no-deps --pull=never"
+    )
+    budget = next(i for i, call in enumerate(recorded) if " budget " in call)
+    assert budget < up
+    assert not any(call.startswith(("systemctl --user stop", "systemctl --user start")) for call in recorded)
+    assert not any(call.startswith("podman compose") and " down" in call for call in recorded)
+
+
+def test_start_inactive_stack_starts_the_unit(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh", active=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text().splitlines()
+    assert "systemctl --user start llm-server.service" in recorded
+    assert not any(call.startswith("podman compose -f") and " up " in call for call in recorded)
+
+
+def test_start_skips_budget_when_llm_server_already_running(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", active=True,
+        env_overrides={"PODMAN_LLM_SERVER_RUNNING": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert " budget " not in calls.read_text()
+    assert "llm-server is already running" in result.stdout
+
+
+def test_start_refuses_to_start_on_an_infeasible_budget(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", active=True,
+        env_overrides={"BUDGET_INFEASIBLE": "1"},
+    )
+    assert result.returncode != 0
+    assert "budget exceeded" in result.stderr
+    assert "VRAM short by 2000 MiB" in result.stdout
+    recorded = calls.read_text().splitlines()
+    assert not any(" up -d" in call for call in recorded)
+    assert not any("render-unit.sh" in call for call in recorded)
+    assert not any(call.startswith(("systemctl --user start", "systemctl --user stop")) for call in recorded)
+
+
+def test_start_prints_restart_hint_for_running_containers(tmp_path: pathlib.Path) -> None:
+    result, _config, _calls = run_lifecycle_script(tmp_path, "scripts/start.sh", active=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "run 'make restart' to apply config changes" in result.stdout
+
+
+def _no_container_touch(recorded: list[str]) -> bool:
+    return not any(call.startswith(("podman stop", "podman restart", "podman rm")) for call in recorded)
+
+
+def test_start_llama_starts_only_llm_server(tmp_path: pathlib.Path) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        result, config, calls = run_lifecycle_script(
+            tmp_path, "scripts/start.sh", args=("llm-server",), active=True,
+            system_one_enabled=True, omniroute_port=listener.getsockname()[1],
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text().splitlines()
+    up = f"podman compose -f {config.parent / 'docker-compose.yml'} up -d --no-recreate --no-deps --pull=never llm-server"
+    compose_calls = [call for call in recorded if call.startswith("podman compose")]
+    assert compose_calls[-1] == up
+    assert next(i for i, call in enumerate(recorded) if " budget " in call) < recorded.index(up)
+    assert "omniroute provision" in calls.read_text()
+    assert "server is ready" in result.stdout and "make restart" in result.stdout
+    text = calls.read_text()
+    for absent in (
+        "systemctl --user start", "systemctl --user stop", "phoenix.sh start",
+        "system-one-cache-check.py verify", "enable-omniroute-heal.sh",
+        "enable-omniroute-zai-reset.sh", "network.sh", "provider-provision.sh",
+    ):
+        assert absent not in text
+    assert "Waiting for System One" not in result.stdout
+
+
+def test_start_llama_refuses_when_stack_inactive(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=False
+    )
+    assert result.returncode != 0
+    assert "run 'make start'" in result.stderr
+    text = calls.read_text()
+    for absent in (" budget ", "render-unit.sh", "up -d", "systemctl --user start"):
+        assert absent not in text
+
+
+def test_start_llama_refuses_when_llm_server_disabled(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=True, llm_server_enabled=False
+    )
+    assert result.returncode != 0
+    assert "make llama-enable MODEL=" in result.stderr
+    text = calls.read_text()
+    for absent in (" budget ", "render-unit.sh", "up -d"):
+        assert absent not in text
+
+
+def test_start_llama_refuses_on_infeasible_budget(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=True,
+        env_overrides={"BUDGET_INFEASIBLE": "1"},
+    )
+    assert result.returncode != 0
+    assert "budget exceeded" in result.stderr
+    recorded = calls.read_text().splitlines()
+    assert not any("up -d" in call or "render-unit.sh" in call for call in recorded)
+    assert not any(call.startswith(("systemctl --user start", "systemctl --user stop")) for call in recorded)
+
+
+def test_start_llama_is_a_noop_when_already_running(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=True,
+        env_overrides={"PODMAN_LLM_SERVER_RUNNING": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "llm-server is already running" in result.stdout
+    assert "make stop-llama" in result.stdout
+    text = calls.read_text()
+    assert "/health" in text
+    for absent in (" budget ", "render-unit.sh", "up -d"):
+        assert absent not in text
+
+
+def test_start_llama_fails_on_a_running_but_unhealthy_server(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=True,
+        env_overrides={"PODMAN_LLM_SERVER_RUNNING": "1", "CURL_HEALTH_FAIL": "1"},
+    )
+    assert result.returncode == 1
+    assert RECOVER_LINE in result.stdout
+    text = calls.read_text()
+    assert "/health" in text
+    for absent in ("up -d", " budget ", "render-unit.sh"):
+        assert absent not in text
+    assert _no_container_touch(text.splitlines())
+
+
+def test_start_llama_leaves_an_unhealthy_server_running(tmp_path: pathlib.Path) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("llm-server",), active=True,
+        env_overrides={"CURL_HEALTH_FAIL": "1"},
+    )
+    assert result.returncode == 1
+    assert RECOVER_LINE in result.stdout
+    recorded = calls.read_text().splitlines()
+    assert f"podman compose -f {config.parent / 'docker-compose.yml'} up -d --no-recreate --no-deps --pull=never llm-server" in recorded
+    assert _no_container_touch(recorded)
+
+
+def test_start_rejects_an_unknown_scope(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", args=("omniroute",), active=True
+    )
+    assert result.returncode == 2
+    assert "usage: start.sh [llm-server]" in result.stderr
+    assert "migrate-config" not in calls.read_text()
 
 
 def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
@@ -7479,8 +7716,13 @@ def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
     assert result.returncode == 0, result.stderr
     assert yq_value(config, ".server.api_key") != "existing-key"
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert "systemctl --user stop llm-server.service" in calls.read_text()
-    assert "systemctl --user start llm-server.service" in calls.read_text()
+    recorded = calls.read_text().splitlines()
+    assert "systemctl --user stop llm-server.service" in recorded
+    assert "systemctl --user start llm-server.service" in recorded
+    assert recorded.index("systemctl --user stop llm-server.service") < recorded.index(
+        "systemctl --user start llm-server.service"
+    )
+    assert not any("--no-recreate" in call for call in recorded)
 
 
 def test_key_reset_does_not_start_an_inactive_server(tmp_path: pathlib.Path) -> None:
@@ -11320,6 +11562,39 @@ def test_makefile_restart_chains_two_recursive_make_calls() -> None:
     assert "restart:\n\t@$(MAKE) --no-print-directory stop\n\t@$(MAKE) --no-print-directory start\n" in makefile
 
 
+def test_makefile_exposes_llama_targets() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    help_text = (ROOT / "scripts/help.sh").read_text()
+    phony = re.search(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+    assert phony is not None
+    recipes = {
+        "start-llama": "@bash tools/run-target.sh start-llama -- bash scripts/start.sh llm-server",
+        "stop-llama": "@bash tools/run-target.sh stop-llama -- bash scripts/stop.sh llm-server",
+        "llama-enable": '@bash tools/run-target.sh llama-enable -- bash scripts/llama-config.sh enable "$(MODEL)"',
+        "llama-disable": "@bash tools/run-target.sh llama-disable -- bash scripts/llama-config.sh disable",
+    }
+    for name, recipe in recipes.items():
+        assert f"{name}:\n\t{recipe}\n" in makefile
+        assert name in phony.group(1).split()
+        assert f'_help_line "{name}"' in help_text
+
+    result = subprocess.run(
+        ["/usr/bin/make", "--no-print-directory", "-n", "llama-enable", "MODEL=x"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'bash scripts/llama-config.sh enable "x"' in result.stdout
+
+
+def test_make_help_benchmark_requires_stop_llama_and_names_gpu_side_effect() -> None:
+    help_text = _make_help_output()
+    assert "run after 'make stop-llama'" in help_text
+    assert "rewrites gpu.backend/gpu.image in models.yml" in help_text
+
+
 def test_logs_follow_main_and_phoenix_projects_with_owned_process_cleanup() -> None:
     logs_text = (ROOT / "scripts/logs.sh").read_text()
     assert "setsid" in logs_text
@@ -12893,3 +13168,91 @@ def test_makefile_exposes_resources_snapshot_and_benchmark_targets() -> None:
     # The retired evidence gate is gone from every entry point.
     assert "resources-measure" not in makefile + help_text
     assert not (ROOT / "scripts/resources-measure.sh").exists()
+
+
+def _backups(config: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(config.parent.glob("models.yml.*.bak"))
+
+
+def test_llama_enable_backs_up_and_selects_the_model(tmp_path: pathlib.Path) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("enable", "test"), llm_server_enabled=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".llm_server.enabled") == "true"
+    assert yq_value(config, '.models[] | select(.alias == "test") | .enabled') == "true"
+    [backup] = _backups(config)
+    assert yq_value(backup, ".llm_server.enabled") == "false"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert str(backup) in result.stdout and "make start-llama" in result.stdout
+    assert sorted(p.name for p in config.parent.iterdir()) == sorted(["models.yml", backup.name])
+    assert "systemctl" not in calls.read_text() and "podman" not in calls.read_text()
+
+
+def test_llama_enable_rejects_an_unknown_alias(tmp_path: pathlib.Path) -> None:
+    result, config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("enable", "nope"), llm_server_enabled=False
+    )
+    assert result.returncode == 1
+    assert "unknown model alias: nope" in result.stderr
+    [backup] = _backups(config)
+    assert str(backup) in result.stdout
+    assert config.read_bytes() == backup.read_bytes()  # nothing written, not even migrate output
+    assert sorted(p.name for p in config.parent.iterdir()) == sorted(["models.yml", backup.name])
+
+
+def test_llama_enable_refuses_an_existing_backup_name(tmp_path: pathlib.Path) -> None:
+    stamp = {"FIXED_DATE_STAMP": "20261030T120000"}
+    first, config, _ = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("enable", "test"),
+        llm_server_enabled=False, env_overrides=stamp,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    [backup] = _backups(config)
+    assert backup.name == "models.yml.20261030T120000.bak"
+    saved = backup.read_bytes()
+    # The helper rewrites the fixture config (enabled: false) and stubs on the same tmp_path.
+    second, config, _ = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("enable", "test"),
+        llm_server_enabled=False, env_overrides=stamp,
+    )
+    assert second.returncode == 1
+    assert "already exists" in second.stderr
+    assert _backups(config) == [backup] and backup.read_bytes() == saved
+    assert yq_value(config, ".llm_server.enabled") == "false"  # refused before any write
+
+
+def test_llama_enable_requires_a_model(tmp_path: pathlib.Path) -> None:
+    result, config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("enable", ""), llm_server_enabled=False
+    )
+    assert result.returncode == 2
+    assert "MODEL=" in result.stderr
+    assert _backups(config) == []
+
+
+def test_llama_disable_backs_up_and_sets_gateway_only(tmp_path: pathlib.Path) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("disable",)
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert yq_value(config, ".llm_server.enabled") == "false"
+    [backup] = _backups(config)
+    assert yq_value(config, ".models") == yq_value(backup, ".models")
+    assert yq_value(backup, ".llm_server.enabled") == "true"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert str(backup) in result.stdout
+    assert "make stop-llama" in result.stdout and "make restart" in result.stdout
+    assert "systemctl" not in calls.read_text() and "podman" not in calls.read_text()
+    assert sorted(p.name for p in config.parent.iterdir()) == sorted(["models.yml", backup.name])
+
+
+def test_llama_config_rejects_an_unknown_action(tmp_path: pathlib.Path) -> None:
+    result, config, _calls = run_lifecycle_script(
+        tmp_path, "scripts/llama-config.sh", args=("toggle",)
+    )
+    assert result.returncode == 2
+    assert "usage: llama-config.sh enable <alias> | disable" in result.stderr
+    assert _backups(config) == []

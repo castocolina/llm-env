@@ -5,6 +5,12 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+scope="${1:-all}"
+case "$scope" in
+    all | llm-server) ;;
+    *) echo "usage: start.sh [llm-server]" >&2; exit 2 ;;
+esac
+
 require_cmd uv jq yq systemctl curl podman
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
@@ -19,12 +25,15 @@ ensure_omniroute_secrets
 # coerce a disabled config back to enabled.
 llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
 
-system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
-if [ "$system_one_enabled" != "true" ]; then
-    # Disabled transition: don't leave a prior Phoenix companion running.
-    bash "${REPO_DIR}/scripts/phoenix.sh" stop
+if [ "$scope" = "llm-server" ]; then
+    [ "$llm_server_enabled" = "true" ] \
+        || die "llm-server is disabled; run 'make llama-enable MODEL=<alias>' first"
+    systemctl --user is-active --quiet "${UNIT_NAME}.service" \
+        || die "the stack is not running; run 'make start'"
 fi
-if [ "$system_one_enabled" = "true" ]; then
+
+system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
     system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
     system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
     podman image exists "$system_one_image" || die "system-one image missing; run 'make setup'"
@@ -44,12 +53,24 @@ if [ "$llm_server_enabled" = "true" ]; then
     [ "$models_max" -gt 0 ] || die "no models enabled; run 'make setup'"
 fi
 
-if systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
-    log_step "Stopping the active router before measuring VRAM"
-    systemctl --user stop "${UNIT_NAME}.service"
+# A running llm-server already holds its VRAM, so measuring "available" now
+# would count it against itself; the gate only guards a fresh load.
+llm_server_running=0
+if [ "$llm_server_enabled" = "true" ] && container_running llm-server; then
+    llm_server_running=1
 fi
 
-if [ "$llm_server_enabled" = "true" ]; then
+# Decision 3: start-llama on a running llm-server only waits for its health;
+# it never budgets, renders or runs `up`.
+skip_start=0
+if [ "$scope" = "llm-server" ] && [ "$llm_server_running" -eq 1 ]; then
+    skip_start=1
+fi
+
+if [ "$llm_server_enabled" = "true" ] && [ "$llm_server_running" -eq 1 ] && [ "$skip_start" -eq 0 ]; then
+    log_info "llm-server is already running; skipping the VRAM budget check"
+fi
+if [ "$llm_server_enabled" = "true" ] && [ "$llm_server_running" -eq 0 ]; then
     log_step "Checking the VRAM budget"
     if ! budget="$(llmenv --config "$CONFIG_PATH" budget --models-dir "$MODELS_DIR")"; then
         # See setup/setup.sh's identical Step 7 gate for why `.error` is
@@ -72,45 +93,56 @@ if [ "$llm_server_enabled" = "true" ]; then
     echo "$budget" | jq -r '"  available \(.available_mib) MiB, required \(.required_mib) MiB"'
 fi
 
-log_step "Computing resource limits"
-# Render paths (`llmenv render-compose`, `phoenix.sh`) recompute the effective
-# policy (defaults + resources.overrides) on every run; nothing is copied back
-# into models.yml except the llm_server remainder.
-resources_json="$(mktemp)"
-trap 'rm -f "$resources_json"' EXIT
-if ! llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
-    # A host too small to reserve the fixed floors is exactly the host
-    # where an uncapped container is most dangerous -- render_compose()
-    # treats cpus/memory_mib == 0 as "no explicit limit", so proceeding to
-    # render here would silently disable the safety mechanism precisely when
-    # it matters most. Fail loudly instead, exactly like setup/setup.sh's
-    # Step 8 already does.
-    die "$(jq -r '.error' "$resources_json")"
-fi
-if [ "$llm_server_enabled" = "true" ]; then
-    cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
-    memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
-    CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
-        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
-        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
-      ' "$CONFIG_PATH"
-    log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
-fi
-if [ "$system_one_enabled" = "true" ]; then
-    log_info "$(jq -r '.phoenix | "Phoenix policy: \(.memory_min_mib) MiB soft memory reservation, \(.memory_max_mib) MiB hard cap, \(.cpus_max) CPUs max"' "$resources_json")"
-fi
+if [ "$skip_start" -eq 0 ]; then
+    log_step "Computing resource limits"
+    # Render paths (`llmenv render-compose`, `phoenix.sh`) recompute the effective
+    # policy (defaults + resources.overrides) on every run; nothing is copied back
+    # into models.yml except the llm_server remainder.
+    resources_json="$(mktemp)"
+    trap 'rm -f "$resources_json"' EXIT
+    if ! llmenv --config "$CONFIG_PATH" resources > "$resources_json"; then
+        # A host too small to reserve the fixed floors is exactly the host
+        # where an uncapped container is most dangerous -- render_compose()
+        # treats cpus/memory_mib == 0 as "no explicit limit", so proceeding to
+        # render here would silently disable the safety mechanism precisely when
+        # it matters most. Fail loudly instead, exactly like setup/setup.sh's
+        # Step 8 already does.
+        die "$(jq -r '.error' "$resources_json")"
+    fi
+    if [ "$llm_server_enabled" = "true" ]; then
+        cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
+        memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
+        CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
+            .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+            .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
+          ' "$CONFIG_PATH"
+        log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
+    fi
+    if [ "$system_one_enabled" = "true" ]; then
+        log_info "$(jq -r '.phoenix | "Phoenix policy: \(.memory_min_mib) MiB soft memory reservation, \(.memory_max_mib) MiB hard cap, \(.cpus_max) CPUs max"' "$resources_json")"
+    fi
 
-# Effective policy (totals and any active overrides), computed by llmenv so the
-# wording is unit-tested; resources.overrides itself is never rewritten here.
-jq -r '.summary[]?' "$resources_json" | while IFS= read -r summary_line; do
-    log_info "$summary_line"
-done
+    # Effective policy (totals and any active overrides), computed by llmenv so the
+    # wording is unit-tested; resources.overrides itself is never rewritten here.
+    jq -r '.summary[]?' "$resources_json" | while IFS= read -r summary_line; do
+        log_info "$summary_line"
+    done
 
-bash "${REPO_DIR}/setup/render-unit.sh"
+    bash "${REPO_DIR}/setup/render-unit.sh"
+
+    log_step "Starting the service"
+    if [ "$scope" = "llm-server" ]; then
+        podman compose -f "$COMPOSE_FILE" up -d --no-recreate --no-deps --pull=never llm-server
+    elif systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
+        # Active unit: its ExecStart will not run again, so create only what is
+        # missing and start what is stopped; running containers are left alone.
+        podman compose -f "$COMPOSE_FILE" up -d --no-recreate --no-deps --pull=never
+    else
+        systemctl --user start "${UNIT_NAME}.service"
+    fi
+fi
 
 port="$(yq -r '.server.port' "$CONFIG_PATH")"
-log_step "Starting the service"
-systemctl --user start "${UNIT_NAME}.service"
 
 if [ "$llm_server_enabled" = "true" ]; then
     log_step "Waiting for health"
@@ -119,12 +151,18 @@ if [ "$llm_server_enabled" = "true" ]; then
     if ! wait_for_health "$port"; then
         log_error "server did not become healthy within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s"
         echo "  Logs: podman compose -f ${COMPOSE_FILE} logs"
+        if [ "$scope" = "llm-server" ]; then
+            echo "  Recover: make stop-llama, restore the backup printed by make llama-enable if the model changed, then make start-llama"
+        fi
         exit 1
     fi
     log_info "server is ready"
+    if [ "$skip_start" -eq 1 ]; then
+        log_info "llm-server is already running; run 'make stop-llama' first to load a changed model"
+    fi
 fi
 
-if [ "$system_one_enabled" = "true" ]; then
+if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
     log_step "Waiting for System One"
     system_one_port="$(yq -r '.system_one.port' "$CONFIG_PATH")"
     if ! LLM_ENV_HEALTH_TIMEOUT_SECONDS="$LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS" \
@@ -141,15 +179,17 @@ if [ "$system_one_enabled" = "true" ]; then
     bash "${REPO_DIR}/scripts/phoenix.sh" start
 fi
 
-bash "${REPO_DIR}/setup/network.sh"
+if [ "$scope" = "all" ]; then
+    bash "${REPO_DIR}/setup/network.sh"
 
-log_step "Ensuring the OmniRoute admission-lease healer is installed"
-bash "${REPO_DIR}/setup/enable-omniroute-heal.sh" \
-    || log_warn "could not enable the OmniRoute healer timer; run 'bash setup/enable-omniroute-heal.sh' manually"
+    log_step "Ensuring the OmniRoute admission-lease healer is installed"
+    bash "${REPO_DIR}/setup/enable-omniroute-heal.sh" \
+        || log_warn "could not enable the OmniRoute healer timer; run 'bash setup/enable-omniroute-heal.sh' manually"
 
-log_step "Ensuring the z.ai weekly-quota reset timer is installed"
-bash "${REPO_DIR}/setup/enable-omniroute-zai-reset.sh" \
-    || log_warn "could not enable the z.ai reset timer; run 'bash setup/enable-omniroute-zai-reset.sh' manually"
+    log_step "Ensuring the z.ai weekly-quota reset timer is installed"
+    bash "${REPO_DIR}/setup/enable-omniroute-zai-reset.sh" \
+        || log_warn "could not enable the z.ai reset timer; run 'bash setup/enable-omniroute-zai-reset.sh' manually"
+fi
 
 log_step "Waiting for OmniRoute"
 omniroute_port="$(yq -r '.omniroute.port' "$CONFIG_PATH")"
@@ -173,8 +213,12 @@ if wait_for_tcp_port "$omniroute_port"; then
     else
         log_info "llm-server disabled -- skipping local OmniRoute provider provisioning; configure providers via the OmniRoute dashboard."
     fi
-    bash "${REPO_DIR}/scripts/provider-provision.sh" \
-        || log_warn "codex-provision failed; run 'make codex-provision' manually"
+    if [ "$scope" = "all" ]; then
+        bash "${REPO_DIR}/scripts/provider-provision.sh" \
+            || log_warn "codex-provision failed; run 'make codex-provision' manually"
+    fi
 else
     log_warn "OmniRoute did not become reachable within ${LLM_ENV_HEALTH_TIMEOUT_SECONDS}s; configure it manually"
 fi
+
+log_info "containers already running keep their definition; run 'make restart' to apply config changes"

@@ -260,6 +260,9 @@ reject_symlink_components() {
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 
+# True when the named podman container exists and is running (missing container: false, silently).
+container_running() { [ "$(podman inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+
 # Prints the system-one container's VRAM MiB on $1 (a PCI address), or returns 1.
 system_one_process_vram() {
     local pci="$1" pid mib

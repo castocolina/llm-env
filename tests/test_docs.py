@@ -171,3 +171,42 @@ def test_no_stale_quadlet_references_outside_architecture() -> None:
     for relative_path in ("AGENTS.md", "README.md", "QUICK_START.md"):
         text = (ROOT / relative_path).read_text().lower()
         assert "quadlet" not in text, f"{relative_path} still mentions quadlet"
+
+
+def _raw_line_starting_with(path: Path, prefix: str) -> str:
+    matches = [line for line in path.read_text().splitlines() if line.startswith(prefix)]
+    assert len(matches) == 1, f"expected one line starting with {prefix!r} in {path.name}"
+    return matches[0]
+
+
+def test_agents_commands_list_focused_lifecycle_targets() -> None:
+    agents = ROOT / "AGENTS.md"
+    normalized = _normalized_markdown(agents)
+
+    for target in ("make start-llama", "make stop-llama", "make llama-enable MODEL=", "make llama-disable"):
+        assert target in normalized
+    assert "never stops a running container" in _raw_line_starting_with(agents, "make start ")
+    assert "re-render" in _raw_line_starting_with(agents, "make restart ")
+    assert "for the next `make restart` or boot" in normalized
+    assert "for the next start or boot" not in normalized
+
+
+def test_readme_and_architecture_describe_the_llama_toggle() -> None:
+    readme = ROOT / "README.md"
+    assert "## Local inference toggle and model swap" in readme.read_text().splitlines()
+    assert "make stop-llama && make llama-enable MODEL=<alias> && make start-llama" in _normalized_markdown(readme)
+
+    architecture = _normalized_markdown(ROOT / ".agents/architecture.md")
+    for fragment in ("up -d --no-recreate", "down --remove-orphans", "--pull=never", "make stop-llama"):
+        assert fragment in architecture
+
+    quick_start = _normalized_markdown(ROOT / "QUICK_START.md")
+    assert "make start-llama" in quick_start
+    assert "make llama-enable MODEL=" in quick_start
+
+
+def test_benchmark_docs_require_llama_stopped_and_config_unchanged() -> None:
+    for document in ("README.md", "QUICK_START.md", "AGENTS.md"):
+        normalized = _normalized_markdown(ROOT / document)
+        assert "only after `make stop-llama`" in normalized, document
+        assert "`yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml`" in normalized, document

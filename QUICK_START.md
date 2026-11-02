@@ -4,8 +4,8 @@
 
 ```bash
 make setup       # 1. pick GPU + models (or opt out of local GPU inference), download, write config
-make benchmark   # 2. measure Vulkan throughput; CPU fallback exits nonzero; skipped if GPU inference is disabled
-make start       # 3. start
+make benchmark   # 2. measure Vulkan throughput (see the note below); CPU fallback exits nonzero; skipped if GPU inference is disabled
+make start       # 3. start whatever is not running
 make check-server
 ```
 
@@ -14,11 +14,22 @@ make check-server
 entirely and run this host as an OmniRoute gateway + remote installer only.
 See the main [README](README.md#gpu-optional-mode) for details.
 
+`make benchmark` rewrites `gpu.backend` and `gpu.image` in the live `models.yml`
+when the Vulkan benchmark fails, and gives contended results while llm-server holds
+the GPU. Run it only after `make stop-llama`. Then take a fresh timestamped backup right before the benchmark: `cp -p ~/.config/llm-env/models.yml ~/.config/llm-env/models.yml.$(date +%Y%m%dT%H%M%S).bak`. Do not reuse the backup `make llama-enable` took earlier: it may be stale, and restoring it would undo the enable edit,
+and check that
+`yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml` is unchanged. If it is
+not, restore the backup and report it. See the
+[README](README.md#local-inference-toggle-and-model-swap) for details.
+
 ## Daily use
 
 ```bash
-make start
+make start        # start whatever is not running; never stops a running container
 make stop
+make restart      # stop everything, re-render and start (applies config changes)
+make start-llama  # start llm-server only, after make llama-enable
+make stop-llama   # stop llm-server only; OmniRoute stays up
 make status
 make logs
 ```
@@ -208,9 +219,12 @@ configurations. It does not modify normal Pi or OpenCode profiles.
 
 ```bash
 uv run llmenv.py models list
-uv run llmenv.py models enable gemma4
-make restart
+make stop-llama && make llama-enable MODEL=gemma4 && make start-llama
 ```
+
+To keep several models enabled at once, use `uv run llmenv.py models select <a> <b>`
+and then `make restart`. Model swaps and the toggle are explained in the
+[README](README.md#local-inference-toggle-and-model-swap).
 
 ## When something breaks
 

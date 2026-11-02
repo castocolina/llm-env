@@ -9,8 +9,8 @@ compose stack on Bazzite.
 ```bash
 make prerequisites  # confirm and install Bazzite/Fedora host tools
 make setup       # choose GPU and models (or opt out of local GPU inference entirely), download, generate config
-make benchmark   # measure Vulkan throughput; CPU fallback still reports a failed Vulkan benchmark
-make start       # start the server
+make benchmark   # measure Vulkan throughput (only after make stop-llama; see below); CPU fallback still reports a failed Vulkan benchmark
+make start       # start whatever is not running (never stops a running container)
 make check-server
 ```
 
@@ -124,7 +124,8 @@ in most consumer GPUs' VRAM. It uses llama.cpp's `--n-cpu-moe` flag (set via
 the model's `n_cpu_moe` field) to keep routed-expert weights for its first N
 transformer blocks in host RAM while the rest of the model stays on GPU —
 `pylib/gguf.py` computes exactly how many bytes that is from the GGUF's own
-tensor layout, and `make setup`/`make start` both refuse to start if
+tensor layout, and `make setup` (and `make start`/`make start-llama` whenever
+llm-server is not already running) refuse to start if
 `resources.llm_server.memory_ceiling_pct` isn't high enough to hold it, the
 same way they already refuse an infeasible VRAM budget.
 
@@ -141,10 +142,86 @@ practical boundary does not change either model's configured client context.
 model selection/download, and VRAM budgeting entirely, and run this host as
 an OmniRoute gateway + remote installer only, with no local llama.cpp
 instance and the GPU untouched. This is persisted as `llm_server.enabled` in
-`models.yml` — flip it and re-run `make setup`/`make start` to change modes
-later. In this mode, configure an upstream provider (OpenRouter, another
+`models.yml` — switch with `make llama-disable` then `make restart`, or back to local with
+`make llama-enable MODEL=<alias>`, then `make setup` (GPU detection, model
+download and validation were skipped in gateway-only mode), then `make restart`. In this mode, configure an upstream provider (OpenRouter, another
 frontier API, etc.) through the OmniRoute dashboard yourself; `make start`
 does not auto-provision a connection to a local model that doesn't exist.
+
+## Local inference toggle and model swap
+
+`make llama-enable MODEL=<alias>` and `make llama-disable` change only
+`models.yml`. Each one first copies `models.yml` to
+`models.yml.<YYYYmmddTHHMMSS>.bak` (mode 0600) and prints its path. It then
+edits a temporary copy and renames it over `models.yml` only when every step
+succeeds, so a failure leaves `models.yml` byte-identical. Neither command
+starts or stops anything; each prints the next command.
+
+Swap the model without touching OmniRoute:
+
+```bash
+make stop-llama && make llama-enable MODEL=<alias> && make start-llama
+```
+
+- `make stop-llama` stops the llm-server container only and never removes it.
+  `make start-llama` runs the budget gate and render, then starts llm-server
+  alone. It waits for `/health`. If that fails, it exits 1 and prints this
+  line on stdout, and leaves the container as it is:
+
+  ```
+    Recover: make stop-llama, restore the backup printed by make llama-enable if the model changed, then make start-llama
+  ```
+
+- A model swap changes `presets.ini`. llama.cpp reads it when the process
+  starts (assumed; not checkable offline), so the new model loads on the next
+  llm-server start. `LLAMA_ARG_MODELS_MAX` is baked into the container and
+  keeps its old value until `make restart`. For a one-model swap that value
+  is harmless.
+- `make start-llama` on an llm-server that is already running changes nothing.
+  It only checks `/health` and provisions `llm-env-local`. Stop it first to
+  load a changed model.
+- Budget: when System One runs and the compositor is on the dGPU, System One's
+  VRAM is counted twice. This can refuse a start that would fit. It never
+  over-commits. `make restart` measures with everything stopped, which clears
+  a false refusal.
+- Healer and `--requires`: the unit's ExecStart (inactive unit, boot) creates
+  OmniRoute with `--requires=llm-server`; an active `make start` runs `up --no-deps`,
+  so a container it creates has no dependency. While llm-server is stopped and
+  OmniRoute carries the dependency, the healer's `podman restart omniroute` is
+  refused ("dependencies not started"). The refusal is logged, and the healer
+  never reloads llm-server. `make update-omniroute` recreates OmniRoute without that
+  dependency. Either way,
+  `make stop-llama` is a temporary stop.
+- `make stop-llama`, then `make llama-disable`, then `make start`: with
+  `--requires` on OmniRoute, `make start` leaves llm-server stopped. Gateway-only
+  mode is applied by `make restart`, which `make llama-disable` prints.
+- llm-server missing from the compose file while still running (after
+  `make llama-disable` and before `make restart`): `make start` leaves it
+  running. `make stop` or `make restart` removes it through `--remove-orphans`.
+- System One disabled, then `make start` while Phoenix still runs: `make start`
+  no longer stops Phoenix, so it keeps running. `make restart` stops it, even
+  when System One is disabled.
+- While llm-server is stopped, the mDNS unit's `ExecStartPre` polls its
+  `/health`, fails after the timeout, and clears on `make start-llama`.
+- An inactive server unit with containers still running (the unit failed,
+  for example when its start timed out): `make start` starts the unit without
+  recreating anything, so running containers keep their old definition.
+  `make restart` removes them directly and recreates everything.
+- An active-unit `make start` runs its direct `up` with `--pull=never`, so it
+  makes no registry call and adds no latency or DNS noise. It does not avoid
+  failure on an unreachable registry. Running containers are untouched and
+  the exit status is 0. A container that must be created pulls through
+  `podman create` and fails only if its image is unavailable. (An inactive
+  unit still pre-pulls through its ExecStart.)
+
+### Benchmarking while llm-server holds the GPU
+
+`make benchmark` rewrites `gpu.backend` and `gpu.image` in the live `models.yml`
+when the Vulkan benchmark fails. It also gives contended or failing results while
+llm-server holds the GPU. Run it only after `make stop-llama`. Then take a fresh timestamped backup right before the benchmark: `cp -p ~/.config/llm-env/models.yml ~/.config/llm-env/models.yml.$(date +%Y%m%dT%H%M%S).bak`. Do not reuse the backup `make llama-enable` took earlier: it may be stale, and restoring it would undo the enable edit.
+Afterwards verify that `yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml`
+is unchanged. If it is not, restore from that backup and report it. Prefer the
+skill's `bench-fit.sh` for screening.
 
 ## OmniRoute updates
 
@@ -432,7 +509,7 @@ touches MoE offload, the resource ceilings, or the Ornith 35B model entry:
    ```
 2. `make setup` — must complete without the VRAM/RAM budget gate firing, at
    the recommended `n_cpu_moe: 28` / `memory_ceiling_pct: 60`.
-3. `make start` — must reach a healthy state (`make check-server` passes).
+3. `make restart` (on a running stack `make start` skips the budget gate and keeps the old llm-server) — must reach a healthy state (`make check-server` passes).
 4. `make benchmark` — measures every enabled model (here, just `ornith-35b`)
    pinned to the configured GPU device, using its own presets-sourced
    `--n-gpu-layers`/`--n-cpu-moe` and its `check_ctx_size`/

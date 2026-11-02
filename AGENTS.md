@@ -17,13 +17,17 @@ make system-one-build        # Build the local System One (Laya) GPU image
 make system-one-benchmark    # Benchmark the running System One server and record the load table
 make resources-snapshot      # Point-in-time snapshot: per-service CPU/RAM policy, overrides and live cgroup counters (OK/WATCH/ALERT, read-only, no load)
 make resources-benchmark SERVICE=omniroute  # Measure a container to re-derive its limits (omniroute|attach|report)
-make start                   # Start the server (or omniroute + remote-setup only); installs the OmniRoute healer and z.ai weekly-reset timers
-make stop                    # Stop the server
-make restart                 # Stop then start
+make start                   # Start whatever is not running (never stops a running container); installs the OmniRoute healer and z.ai weekly-reset timers
+make stop                    # Stop the whole stack
+make restart                 # Stop everything, re-render and start (applies config changes)
+make start-llama            # Start llm-server only; needs the stack running (unit active) and llm_server.enabled true; the rest is left alone
+make stop-llama             # Stop llm-server only; the container is kept (never removed)
+make llama-enable MODEL=<alias>  # Config only: enable local llm-server with one model, backing up models.yml first
+make llama-disable          # Config only: disable local llm-server, backing up models.yml first (apply with make restart)
 make check-setup             # Offline validation
 make check-server            # Online API contract validation
 make check-with-agents       # Live Pi/OpenCode weather and USD-to-CLP checks
-make benchmark                # Measure Vulkan throughput; CPU fallback exits nonzero
+make benchmark                # Measure Vulkan throughput; CPU fallback exits nonzero; run only after make stop-llama (see below)
 make gpu-status                # Show which process (if any) holds the GPU
 make codex-provision           # Import local Codex CLI session into OmniRoute (match by account email)
 make provider-provision        # Alias for codex-provision (Codex-only)
@@ -45,6 +49,13 @@ make test                      # Python test suite
 make clean                     # Remove everything
 ```
 
+`make benchmark` rewrites `gpu.backend` and `gpu.image` in the live `models.yml` when the
+Vulkan benchmark fails, and gives contended or failing results while llm-server holds the GPU.
+Run it only after `make stop-llama`. Then take a fresh timestamped backup right before the benchmark: `cp -p ~/.config/llm-env/models.yml ~/.config/llm-env/models.yml.$(date +%Y%m%dT%H%M%S).bak`. Do not reuse the backup `make llama-enable` took earlier: it may be stale, and restoring it would undo the enable edit,
+and afterwards verify that
+`yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml` is unchanged (restore from the
+backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening.
+
 ### Environment variables
 
 - `LLM_ENV_ASSUME_YES=1` — run `make setup` / `make clean` unattended,
@@ -58,8 +69,10 @@ make clean                     # Remove everything
 - `LLM_ENV_NO_GPU=1` — seed `make setup`'s GPU-inference prompt default to
   "no" for unattended runs, configuring this host as an OmniRoute gateway +
   remote installer only (no local llama.cpp instance). Persisted as
-  `llm_server.enabled` in `models.yml`; flip it and re-run `make setup`/
-  `make start` to change modes later.
+  `llm_server.enabled` in `models.yml`; switch modes later with `make llama-disable`, then
+  `make restart`; to go back to local, `make llama-enable MODEL=<alias>`, then
+  `make setup` (gateway-only setup skipped GPU detection, model download and
+  validation), then `make restart`.
 - `LLM_ENV_SYSTEM_ONE=1|0` — seed `make setup`'s System One prompt for
   unattended runs. Persisted as `system_one.enabled` in `models.yml`.
   Requires `/dev/kfd` (AMD ROCm).
@@ -101,7 +114,7 @@ adds the same data to the JSON under `live`.
 Values must be positive (0 would mean "no limit"). `set` and `clear` only edit
 `models.yml`; running containers keep their current limits until you apply the
 change. `bash setup/render-unit.sh` re-renders the compose file and unit for the
-next start or boot and does not touch running containers (boot starts the last
+next `make restart` or boot and does not touch running containers (boot starts the last
 rendered file). For an `omniroute` change, run `make update-omniroute`: it
 recreates only OmniRoute, once it has no load. To apply to the whole running stack, run `make restart`: it stops and
 starts OmniRoute, remote-setup, System One and (when System One is enabled)
