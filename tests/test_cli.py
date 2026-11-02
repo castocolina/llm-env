@@ -3125,3 +3125,11 @@ def test_combo_context_cli_passes_card_limits(tmp_path, monkeypatch, capsys):
     _write_lite_card(config)
     assert llmenv.main(["--config", str(config), "omniroute", "combo-context"]) == 0
     assert seen == [{}, {"qwen": (131072, 8192)}]
+
+
+def test_agent_runtime_cap_prints_the_bounded_runner_default() -> None:
+    from pylib.agent_runner import DEFAULT_RUNTIME_SECONDS
+
+    result = run("agent-runtime-cap")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"runtime_seconds": int(DEFAULT_RUNTIME_SECONDS)}

@@ -853,6 +853,10 @@ def cmd_phoenix_trial(args: argparse.Namespace) -> int:
         return fail(str(exc))
 
 
+def cmd_agent_runtime_cap(args: argparse.Namespace) -> int:
+    return emit({"runtime_seconds": int(DEFAULT_RUNTIME_SECONDS)})
+
+
 def cmd_run_agent_bounded(args: argparse.Namespace) -> int:
     command = args.agent_command
     if command[:1] == ["--"]:
@@ -1086,6 +1090,8 @@ def build_parser() -> argparse.ArgumentParser:
     volume = phoenix_trial_sub.add_parser("volume-bytes")
     volume.add_argument("--path", type=Path, required=True)
     phoenix_trial_parser.set_defaults(func=cmd_phoenix_trial)
+
+    sub.add_parser("agent-runtime-cap").set_defaults(func=cmd_agent_runtime_cap)
 
     run_agent = sub.add_parser("run-agent-bounded")
     run_agent.add_argument("--transcript", type=Path, required=True)
