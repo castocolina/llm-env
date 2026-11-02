@@ -97,7 +97,7 @@ phoenix_compose() (
 
 # Export the resource environment for the compose render. The policy is the
 # effective one (pylib/resources.py defaults + resources.overrides.phoenix)
-# resolved by llmenv on every call, including the boot-time ExecStartPost.
+# resolved by llmenv on every call, including the boot unit's call from start.sh.
 load_resource_env() {
     local policy cpus_min
     [[ -f "$CONFIG_PATH" ]] || die "no config at ${CONFIG_PATH}; run 'make setup' first"

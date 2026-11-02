@@ -58,7 +58,9 @@ every `make start`:
 - `~/.config/llm-env/docker-compose.yml` — the container definition
   (`pylib/compose.py`). Not for hand editing.
 - `~/.config/systemd/user/llm-server.service` — a thin systemd wrapper unit
-  whose `ExecStart`/`ExecStop` run `podman compose … up -d`/`down`. This is
+  whose `ExecStart` runs `scripts/start.sh` (exactly what `make start` runs, with
+  `LLM_ENV_BOOT_UNIT=1` so it neither re-renders nor starts the unit again) and
+  whose `ExecStop` runs `podman compose … down`. This is
   the unit `make start`/`stop`/`status`/`logs`/`enable-boot` all operate on
   by name (`llm-server.service`); systemd supervises "is the compose stack
   up," while each compose service's own `restart:` policy handles
@@ -75,7 +77,7 @@ path and then starts the rendered compose file.
 The wrapper unit is `Type=oneshot`/`RemainAfterExit=yes`, so its own
 `journalctl -u llm-server.service` only carries the oneshot invocation's
 start/stop lines, not container output, and `systemctl status` only
-reflects whether `compose up -d` last succeeded, not live container health.
+reflects whether `scripts/start.sh` last succeeded, not live container health.
 `scripts/logs.sh` and `scripts/status.sh` use `podman compose logs`/`ps`
 against the compose file for real container output and health — use those
 directly for the same view: `podman compose -f
@@ -84,8 +86,8 @@ directly for the same view: `podman compose -f
 
 ### Lifecycle commands, flags and the unit
 
-- `ExecStart` is `podman compose … up -d --no-recreate`: starting existing containers never tears them down, and their dependents with them. `ExecStop` is `down --remove-orphans`, which also removes containers the rendered file no longer lists.
-- With the unit active, `make start` runs `podman compose -f <file> up -d --no-recreate --no-deps --pull=never` directly; with the unit inactive it runs `systemctl --user start llm-server.service`. `make start-llama` runs the same direct `up` for `llm-server` only. `--pull=never` skips podman-compose's pre-pull, so the direct `up` makes no registry call. Containers that must be created still get their image through `podman create`. The unit's ExecStart keeps the default pre-pull.
+- `ExecStart` is `scripts/start.sh` in boot mode (`LLM_ENV_BOOT_UNIT=1`), which ends in `podman compose … up -d --no-recreate --no-deps --pull=never` and prepares the external Phoenix network first: starting existing containers never tears them down, and their dependents with them. The unit retries a failed start up to 4 times in 15 minutes (`Restart=on-failure`). `ExecStop` is `down --remove-orphans`, which also removes containers the rendered file no longer lists.
+- With the unit active, `make start` runs `podman compose -f <file> up -d --no-recreate --no-deps --pull=never` directly; with the unit inactive it runs `systemctl --user start llm-server.service`, whose `ExecStart` runs the same script again in boot mode. `make start-llama` runs the same direct `up` for `llm-server` only. `--pull=never` skips podman-compose's pre-pull, so the direct `up` makes no registry call. Containers that must be created still get their image through `podman create`. The unit's ExecStart keeps the default pre-pull.
 - `make start-llama` and `make stop-llama` never touch the unit. It stays `active` whether llm-server runs or not, as it already does when a container crashes. `make stop-llama` runs `podman stop llm-server` and never removes the container.
 - `make stop` with the unit inactive and the compose file present runs `podman compose -f <file> down --remove-orphans` directly, after a warning. That removes containers a failed unit (for example, one whose start hit `TimeoutStartSec`) left running, so `make restart` recreates them.
 - `depends_on: service_healthy` is checked only when podman-compose itself starts OmniRoute; a running OmniRoute never checks it again. podman-compose creates OmniRoute with `--requires=llm-server` unless `--no-deps` was used: the unit's ExecStart does so, while an active `make start` uses `--no-deps`, so a container it creates carries no dependency. While that dependency is present, `podman rm llm-server` is refused, `podman start omniroute` on a stopped OmniRoute also starts llm-server, and `podman restart omniroute` is refused (exit 125, "dependencies not started") while llm-server is stopped. The healer's restart is this case: it logs the failure and never reloads llm-server. Changes to llm-server's container definition therefore apply only through `make restart`.

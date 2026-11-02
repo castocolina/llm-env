@@ -4245,8 +4245,29 @@ def test_render_unit_writes_a_compose_file_and_wrapper_unit(tmp_path: pathlib.Pa
     assert compose_file.exists()
     assert "llm-server" in compose_file.read_text()
     unit_text = wrapper_unit.read_text()
-    assert "ExecStart=podman compose -f docker-compose.yml up -d --no-recreate\n" in unit_text
+    assert f"ExecStart=/usr/bin/bash {ROOT}/scripts/start.sh\n" in unit_text
     assert "ExecStop=podman compose -f docker-compose.yml down --remove-orphans\n" in unit_text
+
+
+def test_render_unit_boot_unit_runs_make_start_with_a_usable_path_and_bounded_retries(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Boot must run what `make start` runs, with the tools' directories on PATH, and retry transient
+    early-boot failures a bounded number of times."""
+    result, wrapper_unit = run_render_unit_with_legacy_rocm_config(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    unit_text = wrapper_unit.read_text()
+    assert "Environment=LLM_ENV_BOOT_UNIT=1\n" in unit_text
+    path_line = next(line for line in unit_text.splitlines() if line.startswith("Environment=PATH="))
+    path_entries = path_line.removeprefix("Environment=PATH=").split(":")
+    assert {"/usr/local/bin", "/usr/bin", "/bin"} <= set(path_entries)
+    assert len(path_entries) == len(set(path_entries))
+    assert "." not in path_entries and "" not in path_entries
+    assert "ExecStartPost" not in unit_text  # start.sh starts Phoenix itself
+    assert "Restart=on-failure\n" in unit_text
+    assert "StartLimitBurst=4\n" in unit_text
+    assert "TimeoutStartSec=900\n" in unit_text
 
 
 def test_stop_downs_leftover_containers_when_the_unit_is_inactive(tmp_path: pathlib.Path) -> None:
@@ -4290,7 +4311,7 @@ def test_render_unit_no_gpu_still_writes_the_wrapper_unit(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert wrapper_unit.exists()
-    assert "ExecStart=podman compose" in wrapper_unit.read_text()
+    assert "ExecStart=/usr/bin/bash" in wrapper_unit.read_text()
 
 
 def test_render_unit_no_gpu_still_publishes_mdns_against_omniroutes_port(
@@ -7545,6 +7566,57 @@ def test_start_generates_key_only_when_empty(tmp_path: pathlib.Path) -> None:
     assert "systemctl --user start llm-server.service" in calls.read_text()
 
 
+def test_start_in_the_boot_unit_runs_compose_up_without_rendering_or_restarting_the_unit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """As the unit's ExecStart, start.sh must not `systemctl start` the unit it is running in (it would wait on
+    itself) and boots the last rendered compose file; everything else is the same path as `make start`."""
+    compose_file = tmp_path / "home/.config/llm-env/docker-compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n")
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", env_overrides={"LLM_ENV_BOOT_UNIT": "1"}
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text()
+    assert "systemctl --user start llm-server.service" not in recorded
+    assert "render-unit.sh" not in recorded
+    assert f"podman compose -f {compose_file} up -d --no-recreate --no-deps --pull=never\n" in recorded
+
+
+def test_start_in_the_boot_unit_prepares_the_phoenix_network_before_compose_up(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The compose file declares the Phoenix network as external, so it has to exist before `up` or the whole
+    stack fails at boot (seen on 2026-10-28)."""
+    compose_file = tmp_path / "home/.config/llm-env/docker-compose.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}\n")
+    result, _config, calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        system_one_enabled=True,
+        env_overrides={"LLM_ENV_BOOT_UNIT": "1"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text().splitlines()
+    prepare = next(i for i, call in enumerate(recorded) if "phoenix.sh prepare" in call)
+    compose_up = next(i for i, call in enumerate(recorded) if "up -d --no-recreate --no-deps" in call)
+    assert prepare < compose_up
+
+
+def test_start_in_the_boot_unit_needs_a_rendered_compose_file(tmp_path: pathlib.Path) -> None:
+    result, _config, calls = run_lifecycle_script(
+        tmp_path, "scripts/start.sh", env_overrides={"LLM_ENV_BOOT_UNIT": "1"}
+    )
+
+    assert result.returncode != 0
+    assert "run 'make start' once" in result.stderr
+    assert "up -d" not in calls.read_text()
+
+
 def test_start_computes_and_persists_resource_limits_before_rendering(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -8081,7 +8153,7 @@ def test_enable_boot_renders_a_health_gated_mdns_user_unit(
     assert "After=llm-server.service" in unit
     assert "PartOf=llm-server.service" in unit
     assert "Restart=on-failure" in unit
-    assert "ExecStart=podman compose" in wrapper
+    assert "ExecStart=/usr/bin/bash" in wrapper
     assert "ExecStartPre=" in unit
     assert "http://127.0.0.1:8000/health" in unit
     assert "ExecStart=/usr/bin/bash" in unit

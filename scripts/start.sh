@@ -19,6 +19,10 @@ case "$scope" in
     *) echo "usage: start.sh [llm-server]" >&2; exit 2 ;;
 esac
 
+# Set only by the boot unit (setup/render-unit.sh): the unit runs this script as its ExecStart, so it must not
+# start the unit again, and boot starts the last rendered compose file instead of re-rendering it.
+boot_unit="${LLM_ENV_BOOT_UNIT:-0}"
+
 require_cmd uv jq yq systemctl curl podman
 
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first"
@@ -136,12 +140,19 @@ if [ "$skip_start" -eq 0 ]; then
         log_info "$summary_line"
     done
 
-    bash "${REPO_DIR}/setup/render-unit.sh"
+    if [ "$boot_unit" = "1" ]; then
+        [ -f "$COMPOSE_FILE" ] || die "no rendered compose file at ${COMPOSE_FILE}; run 'make start' once"
+        # The compose file references the internal Phoenix network as external, so it must exist before `up`
+        # (rendering normally creates it).
+        [ "$system_one_enabled" != "true" ] || bash "${REPO_DIR}/scripts/phoenix.sh" prepare
+    else
+        bash "${REPO_DIR}/setup/render-unit.sh"
+    fi
 
     log_step "Starting the service"
     if [ "$scope" = "llm-server" ]; then
         podman compose -f "$COMPOSE_FILE" up -d --no-recreate --no-deps --pull=never llm-server
-    elif systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
+    elif [ "$boot_unit" = "1" ] || systemctl --user is-active --quiet "${UNIT_NAME}.service"; then
         # Active unit: its ExecStart will not run again, so create only what is
         # missing and start what is stopped; running containers are left alone.
         podman compose -f "$COMPOSE_FILE" up -d --no-recreate --no-deps --pull=never
@@ -181,8 +192,7 @@ if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
     fi
     log_info "System One is ready"
     # The Phoenix dashboard is a System One companion: readiness failure
-    # here fails `make start` (the boot wrapper unit runs the same script
-    # best-effort via ExecStartPost).
+    # here fails `make start`, and the boot unit, which runs this same script.
     log_step "Starting the Phoenix dashboard"
     bash "${REPO_DIR}/scripts/phoenix.sh" start
 fi
