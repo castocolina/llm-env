@@ -568,7 +568,7 @@ def profile(**over):
 
 def full_card(env):
     write(env, depth=BENCH_FIT_OUTPUT, interference=REPORT, profile=profile(), sources={"profile": "latency.json"})
-    score = {"ladder": 3, "ladder_at": {"1": "low", "2": None}, "pass_rate": 0.5, "overall": 80.0,
+    score = {"ladder": 1, "ladder_at": {"1": "low", "2": None}, "pass_rate": 0.5, "overall": 80.0,
              "tool_use": {"calls": 10, "errors": 2, "error_rate": 0.2}, "invalid_runs": 0}
     return write(env, score=score)
 
@@ -611,10 +611,21 @@ def test_report_explains_the_window_and_shows_every_measured_group(env):
     assert "host peak 40 %" in page and "llm-server container peak 1.50 cores" in page
     assert "host available at its lowest 12,000 MiB of 32,000 MiB" in page and "Swap: used at most 7,000 MiB (idle 6,900 MiB)" in page
     assert "Gate: passed." in page and "Laya (System One): not measured." in page  # REPORT has no system_one block
-    assert "Highest layer passed: 3 of 5; pass rate 50.0 %" in page and "tool-error rate 20.0 %" in page
+    assert "Highest layer passed: 1 (layers run: 1, 2); pass rate 50.0 %" in page and "tool-error rate 20.0 %" in page
     assert "The runner stops every ladder run after 300 s" in page and "layer 2: not passed" in page
     assert "skipped: p131008 (estimated to pass --max-seconds)" in page
     assert "  depth | input tok/s | output tok/s" in page and "- power draw" in page
+
+
+def test_report_lists_the_layers_the_ladder_ran(env):
+    from pylib import capacity_report
+
+    score = {"ladder": 5, "ladder_at": {"2": "medium", "3": "medium", "4": "medium", "5": "medium"}, "pass_rate": 0.85,
+             "overall": 93.3, "tool_use": {"calls": 288, "errors": 13, "error_rate": 0.045}, "invalid_runs": 0}
+    page = capacity_report.render(write(env, score=score), 300.0)
+    assert "Highest layer passed: 5 (layers run: 2, 3, 4, 5); pass rate 85.0 %" in page
+    none = dict(score, ladder=0, ladder_at={"2": None, "3": "low"})
+    assert "Highest layer passed: none (layers run: 2, 3); pass rate 85.0 %" in capacity_report.render(write(env, score=none), 300.0)
 
 
 def test_report_prints_not_measured_instead_of_guessing(env):

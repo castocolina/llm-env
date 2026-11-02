@@ -140,9 +140,12 @@ def _ladder(ladder: dict | None, runner_cap: float) -> list[str]:
     if ladder is None:
         return [f"Agent ladder: {NM}; run effort-run.sh and score.sh, then make model-capacity SCORE=<json>."]
     rate = ladder.get("tool_error_rate")
-    efforts = ", ".join(f"layer {k}: {v or 'not passed'}" for k, v in sorted((ladder.get("lowest_effort") or {}).items()))
+    lowest = ladder.get("lowest_effort") or {}
+    efforts = ", ".join(f"layer {k}: {v or 'not passed'}" for k, v in sorted(lowest.items()))
+    layers = ", ".join(sorted(lowest, key=int)) or NM
+    highest = "none" if ladder.get("highest_layer") == 0 else _n(ladder.get("highest_layer"))
     return [
-        (f"Highest layer passed: {_n(ladder.get('highest_layer'))} of 5; pass rate {_n(None if ladder.get('pass_rate') is None else ladder['pass_rate'] * 100, ' %', 1)}; "
+        (f"Highest layer passed: {highest} (layers run: {layers}); pass rate {_n(None if ladder.get('pass_rate') is None else ladder['pass_rate'] * 100, ' %', 1)}; "
         f"overall score {_n(ladder.get('overall_score'), digits=1)}; invalid runs {_n(ladder.get('invalid_runs'))}."),
         (f"Tool calls {_n(ladder.get('tool_calls'))}, tool errors {_n(ladder.get('tool_errors'))} "
         f"(tool-error rate {_n(None if rate is None else rate * 100, ' %', 1)})."),
