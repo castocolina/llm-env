@@ -244,7 +244,12 @@ def _save(path: Path, card: dict) -> None:
 
 
 def _view(card: dict, config: dict, fp: str) -> dict:
-    """The card as read against the current config: stale_sections and usable are never stored."""
+    """The card as read against the current config.
+
+    stale_sections exists only in this view. usable is recomputed here, while the
+    stored copy (kept for external readers of the file) reflects the config
+    at write time.
+    """
     return {
         **card,
         "stale_sections": [

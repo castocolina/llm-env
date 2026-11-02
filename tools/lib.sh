@@ -281,6 +281,30 @@ migrate_config_file() {
     fi
 }
 
+# edit_config_atomically TAG FUNC [ARGS...]: the one way scripts rewrite the live models.yml.
+# Backs CONFIG_PATH up to <config>.<TAG>-<YYYYmmddTHHMMSS>.bak (<config>.<stamp>.bak for an empty TAG; mode 0600; an existing
+# name is refused) and prints `backup: <path>`, runs `FUNC <work> [ARGS...]` on a private copy in the config directory,
+# validates the copy with `llmenv migrate-config` (its .error goes to stderr), then renames it over CONFIG_PATH with mode 0600.
+# Any failure exits nonzero and leaves CONFIG_PATH as it was. A subshell, so its traps never replace the caller's.
+edit_config_atomically() (
+    local tag="$1" fn="$2" backup edit_work output msg
+    shift 2
+    backup="${CONFIG_PATH}.${tag:+${tag}-}$(date +%Y%m%dT%H%M%S).bak"
+    [[ ! -e "$backup" ]] || die "backup ${backup} already exists; retry in a second"
+    install -p -m 600 "$CONFIG_PATH" "$backup" || exit 1
+    printf 'backup: %s\n' "$backup"
+    edit_work="$(mktemp "$(dirname "$CONFIG_PATH")/.$(basename "$CONFIG_PATH").XXXXXX")" || exit 1
+    trap 'rm -f "$edit_work"' EXIT
+    trap_signals_to_exit
+    cp "$CONFIG_PATH" "$edit_work" || exit 1
+    "$fn" "$edit_work" "$@" || exit 1
+    if ! output="$(llmenv --config "$edit_work" migrate-config)"; then
+        msg="$(jq -r '.error // empty' <<<"$output" 2>/dev/null || true)"
+        die "${msg:-configuration validation failed}"
+    fi
+    chmod 600 "$edit_work" && mv -f "$edit_work" "$CONFIG_PATH" || exit 1
+)
+
 render_presets_file() {
     local device="$1" output="$2"
     llmenv --config "$CONFIG_PATH" presets \

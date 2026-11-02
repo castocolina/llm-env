@@ -5,6 +5,14 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
+# set_llm_server_limits WORK CPUS MEMORY_MIB: edit_config_atomically callback.
+set_llm_server_limits() {
+    CPUS="$2" MEMORY_MIB="$3" yq -i '
+        .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
+        .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
+      ' "$1"
+}
+
 scope="${1:-all}"
 case "$scope" in
     all | llm-server) ;;
@@ -112,10 +120,10 @@ if [ "$skip_start" -eq 0 ]; then
     if [ "$llm_server_enabled" = "true" ]; then
         cpus="$(jq -r '.llm_server.cpus' "$resources_json")"
         memory_mib="$(jq -r '.llm_server.memory_mib' "$resources_json")"
-        CPUS="$cpus" MEMORY_MIB="$memory_mib" yq -i '
-            .resources.llm_server.cpus = (strenv(CPUS) | tonumber) |
-            .resources.llm_server.memory_mib = (strenv(MEMORY_MIB) | tonumber)
-          ' "$CONFIG_PATH"
+        if [ "$(yq -r '.resources.llm_server.cpus' "$CONFIG_PATH")" != "$cpus" ] ||
+            [ "$(yq -r '.resources.llm_server.memory_mib' "$CONFIG_PATH")" != "$memory_mib" ]; then
+            edit_config_atomically pre-start set_llm_server_limits "$cpus" "$memory_mib"
+        fi
         log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
     fi
     if [ "$system_one_enabled" = "true" ]; then

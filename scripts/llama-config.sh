@@ -22,32 +22,20 @@ esac
 require_cmd uv jq yq
 [[ -f "$CONFIG_PATH" ]] || die "configuration not found: ${CONFIG_PATH}; run 'make setup' first"
 
-backup="${CONFIG_PATH}.$(date +%Y%m%dT%H%M%S).bak"
-[[ ! -e "$backup" ]] || die "backup ${backup} already exists; retry in a second"
-cp -p "$CONFIG_PATH" "$backup"
-chmod 600 "$backup"
-printf 'backup: %s\n' "$backup"
-
-work="$(mktemp "$(dirname "$CONFIG_PATH")/.models.yml.llama-config.XXXXXX")"
-trap 'rm -f "$work"' EXIT
-trap_signals_to_exit
-cp "$CONFIG_PATH" "$work"
-
-# llmenv prints JSON on both outcomes; keep it off stdout and parse it only on failure.
-if ! output="$(llmenv --config "$work" migrate-config)"; then
-    die_with_error "$output" "configuration migration failed"
-fi
-if [[ "$action" == enable ]]; then
-    if ! output="$(llmenv --config "$work" models select "$alias_name")"; then
-        die_with_error "$output" "models select failed"
+# apply_llama WORK: the edit, on the private copy WORK. llmenv prints JSON on both outcomes; keep it off stdout and parse it only on failure.
+apply_llama() {
+    local work="$1" output
+    if [[ "$action" == enable ]]; then
+        if ! output="$(llmenv --config "$work" models select "$alias_name")"; then
+            die_with_error "$output" "models select failed"
+        fi
+        yq -i '.llm_server.enabled = true' "$work"
+    else
+        yq -i '.llm_server.enabled = false' "$work"
     fi
-    yq -i '.llm_server.enabled = true' "$work"
-else
-    yq -i '.llm_server.enabled = false' "$work"
-fi
+}
 
-chmod 600 "$work"
-mv -f "$work" "$CONFIG_PATH"
+edit_config_atomically "" apply_llama
 
 if [[ "$action" == enable ]]; then
     log_info "llama enabled with model ${alias_name}; run 'make start-llama' (or 'make start' when the stack is down)"

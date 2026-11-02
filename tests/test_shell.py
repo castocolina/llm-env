@@ -133,6 +133,42 @@ def test_shell_scripts_use_the_approved_directories() -> None:
     assert (SCRIPT_DIR / "set-desktop-gpu.sh").is_file()
 
 
+def test_validate_shellchecks_skill_scripts_only_when_present(tmp_path: pathlib.Path) -> None:
+    validate = (ROOT / "tools" / "validate.sh").read_text()
+    for with_skill in (True, False):
+        root = tmp_path / str(with_skill)
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "validate.sh").write_text(validate)
+        for directory in ("tools", "setup", "setup/lib", "scripts"):
+            (root / directory).mkdir(parents=True, exist_ok=True)
+            (root / directory / "a.sh").write_text("")
+        if with_skill:
+            skill = root / ".claude" / "skills" / "s" / "scripts"
+            skill.mkdir(parents=True)
+            (skill / "y.sh").write_text("")
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        args_file = root / "args.txt"
+        (bin_dir / "shellcheck").write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >"$ARGS"\n')
+        (bin_dir / "uv").write_text("#!/usr/bin/env bash\nexit 0\n")
+        for name in ("shellcheck", "uv"):
+            (bin_dir / name).chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", "tools/validate.sh"],
+            cwd=root,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "ARGS": str(args_file)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        args = args_file.read_text().splitlines()
+        assert result.returncode == 0, result.stderr
+        assert ("./.claude/skills/s/scripts/y.sh" in args) == with_skill
+        assert not any("*" in arg for arg in args)
+
+
 def test_makefile_dispatches_relocated_entrypoints() -> None:
     makefile = (ROOT / "Makefile").read_text()
 
@@ -7524,6 +7560,68 @@ def test_start_overwrites_a_stale_persisted_resource_limit(
     assert yq_value(config, ".resources.llm_server.memory_mib") == "8000"
 
 
+def test_start_writes_changed_resource_limits_through_a_backup_and_rename(
+    tmp_path: pathlib.Path,
+) -> None:
+    # No FIXED_DATE_STAMP: the date stub would answer every `date` call of start.sh with it.
+    result, config, _ = run_lifecycle_script(tmp_path, "scripts/start.sh")
+
+    assert result.returncode == 0, result.stderr
+    assert yq_value(config, ".resources.llm_server.cpus") == "4"
+    assert yq_value(config, ".resources.llm_server.memory_mib") == "8000"
+    (backup,) = config.parent.glob("models.yml.pre-start-*.bak")
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert yq_value(backup, ".resources.llm_server.cpus") != "4"
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert not list(config.parent.glob(".models.yml.*"))
+    assert f"backup: {backup}" in result.stdout
+
+
+def test_start_leaves_the_config_alone_when_resource_limits_are_unchanged(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, config, calls = run_lifecycle_script(
+        tmp_path,
+        "scripts/start.sh",
+        extra_config="resources:\n  llm_server:\n    cpus: 4\n    memory_mib: 8000\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not list(config.parent.glob("models.yml.pre-start-*.bak"))
+    assert not list(config.parent.glob(".models.yml.*"))
+    assert ".resources.llm_server.cpus =" not in calls.read_text()
+
+
+def test_edit_config_atomically_refuses_an_existing_backup_and_an_invalid_result(
+    tmp_path: pathlib.Path,
+) -> None:
+    script = tmp_path / "edit.sh"
+    script.write_text(
+        f'source "{ROOT}/tools/lib.sh"\n'
+        "bad() { yq -i '.version = 2' \"$1\"; }\n"
+        "edit_config_atomically pre-test bad\n"
+    )
+    result, config, _ = run_lifecycle_script(tmp_path, str(script))
+
+    assert result.returncode == 1
+    assert "version must be 1" in result.stderr
+    (backup,) = config.parent.glob("models.yml.pre-test-*.bak")
+    assert config.read_bytes() == backup.read_bytes()
+    assert not list(config.parent.glob(".models.yml.*"))
+
+    stamp = "20261031T120000"
+    (config.parent / f"models.yml.pre-test-{stamp}.bak").write_text("existing")
+    before = sorted(config.parent.glob("*.bak"))
+    result, config, _ = run_lifecycle_script(
+        tmp_path, str(script), env_overrides={"FIXED_DATE_STAMP": stamp}
+    )
+
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert sorted(config.parent.glob("*.bak")) == before
+    assert not list(config.parent.glob(".models.yml.*"))
+
+
 def test_start_dies_loudly_when_the_host_is_below_the_fixed_resource_floors(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -13912,3 +14010,84 @@ def test_makefile_exposes_local_combo() -> None:
     assert phony is not None and "local-combo" in phony.group(1).split()
     assert "local-combo:\n\t@bash tools/run-target.sh local-combo -- bash scripts/omniroute-local-combo.sh\n" in makefile
     assert '_help_line "local-combo"' in (ROOT / "scripts/help.sh").read_text()
+
+
+def _run_refresh_llm_env_pi_profile(tmp_path: pathlib.Path, config_text: str) -> subprocess.CompletedProcess[str]:
+    config = tmp_path / "models.yml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config.write_text(config_text)
+    return subprocess.run(
+        ["bash", "setup/refresh-llm-env-pi-profile.sh"],
+        cwd=ROOT,
+        env=os.environ | {
+            "HOME": str(tmp_path / "home"),
+            "LLM_ENV_CONFIG": str(config),
+            "LLM_ENV_PI_PROFILE_DIR": str(tmp_path / "pi"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+REFRESH_PI_MODELS_YML = (
+    "version: 1\n"
+    "llm_server: {enabled: true}\n"
+    "models:\n"
+    "- {alias: a, enabled: true}\n"
+    "- {alias: b, enabled: false}\n"
+    "- {alias: c, enabled: true}\n"
+)
+
+
+def test_refresh_llm_env_pi_profile_rewrites_only_the_model_list(tmp_path: pathlib.Path) -> None:
+    profile_dir = tmp_path / "pi"
+    profile_dir.mkdir()
+    profile = profile_dir / "models.json"
+    original = {
+        "providers": {
+            "llm-env": {"baseUrl": "x", "models": [{"id": "old"}]},
+            "other": {"models": [{"id": "keep"}]},
+        },
+        "extra": 1,
+    }
+    profile.write_text(json.dumps(original))
+    profile.chmod(0o640)
+
+    result = _run_refresh_llm_env_pi_profile(tmp_path, REFRESH_PI_MODELS_YML)
+
+    assert result.returncode == 0, result.stderr
+    expected = json.loads(json.dumps(original))
+    expected["providers"]["llm-env"]["models"] = [{"id": "a"}, {"id": "c"}]
+    assert json.loads(profile.read_text()) == expected
+    assert stat.S_IMODE(profile.stat().st_mode) == 0o640
+    assert sorted(path.name for path in profile_dir.iterdir()) == ["models.json"]
+
+
+def test_refresh_llm_env_pi_profile_changes_nothing_when_absent_disabled_or_foreign(
+    tmp_path: pathlib.Path,
+) -> None:
+    result = _run_refresh_llm_env_pi_profile(tmp_path / "absent", REFRESH_PI_MODELS_YML)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "absent" / "pi" / "models.json").exists()
+
+    disabled_dir = tmp_path / "disabled"
+    (disabled_dir / "pi").mkdir(parents=True)
+    disabled_profile = disabled_dir / "pi" / "models.json"
+    disabled_profile.write_text('{"providers": {"llm-env": {"models": [{"id": "old"}]}}}')
+    before = disabled_profile.read_bytes()
+    result = _run_refresh_llm_env_pi_profile(
+        disabled_dir, REFRESH_PI_MODELS_YML.replace("enabled: true}", "enabled: false}", 1)
+    )
+    assert result.returncode == 0, result.stderr
+    assert disabled_profile.read_bytes() == before
+
+    foreign_dir = tmp_path / "foreign"
+    (foreign_dir / "pi").mkdir(parents=True)
+    foreign_profile = foreign_dir / "pi" / "models.json"
+    foreign_profile.write_text('{"providers": {"other": {"models": [{"id": "keep"}]}}}')
+    before = foreign_profile.read_bytes()
+    result = _run_refresh_llm_env_pi_profile(foreign_dir, REFRESH_PI_MODELS_YML)
+    assert result.returncode == 0, result.stderr
+    assert foreign_profile.read_bytes() == before
+    assert "no llm-env provider" in result.stderr

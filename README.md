@@ -252,9 +252,8 @@ context_tokens)`, or `null`.
 
 - a System One (Laya) request returns non-200 during load;
 - Laya p95 during load exceeds 500 ms (`--max-p95-ms`) or Laya p50 exceeds
-  150 ms (`--max-p50-ms`). Laya serves advisory typed judgments (`jev`) whose
-  clients time out after about 20 s, so these are service-level limits; a
-  relative p95 rise (more than 50 % and more than 10 ms over the baseline) is
+  150 ms (`--max-p50-ms`). Laya serves advisory, non-interactive typed judgments,
+  so these are service-level limits; a relative p95 rise (more than 50 % and more than 10 ms over the baseline) is
   only reported as `regression_warning`, never a failure;
 - a `memory.events` `high`, `max`, `oom` or `oom_kill` counter grows for
   omniroute, remote-setup, system-one, phoenix or llm-server;
