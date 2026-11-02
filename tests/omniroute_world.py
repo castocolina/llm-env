@@ -20,6 +20,7 @@ from omniroute_fakes import (
     omni,
     profile_entry,
 )
+from signal_helpers import default_signals
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 STAGED = "sha256:" + "2" * 64
@@ -184,7 +185,7 @@ class World:
                               env={**self.env(), **env}, capture_output=True, text=True, timeout=600, check=False)
 
     def popen(self, **env):
-        return subprocess.Popen(["bash", str(self.repo / "scripts/update-omniroute.sh")],
+        return subprocess.Popen(default_signals(["bash", str(self.repo / "scripts/update-omniroute.sh")]),
                                 env={**self.env(), **env}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, start_new_session=True)
 

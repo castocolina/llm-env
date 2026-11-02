@@ -11,6 +11,7 @@ import time
 
 import pytest
 import yaml
+from signal_helpers import default_signals
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -142,7 +143,7 @@ wait "$child"
     podman.chmod(0o700)
     output = tmp_path / "logs"
     with output.open("w") as stream:
-        proc = subprocess.Popen(["bash", "scripts/logs.sh"], cwd=ROOT,
+        proc = subprocess.Popen(default_signals(["bash", "scripts/logs.sh"]), cwd=ROOT,
                                 env=os.environ | {"PATH": f"{commands}:{os.environ['PATH']}",
                                                   "HOME": str(tmp_path), "JOURNAL": str(journal)},
                                 stdout=stream, stderr=stream)

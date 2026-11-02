@@ -24,6 +24,7 @@ from omniroute_fakes import (
     profile_entry,
 )
 from omniroute_world import STAGED, World
+from signal_helpers import default_signals
 
 REPO = Path(__file__).resolve().parents[1]
 REF = "docker.io/diegosouzapw/omniroute:latest"
@@ -576,7 +577,7 @@ def test_migration_up_failure_reports_stage_and_recovery(mworld):
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["TERM", "HUP"])
 def test_migration_worker_completes_when_the_shell_is_terminated_at_the_hand_off(mworld, sig):
     w = mworld(stop_sleep=4)
-    proc = subprocess.Popen(["bash", str(w.repo / "scripts/migrate-remote-setup.sh")],
+    proc = subprocess.Popen(default_signals(["bash", str(w.repo / "scripts/migrate-remote-setup.sh")]),
                             env={**w.env(), "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "5"}, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
