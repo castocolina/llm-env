@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # model-capacity.sh -- write the capacity card of a local model from measured data, then show it.
 #
-# Usage: scripts/model-capacity.sh <alias> [--depth <bench-fit.sh json>] [--score <score.sh json>]
+# Usage: scripts/model-capacity.sh <alias> [--depth <bench-fit.sh json>] [--score <score.sh json>] [--profile <latency-profile.sh json>]
 # The card lives in <config dir>/capacity/<alias>.json (see pylib/capacity.py). Sections not given are kept.
 set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
@@ -9,12 +9,12 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
 alias_name="${1-}"
-[ -n "$alias_name" ] || die "usage: make model-capacity MODEL=<alias> [DEPTH=<bench json>] [SCORE=<score json>]"
+[ -n "$alias_name" ] || die "usage: make model-capacity MODEL=<alias> [DEPTH=<bench json>] [SCORE=<score json>] [PROFILE=<latency-profile json>]"
 shift
 write_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --depth|--score) [ -n "${2-}" ] || die "$1 needs a file"; write_args+=("$1" "$2"); shift 2 ;;
+        --depth|--score|--profile) [ -n "${2-}" ] || die "$1 needs a file"; write_args+=("$1" "$2"); shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
 done

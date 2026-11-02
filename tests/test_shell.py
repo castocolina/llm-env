@@ -6443,6 +6443,61 @@ def test_setup_local_llm_agents_maps_my_coding_lite_with_card_limits(
     }
 
 
+STALE_LLM_ENV_PI_PROFILE = {
+    "providers": {
+        "llm-env": {
+            "baseUrl": "http://llm.local:8000/v1",
+            "api": "openai-completions",
+            "apiKey": "!printf '%s' \"$LLM_ENV_API_KEY\"",
+            "compat": {"supportsDeveloperRole": False},
+            "models": [{"id": "old-model"}],
+        }
+    }
+}
+
+
+def test_setup_local_llm_agents_refreshes_the_llm_env_pi_profile_models(
+    tmp_path: pathlib.Path,
+) -> None:
+    profile = tmp_path / "home/.config/llm-env/pi/models.json"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(json.dumps(STALE_LLM_ENV_PI_PROFILE))
+    profile.chmod(0o644)
+
+    result, *_ = run_setup_local_llm_agents(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    provider = json.loads(profile.read_text())["providers"]["llm-env"]
+    assert provider["models"] == [{"id": "gemma4"}, {"id": "ornith"}]  # the enabled local models, not the stale `old-model`
+    assert {k: v for k, v in provider.items() if k != "models"} == {
+        k: v for k, v in STALE_LLM_ENV_PI_PROFILE["providers"]["llm-env"].items() if k != "models"
+    }
+    assert profile.stat().st_mode & 0o777 == 0o644
+    assert not list(profile.parent.glob("*.tmp*"))
+
+
+def test_setup_local_llm_agents_does_not_create_the_llm_env_pi_profile_or_touch_it_without_local_models(
+    tmp_path: pathlib.Path,
+) -> None:
+    profile = tmp_path / "home/.config/llm-env/pi/models.json"
+    result, *_ = run_setup_local_llm_agents(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not profile.exists()
+
+    other = tmp_path / "off"
+    other.mkdir()
+    off_profile = other / "home/.config/llm-env/pi/models.json"
+    off_profile.parent.mkdir(parents=True)
+    off_profile.write_text(json.dumps(STALE_LLM_ENV_PI_PROFILE))
+    result, *_ = run_setup_local_llm_agents(
+        other,
+        config_text=VALID_AGENT_SETUP_CONFIG + "llm_server:\n  enabled: false\n",
+        combo_context_case='printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,"min_max_output_tokens":128000}]}\\n\'',
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(off_profile.read_text()) == STALE_LLM_ENV_PI_PROFILE
+
+
 def test_setup_local_llm_agents_drops_local_only_combos_when_llm_server_disabled(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -13707,13 +13762,21 @@ def test_makefile_exposes_model_capacity() -> None:
     assert "model-capacity" in phony.group(1).split()
     assert (
         "model-capacity:\n\t@bash tools/run-target.sh model-capacity -- bash scripts/model-capacity.sh"
-        ' "$(MODEL)" $(if $(DEPTH),--depth "$(DEPTH)") $(if $(SCORE),--score "$(SCORE)")\n'
+        ' "$(MODEL)" $(if $(DEPTH),--depth "$(DEPTH)") $(if $(SCORE),--score "$(SCORE)")'
+        ' $(if $(PROFILE),--profile "$(PROFILE)")\n'
     ) in makefile
     assert '_help_line "model-capacity"' in (ROOT / "scripts/help.sh").read_text()
     dry = subprocess.run(
         ["make", "-n", "model-capacity", "MODEL=x", "DEPTH=d"], cwd=ROOT, text=True, capture_output=True, check=False
     )
     assert 'bash scripts/model-capacity.sh "x" --depth "d"' in dry.stdout
+    assert "model-report" in phony.group(1).split() and '_help_line "model-report"' in (ROOT / "scripts/help.sh").read_text()
+    report = subprocess.run(["make", "-n", "model-report", "MODEL=x"], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert 'bash scripts/model-report.sh "x"' in report.stdout
+    profiled = subprocess.run(
+        ["make", "-n", "model-capacity", "MODEL=x", "PROFILE=p"], cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert '--profile "p"' in profiled.stdout and '--depth' not in profiled.stdout
 
 
 def run_local_combo_with_stubs(

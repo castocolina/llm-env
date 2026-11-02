@@ -472,12 +472,12 @@ def cmd_interference(args: argparse.Namespace) -> int:
 
 
 def cmd_capacity(args: argparse.Namespace) -> int:
-    from pylib import capacity
+    from pylib import capacity, capacity_report
 
     config_path = Path(args.config)
     cfg = require_valid_config(load_config(config_path))
     if args.action == "write":
-        files = {"depth": args.depth, "score": args.score, "interference": args.interference}
+        files = {"depth": args.depth, "score": args.score, "interference": args.interference, "profile": args.profile}
         card = capacity.write_card(
             config_path,
             cfg,
@@ -485,6 +485,7 @@ def cmd_capacity(args: argparse.Namespace) -> int:
             depth=capacity.read_input(args.depth) if args.depth else None,
             score=capacity.read_input(args.score) if args.score else None,
             interference=capacity.read_input(args.interference) if args.interference else None,
+            profile=capacity.read_input(args.profile) if args.profile else None,
             sources={k: v for k, v in files.items() if v},
         )
         return emit(card)
@@ -506,6 +507,12 @@ def cmd_capacity(args: argparse.Namespace) -> int:
     card = capacity.read_card(config_path, cfg, args.alias)
     if card is None:
         return fail(f"no capacity card for {args.alias}; run make model-capacity MODEL={args.alias}")
+    if args.action == "report":
+        page = capacity_report.render(card, DEFAULT_RUNTIME_SECONDS)
+        if args.write:
+            capacity.save_text(capacity.card_path(config_path, cfg, args.alias).with_suffix(".report.md"), page)
+        sys.stdout.write(page)
+        return 0
     return emit(card)
 
 
@@ -922,11 +929,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     capacity_parser = sub.add_parser("capacity")
     capacity_parser.add_argument("--config", default=argparse.SUPPRESS)
-    capacity_parser.add_argument("action", choices=["write", "show", "headroom", "compare"])
+    capacity_parser.add_argument("action", choices=["write", "show", "headroom", "compare", "report"])
     capacity_parser.add_argument("--alias", required=True)
     capacity_parser.add_argument("--depth", help="write: bench-fit.sh JSON")
     capacity_parser.add_argument("--score", help="write: score.sh JSON")
     capacity_parser.add_argument("--interference", help="write: interference report.json")
+    capacity_parser.add_argument("--profile", help="write: latency-profile.sh JSON")
+    capacity_parser.add_argument("--write", action="store_true", help="report: also save <alias>.report.md next to the card")
     capacity_parser.add_argument("--candidates", help="headroom: candidates.json from quant-headroom.sh check")
     capacity_parser.add_argument("--vram-available-mib", type=int, help="headroom: llmenv budget available_mib")
     capacity_parser.add_argument("--candidate", help="compare: alias of the candidate quant's entry")

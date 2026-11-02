@@ -1,4 +1,4 @@
-.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity \
+.PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity model-report \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context local-combo backup \
         combo-backup combo-restore connections-backup update-omniroute migrate-remote-setup logs validate test test-phoenix clean prune
 
@@ -67,7 +67,10 @@ model-interference:
 	@bash tools/run-target.sh model-interference -- bash scripts/model-interference.sh
 
 model-capacity:
-	@bash tools/run-target.sh model-capacity -- bash scripts/model-capacity.sh "$(MODEL)" $(if $(DEPTH),--depth "$(DEPTH)") $(if $(SCORE),--score "$(SCORE)")
+	@bash tools/run-target.sh model-capacity -- bash scripts/model-capacity.sh "$(MODEL)" $(if $(DEPTH),--depth "$(DEPTH)") $(if $(SCORE),--score "$(SCORE)") $(if $(PROFILE),--profile "$(PROFILE)")
+
+model-report:
+	@bash tools/run-target.sh model-report -- bash scripts/model-report.sh "$(MODEL)"
 
 key-reset:
 	@bash tools/run-target.sh key-reset -- bash scripts/key-reset.sh

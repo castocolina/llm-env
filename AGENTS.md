@@ -40,7 +40,8 @@ make migrate-remote-setup      # One-time remote-setup recreation without its Om
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
 make key-reset                 # Rotate the server API key
-make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>]  # Write/show the measured capacity card (~/.config/llm-env/capacity/<alias>.json)
+make model-report MODEL=<alias>  # One-page plain-text account of the model from its card (also saved as capacity/<alias>.report.md)
+make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>] [PROFILE=<latency.json>]  # Write/show the measured capacity card (~/.config/llm-env/capacity/<alias>.json)
 make model-interference  # Gate: does the local model slow System One or raise container memory events
 make local-combo         # Create/update the local-only OmniRoute combo my-coding-lite from the card
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)

@@ -174,10 +174,47 @@ def test_evaluate_fails_without_a_completed_load_request(tmp_path):
 
 
 def test_evaluate_without_system_one_gates_on_events_only(tmp_path):
-    report = evaluate(make_run(tmp_path, laya=None))
+    # A disabled System One is absent from the snapshots, not listed as not running.
+    before, after = snap(), snap()
+    del before["services"]["system_one"], after["services"]["system_one"]
+    report = evaluate(make_run(tmp_path, before=before, after=after, laya=None))
     assert report["system_one"] is None
     assert report["passed"] is True
     assert report["notes"] == ["system_one latency not measured (System One disabled)"]
+
+
+def test_evaluate_fails_without_a_laya_sample_under_load(tmp_path):
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "laya-before.txt").write_text("200 0.050\n200 0.050\n")
+    (d / "laya-during.txt").write_text("")
+    idle = json.dumps({"services": {"system_one": {"state": "running", "uptime_s": 100, "events": {}}}, "host": {}})
+    (d / "live-before.json").write_text(idle)
+    (d / "live-after.json").write_text(idle)
+    (d / "load.jsonl").write_text(json.dumps({"status": 200, "prompt_tokens": 10, "completion_tokens": 5}) + "\n")
+    report = evaluate(d)
+    assert report["passed"] is False
+    assert "system_one: no latency sample under load" in report["failures"]
+    assert report["system_one"]["during"]["n"] == 0
+    (d / "laya-during.txt").write_text("200\n")  # a truncated probe line
+    report = evaluate(d)
+    assert report["passed"] is False
+    assert "system_one: no latency sample under load" in report["failures"]
+
+
+def test_evaluate_skips_short_or_malformed_probe_lines(tmp_path):
+    run_dir = make_run(tmp_path)
+    (run_dir / "laya-during.txt").write_text("200 0.040\n200\n200 abc\n503\n")
+    report = evaluate(run_dir)
+    assert report["system_one"]["during"] == {"n": 1, "p50_ms": 40.0, "p95_ms": 40.0, "non200": 1}
+    assert report["passed"] is False
+    assert any("non-200" in f for f in report["failures"])
+
+
+def test_evaluate_fails_when_system_one_ran_but_was_not_probed(tmp_path):
+    report = evaluate(make_run(tmp_path, laya=None))
+    assert report["passed"] is False
+    assert "system_one was running but its latency was not measured" in report["failures"]
 
 
 def test_evaluate_reports_vram_headroom_and_host_memory(tmp_path):

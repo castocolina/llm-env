@@ -229,8 +229,12 @@ A local model's measured limits live in one card per alias,
 `~/.config/llm-env/capacity/<alias>.json` (directory 0700, file 0600, written
 atomically). Schema: `pylib/capacity_card.schema.json` (schema 1). Unknown
 values are `null`; the card never holds guesses. `make clean` keeps cards.
-`make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>]`
+`make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>] [PROFILE=<latency.json>]`
 writes the sections it is given (others are kept) and then shows the card.
+`PROFILE` is the output of the skill's `scripts/latency-profile.sh` (real requests to the
+running server: input/output speed, time to first token and host peaks per prompt size).
+`make model-report MODEL=<alias>` renders the card as one page of plain text
+(`capacity/<alias>.report.md`); unknown values read `not measured`.
 The alias must exist in `models.yml` and match `[a-z0-9][a-z0-9._-]{0,63}` as a
 whole; anything else is refused.
 
@@ -297,12 +301,20 @@ combo with no known minimum is dropped. Remote installers never list it: their
 `llama-cpp` members have no local limits, so the combo has no known minimum. The router
 key is written to `~/.config/router-env/api-key` (0600) and referenced from the
 client configs (pi `!cat`, opencode `{file:...}`), never written into them.
+When the legacy Pi profile `~/.config/llm-env/pi/models.json` (provider `llm-env`, used by
+`make check-with-agents` and the skill's `effort-run.sh`) exists, the same target also refreshes its model
+list to the enabled local models (`setup/refresh-llm-env-pi-profile.sh`); it never creates that file and leaves it
+alone while `llm_server.enabled` is false.
 
 **Quant headroom.** The onboard-local-model skill's
 `scripts/quant-headroom.sh check` asks whether the next quants of the same
 Hugging Face repo (default `Q5_K_M,Q6_K`) fit beside the current one, using the
-sizes the repo reports and the measured VRAM and RAM. Its sections go into the
-card's `quants` section, with the verdict per candidate. When every candidate is
+sizes the repo reports and the measured VRAM and RAM. The fit verdict of each
+candidate is the repo's own `llmenv budget` on a scratch config for that
+candidate (same ctx and KV); the measured-VRAM-plus-weight-delta formula and the
+measured model VRAM (when the candidate was benchmarked) are shown beside it and
+never override it. Its sections go into the card's `quants` section, with the
+verdict per candidate. When every candidate is
 known not to fit, the verdict is written as `no headroom for Q5_K_M/Q6_K at ctx
 N, free MiB X`. A fitting candidate is trialled in ascending size with the same
 depths and ladder; the first one that fails the interference gate stops the
@@ -310,9 +322,7 @@ trials. Each trial ends by restoring the original quant, so the default is never
 switched silently. `my-coding-lite` is unavailable while a candidate is served.
 Run outputs go to `<root>/model-tune/quant-<stamp>-<pid>`, using the same
 `LLM_ENV_SCOUT_OUT` root.
-The ladder challenges are the skill's bundled tasks, copied into isolated
-directories under `<repo>/tmp/`; the scripts refuse an `--out` outside it, and
-nothing runs in or against the owner's project.
+The ladder challenges are generated per run from the skill's reference projects (`gen-challenge.sh`, seeded, each proven to fail as shipped and to pass with its reference fix before a model sees it), copied into isolated directories under `<repo>/tmp/`; the scripts refuse an `--out` outside it, and nothing runs in or against the owner's project.
 
 ## OmniRoute updates
 

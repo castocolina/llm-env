@@ -112,3 +112,5 @@ install_agent_clients \
     "${REPO_DIR}/setup/update-opencode-config.mjs" \
     "${REPO_DIR}/setup/lib/install-agent-clients.sh" \
     "true"
+
+bash "$(dirname "${BASH_SOURCE[0]}")/refresh-llm-env-pi-profile.sh"

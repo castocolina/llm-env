@@ -3,8 +3,9 @@
 Rules (plan Decision 6, revised 2026-10-31): fail on (a) Laya non-200 during load, (b) Laya p95 under
 load above an absolute service-level limit (500 ms) or p50 above 150 ms, (c) any memory.events counter
 growth, (d) a counter reset, (e) no completed load request, (f) a service running before and not running
-after. Laya serves advisory typed judgments with ~20 s client timeouts, so a relative p95 rise (> +50 %
-and > +10 ms) is only reported as `regression_warning`. VRAM and host memory are recorded only.
+after, (g) no Laya latency sample under load, or System One running but never probed. Laya serves
+advisory typed judgments with ~20 s client timeouts, so a relative p95 rise (> +50 % and > +10 ms) is
+only reported as `regression_warning`. VRAM and host memory are recorded only.
 """
 
 from __future__ import annotations
@@ -93,9 +94,14 @@ def _lines(path: Path) -> list[list[str]]:
 
 def _latency(path: Path) -> dict[str, Any]:
     rows = _lines(path)
-    ms = [float(r[1]) * 1000 for r in rows]
+    ms = []
+    for r in rows:
+        try:  # a sample needs a numeric second field; short or garbled rows are not samples
+            ms.append(float(r[1]) * 1000)
+        except (IndexError, ValueError):
+            pass
     return {
-        "n": len(rows),
+        "n": len(ms),
         "p50_ms": percentile(ms, 0.5),
         "p95_ms": percentile(ms, 0.95),
         "non200": sum(r[0] != "200" for r in rows),
@@ -145,11 +151,18 @@ def evaluate(
     notes: list[str] = []
     regression_warning: str | None = None
 
+    before = json.loads((run_dir / "live-before.json").read_text())
+    after = json.loads((run_dir / "live-after.json").read_text())
     system_one = _latency_pair(run_dir, "laya")
     omniroute = _latency_pair(run_dir, "omniroute")
     if system_one is None:
-        notes.append("system_one latency not measured (System One disabled)")
+        if _running(before, "system_one"):
+            failures.append("system_one was running but its latency was not measured")
+        else:
+            notes.append("system_one latency not measured (System One disabled)")
     else:
+        if not system_one["during"]["n"]:
+            failures.append("system_one: no latency sample under load")
         if system_one["during"]["non200"]:
             failures.append(f"system_one returned {system_one['during']['non200']} non-200 response(s) during load")
         b, d = system_one["before"]["p95_ms"], system_one["during"]["p95_ms"]
@@ -164,8 +177,6 @@ def evaluate(
                 f"(warning above {warn_regression_pct:g} % and {warn_regression_ms:g} ms; not a failure)"
             )
 
-    before = json.loads((run_dir / "live-before.json").read_text())
-    after = json.loads((run_dir / "live-after.json").read_text())
     services_before = before.get("services", {})
     services_after = after.get("services", {})
 

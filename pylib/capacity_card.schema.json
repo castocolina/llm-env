@@ -186,6 +186,44 @@
         "verdict": {"type": ["string", "null"]}
       }
     },
+    "profile": {
+      "type": ["object", "null"],
+      "required": ["fingerprint", "written_at", "source", "measured_at", "runs", "idle", "skipped"],
+      "properties": {
+        "fingerprint": {"type": "string"},
+        "written_at": {"type": "string"},
+        "source": {"type": "string"},
+        "measured_at": {"type": ["string", "null"]},
+        "n_ctx": {"type": ["integer", "null"]},
+        "output_tokens": {"type": ["integer", "null"]},
+        "slack_tokens": {"type": ["integer", "null"]},
+        "host_mem_total_mib": {"type": ["integer", "null"]},
+        "idle": {"type": ["object", "null"]},
+        "skipped": {"type": ["array", "null"]},
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "label", "kind", "prompt_n", "input_tps", "ttft_s", "predicted_n", "output_tps", "wall_s", "error", "gpu", "host"
+            ],
+            "properties": {
+              "label": {"type": "string"},
+              "kind": {"enum": ["size", "cap", "warmup"]},
+              "prompt_n": {"type": ["integer", "null"]},
+              "input_tps": {"type": ["number", "null"]},
+              "ttft_s": {"type": ["number", "null"]},
+              "predicted_n": {"type": ["integer", "null"]},
+              "output_tps": {"type": ["number", "null"]},
+              "wall_s": {"type": ["number", "null"]},
+              "error": {"type": ["string", "null"]},
+              "gpu": {"type": ["object", "null"]},
+              "host": {"type": ["object", "null"]}
+            }
+          }
+        }
+      }
+    },
     "usable": {
       "type": "object",
       "required": ["context_tokens", "max_output_tokens", "basis"],

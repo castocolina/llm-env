@@ -242,3 +242,14 @@ def test_docs_describe_capacity_card_gate_and_local_combo() -> None:
         "ALIAS_PATTERN",
     ):
         assert fragment in architecture, fragment
+
+
+def test_readme_says_ladder_challenges_are_generated_and_isolated() -> None:
+    readme = _normalized_markdown(ROOT / "README.md")
+    for fragment in (
+        "generated per run",
+        "the scripts refuse an `--out` outside it, and nothing runs in or against the owner's project.",
+    ):
+        assert fragment in readme, fragment
+    assert "--challenges bundled" not in readme
+    assert "The ladder challenges are the skill's bundled tasks" not in readme

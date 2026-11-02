@@ -531,3 +531,135 @@ def test_compare_quant_needs_current_cards_on_both_sides(env):
     edit_config(env, ctx_size=65536)  # card A's sections go stale
     with pytest.raises(CapacityError, match="current"):
         capacity.compare_quant(env, cfg_of(env), "qwen", "qwen-q5")
+
+
+def profile_run(label="p1024", kind="size", prompt_n=1001, predicted_n=512, ttft=0.4, **over):
+    run = {
+        "label": label, "kind": kind, "target_prompt_tokens": prompt_n, "max_tokens": predicted_n, "prompt_n": prompt_n,
+        "cache_n": 0, "prompt_tokens": prompt_n, "prompt_ms": ttft * 1000, "input_tps": 2500.0, "ttft_s": ttft,
+        "predicted_n": predicted_n, "completion_tokens": predicted_n, "output_tps": 80.5, "generate_s": 6.4, "wall_s": ttft + 6.4,
+        "error": None,
+        "gpu": {"peak_vram_mib": 9000, "avg_vram_mib": 8800, "peak_busy_pct": 99, "avg_busy_pct": 90, "peak_temp_c": 60,
+                "peak_sclk_mhz": 2900, "avg_sclk_mhz": 2500, "peak_cpu_pct": 40, "avg_cpu_pct": 10, "samples": 8},
+        "host": {"samples": 8, "mem_avail_min_mib": 12000, "swap_used_max_mib": 7000, "cg_mem_peak_mib": 6000,
+                 "cg_anon_peak_mib": 700, "cg_cpu_peak_cores": 1.5, "cg_cpu_avg_cores": 0.9, "proc_vram_peak_mib": 7600,
+                 "proc_vram_avg_mib": 7500},
+    }
+    run.update(over)
+    return run
+
+
+def profile(**over):
+    data = {
+        "schema": 1, "kind": "latency-profile", "alias": "qwen", "file": "qwen.gguf", "measured_at": "2026-10-31T13:00:00+00:00",
+        "ctx_size": 131072, "n_ctx": 131072, "client_max_output_tokens": 8192, "output_tokens": 512, "slack_tokens": 64,
+        "host_mem_total_mib": 32000, "warmup": {"ttft_s": 0.1},
+        "idle": {"gpu": {"peak_vram_mib": 8200}, "host": {"proc_vram_peak_mib": 7500, "swap_used_max_mib": 6900}},
+        "runs": [
+            profile_run(),
+            profile_run("p122000", prompt_n=122000, ttft=330.0, input_tps=370.0),
+            profile_run("cap8192", "cap", prompt_n=122816, predicted_n=8192, ttft=300.0),
+        ],
+        "skipped": [{"label": "p131008", "reason": "estimated to pass --max-seconds"}],
+    }
+    data.update(over)
+    return data
+
+
+def full_card(env):
+    write(env, depth=BENCH_FIT_OUTPUT, interference=REPORT, profile=profile(), sources={"profile": "latency.json"})
+    score = {"ladder": 3, "ladder_at": {"1": "low", "2": None}, "pass_rate": 0.5, "overall": 80.0,
+             "tool_use": {"calls": 10, "errors": 2, "error_rate": 0.2}, "invalid_runs": 0}
+    return write(env, score=score)
+
+
+def test_profile_section_is_stored_fingerprinted_and_goes_stale(env):
+    card = write(env, profile=profile(), sources={"profile": "latency.json"})
+    section = card["profile"]
+    assert section["fingerprint"] == card["fingerprint"] and section["source"] == "latency.json"
+    assert [r["label"] for r in section["runs"]] == ["p1024", "p122000", "cap8192"]
+    assert section["skipped"][0]["label"] == "p131008" and "warmup" not in section
+    edit_config(env, ctx_size=65536)
+    assert "profile" in read(env)["stale_sections"]
+
+
+def test_profile_input_must_match_the_config_and_be_a_profile(env):
+    with pytest.raises(CapacityError, match="latency-profile.sh"):
+        write(env, profile={"runs": []})
+    with pytest.raises(CapacityError, match="ctx_size=4096"):
+        write(env, profile=profile(ctx_size=4096))
+    with pytest.raises(CapacityError, match="file="):
+        write(env, profile=profile(file="other.gguf"))
+    with pytest.raises(CapacityError, match="client_max_output_tokens"):
+        write(env, profile=profile(client_max_output_tokens=1))
+
+
+def test_report_explains_the_window_and_shows_every_measured_group(env):
+    from pylib import capacity_report
+
+    page = capacity_report.render(full_card(env), 300.0)
+    assert "# qwen (Q4_K_M)" in page
+    assert "Total context window: 131,072 tokens. The input prompt and the generated output share" in page
+    assert "Client output cap: 8,192 tokens per reply." in page
+    assert "131,072 - 8,192 = 122,880 tokens" in page
+    assert "a 122,816-token prompt plus 8,192 generated tokens = 131,008 of 131,072 tokens (64 spare)" in page
+    assert "llama-server reports its own window as 131,072 tokens (matches)." in page
+    assert "(first token after the 300 s runner cap)" in page  # the 122K prompt reaches its first token after the runner's stop
+    assert "VRAM, whole card: peak 9,000 MiB of 16,304 MiB, average 8,800 MiB, idle with the model loaded 8,200 MiB." in page
+    assert "VRAM, model only (the llama-server process): peak 7,600 MiB, average 7,500 MiB, idle 7,500 MiB." in page
+    assert "GPU busy: peak 99 %" in page and "Temperature peak 60 C" in page and "Clock peak 2,900 MHz" in page
+    assert "host peak 40 %" in page and "llm-server container peak 1.50 cores" in page
+    assert "host available at its lowest 12,000 MiB of 32,000 MiB" in page and "Swap: used at most 7,000 MiB (idle 6,900 MiB)" in page
+    assert "Gate: passed." in page and "Laya (System One): not measured." in page  # REPORT has no system_one block
+    assert "Highest layer passed: 3 of 5; pass rate 50.0 %" in page and "tool-error rate 20.0 %" in page
+    assert "The runner stops every ladder run after 300 s" in page and "layer 2: not passed" in page
+    assert "skipped: p131008 (estimated to pass --max-seconds)" in page
+    assert "  depth | input tok/s | output tok/s" in page and "- power draw" in page
+
+
+def test_report_prints_not_measured_instead_of_guessing(env):
+    from pylib import capacity_report
+
+    page = capacity_report.render(write(env), 300.0)
+    assert "Card verdict: not verified (no current depth sweep)." in page
+    assert "Full-window request" not in page and "Real requests (latency profile): not measured" in page
+    assert "Depth sweep (llama-bench): not measured." in page
+    assert "Agent ladder: not measured" in page and "Impact on Laya (System One) and OmniRoute: not measured" in page
+    assert "GPU, CPU, RAM and swap during requests: not measured." in page
+    assert "- real-request speeds and host peaks (latency-profile.sh)" in page
+
+
+def test_report_marks_a_missing_reading_and_a_failed_full_window_request(env):
+    from pylib import capacity_report
+
+    runs = [profile_run(), profile_run("cap8192", "cap", prompt_n=1, error="HTTP 400: exceeds the context size")]
+    runs[0]["gpu"]["peak_busy_pct"] = None
+    card = write(env, profile=profile(runs=runs))
+    page = capacity_report.render(card, 300.0)
+    assert "GPU busy: peak not measured" in page
+    assert "Full-window request FAILED: HTTP 400" in page
+    assert "- GPU busy % (no reading)" in page
+
+
+def test_report_leaves_out_stale_sections(env):
+    from pylib import capacity_report
+
+    full_card(env)
+    edit_config(env, ctx_size=65536)
+    card = read(env)
+    page = capacity_report.render(card, 300.0)
+    assert "Stale sections left out:" in page and "profile" in page.split("Stale sections left out:")[1].splitlines()[0]
+    assert "Real requests (latency profile): not measured" in page
+
+
+def test_capacity_report_command_prints_and_saves_the_page(env):
+    from test_cli import run
+
+    write(env, profile=profile())
+    (env.parent / "capacity" / "qwen.json").chmod(0o600)
+    result = run("--config", str(env), "capacity", "report", "--alias", "qwen", "--write")
+    assert result.returncode == 0, result.stderr
+    saved = env.parent / "capacity" / "qwen.report.md"
+    assert saved.read_text() == result.stdout and result.stdout.startswith("# qwen (Q4_K_M)")
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+    assert run("--config", str(env), "capacity", "report", "--alias", "ghost").returncode != 0

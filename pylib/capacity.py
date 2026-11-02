@@ -18,7 +18,7 @@ MIB = 1048576
 GATE_FIRST = "quant headroom needs a current depth sweep and a passed interference gate; finish the main sweep first"
 BENCH_PROMPT_TOKENS = 512  # bench-fit.sh's -p 512 on top of each depth
 ALIAS_PATTERN = r"[a-z0-9][a-z0-9._-]{0,63}"
-MEASURED_SECTIONS = ("depth", "ladder", "interference", "ram", "quants")
+MEASURED_SECTIONS = ("depth", "ladder", "interference", "ram", "quants", "profile")
 FLAG_KEYS = ("n_gpu_layers", "n_cpu_moe", "cache_type_k", "cache_type_v", "ubatch_size", "flash_attn")
 
 
@@ -157,6 +157,17 @@ def _ladder_section(score: dict, fp: str, at: str, source: str) -> dict:
     }
 
 
+def _profile_section(data: dict, config: dict, fp: str, at: str, source: str) -> dict:
+    if data.get("kind") != "latency-profile" or not isinstance(data.get("runs"), list):
+        raise CapacityError(f"{source} is not a latency-profile.sh output")
+    for key, want in (("file", config["file"]), ("ctx_size", config["ctx_size"]),
+                      ("client_max_output_tokens", config["client_max_output_tokens"])):
+        if data.get(key) != want:
+            raise CapacityError(f"{source} was measured with {key}={data.get(key)!r}, models.yml has {want!r}")
+    keep = ("measured_at", "n_ctx", "output_tokens", "slack_tokens", "host_mem_total_mib", "idle", "runs", "skipped")
+    return {"fingerprint": fp, "written_at": at, "source": source, **{k: data.get(k) for k in keep}}
+
+
 def write_card(
     config_path: Path,
     cfg: dict,
@@ -166,6 +177,7 @@ def write_card(
     score: dict | None = None,
     interference: dict | None = None,
     quants: dict | None = None,
+    profile: dict | None = None,
     sources: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> dict:
@@ -200,29 +212,35 @@ def write_card(
             "llm_server_peak_mib": llm.get("memory_peak_mib"), "llm_server_cap_mib": llm.get("memory_cap_mib"),
             "host_available_min_mib": host.get("mem_available_min_mib"), "swap_delta_mib": host.get("swap_delta_mib"),
         }
+    if profile is not None:
+        card["profile"] = _profile_section(profile, config, fp, at, src.get("profile") or "profile input")
     if quants is not None:
         gate = _current(card, "interference", fp)
         if _current(card, "depth", fp) is None or gate is None or gate.get("passed") is not True:
             raise CapacityError(GATE_FIRST)
         card["quants"] = {"fingerprint": fp, "written_at": at, **quants}
     card["usable"] = usable(card, fp, config)
-    _save(path, card, alias)
+    _save(path, card)
     return _view(card, config, fp)
 
 
-def _save(path: Path, card: dict, alias: str) -> None:
+def save_text(path: Path, text: str) -> None:
+    """Atomic 0600 write inside the 0700 capacity directory."""
     path.parent.mkdir(mode=0o700, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{alias}.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as handle:
-            json.dump(card, handle, indent=2)
-            handle.write("\n")
+            handle.write(text)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _save(path: Path, card: dict) -> None:
+    save_text(path, json.dumps(card, indent=2) + "\n")
 
 
 def _view(card: dict, config: dict, fp: str) -> dict:
@@ -417,5 +435,5 @@ def compare_quant(config_path: Path, cfg: dict, alias: str, candidate_alias: str
             "overall_score": _diff(ladder_b.get("overall_score"), ladder_a.get("overall_score")),
         },
     }
-    _save(path, card, alias)
+    _save(path, card)
     return read_card(config_path, cfg, alias) or {}
