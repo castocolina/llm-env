@@ -1,0 +1,22 @@
+{
+  "id": "lab/Foo-9B-GGUF",
+  "downloads": 1200,
+  "likes": 40,
+  "lastModified": "2026-10-22T00:00:00.000Z",
+  "gguf": {
+    "total": 9000000000,
+    "context_length": 262144,
+    "architecture": "qwen35"
+  },
+  "baseModels": {
+    "models": [
+      {
+        "id": "lab/Foo-9B"
+      }
+    ]
+  },
+  "tags": [
+    "gguf"
+  ],
+  "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+}

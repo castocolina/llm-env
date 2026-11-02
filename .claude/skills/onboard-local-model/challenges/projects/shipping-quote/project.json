@@ -1,0 +1,18 @@
+{
+  "id": "shipping-quote",
+  "summary": "This project is a small parcel shipping quote calculator, prices in integer cents (`src/`).",
+  "renames": {
+    "quote": ["priceParcels", "estimate"],
+    "billableKg": ["chargeableKg", "billedWeight"],
+    "roundUpTo": ["stepUp", "toStep"]
+  },
+  "sites": [
+    {"id": "round-step", "layers": [3, 5], "file": "src/round.js", "find": "Math.ceil(x / step)", "ops": ["ceil-floor"]},
+    {"id": "billable-max", "layers": [3], "file": "src/billing.js", "find": "Math.max(actualKg, volumetricKg(parcel))", "ops": ["max-min"]},
+    {"id": "zone-cost", "layers": [3], "file": "src/rates.js", "find": "baseCents + perKgCents * billableKg(parcel)", "ops": ["plus-minus"]}
+  ],
+  "features": [
+    {"id": "weight-units", "layers": [4], "prompt": "Parcels now carry `weight` and `unit` (`kg`, `g` or `lb`) instead of `weightKg`: `toKg(weight, unit)` in `src/units.js` converts with 1 lb = 0.45359237 kg and 1 g = 0.001 kg and throws a `RangeError` for an unknown unit; billing uses the converted weight, and each quote line shows the weight as given (`3 lb`).", "replace": ["src/billing.js", "src/format.js"], "delete": ["src/units.js"]},
+    {"id": "service-levels", "layers": [4], "prompt": "Add service levels: `quote(parcels, { zone, service = 'standard' })` accepts `standard` (100 %) or `express` (160 % of each parcel price, rounded half up to the cent) from `src/services.js`, whose `serviceInfo(name)` returns `{ label, factorPct }` and throws a `RangeError` for an unknown name; the quote keeps `service`, and the text adds a `Service: <label>` line before the total.", "replace": ["src/rates.js", "src/quote.js", "src/format.js"], "delete": ["src/services.js"]}
+  ]
+}

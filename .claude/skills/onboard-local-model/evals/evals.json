@@ -1,0 +1,747 @@
+{
+  "skill_name": "onboard-local-model",
+  "harness": "Each eval's setup is operator context for an offline run (fixture paths, environment variables, the read-only rule): a harness gives it to the run apart from the prompt, which is the user's message alone. A run without setup is unsafe and not a valid run: it would act on the live host. Use the fixtures and the DRY RUN rule only.",
+  "evals": [
+    {
+      "id": "served-alias-argument",
+      "prompt": "gemma4 feels slower lately: re-measure it and tell me where it stands. Give me the ordered plan with its gates.",
+      "setup": "Premise: it is the enabled model and llm-server is RUNNING and serving it. The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh with those variables, cat, yq, jq); do not stop or start containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/models/gemma4-v2-Q4_K_M.gguf",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "The served alias is a re-measure: resolve-target.sh classifies it, the fit is the preflight budget of 8321 MiB with no scratch config, its one ladder lane runs before G2, G2 stops llm-server with make stop-llama and waits until no llama-server holds the GPU, bench-fit.sh measures depth, G-R2 only runs make start-llama, and there is no verdict and nothing to revert.",
+      "assertions": [
+        "resolve-target.sh, run with the fixture LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR, gives kind alias, enabled true, present true, before any other step",
+        "The answer sizes against 8321 MiB (llmenv_budget.vram_available_mib, the smaller of 8321 and 10369 from preflight) and says which of the two figures it used",
+        "No scratch config is built for the served alias: its fit is the llmenv_budget of the preflight JSON",
+        "Its one ladder lane runs before G2, while it is still served, on the router profile (router-env/llama-cpp/gemma4 with PI_CODING_AGENT_DIR=$HOME/.pi/agent, --per-layer 3)",
+        "G2 runs make stop-llama, then wait-gpu-release.sh, which returns once neither llama-server holder (router 12 + model 7450) is left; it never uses make stop, make restart or an omniroute restart, and System One stays up",
+        "bench-fit.sh runs after G2 on the live config at depths that include 32768 and the reference depth min(131072, ctx - 512), which is 130560 for the fixture's ctx_size 131072",
+        "G-R2 edits nothing and serves the alias again with make start-llama, without make llama-enable, make setup or make benchmark",
+        "No replacement verdict is given for the served alias: it reports the measured numbers and the capacity card, says G5 has nothing to revert, then checks that nothing it started remains (podman ps -a, PIDs)",
+        "No container was stopped or started, no configuration was edited and no benchmark was started"
+      ]
+    },
+    {
+      "id": "disabled-alias-argument",
+      "prompt": "try ornith-35b from my models.yml instead of gemma4 and tell me if it is better. Give me the ordered plan with its gates.",
+      "setup": "Premise: it is a disabled entry in the live models.yml and llm-server is RUNNING and serving gemma4. The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, cat, yq, jq); do not download, stop or start containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/models/gemma4-v2-Q4_K_M.gguf",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "The disabled alias is classified with present false, so G1 downloads the entry's url; the fit includes the RAM side; the scratch config comes from resolve-target.sh, G3 only runs make llama-enable after the rollback copy, the gemma4 baseline lane runs before G2, and the verdict uses the replace rule and the pp/tg margin.",
+      "assertions": [
+        "resolve-target.sh with the fixture variables gives enabled false and present false for ornith-35b before any other step",
+        "Because of present false, G1 downloads the entry's url (21155768832 bytes, about 19.7 GiB, against 182000 MiB free disk) before validate-gguf or budget run",
+        "The fit includes the RAM side (n_cpu_moe experts against ram_offload_budget_mib 12000)",
+        "The scratch config comes from resolve-target.sh --scratch-config, and G3 adds no entry: it takes a cp -p rollback copy, then runs make llama-enable MODEL=ornith-35b",
+        "The gemma4 baseline lane runs before G2, on the router profile with --per-layer 3, and the candidate lane later takes its seeds.json",
+        "The verdict uses ladder delta >= 0 and overall delta > 10 on the same seeds, plus pp/tg at depth within about 3 % of the baseline (or the quality gain justifies the slowdown and the trade is stated)",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "hf-repo-argument",
+      "prompt": "set up https://huggingface.co/lab/Foo-9B-GGUF as my local model if it fits.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf/model-lab__Foo-9B-GGUF.json",
+        "evals/files/hf/tree-lab__Foo-9B-GGUF.json"
+      ],
+      "expected_output": "The URL is classified as hf_repo; hf-scout.sh --repo with the preflight budgets picks Foo-9B-Q5_K_M.gguf (6500 MiB, fit vram); one research subagent writes the card; G1 states the file, size, free disk and destination; the scratch config comes from resolve-target.sh --scratch-config with the entry added by yq.",
+      "assertions": [
+        "The URL is classified with resolve-target.sh as kind hf_repo for lab/Foo-9B-GGUF before any other step",
+        "hf-scout.sh --repo lab/Foo-9B-GGUF --json --budget-mib 8321 --ram-mib 12000 with HF_FIXTURE_DIR gives fit vram and the pick Foo-9B-Q5_K_M.gguf (6500 MiB), not a --query scout",
+        "Exactly one research subagent writes the evidence card, and its false gates or a failed `bpw` or `ctx` gate are stated as G1 facts (`fit: no` would stop before G1)",
+        "G1 states Foo-9B-Q5_K_M.gguf, 6500 MiB, 182000 MiB free disk and the destination ~/llm-workspace/models",
+        "The scratch config comes from resolve-target.sh gemma4 --scratch-config (API key redacted) with the entry added by yq, enabled false, never a cp of the live file",
+        "llmenv budget on the scratch config after the download is the authoritative fit; the hf-scout fit class is screening",
+        "Before G1 the step 4 settings (ctx_size, client_max_output_tokens, sampling; no n_cpu_moe for this dense model) are written into foo-9b in the scratch config with yq -i; the KV type runtime.cache_type_k/v is global and left alone",
+        "On the scratch config, `models select foo-9b` runs before validate-gguf and budget (both with --models-dir ~/llm-workspace/models after G1), so they check the candidate file, not gemma4's",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "hf-repo-quant",
+      "prompt": "try lab/Foo-9B-GGUF:Q4_K_M as my local model.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf/model-lab__Foo-9B-GGUF.json",
+        "evals/files/hf/tree-lab__Foo-9B-GGUF.json"
+      ],
+      "expected_output": "The argument is hf_repo lab/Foo-9B-GGUF with quant Q4_K_M; hf-scout.sh --repo with --quant Q4_K_M picks Foo-9B-Q4_K_M.gguf (5600 MiB, fit vram) instead of the scout's Q5_K_M; G1 states that file.",
+      "assertions": [
+        "resolve-target.sh classifies lab/Foo-9B-GGUF:Q4_K_M as kind hf_repo, repo lab/Foo-9B-GGUF, quant Q4_K_M, not a bare-name search",
+        "hf-scout.sh --repo lab/Foo-9B-GGUF --quant Q4_K_M --json --budget-mib 8321 --ram-mib 12000 with HF_FIXTURE_DIR gives fit vram and the pick Foo-9B-Q4_K_M.gguf (5600 MiB), not the default pick Foo-9B-Q5_K_M.gguf",
+        "G1 states Foo-9B-Q4_K_M.gguf, 5600 MiB, 182000 MiB free disk and the destination ~/llm-workspace/models",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "onboard-plan-with-server-running",
+      "prompt": "quiero probar Qwen3.8-27B (o su variante coder mas chica si no cabe) en mi GPU y compararlo con el modelo actual. Give me the exact ordered plan with the commands you would run, where you would ask me to confirm, and how you would show progress.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory .claude/skills/onboard-local-model/evals/files/models/ (pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR); llm-server is RUNNING and serving gemma4. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. Hugging Face reads come from .claude/skills/onboard-local-model/evals/files/hf-qwen/ (pass it as HF_FIXTURE_DIR to hf-scout.sh); no other network. DRY RUN for evaluation: do not execute any step that changes the host; read-only inspection is fine. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf-qwen/models.json",
+        "evals/files/hf-qwen/model-qwen__Qwen3.8-Coder-9B-GGUF.json",
+        "evals/files/hf-qwen/tree-qwen__Qwen3.8-27B-GGUF.json",
+        "evals/files/hf-qwen/tree-qwen__Qwen3.8-Coder-9B-GGUF.json"
+      ],
+      "expected_output": "The bare name exits 3 and hf-scout.sh --query finds the 27B (fit no) and the coder 9B (fit vram, Q5_K_M), so the plan follows the owner's fallback; then an ordered plan with the gemma4 baseline lane before G2, separate gates for the download, for stopping only llm-server and for the live config edit, a cp -p rollback copy, System One left running and a leftover check at the end.",
+      "assertions": [
+        "resolve-target.sh Qwen3.8-27B exits 3 (a bare name), so the repo comes from hf-scout.sh --query Qwen3.8-27B --json --budget-mib 8321 --ram-mib 12000 before any gate",
+        "qwen/Qwen3.8-27B-GGUF is fit no (its only quant, Q4_K_M at 16500 MiB, does not fit 8321 MiB, and a dense model is never offloaded), so the plan takes the owner's fallback qwen/Qwen3.8-Coder-9B-GGUF (fit vram) and says why",
+        "H1 scouts that repo alone; G1 states Qwen3.8-Coder-9B-Q5_K_M.gguf, 6710886400 bytes (6400 MiB), 182000 MiB free disk and the destination ~/llm-workspace/models; the entry alias is qwen3-8-coder-9b",
+        "The gemma4 baseline lane runs before G2, on the router profile (router-env/llama-cpp/gemma4, --per-layer 3)",
+        "A separate confirmation step (G2) comes before stopping llm-server: make stop-llama, then wait-gpu-release.sh; never make stop, make restart or an omniroute restart",
+        "System One is left running and the plan explains why (it is budgeted as resident)",
+        "A cp -p rollback copy of the live models.yml is taken before it is edited; make llama-enable's own backup is not the rollback copy",
+        "The plan includes numbered progress stages covering setup, unload, load, checks and benchmarks",
+        "The plan benchmarks throughput at context depth (for example 32K and 128K), not only at depth 0",
+        "The plan ends with verifying that no containers or processes started by the run remain"
+      ]
+    },
+    {
+      "id": "named-gguf-argument",
+      "prompt": "I downloaded .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.gguf: does it fit next to laya?",
+      "setup": "DRY RUN for evaluation: read-only commands only (resolve-target.sh, validate-gguf, budget on a scratch config, cat, jq); do not copy, move or delete the file, do not download, do not edit models.yml, do not start or stop any container or benchmark. Answer in English.",
+      "files": [
+        "evals/files/Foo-9B-Q4_K_M.gguf"
+      ],
+      "expected_output": "The argument is classified as a local GGUF with resolve-target.sh; a fit check runs on a redacted scratch config whose only enabled entry is `candidate`; budget's error for the header-only fixture is reported, not replaced by an estimate; with budget's error no copy is offered (G1 is asked only after a feasible fit).",
+      "assertions": [
+        "The answer classifies the argument as a local GGUF file (kind gguf_file, quant Q4_K_M) with resolve-target.sh before any other step",
+        "The fit check runs on the --scratch-config copy under ./tmp/ with entry `candidate` as the only enabled model, not on the live models.yml",
+        "validate-gguf and budget run with --models-dir = the fixture's own directory, and no file is downloaded",
+        "budget's error for the header-only fixture (no model metadata such as general.architecture) is reported as the result; no fit verdict or VRAM figure is estimated for it",
+        "Copying the file into ~/llm-workspace/models would be a G1 gate (size, free disk, destination) asked only after a feasible fit on the file's own directory; with budget's error it is never offered; the original directory is never mounted and the original file is never moved or deleted",
+        "No container was stopped, no configuration was edited and no benchmark was started"
+      ]
+    },
+    {
+      "id": "no-argument-ranking",
+      "prompt": "which local models should pi try next? Give me a shortlist.",
+      "setup": "The scout results are saved as .claude/skills/onboard-local-model/evals/files/scout-coder.json and .claude/skills/onboard-local-model/evals/files/scout-agent.json: gate and rank them with rank-candidates.sh --scout on both files. The research cards are in .claude/skills/onboard-local-model/evals/files/evidence/ (pass that directory as --evidence). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: no network, no subagent dispatch (describe what you would send), do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/scout-coder.json",
+        "evals/files/scout-agent.json",
+        "evals/files/evidence/1.json",
+        "evals/files/evidence/2.json",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "rank-candidates.sh shortlists three rows and names the gate of each dropped one; the row with no card is reported unresearched, never eliminated; the offload MoE is held back because of swap in use; the ranking is 23 and 20 with the unverified template named; the one disagreement is re-checked from the card's sources; jev-fast-decision stays advisory and a missing answer changes nothing.",
+      "assertions": [
+        "rank-candidates.sh over both scout files shortlists lab-a/Coder-9B-GGUF, lab-b/Agent-14B-GGUF and lab-d/MoE-30B-A3B-GGUF and names the gate each dropped row failed (lab-c/Coder-27B-IQ2-GGUF bpw, lab-e/Short-8B-GGUF ctx, lab-f/Dense-32B-GGUF fit)",
+        "lab-b/Agent-14B-GGUF has no card, so --evidence leaves it out of both ranked and excluded: it is reported unresearched, with one research subagent to dispatch (the Research brief, `references/selection-criteria.md` section 4), never as eliminated",
+        "lab-d/MoE-30B-A3B-GGUF (offload) does not go on because 3100 MiB of swap are in use, and the answer says so",
+        "The ranking is lab-a/Coder-9B-GGUF 23 and lab-d/MoE-30B-A3B-GGUF 20, and lab-d is listed with tool_template unverified",
+        "The lab-a agentic_evidence disagreement (card 2, jev 0) is re-checked from the card's sources and the decision recorded in the card's notes; the jev-fast-decision answer is advisory and never changes the score",
+        "At most three candidates go on, and only if the owner asked to onboard; nothing was downloaded, dispatched, stopped or edited",
+        "A needs_fallback or missing jev answer (lab-d's empty jev block) leaves the card levels as they are and never blocks the ranking; any jev question is optional, only for a level the notes mark uncertain, and goes to the jev-fast-decision skill as its own SKILL.md says; the answer adds no step about how that skill picks or reaches its backend"
+      ]
+    },
+    {
+      "id": "latest-fit",
+      "prompt": "cual es el ultimo modelo agentico que cabe ahora en mi equipo? busca en hugging face si hay algo mejor que el que tengo en models.yml y dime por que.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml (pass it as LLM_ENV_CONFIG). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. The Hugging Face scouts for coder and agent already printed .claude/skills/onboard-local-model/evals/files/scout-coder.json and .claude/skills/onboard-local-model/evals/files/scout-agent.json, and the research subagents returned the cards in .claude/skills/onboard-local-model/evals/files/evidence/; do not run hf-scout.sh, curl or subagents. DRY RUN for evaluation: read-only commands only; do not stop containers, download model files, edit configuration or start benchmarks. Answer in the final message, in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/scout-coder.json",
+        "evals/files/scout-agent.json",
+        "evals/files/evidence/1.json",
+        "evals/files/evidence/2.json"
+      ],
+      "expected_output": "A read-only report on the fixtures: gemma4 is the current model and fits the 8321 MiB budget with System One resident; rank-candidates.sh shortlists three rows and ranks lab-a 23 and lab-d 20; at most three go on; the IQ2 row is not recommended; the offload MoE is held back by swap in use; no candidate is called better than gemma4 before a measured run; what was not verified is listed.",
+      "assertions": [
+        "The current model is gemma4 (Gemma 4 12B Agentic v2), the enabled entry of the fixture models.yml, read from the file, not assumed",
+        "The VRAM budget is 8321 MiB, the smaller of llmenv_budget.vram_available_mib 8321 and model_vram_budget_mib 10369, named; never the 16305 MiB card total or live free VRAM",
+        "gemma4 fits with System One resident: llmenv_budget feasible true, 7300 of 8321 MiB",
+        "RAM for MoE offload is 12000 MiB (budget.ram_offload_budget_mib), and 3100 MiB of swap in use holds back the offload row lab-d/MoE-30B-A3B-GGUF",
+        "rank-candidates.sh over both scout files shortlists at most 6 rows (3 here) and at most three are recommended to go on, ranked lab-a/Coder-9B-GGUF 23 then lab-d/MoE-30B-A3B-GGUF 20, with lab-b/Agent-14B-GGUF reported unresearched; each row gives lab, parameters, quant and context, and the answer says the scout rows carry no base model",
+        "lab-c/Coder-27B-IQ2-GGUF (2.1 bits per weight) is not recommended: it failed the bpw gate",
+        "The answer names the baseline-family scout term (gemma) it would also run, and says no candidate is proven better than gemma4 before a measured run on the onboarding route",
+        "The report separates measured facts from model-card claims and lists at least one thing it did not verify",
+        "No container was stopped, no file downloaded and no configuration edited"
+      ]
+    },
+    {
+      "id": "dense-27b-verdict",
+      "prompt": "will a dense 27B coder model at Q4_K_M run on this machine with System One loaded? Give me a yes or no and the numbers.",
+      "setup": "preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only; do not download, stop, edit or benchmark. Answer in English.",
+      "files": [
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "A clear no for the dense 27B at Q4: weights alone exceed the VRAM budget, dense layer offload is CPU-bound, and the quants that fit are below the 3.5 bpw floor; names what would fit instead.",
+      "assertions": [
+        "The answer is a clear no (or no without a sub-3.5-bit quant) for a dense 27B at Q4_K_M",
+        "The answer compares the Q4_K_M file size with the 8321 MiB budget from the fixture and shows the arithmetic",
+        "The answer says layer offload of a dense model is CPU-bound and not an acceptable fallback",
+        "The answer does not recommend a sub-3.5-bit quant without an own benchmark caveat",
+        "The answer offers an alternative that fits (a smaller dense model or an MoE with n_cpu_moe) and states its RAM or VRAM cost, and notes the 3100 MiB of swap in use before offering an MoE offload"
+      ]
+    },
+    {
+      "id": "quant-head-to-head",
+      "prompt": "compare Q4_K_M and Q5_K_M of the local model head to head and tell me which one to keep. Give me the ordered plan with its gates and how long it would take.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml (LLM_ENV_CONFIG; pass it to llmenv as --config; llm-server is serving its enabled gemma4) and preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (cat, yq, jq, uv run llmenv.py --config <that file> capacity show, the skill scripts' --help); do not download, stop or start containers, edit models.yml or start benchmark or agent runs. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "capacity show finds no card for gemma4, so P0 (gemma4's url is a pinned Hugging Face resolve url), P1 interference, and P2 G-T2 plus bench-fit.sh at 0,32768,130560 with make model-capacity DEPTH run before Q1. Q1 runs check without the flag while llm-server is stopped. The gemma4 ladder lane (P3) runs only if a candidate fits. G-Q1 and G-Q2 are separate gates. Both quants run on one seed set through the router profile. The upper bound is stated. No fitting candidate means the plan ends with make start-llama. G-Q3 is the owner's call. Q11 restores gemma4, and its make start-llama creates or updates my-coding-lite for gemma4.",
+      "assertions": [
+        "The plan follows `references/tuning.md`, Quant headroom: quant-headroom.sh check --alias gemma4, and only a candidate with fits true goes on (fits false or null is not fetched)",
+        "uv run llmenv.py --config <fixture> capacity show --alias gemma4 reports no capacity card, so before Q1 the steps run in order: P0 finds gemma4's url pinned to a huggingface.co resolve/<sha> url, P1 make model-interference while served, P2 G-T2, then bench-fit.sh --alias gemma4 --depths 0,32768,130560 and make model-capacity MODEL=gemma4 DEPTH=<bench json>; tune-sweep.sh and tune-apply.sh are not run",
+        "After P2 llm-server stays stopped, so Q1 runs quant-headroom.sh check without --vram-available-mib, before any ladder lane",
+        "The gemma4 ladder lane (P3, which writes seeds.json) runs only when a candidate has fits true, after make start-llama; Q4 then asks G-T2 again before make llama-enable",
+        "Separate gates: G-Q1 before quant-headroom.sh fetch (file, size, free disk) and G-Q2 before quant-headroom.sh add-entry (backup path)",
+        "Both quants run effort-run.sh on the P3 seeds.json through the router profile: the Q5_K_M lane passes --seeds with the same --efforts and --timeout",
+        "The lanes are compared with compare-runs.sh --correctness-only, gemma4's results.jsonl first, and its exit 3 (different challenge_set) is treated as not a head-to-head instead of comparing numbers",
+        "The upper bound is stated before dispatch as 5 x 3 x 2 x 300 s (layers x challenges per layer x tiers x timeout) per lane",
+        "When no candidate has fits true, the plan ends with make start-llama, because P2 stopped llm-server, and no ladder lane has run",
+        "Switching the default quant is gate G-Q3, the owner's call; with permissions bypassed the current quant is kept and the comparison table announced",
+        "Q11 restores the original alias (make stop-llama, make llama-enable MODEL=gemma4, make start-llama, make setup-local-llm-agents); its make start-llama creates or updates my-coding-lite for gemma4 once gemma4's card and interference gate are current, so no separate make local-combo runs",
+        "Nothing was downloaded, no container was stopped or started and no configuration was edited"
+      ]
+    },
+    {
+      "id": "tune-capacity-card",
+      "prompt": "write the capacity card for the local model and set up my-coding-lite. Give me the ordered plan with its gates.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml (LLM_ENV_CONFIG; llm-server is serving its enabled gemma4) and preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (cat, yq, jq, the skill scripts' --help); do not stop or start containers, edit models.yml or start sweeps, benchmarks or ladders. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "Preflight first; G-T1 only if llm_server.enabled is false; G-T2 frees the GPU with make stop-llama while System One stays; one subagent runs tune-sweep.sh on the default grid; G-T3 guards tune-apply.sh; make benchmark is not run; interference gate, capacity card with DEPTH and SCORE from a router-profile ladder, then local-combo and the profile refresh.",
+      "assertions": [
+        "Preflight comes first, and G-T1 (make llama-enable) is not asked: llm_server.enabled is true in the fixture config",
+        "G-T2 frees the GPU with make stop-llama and wait-gpu-release.sh (it returns once neither llama-server holder, router 12 + model 7450, is left) while System One stays up",
+        "tune-sweep.sh goes to one subagent with a written brief, on the default grid unless the owner names axes, and its upper bound is relayed first",
+        "tune-pick ranks ctx first, then tg at min(131072, ctx - 512) with a 20 t/s floor, and tune-apply.sh runs under G-T3 with its backup path stated",
+        "make benchmark is not run in this procedure because on a Vulkan failure it can rewrite gpu.backend to cpu",
+        "make model-interference runs, then make model-capacity with DEPTH, and again with SCORE from a router-profile ladder (--efforts low,high --per-layer 3)",
+        "make local-combo and make setup-local-llm-agents run last, confirmed with the jq check of my-coding-lite in ~/.pi/agent/models.json",
+        "No container was stopped or started and no configuration was edited"
+      ]
+    },
+    {
+      "id": "tune-enabled-no-gpu-config",
+      "prompt": "tune the context and KV cache of my local model for the best speed at depth. Give me the ordered plan with its gates.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models-enabled-no-gpu.yml (LLM_ENV_CONFIG): llm_server.enabled is true, but gpu.pci_address and gpu.device_name are empty (make llama-enable ran, make setup did not). preflight.sh with that LLM_ENV_CONFIG exits 2 before it reads the GPU; running it is allowed. DRY RUN for evaluation: read-only commands only (preflight.sh with that variable, cat, yq, jq, the skill scripts' --help); do not start or stop containers, run make targets, edit models.yml or start sweeps, benchmarks or ladders. Answer in English.",
+      "files": [
+        "evals/files/models-enabled-no-gpu.yml"
+      ],
+      "expected_output": "T1's preflight exits 2 with gpu.pci_address is empty and prints no JSON; llm_server.enabled is true, so Gate G-T1 asks before LLM_ENV_ASSUME_YES=1 make setup (no make llama-enable), then T1 runs again, and only that read decides whether llm-server must be served before G-T2.",
+      "assertions": [
+        "preflight.sh with the fixture LLM_ENV_CONFIG exits 2 with gpu.pci_address is empty and prints no JSON, so no services or budget figures are read from it",
+        "llm_server.enabled is true in the fixture, so T2 (make llama-enable) is not run; Gate G-T1 asks before LLM_ENV_ASSUME_YES=1 make setup, which detects the GPU and the Vulkan device",
+        "After make setup, T1 runs again (preflight.sh), and only that read decides whether llm-server is enabled but stopped and must be served before G-T2",
+        "No make start-llama or make stop-llama runs before make setup and the second T1 read",
+        "Nothing was started, stopped or edited"
+      ]
+    },
+    {
+      "id": "gateway-only-host",
+      "prompt": "quiero correr el benchmark de effort low/medium/high del modelo nuevo ahora mismo. Tell me what is possible on this host as it is configured and what I must approve first.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models-gateway.yml (scripts read it through LLM_ENV_CONFIG) and preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-gateway.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only; do not start anything. Answer in English.",
+      "files": [
+        "evals/files/models-gateway.yml",
+        "evals/files/preflight-gateway.json"
+      ],
+      "expected_output": "Detects that llm_server.enabled is false (gateway-only) and that gpu.device_name is empty (a gateway-only make setup skipped the Vulkan device), so nothing can run yet: neither bench-fit.sh screening nor effort runs. Asks before enabling local inference via make llama-enable MODEL=<alias> and LLM_ENV_ASSUME_YES=1 make setup, and before editing the live config.",
+      "assertions": [
+        "The answer reads llm_server.enabled false from the fixture config (preflight services.llm_server_enabled false) and reports a gateway-only host",
+        "The answer says effort runs need the model served and that enabling local inference goes through make llama-enable MODEL=<alias> (then make setup for the download and make start-llama) after the user approves",
+        "The answer says nothing can run yet: gpu.device_name is empty in the fixture config (a gateway-only setup skipped the Vulkan device), so bench-fit.sh screening also waits for make llama-enable MODEL=<alias> and LLM_ENV_ASSUME_YES=1 make setup after the user approves",
+        "The answer asks for approval before editing the live models.yml and mentions a timestamped backup",
+        "The requested full run (low, medium and high) is bounded by 5 x 1 x 3 x 300 s (layers x challenges per layer x tiers x timeout), and the answer offers the quicker screen --efforts low,high (5 x 1 x 2 x 300 s)"
+      ]
+    },
+    {
+      "id": "anchor-comparison",
+      "prompt": "compara el modelo local que tengo ahora contra haiku 4.5, gpt-5.6 luna y composer 2.5 en tareas de codigo y dame un score. Say what you would do and what you found about the availability of each anchor.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml and preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json. The route checks ran on 2026-11-01; their output is saved in .claude/skills/onboard-local-model/evals/files/anchors/route-check.txt; use it instead of pi or cursor-agent. DRY RUN for evaluation: read-only commands only (cat, jq, yq); do not launch benchmark or agent task runs. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/anchors/route-check.txt"
+      ],
+      "expected_output": "Each anchor is handled from the saved route checks: haiku is the one runnable anchor lane after G4; luna (401) and Composer 2.5 (no pi route, cursor-agent unauthenticated) are compared by published numbers only, never switched to another provider; the gemma4 lane runs first and writes seeds.json; correctness-only comparison; the seed set is retired.",
+      "assertions": [
+        "The local model is gemma4, the enabled and served entry of the fixture config",
+        "Composer 2.5 has no pi route, and cursor-agent models fails with Authentication required in the saved output, so there is no verified route: Composer 2.5 is compared by published numbers only, with benchmark version and effort, and the OmniRoute grok-composer variant is never counted as the anchor",
+        "openai/gpt-5.6-luna fails its auth check with 401 on PI_CODING_AGENT_DIR=$HOME/.pi/agent: no verified route, so it is compared by published numbers only (version and effort stated, the conflicting SWE-bench figures not quoted) until the owner fixes its credentials; the answer never switches it to another provider or model",
+        "opencode/claude-haiku-4-5 passes its auth check, so it is the one anchor lane, after G4 states provider, model, runs, the upper bound and that it spends quota",
+        "The local lane (router-env/llama-cpp/gemma4, --per-layer 3) runs first and writes seeds.json; the haiku lane passes --seeds with the same --efforts and --timeout",
+        "compare-runs.sh --correctness-only gives local overall over anchor overall with both ladders, local lane first",
+        "The seed set is retired after the cloud lane",
+        "No benchmark or agent run was launched"
+      ]
+    },
+    {
+      "id": "anchor-401-retry",
+      "prompt": "the haiku 4.5 anchor lane just returned a 401 during the effort run and the luna lane hit a usage limit. What do you do now? Answer in English; no commands need to be run.",
+      "expected_output": "Recognises api_error runs as invalid rather than failures, retries the same lane up to three times, then changes session up to three times, then reports with evidence; never switches provider or model unasked; keeps scoring correct.",
+      "assertions": [
+        "The answer treats the 401 and the usage limit as invalid runs (api_error) that are excluded from scoring, not as zero scores",
+        "The answer retries the same lane up to 3 times, then changes session up to 3 times, before reporting",
+        "The answer does not switch provider, model or anchor on its own and asks the user for that decision",
+        "The answer reports the error with evidence (status, model, timestamps) and waits before retrying",
+        "The answer falls back to published numbers for the comparison only as a labelled, version-caveated fallback"
+      ]
+    },
+    {
+      "id": "runtime-image-review",
+      "prompt": "deberiamos actualizar la imagen docker de llama.cpp o pasarnos a rocm para este modelo?",
+      "setup": "the read-only image commands already ran; their output is saved in .claude/skills/onboard-local-model/evals/files/runtime/images.txt; use it instead of podman or gh. The config is .claude/skills/onboard-local-model/evals/files/models.yml. DRY RUN for evaluation: do not pull images, run benchmarks or change configuration. Answer in English.",
+      "files": [
+        "evals/files/runtime/images.txt",
+        "evals/files/models.yml"
+      ],
+      "expected_output": "Reports the builds from the saved output (Vulkan 10871, ROCm 10143, upstream b12290), recommends an A/B with identical flags at context depth rather than deciding from community reports, notes the ROCm image is older and was unusable here, and applies image changes only through render-unit plus a gated restart, never by restarting omniroute.",
+      "assertions": [
+        "The answer reports Vulkan build 10871 and ROCm build 10143 from the saved --version output, not the last-seen 10454 of the table in `references/runtimes.md`",
+        "It says the production Vulkan image (gpu.image in the fixture config) is 1419 builds behind upstream b12290",
+        "It notes that the local ROCm image is older than the Vulkan image and was not usable as-is on this host (the iGPU enumerates as device 1)",
+        "It proposes an A/B with identical flags on both images at context depth (32K and 128K) before any decision, the ROCm side by hand after freeing the GPU (G2) and wrapped in timeout",
+        "It does not change gpu.image, pull an image or restart any container; any apply step goes through setup/render-unit.sh and a gated make restart, never an omniroute restart"
+      ]
+    },
+    {
+      "id": "system-one-check",
+      "prompt": "is laya outdated? anything that would use less vram or fix the busy cpu core?",
+      "setup": "Premise: llm-server is RUNNING and serving gemma4. system-one-check.sh reads its answers from SO_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/system-one/ with SO_DOCKERFILE=.claude/skills/onboard-local-model/evals/files/system-one/Dockerfile instead of the network. DRY RUN for evaluation: read-only commands only; do not build, pull, run or recreate anything and do not stop containers. Answer in English.",
+      "files": [
+        "evals/files/system-one/Dockerfile",
+        "evals/files/system-one/pypi.json",
+        "evals/files/system-one/torch-index.html"
+      ],
+      "expected_output": "system-one-check.sh reports the pin against the latest release with the yanked one not counted, the report is a table with the unread release notes marked as not verified, the newer rocm index is not an upgrade by version, a trial runs only after freeing the GPU and replacing production is G6.",
+      "assertions": [
+        "system-one-check.sh with SO_FIXTURE_DIR and SO_DOCKERFILE reports Laya pinned 0.4.2 and latest 0.5.0, 2 releases behind (the yanked 0.4.4 not counted), torch 2.14.1 on rocm7.2",
+        "The report is a table of pin, latest, gap, what the gap contains and risk; it does not claim what the gap contains when github.since_pin is null (release notes unread offline), and says so",
+        "torch 2.15.0 on rocm7.14 is not an upgrade by version: the rocm7.2 pin works around the ROCR busy-spin and moves only with the fix released and the 10-minute idle check",
+        "A trial image is built under another tag; the trial container runs on port 8011 only after freeing the GPU (G2, llm-server is serving) and is removed afterwards; replacing production is G6",
+        "The /v1/systemone contract stays and any upgrade is valued against the 4.26 GB steady VRAM, not against newness",
+        "Nothing was built, pulled, run, stopped or recreated"
+      ]
+    },
+    {
+      "id": "generate-one-challenge",
+      "prompt": "generate one layer-2 ladder challenge with seed 11 the way the effort ladder would, show me its prompt and prove it is intact. Do not run any agent, effort run or benchmark. Answer in English.",
+      "expected_output": "One layer-2 challenge is generated with gen-challenge.sh --seed 11 into a new directory under ./tmp/ without a reference, its prompt is shown, gen-challenge.sh --verify reports it intact, and the directory is removed at the end.",
+      "assertions": [
+        "The challenge is made with gen-challenge.sh --layer 2 --seed 11 --out DIR, DIR a new or empty directory under ./tmp/",
+        "--with-reference is not passed, so no reference/ directory is written next to the challenge",
+        "The answer shows DIR/challenge/prompt.md, and DIR/challenge is a git repository with exactly one commit",
+        "Integrity is shown with gen-challenge.sh --verify DIR, which prints verified true with no changed files",
+        "Nothing is written outside ./tmp/, nothing runs in or against the owner's project, and DIR is removed at the end unless the user asks to keep it",
+        "No agent, effort-run.sh or bench-fit.sh run was started"
+      ]
+    },
+    {
+      "id": "hf-file-pinned-revision",
+      "prompt": "can we run https://huggingface.co/lab/Foo-9B-GGUF/resolve/v2/Foo-9B-Q4_K_M.gguf locally? Show the entry you would add.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf/model-lab__Foo-9B-GGUF@v2.json",
+        "evals/files/hf/tree-lab__Foo-9B-GGUF@v2.json"
+      ],
+      "expected_output": "kind hf_file at revision v2; hf-scout.sh --repo with --revision v2 --file Foo-9B-Q4_K_M.gguf reads that commit, keeps the named file over the scout's Q5_K_M, and the entry pins the resolved sha with the exact size and sha256 from that one row.",
+      "assertions": [
+        "resolve-target.sh classifies the URL as kind hf_file with repo lab/Foo-9B-GGUF, revision v2 and file Foo-9B-Q4_K_M.gguf",
+        "hf-scout.sh runs with --repo lab/Foo-9B-GGUF --revision v2 --file Foo-9B-Q4_K_M.gguf --json --budget-mib 8321 --ram-mib 12000",
+        "The named Foo-9B-Q4_K_M.gguf is the one file (5500 MiB) even though the scout alone would pick Foo-9B-Q5_K_M.gguf",
+        "The entry url is https://huggingface.co/lab/Foo-9B-GGUF/resolve/a1b2c3d4e5f60718293a4b5c6d7e8f9012345678/Foo-9B-Q4_K_M.gguf (the resolved sha, not v2 or main) with size_bytes 5767168000",
+        "The download check is sha256 c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00 from the same row; nothing is read from tree/main",
+        "The entry alias is foo-9b (Alias for a new entry: no live entry has the file Foo-9B-Q4_K_M.gguf and no live alias is foo-9b)",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "hf-repo-gateway-only",
+      "prompt": "set up https://huggingface.co/lab/Foo-9B-GGUF on this box. Give me the ordered plan with its gates.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models-gateway.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-gateway.json; use it as its output. DRY RUN for evaluation: only resolve-target.sh, hf-scout.sh, cat, yq and jq; a scratch config under ./tmp/ is allowed and removed at the end. Answer in English.",
+      "files": [
+        "evals/files/models-gateway.yml",
+        "evals/files/preflight-gateway.json",
+        "evals/files/hf/model-lab__Foo-9B-GGUF.json",
+        "evals/files/hf/tree-lab__Foo-9B-GGUF.json"
+      ],
+      "expected_output": "A gateway-only host: the budget is model_vram_budget_mib because llmenv_budget is null; the scratch config comes from any alias of the live file; there is no baseline, so no baseline lane or bench; G3 enables local inference and runs setup unattended, before step 6's screen because gpu.device_name is empty, and the scratch config then takes the live gpu block.",
+      "assertions": [
+        "The budget is model_vram_budget_mib 10369 because llmenv_budget is null, and the answer says so",
+        "hf-scout.sh --repo lab/Foo-9B-GGUF --json --budget-mib 10369 --ram-mib 14500 picks Foo-9B-Q5_K_M.gguf (6500 MiB): the rule 1 RAM is ram.available_mib 14500 because ram_offload_budget_mib is 0 while llm-server is disabled, and the answer says so",
+        "The scratch config comes from resolve-target.sh gemma4 --scratch-config under ./tmp/ (any alias of the live file; none is enabled), with the entry added by yq; the live file is not copied",
+        "There is no baseline: no baseline lane, no baseline bench; the candidate lane is the first lane with --per-layer 3, and step 8 skips (b) and (c) and says so",
+        "G3 lists the entry add, make llama-enable MODEL=<alias> and LLM_ENV_ASSUME_YES=1 make setup, each after its gate, with a rollback copy first, and G3 runs before step 6's screen because gpu.device_name is empty; the scratch config then takes the live gpu block",
+        "The scratch config is removed at the end; nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "bare-name-no-repo",
+      "prompt": "try Zeta-Coder-7B as the local model.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml (LLM_ENV_CONFIG, models directory .claude/skills/onboard-local-model/evals/files/models/ as LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf-empty/. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use it as its output. DRY RUN for evaluation: read-only commands only. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf-empty/models.json"
+      ],
+      "expected_output": "resolve-target.sh exits 3 (a bare name), the Find the repo search returns no GGUF repo, and the run reports that and stops without a download or a gate.",
+      "assertions": [
+        "resolve-target.sh Zeta-Coder-7B exits 3: a bare model name, none of the four forms",
+        "The search is hf-scout.sh --query Zeta-Coder-7B --json --budget-mib 8321 --ram-mib 12000, and it prints []",
+        "The answer says [] means no GGUF repo, or every match is under 131072 context or a modded variant, and asks for a repo id or URL",
+        "The run stops there: no G1, no download, no scratch config, and nothing was stopped, started or edited"
+      ]
+    },
+    {
+      "id": "quant-switch-yes",
+      "prompt": "the Q4_K_M vs Q5_K_M comparison of gemma4 is done. Should I switch? If yes, I approve G-Q3.",
+      "setup": "Lanes: .claude/skills/onboard-local-model/evals/files/quant/q4.jsonl (gemma4, first) and .claude/skills/onboard-local-model/evals/files/quant/q5.jsonl (gemma4-q5_k_m), same seeds. quant-headroom.sh record printed tg -2.1 % and pp -1.4 % at the reference depth for gemma4-q5_k_m; its Q7 interference gate passed. DRY RUN for evaluation: run only compare-runs.sh --correctness-only on the two files; list the commands you would run, in order, without running them. Answer in English.",
+      "files": [
+        "evals/files/quant/q4.jsonl",
+        "evals/files/quant/q5.jsonl"
+      ],
+      "expected_output": "The candidate qualifies under the G-Q3 rule (replace rule passed, pp/tg within 3 %, interference passed); the yes branch serves gemma4-q5_k_m (its make start-llama moves my-coding-lite to it), refreshes the router profile, and keeps gemma4 disabled as the rollback.",
+      "assertions": [
+        "compare-runs.sh --correctness-only with q4.jsonl first gives ladder delta 1 and overall delta 22.2 for gemma4-q5_k_m: the replace rule passes (ladder delta >= 0 and overall delta > 10)",
+        "The decision also checks tg and pp within about 3 % of gemma4 (-2.1 % and -1.4 %) and the passed Q7 interference gate",
+        "The yes branch, in order: make stop-llama, make llama-enable MODEL=gemma4-q5_k_m, make start-llama (it moves my-coding-lite to gemma4-q5_k_m: its card and Q7 gate are current), make check-server, make setup-local-llm-agents; no separate make local-combo",
+        "gemma4 stays in models.yml, disabled, as the rollback, and all of Q11 restores it: make stop-llama, make llama-enable MODEL=gemma4, make start-llama, make setup-local-llm-agents",
+        "Nothing was executed besides compare-runs.sh"
+      ]
+    },
+    {
+      "id": "missing-gguf-path",
+      "prompt": "use .claude/skills/onboard-local-model/evals/files/Missing-7B-Q4_K_M.gguf as my local model.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). DRY RUN for evaluation: read-only commands only. Answer in English.",
+      "files": [
+        "evals/files/models.yml"
+      ],
+      "expected_output": "resolve-target.sh exits 2 with not found: a .gguf argument that does not exist is an error, not a model name; the run reports the message, asks for the right path and stops without a Hugging Face search.",
+      "assertions": [
+        "resolve-target.sh .claude/skills/onboard-local-model/evals/files/Missing-7B-Q4_K_M.gguf exits 2 and its message says not found",
+        "Exit 2 is treated as an error: the message is reported and the run stops; hf-scout.sh --query is not run (only exit 3 means a bare model name)",
+        "The answer asks for the correct path to the .gguf file, or a Hugging Face repo id or URL",
+        "No scratch config, download, gate, container or configuration change was made"
+      ]
+    },
+    {
+      "id": "gguf-alias-collision",
+      "prompt": "add .claude/skills/onboard-local-model/evals/files/Ornith-Q5_K_M.gguf as a local model next to the ornith I have. Say which alias the live entry would get and why.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). DRY RUN for evaluation: read-only commands only (resolve-target.sh, yq, jq); a scratch config under ./tmp/ is allowed and removed at the end. The alias is the one the live entry would get at G3. Answer in English.",
+      "files": [
+        "evals/files/Ornith-Q5_K_M.gguf",
+        "evals/files/models.yml"
+      ],
+      "expected_output": "kind gguf_file, quant Q5_K_M; no live entry has the file Ornith-Q5_K_M.gguf; the derived name ornith is the alias of another file (ornith-1.0-9b-Q4_K_M.gguf), so the entry becomes ornith-2 and the existing ornith entry is never reused.",
+      "assertions": [
+        "resolve-target.sh classifies the argument as kind gguf_file with quant Q5_K_M",
+        "No entry of the fixture config has the file Ornith-Q5_K_M.gguf, so no existing alias is reused for it",
+        "The derived name is ornith (the base name without .gguf and the quant token Q5_K_M, lowercased, the trailing - dropped), which the live alias ornith already has for ornith-1.0-9b-Q4_K_M.gguf",
+        "The G3 alias is therefore ornith-2; the ornith entry is never edited or enabled for this file",
+        "The scratch config keeps the alias candidate and is removed at the end; nothing was copied, downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "mistyped-gguf-path",
+      "prompt": "can you hook up .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.ggu as my local model? Just tell me what you would do; change nothing.",
+      "expected_output": "resolve-target.sh exits 2 because the path is not a .gguf file, and its message suggests .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.gguf; the answer reports that, asks whether that file was meant and stops, with no Hugging Face search.",
+      "assertions": [
+        "resolve-target.sh .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.ggu exits 2 with not a .gguf file (did you mean .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.gguf?)",
+        "Exit 2 is treated as an error: the answer reports the message, asks whether Foo-9B-Q4_K_M.gguf was meant and stops; hf-scout.sh --query is not run",
+        "No scratch config, download, gate, container or configuration change was made"
+      ]
+    },
+    {
+      "id": "quant-room-local-entry",
+      "prompt": "is there room for a Q5 of my local model? I added it from a file in my Downloads folder.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models-local-url.yml; pass it as LLM_ENV_CONFIG or --config; llm-server serves its gemma4. Change nothing.",
+      "files": [
+        "evals/files/models-local-url.yml"
+      ],
+      "expected_output": "The standalone quant comparison starts with P0: gemma4's url is file://, not a Hugging Face resolve url, so quant-headroom.sh check would exit 1. No GPU step runs. The answer asks for the Hugging Face repo, to pin the url under G-Q0 after the size and sha256 checks, or reports that the comparison needs a Hugging Face entry.",
+      "assertions": [
+        "The route is `references/tuning.md`, Standalone quant comparison, and its first step reads gemma4's url: file:///var/home/bazzite/Downloads/gemma4-v2-Q4_K_M.gguf",
+        "The answer says quant-headroom.sh check cannot read a tree for that url (it exits 1 with entry url is not a Hugging Face resolve url)",
+        "No interference gate, bench-fit.sh run, ladder lane, download or config edit is started or proposed before a Hugging Face url is pinned",
+        "The answer asks for the Hugging Face repo and names Gate G-Q0 for the pin after the size and sha256 checks, or reports that the comparison needs a Hugging Face entry",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "alias-typo",
+      "prompt": "re-measure Gemma4 for me, I think it got slower at long context. Just tell me what you would do; change nothing.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory .claude/skills/onboard-local-model/evals/files/models/; pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR.",
+      "files": [
+        "evals/files/models.yml"
+      ],
+      "expected_output": "resolve-target.sh Gemma4 exits 2 and names the alias gemma4; the answer asks whether gemma4 was meant and stops, with no Hugging Face search.",
+      "assertions": [
+        "resolve-target.sh Gemma4 exits 2 with no models.yml alias of that name; did you mean alias gemma4?",
+        "Exit 2 is treated as an error: the answer asks whether gemma4 was meant and stops; hf-scout.sh --query is not run",
+        "No scratch config, download, gate, container or configuration change was made"
+      ]
+    },
+    {
+      "id": "quant-room-subfolder-entry",
+      "prompt": "is there VRAM for a Q5 of my local model? Its file came from a sub-folder of the Hugging Face repo. Tell me what you would run; change nothing.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models-subfolder.yml (LLM_ENV_CONFIG); quant-headroom.sh and hf-scout.sh read Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/; llm-server serves gemma4.",
+      "files": [
+        "evals/files/models-subfolder.yml",
+        "evals/files/hf/model-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF.json",
+        "evals/files/hf/tree-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@190a31365a6b80a692349be34ccdac730cad4fe4.json"
+      ],
+      "expected_output": "P0 finds gemma4's url pinned to a resolve/<sha> path inside the Q4_K_M sub-folder that ends in the entry's file, so no pin is needed. Q1's check looks Q5_K_M up at Q5_K_M/gemma4-v2-Q5_K_M.gguf (file gemma4-v2-Q5_K_M.gguf, 8547884576 bytes) and marks Q6_K sharded, not supported.",
+      "assertions": [
+        "P0 reads gemma4's url https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/Q4_K_M/gemma4-v2-Q4_K_M.gguf as a Hugging Face resolve url whose path ends in the entry's file, so G-Q0 is not asked",
+        "quant-headroom.sh check takes Q5_K_M at path Q5_K_M/gemma4-v2-Q5_K_M.gguf with file gemma4-v2-Q5_K_M.gguf (8547884576 bytes), and Q6_K as sharded, not supported",
+        "A fetch of Q5_K_M would land in the models directory as gemma4-v2-Q5_K_M.gguf, never in a sub-folder",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "second-lane-out-dir",
+      "prompt": "the gemma4 baseline lane of today's foo-9b onboarding finished in tmp/model-scout/20261031-foo-9b/effort-baseline and foo-9b is served now. What exact command runs the foo-9b ladder lane? Run nothing.",
+      "expected_output": "The candidate lane writes a new folder, tmp/model-scout/20261031-foo-9b/effort, never the baseline's (effort-run.sh exits 2 on a folder that holds a run); it reuses the baseline seeds with the same efforts on the router profile and goes to one subagent with the brief in `references/scoring.md`, Running a lane.",
+      "assertions": [
+        "The command is PI_CODING_AGENT_DIR=$HOME/.pi/agent bash .claude/skills/onboard-local-model/scripts/effort-run.sh --model router-env/llama-cpp/foo-9b --out tmp/model-scout/20261031-foo-9b/effort --efforts low,high --seeds tmp/model-scout/20261031-foo-9b/effort-baseline/seeds.json",
+        "It never reuses tmp/model-scout/20261031-foo-9b/effort-baseline as --out: effort-run.sh exits 2 on a folder that already holds a run",
+        "The lane is delegated with the brief in `references/scoring.md`, Running a lane, <out> filled with tmp/model-scout/20261031-foo-9b/effort and the log at tmp/model-scout/20261031-foo-9b/effort.log",
+        "Nothing was run, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "alias-edit-typo",
+      "prompt": "swap my local model to orinth-35b and tell me if it beats gemma4. Just the plan; change nothing.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory .claude/skills/onboard-local-model/evals/files/models/; pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR.",
+      "files": [
+        "evals/files/models.yml"
+      ],
+      "expected_output": "resolve-target.sh orinth-35b exits 2 and names the alias ornith-35b (two edits away); the answer asks whether ornith-35b was meant and stops, with no Hugging Face search.",
+      "assertions": [
+        "resolve-target.sh orinth-35b exits 2 with no models.yml alias of that name; did you mean alias ornith-35b?",
+        "Exit 2 is treated as an error: the answer asks whether ornith-35b was meant and stops; hf-scout.sh --query is not run",
+        "No scratch config, download, gate, container or configuration change was made"
+      ]
+    },
+    {
+      "id": "enabled-alias-stopped",
+      "prompt": "how fast is gemma4 now at long context? measure it again and give me the ordered plan with its gates.",
+      "setup": "the config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory .claude/skills/onboard-local-model/evals/files/models/ (pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-stopped.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh with those variables, cat, yq, jq); do not start or stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/models/gemma4-v2-Q4_K_M.gguf",
+        "evals/files/preflight-stopped.json"
+      ],
+      "expected_output": "gemma4 is the enabled alias but llm-server is stopped: the plan starts it with make start-llama, reads preflight again, then re-measures (lane while served, G2, bench-fit at depth, G-R2 serve, interference and card) with no scratch config and no verdict, and hands llm-server back stopped with make stop-llama.",
+      "assertions": [
+        "resolve-target.sh gemma4 with the fixture variables gives kind alias, enabled true, present true, and the preflight JSON says llm_server_enabled true and llm_server_running false: this is the re-measure with llm-server stopped, not an onboarding of gemma4 against itself",
+        "The plan first runs make start-llama (the stack is up: System One and OmniRoute run), never make start, make restart, make llama-enable or make setup, and then reads preflight again",
+        "No scratch config, candidate or replacement verdict appears",
+        "The ladder lane (router-env/llama-cpp/gemma4 on PI_CODING_AGENT_DIR=$HOME/.pi/agent, --per-layer 3, --out tmp/model-scout/<run>/effort-served) runs while gemma4 is served, before G2",
+        "G2 follows the preflight read after make start-llama, which has llm_server_running true; the stopped JSON has llm_server_running false and would skip make stop-llama",
+        "bench-fit.sh runs after G2 at depths that include 32768 and 130560 (the fixture's ctx_size 131072)",
+        "At the end llm-server is handed back stopped with make stop-llama, as it was found, and the leftover check (podman ps -a, PIDs) runs",
+        "No container was started or stopped, no configuration was edited and no benchmark was started"
+      ]
+    },
+    {
+      "id": "hf-subfolder-file",
+      "prompt": "can I run https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/main/Q5_K_M/gemma4-v2-Q5_K_M.gguf on this box? show me the models.yml entry you'd add",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models-gateway.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-gateway.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq, yq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models-gateway.yml",
+        "evals/files/preflight-gateway.json",
+        "evals/files/hf/model-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json",
+        "evals/files/hf/tree-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json"
+      ],
+      "expected_output": "The sub-folder URL is an hf_file at main; hf-scout.sh reads that one commit and pins its sha, size and sha256; the entry keeps the sub-folder in its url and the base name in file, its alias is gemma4-q5_k_m, and G1 downloads to the base name; this gateway-only host has no baseline.",
+      "assertions": [
+        "resolve-target.sh gives kind hf_file, revision main, file Q5_K_M/gemma4-v2-Q5_K_M.gguf (the sub-folder kept) and quant Q5_K_M",
+        "hf-scout.sh --repo yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF --revision main --file Q5_K_M/gemma4-v2-Q5_K_M.gguf --json --budget-mib 10369 --ram-mib 14500 gives sha 190a31365a6b80a692349be34ccdac730cad4fe4, fit vram, pick.bytes 8547884576 and pick.sha256 5555555555555555555555555555555555555555555555555555555555555555; the budget is model_vram_budget_mib because llmenv_budget is null and the RAM is ram.available_mib because ram_offload_budget_mib is 0, both said",
+        "The entry has file gemma4-v2-Q5_K_M.gguf (the base name), url https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/Q5_K_M/gemma4-v2-Q5_K_M.gguf (the commit, never main, and the sub-folder kept), size_bytes 8547884576, quantization Q5_K_M and enabled false",
+        "The alias is gemma4-q5_k_m: the live gemma4 entry's file gemma4-v2-Q4_K_M.gguf gives the same name, gemma4-v2 (A2)",
+        "G1 downloads to ~/llm-workspace/models/gemma4-v2-Q5_K_M.gguf (a base name, never Q5_K_M/...) and checks its size and sha256",
+        "There is no baseline (gateway-only host): no baseline lane or bench, and step 8 says so",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "hf-subfolder-no-fit",
+      "prompt": "does https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/main/Q5_K_M/gemma4-v2-Q5_K_M.gguf fit next to laya? if not, which file from that repo would?",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf/model-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json",
+        "evals/files/hf/tree-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json"
+      ],
+      "expected_output": "The named Q5_K_M (8151 MiB) is fit no against the 8321 MiB budget, so the run stops before G1; the fallback with --single-file is fit no too, so no single-file quant of 3.5 bpw or more fits in VRAM and none is offered; the split Q6_K that the plain call picks is never offered.",
+      "assertions": [
+        "resolve-target.sh gives kind hf_file, revision main, file Q5_K_M/gemma4-v2-Q5_K_M.gguf",
+        "hf-scout.sh --repo yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF --revision main --file Q5_K_M/gemma4-v2-Q5_K_M.gguf --json --budget-mib 8321 --ram-mib 12000 gives fit no (8151 MiB plus about 1.5 GiB for KV and buffers exceeds 8321 MiB): the run stops before G1, under bypass too",
+        "The fallback is the same call without --file and with --single-file (--revision main kept); its fit is no, so the answer says no single-file quant of 3.5 bpw or more fits in VRAM and offers none",
+        "The split Q6_K file (Q6_K/gemma4-v2-Q6_K-00001-of-00002.gguf, 9346 MiB, no single sha256) that the call without --single-file picks is never offered",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "quoted-tilde-gguf",
+      "prompt": "put \"~/Downloads/Bar-7B-Q4_K_M.gguf\" on my local llama server if it fits next to laya. just the plan for now, change nothing",
+      "setup": "Run resolve-target.sh with HOME=.claude/skills/onboard-local-model/evals/files/home, so the quoted path is the file .claude/skills/onboard-local-model/evals/files/home/Downloads/Bar-7B-Q4_K_M.gguf. The config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory .claude/skills/onboard-local-model/evals/files/models/ (pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, validate-gguf and budget on a scratch config, cat, jq); do not copy, move or delete the file, download, edit models.yml, or start or stop a container or benchmark. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/home/Downloads/Bar-7B-Q4_K_M.gguf"
+      ],
+      "expected_output": "The quoted ~ path resolves to the local GGUF; `references/local-gguf.md` runs its fit on the file's own directory right after the step 4.2 settings, budget's error for the header-only file is the result, and no copy is offered.",
+      "assertions": [
+        "resolve-target.sh with the quoted path gives kind gguf_file, quant Q4_K_M, in_models_dir false; it is not an exit 2 \"not found\"",
+        "`references/local-gguf.md` runs: no live entry or models-dir file has the name Bar-7B-Q4_K_M.gguf, and the scratch config comes from resolve-target.sh --scratch-config with candidate as its only enabled entry",
+        "After the step 4.2 settings, models select candidate, validate-gguf and budget run on the scratch config with --models-dir set to the file's own directory, before any copy",
+        "budget's error for the header-only file is the result: the flow stops there and the G1 copy is never offered",
+        "The original file is never copied, moved or deleted; nothing was edited, started or stopped"
+      ]
+    },
+    {
+      "id": "early-typo-gguf-path",
+      "prompt": "use .claude/skills/onboard-local-model/evals/files/Fo-9B-Q4_K_M.gguf as my local model",
+      "expected_output": "resolve-target.sh exits 2 with not found and a did-you-mean hint for Foo-9B-Q4_K_M.gguf (an early typo); the answer reports it, asks whether that file was meant and stops.",
+      "assertions": [
+        "resolve-target.sh .claude/skills/onboard-local-model/evals/files/Fo-9B-Q4_K_M.gguf exits 2 with not found (did you mean .claude/skills/onboard-local-model/evals/files/Foo-9B-Q4_K_M.gguf?)",
+        "Exit 2 is treated as an error: the answer reports the message, asks whether Foo-9B-Q4_K_M.gguf was meant and stops; hf-scout.sh --query is not run",
+        "No scratch config, download, gate, container or configuration change was made"
+      ]
+    },
+    {
+      "id": "onboard-baseline-server-stopped",
+      "prompt": "could https://huggingface.co/lab/Foo-9B-GGUF beat the model I run locally? walk me through what you'd do, step by step, and where you'd stop to ask me first",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-stopped.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq, yq); do not download weights, start or stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-stopped.json",
+        "evals/files/hf/model-lab__Foo-9B-GGUF.json",
+        "evals/files/hf/tree-lab__Foo-9B-GGUF.json"
+      ],
+      "expected_output": "lab/Foo-9B-GGUF is onboarded against the enabled gemma4 baseline, which is enabled but stopped: step 1 serves it with make start-llama and reads preflight again, the gemma4 lane runs before G2 and G2 reads llm_server_running true from that second read, and step 9 hands llm-server back stopped with make stop-llama whatever G5 decides.",
+      "assertions": [
+        "resolve-target.sh gives kind hf_repo for lab/Foo-9B-GGUF, and hf-scout.sh --repo lab/Foo-9B-GGUF --json --budget-mib 8321 --ram-mib 12000 gives fit vram with the pick Foo-9B-Q5_K_M.gguf (6500 MiB)",
+        "The preflight JSON says llm_server_enabled true and llm_server_running false while OmniRoute and System One run: gemma4 is the baseline, and step 1 says llm-server is stopped, runs make start-llama (never make start, make restart or make setup) and reads preflight again before the baseline lane",
+        "The gemma4 baseline lane (router-env/llama-cpp/gemma4, --per-layer 3, --out tmp/model-scout/<run>/effort-baseline) runs while gemma4 is served, before G2",
+        "G2 follows the preflight read after make start-llama, which has llm_server_running true; the stopped JSON has llm_server_running false and would skip make stop-llama",
+        "Step 9 hands llm-server back stopped with make stop-llama, as step 1 found it, after a yes to G5 as well as after a no (a no also restores the cp -p rollback copy)",
+        "Nothing was downloaded, started, stopped or edited"
+      ]
+    },
+    {
+      "id": "onboard-keep",
+      "prompt": "foo-9b beat gemma4 in today's onboarding and I approve G5: keep foo-9b. What runs now, in order?",
+      "setup": "Premise: steps 1-8 of an onboarding of foo-9b (a Hugging Face candidate) ran on this host with the fixture config .claude/skills/onboard-local-model/evals/files/models.yml. The first step-1 read was .claude/skills/onboard-local-model/evals/files/preflight-served.json (llm-server serving gemma4). 7a added foo-9b, ran make llama-enable MODEL=foo-9b and make setup, and its make start-llama printed `my-coding-lite: skipped (no capacity card; run make model-capacity MODEL=foo-9b and make model-interference)`. 7a.7 ran make setup-local-llm-agents. 7b's interference gate passed and make model-capacity wrote foo-9b's card. DRY RUN for evaluation: read-only commands only (cat, yq, jq); list the commands you would run, in order, without running them. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "Keep: make local-combo moves my-coding-lite from llama-cpp/gemma4 (no longer served) to llama-cpp/foo-9b now that foo-9b has a card and a passed interference gate, then make setup-local-llm-agents refreshes the router profile; nothing is rolled back and llm-server keeps serving foo-9b.",
+      "assertions": [
+        "Keep runs make local-combo, then make setup-local-llm-agents",
+        "The answer says why: 7a.6's make start-llama skipped my-coding-lite (no capacity card for foo-9b yet), so my-coding-lite still routes to llama-cpp/gemma4, which the router no longer serves once foo-9b is the enabled model; 7b's card and gate let it move to llama-cpp/foo-9b",
+        "Nothing is rolled back and no make stop-llama runs: the first step-1 read (preflight-served.json) found llm-server serving",
+        "models.yml.example gets the foo-9b entry with enabled false only when the owner wants a repo default",
+        "Nothing was executed"
+      ]
+    },
+    {
+      "id": "gateway-enabled-alias",
+      "prompt": "gemma4 feels slow on this machine. measure it again and tell me where it stands",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models-gateway-enabled.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-gateway-enabled.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh with those variables, cat, yq, jq); do not download, start or stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models-gateway-enabled.yml",
+        "evals/files/models/gemma4-v2-Q4_K_M.gguf",
+        "evals/files/preflight-gateway-enabled.json"
+      ],
+      "expected_output": "gemma4 is an entry left enabled on a gateway-only host, so it is not a re-measure: the other-alias row onboards it with no baseline on a scratch config, sized against llmenv_budget.vram_available_mib 8321, with no make stop-llama, and it is served only after G3's make llama-enable.",
+      "assertions": [
+        "resolve-target.sh gemma4 with the fixture variables gives kind alias, enabled true, present true, and the preflight JSON says llm_server_enabled false: the enabled-alias row needs llm-server enabled, so this is not a re-measure but SKILL.md's other-alias row (references/onboard-flow.md, Alias)",
+        "The scratch config comes from resolve-target.sh gemma4 --scratch-config, and validate-gguf and budget take --config of it",
+        "The budget is llmenv_budget.vram_available_mib 8321, the smaller of it and model_vram_budget_mib 10369 (llmenv budget gives a verdict for an enabled entry whose file is present, even with llm-server disabled), and the RAM is ram.available_mib 14500 because ram_offload_budget_mib is 0, both said",
+        "There is no baseline (gateway-only host): no baseline lane or bench, and no make stop-llama or wait-gpu-release.sh, because its preflight read has llm_server_running false",
+        "Serving it needs Gate G3: a cp -p rollback copy, then make llama-enable MODEL=gemma4 (no new entry) and LLM_ENV_ASSUME_YES=1 make setup",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "hf-file-is-the-served-file",
+      "prompt": "is https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/main/Q4_K_M/gemma4-v2-Q4_K_M.gguf any better than what I run now?",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml and its models directory is .claude/skills/onboard-local-model/evals/files/models/ (scripts read them through LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). hf-scout.sh reads its Hugging Face answers from HF_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/hf/ instead of the network. preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; do not run it, use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, hf-scout.sh, cat, jq, yq); do not download weights, stop containers, edit models.yml or start benchmarks. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/hf/model-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json",
+        "evals/files/hf/tree-yuxinlu1__gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF@main.json"
+      ],
+      "expected_output": "The file is the one the enabled gemma4 entry already serves (same base name and size), so it is not a candidate: the answer moves to the enabled-alias row and offers a re-measure of gemma4, with no research subagent, scratch config, new entry, lane against itself or replace verdict, and it never reports the served model as not fitting from hf-scout's screening class.",
+      "assertions": [
+        "resolve-target.sh gives kind hf_file, revision main, file Q4_K_M/gemma4-v2-Q4_K_M.gguf",
+        "hf-scout.sh --repo yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF --revision main --file Q4_K_M/gemma4-v2-Q4_K_M.gguf --json --budget-mib 8321 --ram-mib 12000 gives pick.bytes 7381381664: its base name gemma4-v2-Q4_K_M.gguf and its size equal the file and size_bytes of the enabled gemma4 entry, the baseline (H2)",
+        "It is the served model, not a candidate: the answer follows SKILL.md's enabled-alias row (llm_server_enabled true in the preflight JSON) and offers the re-measure of gemma4 per references/served-alias.md",
+        "No research subagent, scratch config, new entry or alias (no gemma4-2), candidate lane, bench of gemma4 against itself or replace verdict appears",
+        "The fit no of that hf-scout call (7039 MiB plus about 1.5 GiB over 8321 MiB, a screening class) is not reported as gemma4 failing to fit: preflight's llmenv_budget says feasible true",
+        "Nothing was downloaded, stopped, started or edited"
+      ]
+    },
+    {
+      "id": "local-gguf-a1-moe",
+      "prompt": "put \"~/Downloads/ornith-1.0-35b-Q4_K_M.gguf\" on my local llama server if it fits next to laya. just the plan for now, change nothing",
+      "setup": "Run resolve-target.sh and new-alias.sh with HOME=.claude/skills/onboard-local-model/evals/files/home, so the quoted path is the file .claude/skills/onboard-local-model/evals/files/home/Downloads/ornith-1.0-35b-Q4_K_M.gguf (64 bytes). The config is .claude/skills/onboard-local-model/evals/files/models-a1-local.yml, whose disabled MoE entry ornith-35b has this file name and size_bytes 64, and its models directory .claude/skills/onboard-local-model/evals/files/models/, which does not hold that file (pass them as LLM_ENV_CONFIG and LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, new-alias.sh, validate-gguf and budget on a scratch config under ./tmp/, removed at the end, cat, yq, jq); do not copy, move or delete the file, download, edit models.yml, or start or stop a container or benchmark. Answer in English.",
+      "files": [
+        "evals/files/models-a1-local.yml",
+        "evals/files/preflight-served.json",
+        "evals/files/home/Downloads/ornith-1.0-35b-Q4_K_M.gguf"
+      ],
+      "expected_output": "resolve-target.sh gives kind gguf_file (quant Q4_K_M, 64 bytes, not in the models directory). L1: the live entry ornith-35b has this file and the models directory lacks it, so new-alias.sh decides: A1, ornith-35b. The scratch config comes from resolve-target.sh ornith-35b --scratch-config, so the fit uses ornith-35b's own n_cpu_moe 28, ctx_size 262144 and vram_budget 85%, never a candidate copy of gemma4's settings. budget's error for the header-only file is the result, so no copy is offered; after a feasible fit G1 would copy the file with fetch-gguf.sh --from and G3 would run make llama-enable MODEL=ornith-35b.",
+      "assertions": [
+        "resolve-target.sh, run with HOME at the given home directory, classifies the quoted path as kind gguf_file with quant Q4_K_M, size_bytes 64 and in_models_dir false",
+        "L1 finds the live entry ornith-35b for the file name ornith-1.0-35b-Q4_K_M.gguf, which is not in the models directory, and runs new-alias.sh --file ornith-1.0-35b-Q4_K_M.gguf --size 64 --quant Q4_K_M, which prints alias ornith-35b, rule A1",
+        "The scratch config is built with resolve-target.sh ornith-35b --scratch-config under ./tmp/, with ornith-35b alone enabled; it has no entry candidate",
+        "The fit uses ornith-35b's own settings, n_cpu_moe 28, ctx_size 262144 and vram_budget 85%; step 4.2 writes no settings, and gemma4's ctx_size 131072 and vram_budget 55% are never used for this file",
+        "validate-gguf and budget run on that scratch config with --models-dir set to the file's own directory; budget's error for the header-only file (no general.architecture) is reported as the result, with no fit verdict or VRAM figure estimated, and no copy is offered",
+        "After a feasible fit, G1 would be a copy, fetch-gguf.sh --from the original path --dest ~/llm-workspace/models/ornith-1.0-35b-Q4_K_M.gguf --size 64, never a download of the entry's url, and G3 would run make llama-enable MODEL=ornith-35b without adding an entry",
+        "Nothing was copied, downloaded, stopped, started or edited, and the scratch config is removed at the end"
+      ]
+    },
+    {
+      "id": "tune-named-enabled-alias",
+      "prompt": "tune gemma4 for the best context and tok/s at depth. Give me the ordered plan with its gates.",
+      "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml (LLM_ENV_CONFIG; llm-server is serving its enabled gemma4) and its models directory .claude/skills/onboard-local-model/evals/files/models/ (LLM_ENV_MODELS_DIR). preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (resolve-target.sh, cat, yq, jq, the skill scripts' --help); do not stop or start containers, edit models.yml or start sweeps, benchmarks or ladders. Answer in English.",
+      "files": [
+        "evals/files/models.yml",
+        "evals/files/models/gemma4-v2-Q4_K_M.gguf",
+        "evals/files/preflight-served.json"
+      ],
+      "expected_output": "gemma4 is the enabled alias, but the request is to tune it: the model-argument rule's exception sends it to the tune row (references/tuning.md), not the re-measure. Preflight first, no G-T1, G-T2 frees the GPU, one subagent runs tune-sweep.sh, G-T3 guards tune-apply.sh.",
+      "assertions": [
+        "resolve-target.sh gives kind alias, enabled true for gemma4, and the plan follows the tune row, references/tuning.md, not the re-measure of references/served-alias.md",
+        "Preflight comes first, and G-T1 (make llama-enable) is not asked: llm_server.enabled is true in the fixture config",
+        "G-T2 frees the GPU with make stop-llama and wait-gpu-release.sh while System One stays up",
+        "tune-sweep.sh goes to one subagent with a written brief, and tune-apply.sh runs under G-T3 with its backup path stated",
+        "No candidate, scratch config, G1 or replacement verdict appears: the model being tuned is the one served",
+        "No container was stopped or started and no configuration was edited"
+      ]
+    }
+  ]
+}

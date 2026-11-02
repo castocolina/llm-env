@@ -1,0 +1,9 @@
+# Saved 2026-11-01 for the anchor-comparison eval (a fixture, not a host transcript). Route checks change: on the real host on 2026-10-30 opencode/claude-haiku-4-5 returned 401 during a lane (`references/anchors.md`, Anchor lanes item 5).
+$ PI_CODING_AGENT_DIR=$HOME/.pi/agent pi auth check --model opencode/claude-haiku-4-5
+auth ok: opencode/claude-haiku-4-5
+$ PI_CODING_AGENT_DIR=$HOME/.pi/agent pi auth check --model openai/gpt-5.6-luna
+auth failed: openai/gpt-5.6-luna: HTTP 401 Unauthorized
+$ cursor-agent status
+Logged in
+$ cursor-agent models
+Error: Authentication required

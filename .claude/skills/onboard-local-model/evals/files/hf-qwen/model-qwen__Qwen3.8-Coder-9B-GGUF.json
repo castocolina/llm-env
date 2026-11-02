@@ -1,0 +1,22 @@
+{
+  "id": "qwen/Qwen3.8-Coder-9B-GGUF",
+  "downloads": 3100,
+  "likes": 150,
+  "lastModified": "2026-10-27T00:00:00.000Z",
+  "gguf": {
+    "total": 9000000000,
+    "context_length": 262144,
+    "architecture": "qwen38"
+  },
+  "baseModels": {
+    "models": [
+      {
+        "id": "qwen/Qwen3.8-Coder-9B"
+      }
+    ]
+  },
+  "tags": [
+    "gguf"
+  ],
+  "sha": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c"
+}

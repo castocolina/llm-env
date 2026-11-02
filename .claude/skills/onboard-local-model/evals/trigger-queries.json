@@ -1,0 +1,82 @@
+[
+  {
+    "query": "want to try Qwen3.8-27B, or the smaller coder one if it doesn't fit, against what pi uses now",
+    "should_trigger": true
+  },
+  {
+    "query": "https://huggingface.co/unsloth/Qwen3.8-9B-Instruct-GGUF would this run next to laya? set it up if it does",
+    "should_trigger": true
+  },
+  {
+    "query": "a friend sent me ~/Downloads/Devstral-Small-3-Q4_K_M.gguf, can we swap the local model for it?",
+    "should_trigger": true
+  },
+  {
+    "query": "hay algun modelo agentico mas nuevo que quepa en mi gpu con laya cargado? necesito 128k de contexto minimo",
+    "should_trigger": true
+  },
+  {
+    "query": "is q5 or q6 of the current model worth it over q4, and is there even vram for it?",
+    "should_trigger": true
+  },
+  {
+    "query": "pi crawls in long sessions since the 256k change: what tok/s do we actually get at 128k depth? then write the capacity card and set up my-coding-lite",
+    "should_trigger": true
+  },
+  {
+    "query": "swap the local model to ornith-35b from models.yml and tell me if it actually beats gemma4",
+    "should_trigger": true
+  },
+  {
+    "query": "generate one layer-3 ladder challenge with seed 7 and check it is intact before I hand it to pi",
+    "should_trigger": true
+  },
+  {
+    "query": "how does our local model compare to haiku 4.5 on coding tasks? i want an actual number, not leaderboard stuff",
+    "should_trigger": true
+  },
+  {
+    "query": "our llama.cpp image is ~1500 builds behind and laya is a couple releases behind on pypi: worth pulling a new vulkan build, trying rocm, or upgrading laya to free vram?",
+    "should_trigger": true
+  },
+  {
+    "query": "make gpu-status says steamwebhelper holds VRAM, which process should I move to the iGPU?",
+    "should_trigger": false
+  },
+  {
+    "query": "update omniroute to the latest image without interrupting running agents",
+    "should_trigger": false
+  },
+  {
+    "query": "system-one's memory cap keeps getting clipped at 5120 MiB, how do I re-derive the limit",
+    "should_trigger": false
+  },
+  {
+    "query": "ornith rambles, tune temperature and top_p in models.yml",
+    "should_trigger": false
+  },
+  {
+    "query": "convert my safetensors fine-tune to gguf and quantize it to q4_k_m",
+    "should_trigger": false
+  },
+  {
+    "query": "add kimi to the my-coding combo and drop grok from it",
+    "should_trigger": false
+  },
+  {
+    "query": "which cloud model is cheapest for a coding agent through openrouter?",
+    "should_trigger": false
+  },
+  {
+    "query": "ask laya whether this commit message matches its diff, just a yes or no",
+    "should_trigger": false
+  },
+  {
+    "query": "write a coding challenge for our interview loop: an LRU cache kata with a hidden test suite",
+    "should_trigger": false
+  },
+  {
+    "query": "fine-tune gemma4, the model llm-server serves, with LoRA on our commit history so pi gets better at our code",
+    "should_trigger": false
+  }
+]

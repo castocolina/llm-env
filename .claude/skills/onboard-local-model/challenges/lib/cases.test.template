@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const { entry, cases } = JSON.parse(readFileSync(new URL('../data/cases.json', import.meta.url), 'utf8'));
+const mod = await import(new URL(`../${entry}`, import.meta.url));
+
+for (const c of cases) {
+  test(c.name, () => {
+    const args = structuredClone(c.args).map((a) => (typeof a === 'string' && a.startsWith('@') ? root + a.slice(1) : a));
+    assert.deepEqual(mod[c.call](...args), c.expected);
+  });
+}

@@ -1,0 +1,16 @@
+{
+  "id": "event-pipeline",
+  "summary": "This project is an event pipeline: it reads NDJSON and CSV event exports, cleans, orders and de-duplicates the events and prints a report (`src/`).",
+  "renames": {
+    "runPipeline": ["processEvents", "runAll"],
+    "compareEvents": ["orderEvents", "eventOrder"],
+    "dedupeSorted": ["dropRepeats", "uniqueSorted"],
+    "trimLower": ["normText", "cleanLower"]
+  },
+  "sites": [
+    {"id": "compare-tiebreak", "layers": [5], "file": "src/util/key.js", "find": "a.ts - b.ts || compareKeys(eventKey(a), eventKey(b))", "ops": ["drop-or-fallback"],
+     "twin": {"names": ["compareByTime", "byTimestamp"], "files": ["ordering", "timeline"]}},
+    {"id": "trim-lower", "layers": [5], "file": "src/util/strings.js", "find": "String(s ?? '').trim().toLowerCase()", "ops": ["case-fold"],
+     "twin": {"names": ["normalizeText", "lowerTrim"], "files": ["text-clean", "words"]}}
+  ]
+}

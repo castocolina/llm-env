@@ -1,0 +1,25 @@
+{
+  "id": "lab-a/Coder-9B-GGUF",
+  "gates": {
+    "tool_template": true,
+    "arch_supported": true,
+    "no_red_flags": true
+  },
+  "levels": {
+    "agentic_evidence": 2,
+    "speed": 3,
+    "context": 3,
+    "lab": 3,
+    "recency": 2
+  },
+  "jev": {
+    "agentic_evidence": {
+      "level": 0,
+      "needs_fallback": false
+    }
+  },
+  "sources": [
+    "https://huggingface.co/lab-a/Coder-9B-GGUF (retrieved 2026-10-31)"
+  ],
+  "notes": "agentic_evidence uncertain: one vendor claim, no third-party run"
+}

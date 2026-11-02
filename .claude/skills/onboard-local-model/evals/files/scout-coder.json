@@ -1,0 +1,41 @@
+[
+  {
+    "id": "lab-a/Coder-9B-GGUF",
+    "params_b": 9,
+    "ctx": 262144,
+    "fit": "vram",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 5600,
+      "bpw": 4.9
+    },
+    "updated": "2026-10-20",
+    "downloads": 900
+  },
+  {
+    "id": "lab-b/Agent-14B-GGUF",
+    "params_b": 14,
+    "ctx": 131072,
+    "fit": "vram",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 8100,
+      "bpw": 4.8
+    },
+    "updated": "2026-10-25",
+    "downloads": 400
+  },
+  {
+    "id": "lab-c/Coder-27B-IQ2-GGUF",
+    "params_b": 27,
+    "ctx": 262144,
+    "fit": "vram",
+    "pick": {
+      "quant": "IQ2_XXS",
+      "mib": 7000,
+      "bpw": 2.1
+    },
+    "updated": "2026-10-27",
+    "downloads": 300
+  }
+]

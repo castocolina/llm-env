@@ -1,0 +1,54 @@
+[
+  {
+    "id": "lab-a/Coder-9B-GGUF",
+    "params_b": 9,
+    "ctx": 32768,
+    "fit": "vram",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 5600,
+      "bpw": 4.9
+    },
+    "updated": "2026-10-20",
+    "downloads": 900
+  },
+  {
+    "id": "lab-d/MoE-30B-A3B-GGUF",
+    "params_b": 30,
+    "ctx": 262144,
+    "fit": "offload",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 17500,
+      "bpw": 4.8
+    },
+    "updated": "2026-10-28",
+    "downloads": 700
+  },
+  {
+    "id": "lab-e/Short-8B-GGUF",
+    "params_b": 8,
+    "ctx": 32768,
+    "fit": "vram",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 4900,
+      "bpw": 4.9
+    },
+    "updated": "2026-10-29",
+    "downloads": 100
+  },
+  {
+    "id": "lab-f/Dense-32B-GGUF",
+    "params_b": 32,
+    "ctx": 131072,
+    "fit": "no",
+    "pick": {
+      "quant": "Q4_K_M",
+      "mib": 19000,
+      "bpw": 4.8
+    },
+    "updated": "2026-10-26",
+    "downloads": 200
+  }
+]

@@ -1,0 +1,17 @@
+{
+  "id": "currency-invoice",
+  "summary": "This project is a small invoicing library (`src/`).",
+  "renames": {
+    "createInvoice": ["makeInvoice", "buildInvoice"],
+    "invoiceTotals": ["computeTotals", "invoiceSums"],
+    "formatMoney": ["showMoney", "moneyText"],
+    "taxOn": ["taxFor", "levyOn"]
+  },
+  "sites": [
+    {"id": "tax-base", "layers": [3], "file": "src/tax.js", "find": "sub(subtotal, discount)", "ops": ["swap-args"]}
+  ],
+  "features": [
+    {"id": "multi-currency", "layers": [4], "prompt": "- `money(cents, currency = 'USD')` returns `{ cents, currency }`; `cents` is an integer count of the currency's minor\n  units (see `src/currency.js`). `add`, `sub` and `percent` must keep the currency and `add`/`sub` must refuse to mix currencies with a `RangeError`; `sum(list, currency = 'USD')`\n  and `times` keep the currency.\n- `convert(money, to, rates)` in `src/convert.js`: `rates` maps a currency code to its units per 1 USD\n  (`{ USD: 1, EUR: 0.92, JPY: 151.3 }`); any pair converts through it, the result is rounded half up to the target's\n  minor unit, and a missing rate is a `RangeError`.\n- Invoices: `createInvoice(lines, { taxBps = 0, discountBps = 0, currency, rates })`; totals are in `currency` (default: the first line's\n  currency, else USD). Each line total is converted, then summed, then discounted, then taxed; lines in another currency without\n  `rates` is a `RangeError`. Discount and tax keep the currency.\n- `formatMoney` / `formatInvoice` show the currency symbol and its minor-unit digits; invoice lines show their own\n  currency, the totals the invoice currency.", "replace": ["src/money.js", "src/convert.js", "src/format.js", "src/invoice.js"], "delete": []},
+    {"id": "discount", "layers": [4], "prompt": "Add invoice discounts: `createInvoice(lines, { discountBps = 0, ... })`; the discount is `discountBps` basis points of the subtotal, rounded half up to the minor unit, and comes off before tax (tax is charged on the subtotal minus the discount); `invoiceTotals` returns `discount` (zero in the invoice currency when there is none), and `formatInvoice` prints `Discount: -<amount>` after the subtotal only when the discount is not zero.", "replace": ["src/invoice.js", "src/format.js", "src/tax.js"], "delete": []}
+  ]
+}

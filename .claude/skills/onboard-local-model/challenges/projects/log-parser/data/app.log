@@ -1,0 +1,6 @@
+2026-10-30T10:00:01Z INFO boot ok
+2026-10-30T10:00:02Z ERROR db timeout after 30s
+2026-10-30T10:00:03Z WARN slow query
+2026-10-30T10:00:04Z FATAL out of memory
+2026-10-30T10:00:05Z error retry failed
+

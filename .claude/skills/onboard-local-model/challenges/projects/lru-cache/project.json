@@ -1,0 +1,16 @@
+{
+  "id": "lru-cache",
+  "summary": "This project is a small in-memory cache with a fixed capacity (`src/`).",
+  "renames": {
+    "LRUCache": ["RecentCache", "BoundedCache", "EvictingCache"]
+  },
+  "sites": [
+    {
+      "id": "lru-class",
+      "layers": [2],
+      "file": "src/lru.js",
+      "stub": "LRUCache",
+      "spec": "`new LRUCache(capacity)`, `get(key)` returns the value or `undefined` and marks the key most recently used, `set(key, value)` inserts or updates and evicts the least recently used key when over capacity, `size` is a getter."
+    }
+  ]
+}

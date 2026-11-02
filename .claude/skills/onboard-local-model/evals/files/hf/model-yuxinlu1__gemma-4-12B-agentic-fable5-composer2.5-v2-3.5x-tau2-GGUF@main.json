@@ -1,0 +1,9 @@
+{
+  "id": "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF",
+  "sha": "190a31365a6b80a692349be34ccdac730cad4fe4",
+  "gguf": {
+    "total": 11766000000,
+    "context_length": 262144,
+    "architecture": "gemma4"
+  }
+}

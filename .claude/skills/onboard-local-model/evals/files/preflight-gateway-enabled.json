@@ -1,0 +1,60 @@
+{
+  "gpu": {
+    "pci": "0000:03:00.0",
+    "render_node": "renderD128",
+    "total_mib": 16305,
+    "used_mib": 6200,
+    "free_mib": 10105,
+    "temp_c": 52,
+    "sclk_mhz": 2400,
+    "busy_pct": 3,
+    "holders": [
+      {
+        "pid": 4343,
+        "comm": "python3",
+        "vram_mib": 4300
+      }
+    ]
+  },
+  "budget": {
+    "vram_ceiling_mib": 15489,
+    "system_one_reserve_mib": 5120,
+    "model_vram_budget_mib": 10369,
+    "ram_offload_budget_mib": 0,
+    "ram_budget_source": "llmenv budget",
+    "llmenv_budget": {
+      "feasible": true,
+      "vram_feasible": true,
+      "vram_available_mib": 8321,
+      "vram_required_mib": 7300,
+      "vram_shortfall_mib": 0,
+      "ram_available_mib": 0,
+      "ram_feasible": true,
+      "ram_required_mib": 0,
+      "remedies": []
+    }
+  },
+  "ram": {
+    "total_mib": 31800,
+    "available_mib": 14500,
+    "swap_used_mib": 3100
+  },
+  "services": {
+    "llm_server_enabled": false,
+    "llm_server_running": false,
+    "system_one_enabled": true,
+    "system_one_running": true,
+    "omniroute_running": true
+  },
+  "runtime": {
+    "backend": "vulkan",
+    "image": "ghcr.io/ggml-org/llama.cpp:server-vulkan",
+    "enabled_models": [
+      "gemma4"
+    ]
+  },
+  "disk": {
+    "models_dir": "/home/user/llm-workspace/models",
+    "free_mib": 182000
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "log-parser",
+  "summary": "This project is a small log summarizer that counts the severe lines of a log file (`src/`).",
+  "renames": {
+    "errorReport": ["summarizeErrors", "countErrors"],
+    "parseLine": ["readEntry", "splitEntry"],
+    "isError": ["isFailure", "isSevere"],
+    "ERROR_LEVELS": ["SEVERE_LEVELS", "FAILURE_LEVELS"]
+  },
+  "sites": [
+    {"id": "level-case", "layers": [3], "file": "src/parse.js", "find": "m[2].toLowerCase()", "ops": ["case-fold"]},
+    {"id": "error-check", "layers": [3], "file": "src/levels.js", "find": "ERROR_LEVELS.has(entry.level)", "ops": ["negate"]}
+  ]
+}

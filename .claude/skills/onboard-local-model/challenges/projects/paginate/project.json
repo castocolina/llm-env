@@ -1,0 +1,13 @@
+{
+  "id": "paginate",
+  "summary": "This project is a small pagination helper (`src/`).",
+  "renames": {
+    "paginate": ["pageOf", "slicePage", "getPage"],
+    "perPage": ["pageSize", "perSheet"]
+  },
+  "sites": [
+    {"id": "start-offset", "layers": [1], "file": "src/paginate.js", "find": "(page - 1) * perPage", "ops": ["drop-minus-one"]},
+    {"id": "page-count", "layers": [1], "file": "src/paginate.js", "find": "Math.ceil(items.length / perPage)", "ops": ["ceil-floor"]},
+    {"id": "paginate-fn", "layers": [2], "file": "src/paginate.js", "stub": "paginate", "spec": "`paginate(items, page, perPage)` returns `{ items, totalPages }`: `page` is 1-based, `items` holds that page's elements in order (an empty array past the last page), and `totalPages` is the number of pages, rounded up."}
+  ]
+}

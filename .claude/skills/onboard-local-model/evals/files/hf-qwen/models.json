@@ -1,0 +1,8 @@
+[
+  {"id": "qwen/Qwen3.8-27B-GGUF", "downloads": 5400, "likes": 210, "lastModified": "2026-10-25T00:00:00.000Z",
+   "gguf": {"total": 27000000000, "context_length": 262144, "architecture": "qwen38"},
+   "baseModels": {"models": [{"id": "qwen/Qwen3.8-27B"}]}, "tags": ["gguf"], "sha": "2727272727272727272727272727272727272727"},
+  {"id": "qwen/Qwen3.8-Coder-9B-GGUF", "downloads": 3100, "likes": 150, "lastModified": "2026-10-27T00:00:00.000Z",
+   "gguf": {"total": 9000000000, "context_length": 262144, "architecture": "qwen38"},
+   "baseModels": {"models": [{"id": "qwen/Qwen3.8-Coder-9B"}]}, "tags": ["gguf"], "sha": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c"}
+]

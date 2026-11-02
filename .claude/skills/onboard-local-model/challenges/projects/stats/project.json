@@ -1,0 +1,22 @@
+{
+  "id": "stats",
+  "summary": "This project is a small statistics helper (`src/`).",
+  "renames": {
+    "median": ["middleValue", "midpoint"],
+    "percentile": ["nearestRank", "quantileAt"],
+    "histogram": ["bucketCounts", "binCounts"],
+    "countInRange": ["countBetween", "inRangeCount"],
+    "ascending": ["byValue", "numericOrder"]
+  },
+  "sites": [
+    {"id": "ascending-order", "layers": [1], "file": "src/stats.js", "find": "(a, b) => a - b", "ops": ["swap-sub"]},
+    {"id": "median-pair", "layers": [1], "file": "src/stats.js", "find": "sorted[mid - 1]", "ops": ["drop-minus-one"]},
+    {"id": "percentile-rank", "layers": [1], "file": "src/stats.js", "find": "Math.ceil((p / 100) * sorted.length)", "ops": ["ceil-floor"]},
+    {"id": "bucket-start", "layers": [1], "file": "src/stats.js", "find": "Math.floor(x / width)", "ops": ["ceil-floor"]},
+    {"id": "range-upper", "layers": [1], "file": "src/stats.js", "find": "x < hi", "ops": ["lt-le"]},
+    {"id": "median-fn", "layers": [2], "file": "src/stats.js", "stub": "median", "spec": "`median(xs)` returns the middle value of `xs` sorted in ascending order; for an even count it is the mean of the two middle values; an empty list gives 0; `xs` is not modified."},
+    {"id": "percentile-fn", "layers": [2], "file": "src/stats.js", "stub": "percentile", "spec": "`percentile(xs, p)` returns the nearest-rank percentile: sort ascending and take the element at position `ceil(p / 100 * n)` counting from 1 (at least the first element); an empty list gives 0; `xs` is not modified."},
+    {"id": "histogram-fn", "layers": [2], "file": "src/stats.js", "stub": "histogram", "spec": "`histogram(xs, width)` counts values per bucket of size `width`: `x` belongs to the bucket starting at `floor(x / width) * width`; it returns an object from each non-empty bucket start to its count."},
+    {"id": "count-in-range-fn", "layers": [2], "file": "src/stats.js", "stub": "countInRange", "spec": "`countInRange(xs, lo, hi)` returns how many values are at least `lo` and below `hi`."}
+  ]
+}

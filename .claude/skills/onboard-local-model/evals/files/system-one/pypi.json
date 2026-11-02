@@ -1,0 +1,40 @@
+{
+  "info": {
+    "requires_python": ">=3.10",
+    "project_urls": {
+      "Homepage": "https://example.invalid/laya"
+    }
+  },
+  "releases": {
+    "0.4.1": [
+      {
+        "upload_time": "2026-10-10T00:00:00",
+        "yanked": false
+      }
+    ],
+    "0.4.2": [
+      {
+        "upload_time": "2026-10-11T00:00:00",
+        "yanked": false
+      }
+    ],
+    "0.4.3": [
+      {
+        "upload_time": "2026-10-12T00:00:00",
+        "yanked": false
+      }
+    ],
+    "0.4.4": [
+      {
+        "upload_time": "2026-10-13T00:00:00",
+        "yanked": true
+      }
+    ],
+    "0.5.0": [
+      {
+        "upload_time": "2026-10-14T00:00:00",
+        "yanked": false
+      }
+    ]
+  }
+}
