@@ -48,7 +48,13 @@ fi
 # reports.
 combo_context_response="$(llmenv omniroute combo-context --config "$CONFIG_PATH")" \
     || die "$(jq -r '.error // "could not fetch OmniRoute combos"' <<<"$combo_context_response")"
-combo_models_json="$(jq '[.combos[] | select(.min_context_window != null) | {
+# A combo whose members are all llama-cpp needs the local server: drop it when
+# local inference is off. A combo without a members key is kept.
+combo_models_json="$(jq --argjson llm_enabled "$llm_server_enabled" '[.combos[]
+    | select(.min_context_window != null
+             and ($llm_enabled
+                  or (([.members[]?.provider] | length > 0 and all(. == "llama-cpp")) | not)))
+    | {
     id: .combo,
     label: "\(.combo) (combo)",
     ctx_size: .min_context_window,

@@ -24,7 +24,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pylib.omniroute import OmniRouteError, _extract_providers, _login, _request
+from pylib.omniroute import (
+    OmniRouteError,
+    _extract_providers,
+    _login,
+    _request,
+    find_connection,
+)
 
 # Fields accepted by POST /api/combos and PUT /api/combos/{id} (see
 # createComboSchema in OmniRoute's own source). Backing up and restoring
@@ -209,3 +215,70 @@ def restore_combos(
             result["unresolved_connections"] = unresolved
         results.append(result)
     return results
+
+
+LOCAL_COMBO_NAME = "my-coding-lite"
+_MEMBER_KEYS = ("model", "providerId", "connectionId", "label")
+
+
+def local_combo_payload(alias: str, connection_id: str, context_length: int) -> dict[str, Any]:
+    # Task 0 spike: OmniRoute accepted and persisted member id + context_length, no `config`.
+    return {
+        "name": LOCAL_COMBO_NAME,
+        "strategy": "priority",
+        "models": [
+            {
+                "id": f"{LOCAL_COMBO_NAME}-model-1-llama-cpp-{alias.replace('.', '-')}-{connection_id}",
+                "kind": "model",
+                "model": f"llama-cpp/{alias}",
+                "providerId": "llama-cpp",
+                "connectionId": connection_id,
+                "weight": 0,
+                "label": "llm-env-local",
+            }
+        ],
+        "context_length": context_length,
+    }
+
+
+def _members(combo: dict[str, Any]) -> list[tuple[Any, ...]]:
+    return [
+        tuple(m.get(k) for k in _MEMBER_KEYS) for m in combo.get("models") or [] if isinstance(m, dict)
+    ]
+
+
+def _matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
+    # Keys the payload omits (OmniRoute-added `config`, ...) are ignored; member `id` is ignored.
+    scalars = all(existing.get(k) == v for k, v in desired.items() if k not in ("name", "models"))
+    return scalars and _members(existing) == _members(desired)
+
+
+def ensure_local_combo(
+    base_url: str, dashboard_password: str, alias: str, context_length: int
+) -> dict[str, Any]:
+    """Create or update the local-only my-coding-lite combo; the tool owns it, so drift is overwritten."""
+    result: dict[str, Any] = {
+        "combo": LOCAL_COMBO_NAME,
+        "model": f"llama-cpp/{alias}",
+        "context_length": context_length,
+    }
+    session_token = _login(base_url, dashboard_password)
+    connection = find_connection(
+        _extract_providers(_request("GET", f"{base_url}/api/providers", session_token))
+    )
+    connection_id = connection.get("id") if connection else None
+    if not isinstance(connection_id, str) or not connection_id:
+        return {**result, "action": "skipped", "reason": "no llm-env-local connection; run make start-llama"}
+    desired = local_combo_payload(alias, connection_id, context_length)
+    listing = _request("GET", f"{base_url}/api/combos", session_token)
+    combos = listing.get("combos") if isinstance(listing, dict) else None
+    if not isinstance(combos, list):
+        raise OmniRouteError("unexpected /api/combos response shape")
+    existing = next((c for c in combos if isinstance(c, dict) and c.get("name") == LOCAL_COMBO_NAME), None)
+    if existing is None:
+        _request("POST", f"{base_url}/api/combos", session_token, desired)
+        return {**result, "action": "created"}
+    if _matches(existing, desired):
+        return {**result, "action": "unchanged"}
+    _request("PUT", f"{base_url}/api/combos/{existing['id']}", session_token, desired)
+    return {**result, "action": "updated"}

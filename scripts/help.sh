@@ -39,6 +39,7 @@ _help_line "codex-provision" "Import local Codex CLI session into OmniRoute (mat
 _help_line "provider-provision" "Alias for codex-provision (Codex-only; not all local providers)"
 _help_line "fix-codex-context" "Correct OmniRoute Codex model context windows"
 _help_line "combo-context" "Set a combo context length (COMBO=name)"
+_help_line "local-combo" "Create or update the local-only OmniRoute combo my-coding-lite from the capacity card"
 _help_line "backup" "Back up OmniRoute combos + provider connection metadata (before prune/clean)"
 _help_line "combo-backup" "Back up OmniRoute combos only (OUTPUT=path optional)"
 _help_line "combo-restore" "Restore OmniRoute combos (INPUT=path; OVERWRITE=1 optional)"

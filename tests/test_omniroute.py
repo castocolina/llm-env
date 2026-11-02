@@ -619,6 +619,69 @@ def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
     ]
 
 
+def _lite_combo_result(monkeypatch, catalog_data, **kwargs):
+    combos_payload = {
+        "combos": [{"name": "my-coding-lite", "models": [_combo_member("llama-cpp", "qwen")]}]
+    }
+    monkeypatch.setattr(
+        omniroute_module.urllib.request,
+        "urlopen",
+        _combo_context_urlopen(
+            _fake_login_ok(), {"object": "list", "data": catalog_data}, combos_payload
+        ),
+    )
+    return compute_combo_context("http://127.0.0.1:20128", "dashboard-pw", **kwargs)
+
+
+def test_compute_combo_context_resolves_llama_cpp_members_from_local_limits(monkeypatch):
+    result = _lite_combo_result(monkeypatch, [], local_limits={"qwen": (131072, 8192)})
+
+    assert result == [
+        {
+            "combo": "my-coding-lite",
+            "members": [
+                {
+                    "provider": "llama-cpp",
+                    "model": "qwen",
+                    "context_window": 131072,
+                    "max_output_tokens": 8192,
+                }
+            ],
+            "min_context_window": 131072,
+            "min_max_output_tokens": 8192,
+            "limiting_member": "llama-cpp/qwen",
+        }
+    ]
+
+
+def test_compute_combo_context_without_local_limits_leaves_llama_cpp_unresolved(monkeypatch):
+    (combo,) = _lite_combo_result(monkeypatch, [])
+
+    assert combo["min_context_window"] is None
+    assert combo["limiting_member"] is None
+
+
+def test_compute_combo_context_ignores_the_catalog_for_llama_cpp_members(monkeypatch):
+    catalog = [
+        {
+            "id": "llama-cpp/qwen",
+            "root": "qwen",
+            "owned_by": "llama-cpp",
+            "context_length": 8192,
+            "max_output_tokens": 4096,
+        }
+    ]
+    for kwargs in ({"local_limits": {}}, {}):
+        (combo,) = _lite_combo_result(monkeypatch, catalog, **kwargs)
+        (member,) = combo["members"]
+        assert member["context_window"] is None
+        assert member["max_output_tokens"] is None
+        assert combo["min_context_window"] is None
+    (combo,) = _lite_combo_result(monkeypatch, catalog, local_limits={"qwen": (131072, 8192)})
+    (member,) = combo["members"]
+    assert (member["context_window"], member["max_output_tokens"]) == (131072, 8192)
+
+
 def test_compute_combo_context_leaves_unknown_models_out_of_the_minimum(monkeypatch):
     login = _fake_login_ok()
     catalog = {"object": "list", "data": []}

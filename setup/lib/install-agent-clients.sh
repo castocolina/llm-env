@@ -108,9 +108,14 @@ _iac_stage_pi() {
 
 _iac_stage_pi_settings() {
     local source="$1" models="$2" staged="$3"
+    # Current router-env ids first (setup order), then the prior non-router-env
+    # entries in their order, without duplicates.
     jq --slurpfile models "$models" '
         if type != "object" then error("Pi settings must be an object") else
-          .enabledModels = [$models[0][] | "router-env/\(.id)"]
+          (.enabledModels // []) as $old
+          | [$models[0][] | "router-env/\(.id)"] as $router
+          | .enabledModels = ($router + [$old[] | select(startswith("router-env/") | not)]
+                             | reduce .[] as $m ([]; if index([$m]) then . else . + [$m] end))
         end
     ' "$source" >"$staged"
 }
@@ -208,18 +213,30 @@ install_agent_clients() {
         "${opencode_dir}/opencode.jsonc"
     )
 
+    # The client configs reference the key through this private file; the key
+    # itself never enters a jq argument or a client config.
+    local key_dir="${XDG_CONFIG_HOME:-$HOME/.config}/router-env"
+    local key_path="${key_dir}/api-key"
+    case "$key_path" in
+        /*) ;;
+        *) _iac_die "router-env key file path must be absolute: ${key_path}" ;;
+    esac
+    case "$key_path" in
+        *\'*) _iac_die "router-env key file path must not contain a single quote" ;;
+    esac
+
     local models_state_file="${workdir}/models-state.json"
     jq '[.[] | .alias = .id]' "$models_file" >"$models_state_file" \
         || _iac_die "could not build model ids for OpenCode model state"
     chmod 600 "$models_state_file" || _iac_die "could not secure model ids"
 
     local pi_provider="${workdir}/pi-provider.json"
-    jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
+    jq -n --arg base_url "$base_url" --arg key_path "$key_path" \
         --slurpfile models "$models_file" \
         '($models[0]) as $models | {
             baseUrl: $base_url,
             api: "openai-completions",
-            apiKey: ($api_key | rtrimstr("\n")),
+            apiKey: "!cat '"'"'\($key_path)'"'"'",
             compat: {supportsDeveloperRole: false, supportsReasoningEffort: false},
             models: [$models[] | {
                 id: .id,
@@ -230,12 +247,12 @@ install_agent_clients() {
     chmod 600 "$pi_provider" || _iac_die "could not secure Pi provider"
 
     local opencode_provider="${workdir}/opencode-provider.json"
-    jq -n --arg base_url "$base_url" --rawfile api_key "$api_key_file" \
+    jq -n --arg base_url "$base_url" --arg key_path "$key_path" \
         --slurpfile models "$models_file" \
         '($models[0]) as $models | {
             npm: "@ai-sdk/openai-compatible",
             name: "router-env",
-            options: {baseURL: $base_url, apiKey: ($api_key | rtrimstr("\n"))},
+            options: {baseURL: $base_url, apiKey: "{file:\($key_path)}"},
             models: (reduce $models[] as $model ({};
                 .[$model.id] = {
                     name: $model.label,
@@ -342,6 +359,14 @@ install_agent_clients() {
     _iac_ensure_private_dir "$pi_dir"
     _iac_ensure_private_dir "$opencode_dir"
 
+    # Staged first and moved first: no client config may point at a key file
+    # that is not in place yet.
+    _iac_prepare_staged_file "$key_dir" "api-key"
+    local key_staged="$IAC_STAGED_FILE"
+    tr -d '\n' <"$api_key_file" >"$key_staged" || _iac_die "could not stage the router-env key file"
+    [ -s "$key_staged" ] || _iac_die "the router-env key file would be empty"
+    chmod 600 "$key_staged" || _iac_die "could not secure staged router-env key file"
+
     _iac_prepare_staged_file "$pi_dir" "models.json"
     local pi_staged="$IAC_STAGED_FILE"
     _iac_stage_pi "$pi_source" "$pi_provider" "$pi_staged" || _iac_die "could not update Pi configuration"
@@ -386,6 +411,8 @@ install_agent_clients() {
     fi
 
     local replacement_error="client replacement failed; close Pi and OpenCode, then rerun the installer to repair partial updates"
+    mv -f -- "$key_staged" "$key_path" || _iac_die "$replacement_error"
+    staged_files=("${staged_files[@]:1}")
     mv -f -- "$pi_staged" "$pi_path" || _iac_die "$replacement_error"
     staged_files=("${staged_files[@]:1}")
     mv -f -- "$pi_settings_staged" "$pi_settings_path" || _iac_die "$replacement_error"

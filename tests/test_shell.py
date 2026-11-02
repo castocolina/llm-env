@@ -6283,7 +6283,8 @@ def test_setup_stages_every_target_before_first_replacement(
     first_move = next(
         index for index, line in enumerate(lines) if line.startswith("mv ")
     )
-    targets = (pi_path, settings_path, *opencode_paths, state_path)
+    key_path = tmp_path / "home/.config/router-env/api-key"
+    targets = (key_path, pi_path, settings_path, *opencode_paths, state_path)
     for target in targets:
         pattern = f"{target.parent}/.{target.name}.XXXXXX"
         assert any(pattern in line for line in lines[:first_move])
@@ -6298,7 +6299,7 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
     opencode_state_text = '{"recent":[],"favorite":[],"variant":{}}'
     failed, _, *_ = run_setup_local_llm_agents(
         tmp_path,
-        fail_move_number=2,
+        fail_move_number=3,
         pi_text=pi_text,
         pi_settings_text=pi_settings_text,
         opencode_config_json_text=opencode_config_json_text,
@@ -6342,7 +6343,7 @@ def test_setup_local_llm_agents_creates_private_provider_files(
     assert json.loads(pi_path.read_text())["providers"]["router-env"] == {
         "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
-        "apiKey": "fixture-omniroute-api-key",
+        "apiKey": f"!cat '{tmp_path}/home/.config/router-env/api-key'",
         "compat": {
             "supportsDeveloperRole": False,
             "supportsReasoningEffort": False,
@@ -6359,7 +6360,7 @@ def test_setup_local_llm_agents_creates_private_provider_files(
         "name": "router-env",
         "options": {
             "baseURL": "http://127.0.0.1:20128/v1",
-            "apiKey": "fixture-omniroute-api-key",
+            "apiKey": f"{{file:{tmp_path}/home/.config/router-env/api-key}}",
         },
         "models": {
             "llama-cpp/gemma4": {
@@ -6412,6 +6413,59 @@ def test_setup_local_llm_agents_maps_combos_alongside_llama_cpp_models(
         "name": "my-coding (combo)",
         "limit": {"context": 200000, "output": 128000},
     }
+
+
+LITE_COMBO_JSON = (
+    '{"combo":"my-coding-lite","members":[{"provider":"llama-cpp","model":"qwen",'
+    '"context_window":131072,"max_output_tokens":8192}],"min_context_window":131072,'
+    '"min_max_output_tokens":8192,"limiting_member":"llama-cpp/qwen"}'
+)
+
+
+def test_setup_local_llm_agents_maps_my_coding_lite_with_card_limits(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _calls, pi_path, settings_path, opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            combo_context_case=f"printf '{{\"combos\":[{LITE_COMBO_JSON}]}}\\n'",
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
+    assert {"id": "my-coding-lite", "contextWindow": 131072, "maxTokens": 8192} in pi_models
+    assert "router-env/my-coding-lite" in json.loads(settings_path.read_text())["enabledModels"]
+    opencode_models = json.loads(opencode_paths[2].read_text())["provider"]["router-env"]["models"]
+    assert opencode_models["my-coding-lite"] == {
+        "name": "my-coding-lite (combo)",
+        "limit": {"context": 131072, "output": 8192},
+    }
+
+
+def test_setup_local_llm_agents_drops_local_only_combos_when_llm_server_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    mixed = (
+        '{"combo":"my-coding","members":[{"provider":"codex","model":"gpt-5.6-sol-high"},'
+        '{"provider":"llama-cpp","model":"qwen"}],"min_context_window":200000,'
+        '"min_max_output_tokens":128000}'
+    )
+    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
+        run_setup_local_llm_agents(
+            tmp_path,
+            config_text=VALID_AGENT_SETUP_CONFIG.replace(
+                "omniroute:\n", "llm_server:\n  enabled: false\nomniroute:\n", 1
+            ),
+            combo_context_case=f"printf '{{\"combos\":[{LITE_COMBO_JSON},{mixed}]}}\\n'",
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    pi_ids = [m["id"] for m in json.loads(pi_path.read_text())["providers"]["router-env"]["models"]]
+    assert pi_ids == ["my-coding"]
+    opencode_models = json.loads(opencode_paths[2].read_text())["provider"]["router-env"]["models"]
+    assert list(opencode_models) == ["my-coding"]
 
 
 def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
@@ -6713,7 +6767,7 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
     assert updated["providers"]["router-env"] == {
         "baseUrl": "http://127.0.0.1:20128/v1",
         "api": "openai-completions",
-        "apiKey": "fixture-omniroute-api-key",
+        "apiKey": f"!cat '{tmp_path}/home/.config/router-env/api-key'",
         "compat": {
             "supportsDeveloperRole": False,
             "supportsReasoningEffort": False,
@@ -6749,11 +6803,18 @@ def test_setup_local_llm_agents_migrates_legacy_pi_provider_key(
 
 
 @pytest.mark.parametrize(
-    "settings_text",
-    [None, '{"enabledModels":[]}\n', '{"theme":"dark","enabledModels":["other/model"]}\n'],
+    ("settings_text", "expected_tail"),
+    [
+        (None, []),
+        ('{"enabledModels":[]}\n', []),
+        (
+            '{"theme":"dark","enabledModels":["other/model","router-env/stale","other/model"]}\n',
+            ["other/model"],
+        ),
+    ],
 )
-def test_setup_local_llm_agents_sets_exact_pi_cycle(
-    tmp_path: pathlib.Path, settings_text: str | None
+def test_setup_local_llm_agents_puts_router_models_first_and_keeps_other_models(
+    tmp_path: pathlib.Path, settings_text: str | None, expected_tail: list[str]
 ) -> None:
     result, _, _, settings_path, _, _ = run_setup_local_llm_agents(
         tmp_path, pi_settings_text=settings_text
@@ -6764,9 +6825,29 @@ def test_setup_local_llm_agents_sets_exact_pi_cycle(
     assert settings["enabledModels"] == [
         "router-env/llama-cpp/gemma4",
         "router-env/llama-cpp/ornith",
+        *expected_tail,
     ]
     if settings_text and "theme" in settings_text:
         assert settings["theme"] == "dark"
+
+
+def test_agent_clients_never_write_the_api_key_into_client_configs(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, _, pi_path, settings_path, opencode_paths, state_path = (
+        run_setup_local_llm_agents(
+            tmp_path, opencode_jsonc_text='{"provider":{"other":{}}}\n'
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    key_path = tmp_path / "home/.config/router-env/api-key"
+    for path in (pi_path, settings_path, state_path, *opencode_paths):
+        if path.exists():
+            assert "fixture-omniroute-api-key" not in path.read_text(), path
+    assert key_path.read_text() == "fixture-omniroute-api-key"
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(key_path.parent.stat().st_mode) == 0o700
 
 
 def test_setup_local_llm_agents_preserves_explicit_pi_defaults(
@@ -6948,7 +7029,8 @@ def test_setup_local_llm_agents_stages_each_replacement_with_its_target(
         for line in calls.read_text().splitlines()
         if line.startswith("mv ")
     ]
-    targets = (pi_path, settings_path, *opencode_paths, state_path)
+    key_path = tmp_path / "home/.config/router-env/api-key"
+    targets = (key_path, pi_path, settings_path, *opencode_paths, state_path)
     assert len(moves) == len(targets)
     for move, target in zip(moves, targets, strict=True):
         assert pathlib.Path(move[-2]).parent == target.parent
@@ -13632,3 +13714,138 @@ def test_makefile_exposes_model_capacity() -> None:
         ["make", "-n", "model-capacity", "MODEL=x", "DEPTH=d"], cwd=ROOT, text=True, capture_output=True, check=False
     )
     assert 'bash scripts/model-capacity.sh "x" --depth "d"' in dry.stdout
+
+
+def run_local_combo_with_stubs(
+    tmp_path: pathlib.Path,
+    *,
+    omniroute_port: int,
+    llm_server_enabled: bool = True,
+    running: bool = True,
+    ensure_case: str = 'printf \'{"combo":"my-coding-lite","action":"created"}\\n\'',
+) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    """Run omniroute-local-combo.sh with stubbed uv/podman; returns the result and the calls log."""
+    commands = tmp_path / "bin"
+    commands.mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    calls.touch()
+    uv = commands / "uv"
+    uv.write_text(
+        "#!/usr/bin/bash\n"
+        "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
+        "case \"$*\" in\n"
+        "  *' migrate-config')\n"
+        "    python3 << PYEOF\n"
+        + MIGRATE_CONFIG_PYSTUB
+        + "PYEOF\n"
+        "    printf '{\"written\":true}\\n' ;;\n"
+        f"  *' omniroute ensure-local-combo'*) {ensure_case} ;;\n"
+        "esac\n"
+    )
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    podman = commands / "podman"
+    podman.write_text(
+        "#!/usr/bin/bash\n"
+        f"[ \"$*\" = 'inspect --format {{{{.State.Running}}}} llm-server' ] && {'echo true' if running else 'echo false'}\n"
+        "exit 0\n"
+    )
+    podman.chmod(podman.stat().st_mode | stat.S_IXUSR)
+    real_yq = shutil.which("yq")
+    assert real_yq is not None
+    yq = commands / "yq"
+    yq.write_text(f"#!/usr/bin/bash\nexec {real_yq} \"$@\"\n")
+    yq.chmod(yq.stat().st_mode | stat.S_IXUSR)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    config = tmp_path / "models.yml"
+    config.write_text(f"llm_server:\n  enabled: {str(llm_server_enabled).lower()}\nomniroute:\n  port: {omniroute_port}\n")
+    environment = os.environ | {
+        "HOME": str(home),
+        "CALLS": str(calls),
+        "LLM_ENV_CONFIG": str(config),
+        "PATH": f"{commands}:/usr/bin:/bin",
+        "LLM_ENV_HEALTH_TIMEOUT_SECONDS": "1",
+    }
+    result = subprocess.run(
+        ["/usr/bin/bash", "scripts/omniroute-local-combo.sh"],
+        cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
+    )
+    return result, calls
+
+
+def _local_combo_run(tmp_path: pathlib.Path, **kwargs):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        return run_local_combo_with_stubs(tmp_path, omniroute_port=listener.getsockname()[1], **kwargs)
+
+
+def test_local_combo_skips_when_llm_server_disabled(tmp_path: pathlib.Path) -> None:
+    result, calls = _local_combo_run(tmp_path, llm_server_enabled=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "skipping my-coding-lite" in result.stdout
+    assert "ensure-local-combo" not in calls.read_text()
+
+
+def test_local_combo_skips_when_llm_server_not_running(tmp_path: pathlib.Path) -> None:
+    result, calls = _local_combo_run(tmp_path, running=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "not running" in result.stdout and "skipping my-coding-lite" in result.stdout
+    assert "ensure-local-combo" not in calls.read_text()
+
+
+def test_local_combo_prints_the_action(tmp_path: pathlib.Path) -> None:
+    result, _calls = _local_combo_run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "my-coding-lite: created" in result.stdout
+
+
+def test_local_combo_prints_the_skip_reason(tmp_path: pathlib.Path) -> None:
+    result, _calls = _local_combo_run(
+        tmp_path, ensure_case='printf \'{"action":"skipped","reason":"no capacity card"}\\n\''
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no capacity card" in result.stdout
+
+
+def test_local_combo_dies_with_the_llmenv_error(tmp_path: pathlib.Path) -> None:
+    result, _calls = _local_combo_run(
+        tmp_path, ensure_case='printf \'{"error":"login failed"}\\n\'; exit 1'
+    )
+    assert result.returncode == 1
+    assert "login failed" in result.stderr
+
+
+def _start_local_combo_calls(tmp_path: pathlib.Path, **kwargs) -> list[str]:
+    tmp_path.mkdir()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        result, _config, calls = run_lifecycle_script(
+            tmp_path, "scripts/start.sh", omniroute_port=listener.getsockname()[1], **kwargs
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return calls.read_text().splitlines()
+
+
+def test_start_ensures_the_local_combo_after_provisioning(tmp_path: pathlib.Path) -> None:
+    script = f"bash {ROOT}/scripts/omniroute-local-combo.sh"
+    for name, kwargs in (
+        ("start", {}),
+        ("start-llama", {
+            "args": ("llm-server",), "active": True, "env_overrides": {"PODMAN_LLM_SERVER_RUNNING": "1"},
+        }),
+    ):
+        recorded = _start_local_combo_calls(tmp_path / name, **kwargs)
+        provision = next(i for i, call in enumerate(recorded) if "omniroute provision" in call)
+        assert recorded.index(script) > provision, name
+    recorded = _start_local_combo_calls(tmp_path / "disabled", llm_server_enabled=False)
+    assert script not in recorded
+
+
+def test_makefile_exposes_local_combo() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    phony = re.search(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+    assert phony is not None and "local-combo" in phony.group(1).split()
+    assert "local-combo:\n\t@bash tools/run-target.sh local-combo -- bash scripts/omniroute-local-combo.sh\n" in makefile
+    assert '_help_line "local-combo"' in (ROOT / "scripts/help.sh").read_text()

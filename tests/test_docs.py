@@ -115,8 +115,9 @@ def test_quick_start_ties_pi_model_cycle_to_setup_selection_order() -> None:
     quick_start = _normalized_markdown(ROOT / "QUICK_START.md").lower()
 
     assert (
-        "pi's global `enabledmodels` becomes exactly the setup-selected local aliases "
-        "in setup order, which defines its model cycle."
+        "pi's global `enabledmodels` starts with the setup-selected local aliases "
+        "in setup order, which defines its model cycle; stale router-env entries are "
+        "removed, while other enabled models keep their order."
     ) in quick_start
 
 

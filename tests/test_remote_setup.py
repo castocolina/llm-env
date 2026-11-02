@@ -1240,7 +1240,7 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     ]
     assert not [line for line in code_lines if "--argjson" in line]
     # The key only ever reaches jq through file-backed options.
-    assert '--rawfile api_key "$api_key_file"' in script
+    assert "--rawfile api_key" not in script
     assert '--slurpfile models "$models_file"' in script
     assert '"$pi_provider"' in script
 
@@ -1248,7 +1248,9 @@ def test_setup_sh_never_passes_the_api_key_through_a_command_argument(
     exit_code, output, home_dir = _run_generated_setup_sh(tmp_path, monkeypatch)
     assert exit_code == 0, output
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
-    assert pi_models["providers"]["router-env"]["apiKey"] == "sk-live-value"
+    key_path = home_dir / ".config" / "router-env" / "api-key"
+    assert pi_models["providers"]["router-env"]["apiKey"] == f"!cat '{key_path}'"
+    assert key_path.read_text() == "sk-live-value"
     assert "sk-live-value" not in output
 
 

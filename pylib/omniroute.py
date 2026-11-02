@@ -18,6 +18,7 @@ import http.cookies
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -437,7 +438,10 @@ def fix_codex_context_overrides(base_url: str, dashboard_password: str) -> list[
 
 
 def _resolve_member_context_window(
-    catalog_context_by_root: dict[str, int], provider_id: str, model_id: str
+    catalog_context_by_root: dict[str, int],
+    provider_id: str,
+    model_id: str,
+    local_limits: Mapping[str, tuple[int, int]] | None = None,
 ) -> int | None:
     """Resolve a combo member's real context window.
 
@@ -448,7 +452,13 @@ def _resolve_member_context_window(
     override table) -- so a codex GPT-5.6 family member is corrected here
     using the exact same value fix_codex_context_overrides() persists,
     instead of trusting the catalog's stale number for it.
+
+    A llama-cpp member is resolved from local_limits only (the measured
+    capacity card), never from the catalog.
     """
+    if provider_id == "llama-cpp":
+        limit = (local_limits or {}).get(model_id)
+        return limit[0] if limit else None
     if provider_id == "codex" and _codex_gpt_5_6_family(model_id) is not None:
         return CODEX_GPT_5_6_CONTEXT_WINDOW
     if provider_id == "kimi-coding" and model_id in KIMI_CODING_K3_MODELS:
@@ -459,7 +469,11 @@ def _resolve_member_context_window(
 
 
 def compute_combo_context(
-    base_url: str, dashboard_password: str, combo_name: str | None = None
+    base_url: str,
+    dashboard_password: str,
+    combo_name: str | None = None,
+    *,
+    local_limits: Mapping[str, tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute each combo's real minimum context/output window across its members.
 
@@ -477,6 +491,10 @@ def compute_combo_context(
     catalog-staleness bug -- it is read straight off the catalog per member
     with no correction applied, and is simply absent (None) for a member
     that is hidden from the catalog entirely (e.g. grok-composer-2.5-fast).
+
+    A llama-cpp member takes both limits from local_limits (alias ->
+    (context, max output)) and never from the catalog; both are None when the
+    alias is not listed or local_limits is omitted, as in remote-setup.
 
     Raises OmniRouteError if combo_name is given but no combo has that name.
     """
@@ -526,14 +544,19 @@ def compute_combo_context(
                 continue
             model_id = model_field.split("/", 1)[-1]
             context_window = _resolve_member_context_window(
-                catalog_context_by_root, provider_id, model_id
+                catalog_context_by_root, provider_id, model_id, local_limits
             )
+            if provider_id == "llama-cpp":
+                limit = (local_limits or {}).get(model_id)
+                max_output_tokens = limit[1] if limit else None
+            else:
+                max_output_tokens = catalog_output_by_root.get(model_id)
             members.append(
                 {
                     "provider": provider_id,
                     "model": model_id,
                     "context_window": context_window,
-                    "max_output_tokens": catalog_output_by_root.get(model_id),
+                    "max_output_tokens": max_output_tokens,
                 }
             )
 

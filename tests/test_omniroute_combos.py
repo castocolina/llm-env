@@ -9,8 +9,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.omniroute as omniroute_module
+import pylib.omniroute_combos as combos_module
 from pylib.omniroute import OmniRouteError
-from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
+from pylib.omniroute_combos import (
+    _combo_payload,
+    _remap_combo_connection_ids,
+    backup_combos,
+    backup_connections,
+    ensure_local_combo,
+    local_combo_payload,
+    restore_combos,
+)
 
 LOGIN_URL = "http://127.0.0.1:20128/api/auth/login"
 COMBOS_URL = "http://127.0.0.1:20128/api/combos"
@@ -364,3 +373,89 @@ def test_restore_combos_clears_and_reports_unresolved_connection_id(tmp_path, mo
         }
     ]
     assert posts[0]["models"][0]["connectionId"] is None
+
+
+LOCAL_PROVIDERS = {"connections": [{"provider": "llama-cpp", "name": "llm-env-local", "id": "conn-1"}]}
+
+
+def _local_combo_server(monkeypatch, *, providers=LOCAL_PROVIDERS, combos=()):
+    """Fake OmniRoute; returns the list of (method, path, body) combo writes and the combo-URL call log."""
+    login = _fake_login_ok()
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        path = request.full_url.removeprefix("http://127.0.0.1:20128")
+        body = json.loads(request.data) if request.data else None
+        calls.append((request.get_method(), path, body))
+        if path == "/api/providers":
+            return FakeResponse(providers)
+        if request.get_method() == "GET":
+            return FakeResponse({"combos": list(combos), "total": len(combos)})
+        return FakeResponse({"name": "my-coding-lite"})
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+def _local_combo(payload, **extra):
+    return _combo("my-coding-lite", **{k: v for k, v in payload.items() if k != "name"}, **extra)
+
+
+def _writes(calls):
+    return [c for c in calls if c[0] in ("POST", "PUT")]
+
+
+def _ensure(alias="qwen", context_length=131072):
+    return ensure_local_combo("http://127.0.0.1:20128", "dashboard-pw", alias, context_length)
+
+
+def test_ensure_local_combo_creates_a_local_only_priority_combo(monkeypatch):
+    calls = _local_combo_server(monkeypatch)
+    result = _ensure()
+    assert _writes(calls) == [("POST", "/api/combos", local_combo_payload("qwen", "conn-1", 131072))]
+    assert result["action"] == "created"
+    assert result["context_length"] == 131072 and result["model"] == "llama-cpp/qwen"
+
+
+def test_ensure_local_combo_is_unchanged_when_it_already_matches(monkeypatch):
+    desired = local_combo_payload("qwen", "conn-1", 131072)
+    desired["models"][0]["id"] = "another-member-id"
+    calls = _local_combo_server(monkeypatch, combos=[_local_combo(desired)])
+    assert _ensure()["action"] == "unchanged"
+    assert _writes(calls) == []
+
+
+def test_ensure_local_combo_unchanged_check_ignores_fields_the_payload_omits(monkeypatch):
+    payload = local_combo_payload("qwen", "conn-1", 131072)
+    del payload["context_length"]
+    monkeypatch.setattr(combos_module, "local_combo_payload", lambda *a: payload)
+    existing = _local_combo(payload, config={"added": "by omniroute"})
+    calls = _local_combo_server(monkeypatch, combos=[existing])
+    assert _ensure()["action"] == "unchanged"
+    assert _writes(calls) == []
+
+
+def test_ensure_local_combo_updates_drifted_context_or_members(monkeypatch):
+    drifted = local_combo_payload("qwen", "conn-1", 262144)
+    drifted["models"].append({"kind": "model", "providerId": "grok-cli", "model": "grok-cli/grok-4.6"})
+    calls = _local_combo_server(monkeypatch, combos=[_local_combo(drifted)])
+    assert _ensure()["action"] == "updated"
+    assert _writes(calls) == [
+        ("PUT", "/api/combos/id-my-coding-lite", local_combo_payload("qwen", "conn-1", 131072))
+    ]
+
+
+def test_ensure_local_combo_skips_without_the_llm_env_local_connection(monkeypatch):
+    calls = _local_combo_server(monkeypatch, providers={"connections": []})
+    result = _ensure()
+    assert result["action"] == "skipped" and "make start-llama" in result["reason"]
+    assert not [c for c in calls if c[1].startswith("/api/combos")]
+
+
+def test_local_combo_payload_survives_backup_and_restore_remap():
+    payload = local_combo_payload("qwen", "conn-1", 131072)
+    assert _combo_payload(payload) == payload
+    remapped, unresolved = _remap_combo_connection_ids(payload, {("llama-cpp", "llm-env-local"): "conn-new"})
+    assert remapped["models"][0]["connectionId"] == "conn-new" and unresolved == []

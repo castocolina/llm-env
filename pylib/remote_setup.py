@@ -493,7 +493,10 @@ def _build_unified_models(
       /api/combos do not reflect manual context-window overrides (see
       compute_combo_context's docstring). A combo with no known context
       window across any member is skipped entirely rather than mapped with
-      a fabricated limit.
+      a fabricated limit. Local-only combos never reach remote clients:
+      compute_combo_context leaves llama-cpp members unresolved without local
+      limits, so the members-based filter of setup-local-llm-agents.sh needs
+      no mirror here.
     """
     models = [
         {

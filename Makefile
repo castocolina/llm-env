@@ -1,5 +1,5 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity \
-        key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context backup \
+        key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context local-combo backup \
         combo-backup combo-restore connections-backup update-omniroute migrate-remote-setup logs validate test test-phoenix clean prune
 
 help:
@@ -104,6 +104,9 @@ fix-codex-context:
 
 combo-context:
 	@bash tools/run-target.sh combo-context -- bash scripts/omniroute-combo-context.sh $(COMBO)
+
+local-combo:
+	@bash tools/run-target.sh local-combo -- bash scripts/omniroute-local-combo.sh
 
 backup:
 	@bash tools/run-target.sh backup -- bash scripts/omniroute-backup.sh

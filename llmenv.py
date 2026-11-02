@@ -71,7 +71,13 @@ from pylib.omniroute import (
     provision,
 )
 from pylib.omniroute_cli import register as register_omniroute_update
-from pylib.omniroute_combos import backup_combos, backup_connections, restore_combos
+from pylib.omniroute_combos import (
+    LOCAL_COMBO_NAME,
+    backup_combos,
+    backup_connections,
+    ensure_local_combo,
+    restore_combos,
+)
 from pylib.phoenix_trial import (
     PhoenixTrialError,
     load_expected_file,
@@ -597,6 +603,33 @@ def cmd_resource_override(args: argparse.Namespace) -> int:
     return emit({**result, "apply": _APPLY_HINT})
 
 
+def _local_combo_skip(reason: str) -> int:
+    return emit({"combo": LOCAL_COMBO_NAME, "action": "skipped", "reason": reason})
+
+
+def _ensure_local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, password: str) -> int:
+    """Decision 4: only a current depth sweep plus a passed interference gate may feed the combo."""
+    from pylib import capacity
+
+    if not (cfg.get("llm_server") or {}).get("enabled"):
+        return _local_combo_skip("llm_server disabled")
+    models = enabled_models(cfg)
+    if not models:
+        return _local_combo_skip("no enabled model")
+    alias = models[0]["alias"]
+    try:
+        card = capacity.read_card(config_path, cfg, alias)
+    except capacity.CapacityError as exc:
+        return _local_combo_skip(str(exc))
+    now = card["usable"] if card else capacity.current_usable(config_path, cfg, alias)
+    hint = f"run make model-capacity MODEL={alias} and make model-interference"
+    if now["context_tokens"] is None:
+        return _local_combo_skip(f"{now['basis']}; {hint}")
+    if card is None or capacity.interference_passed(card) is not True:
+        return _local_combo_skip("interference gate not passed; run make model-interference")
+    return emit(ensure_local_combo(base_url, password, alias, now["context_tokens"]))
+
+
 def cmd_omniroute(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     omniroute_cfg = cfg.get("omniroute") or {}
@@ -608,6 +641,8 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
             "'make start' after 'make setup' to generate them"
         )
     base_url = f"http://127.0.0.1:{port}"
+    if args.action == "ensure-local-combo":
+        return _ensure_local_combo(Path(args.config), cfg, base_url, initial_password)
     if args.action == "provision":
         result = provision(
             base_url, initial_password, cfg["server"]["port"], cfg["server"]["api_key"]
@@ -624,7 +659,14 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
         results = zai_reset_check(base_url, initial_password, Path(args.state_file).expanduser(), dry_run=args.dry_run)
         return emit({"results": results}, 1 if any(r["action"] == "error" for r in results) else 0)
     if args.action == "combo-context":
-        combos = compute_combo_context(base_url, initial_password, combo_name=args.combo)
+        from pylib import capacity
+
+        combos = compute_combo_context(
+            base_url,
+            initial_password,
+            combo_name=args.combo,
+            local_limits=capacity.local_limits(Path(args.config), cfg),
+        )
         return emit({"combos": combos})
     if args.action == "backup-combos":
         if not args.output:
@@ -887,6 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
             "backup-combos",
             "restore-combos",
             "backup-connections",
+            "ensure-local-combo",
             "zai-reset",
         ],
     )

@@ -206,6 +206,8 @@ if wait_for_tcp_port "$omniroute_port"; then
         done
         if [ "$provisioned" -eq 1 ]; then
             log_info "OmniRoute connection configured"
+            bash "${REPO_DIR}/scripts/omniroute-local-combo.sh" \
+                || log_warn "could not ensure the my-coding-lite combo; run 'make local-combo'"
         else
             jq -r '.error // "provisioning failed"' <<<"$response" >&2
             log_warn "OmniRoute provisioning failed; configure it manually via the dashboard"

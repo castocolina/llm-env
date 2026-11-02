@@ -160,13 +160,16 @@ OmniRoute is the router: it can dispatch a request to this machine's own
 llm-server or to any other provider/combo you've configured in it, using
 priority and quota-aware strategies, not "local models only". It preserves
 all other providers and settings and writes each updated file with mode
-`0600`. It never prints the key. Run it again after rotating the key,
+`0600`. It never prints the key or writes it into the Pi or OpenCode
+configs: both reference the private key file `~/.config/router-env/api-key`
+(`0600`). Run it again after rotating the key,
 changing the port, or enabling or disabling a model.
 
 Clean setup maps `gemma4` to yuxinlu1's Agentic Gemma 4 12B v2 Q4_K_M
 build. The model and client records use an exact 131,072-token context and
-8,192-token output limit. Pi's global `enabledModels` becomes exactly the setup-selected
-local aliases in setup order, which defines its model cycle.
+8,192-token output limit. Pi's global `enabledModels` starts with the setup-selected
+local aliases in setup order, which defines its model cycle; stale router-env entries are
+removed, while other enabled models keep their order.
 OpenCode favorites start with the setup-selected local aliases in setup order;
 stale local favorites are removed, while unrelated favorites retain their
 order. The command leaves explicit client defaults unchanged.

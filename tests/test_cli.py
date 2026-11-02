@@ -2962,3 +2962,136 @@ def test_capacity_show_without_a_card_fails_with_the_make_hint(tmp_path: Path) -
     assert result.returncode == 1
     assert "make model-capacity MODEL=qwen" in json.loads(result.stdout)["error"]
     assert not (tmp_path / "capacity").exists()
+
+
+QWEN_LITE = {
+    "alias": "qwen", "label": "Qwen", "parameters": "1B", "quantization": "Q4_K_M", "enabled": True,
+    "file": "qwen.gguf", "url": "u", "size_bytes": 1, "vram_budget": "10%", "ctx_size": 131072,
+    "client_max_output_tokens": 8192, "n_gpu_layers": 99,
+}
+LITE_REPORT = {
+    "schema": 1, "passed": True, "failures": [], "notes": [], "system_one": None, "omniroute": None,
+    "events_changed": [], "vram": {"total_mib": 16304, "peak_used_mib": 9000, "headroom_min_mib": 7304},
+    "host": {"mem_available_min_mib": 20000, "swap_delta_mib": 0},
+    "llm_server": {"memory_peak_mib": 6000, "memory_cap_mib": 12000},
+}
+
+
+def _lite_config(tmp_path: Path, *, llm_server: bool = True, enabled_alias: str = "qwen") -> Path:
+    config = write_test_config(tmp_path)
+    data = yaml.safe_load(config.read_text())
+    data["models"][0]["enabled"] = False
+    data["models"].append(dict(QWEN_LITE, enabled=enabled_alias == "qwen"))
+    data["models"].append(dict(QWEN_LITE, alias="Qwen3", file="q3.gguf", enabled=enabled_alias == "Qwen3"))
+    data["llm_server"] = {"enabled": llm_server}
+    data["omniroute"] = {"port": 20128, "initial_password": "dashboard-pw"}
+    config.write_text(yaml.safe_dump(data))
+    return config
+
+
+def _write_lite_card(config: Path, *, depth: int | None = 130560, interference: bool = True) -> None:
+    from pylib import capacity
+    from pylib.config import load_config
+
+    points = [{"depth": 0, "pp_tps": 900, "tg_tps": 60}]
+    if depth is not None:
+        points.append({"depth": depth, "pp_tps": 300, "tg_tps": 30})
+    bench = {
+        "alias": "qwen", "file": "qwen.gguf", "n_cpu_moe": None,
+        "flags": {
+            "n_gpu_layers": 99, "n_cpu_moe": None, "cache_type_k": "q8_0", "cache_type_v": "q8_0",
+            "ubatch_size": 512, "flash_attn": True, "threads": None,
+        },
+        "limits": {"cpus": None, "memory_mib": None}, "system_one_warm": True,
+        "gpu": {"samples": 1, "seconds": 1, "first_vram_mib": 1, "peak_vram_mib": 2, "peak_temp_c": 40,
+                "avg_sclk_mhz": 1, "avg_gpu_busy_pct": 1, "avg_cpu_pct": 1, "model_vram_mib": 1},
+        "tps": points,
+    }
+    capacity.write_card(
+        config, load_config(config), "qwen", depth=bench, interference=LITE_REPORT if interference else None
+    )
+
+
+def _ensure_local_combo_cli(config: Path, monkeypatch, capsys) -> tuple[int, dict, list]:
+    import llmenv
+
+    calls: list = []
+
+    def fake(*args):
+        calls.append(args[2:])
+        return {"combo": "my-coding-lite", "action": "created"}
+
+    monkeypatch.setattr(llmenv, "ensure_local_combo", fake)
+    code = llmenv.main(["--config", str(config), "omniroute", "ensure-local-combo"])
+    return code, json.loads(capsys.readouterr().out), calls
+
+
+def test_ensure_local_combo_cli_skips_when_llm_server_disabled(tmp_path, monkeypatch, capsys):
+    code, out, calls = _ensure_local_combo_cli(_lite_config(tmp_path, llm_server=False), monkeypatch, capsys)
+    assert code == 0 and out["action"] == "skipped" and out["reason"] == "llm_server disabled"
+    assert calls == []
+
+
+def test_ensure_local_combo_cli_skips_without_an_enabled_model(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    config = _lite_config(tmp_path)
+    monkeypatch.setattr(llmenv, "enabled_models", lambda cfg: [])  # validation rejects such a config on disk
+    code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+    assert code == 0 and out["reason"] == "no enabled model" and calls == []
+
+
+def test_ensure_local_combo_cli_skips_without_a_capacity_card(tmp_path, monkeypatch, capsys):
+    code, out, calls = _ensure_local_combo_cli(_lite_config(tmp_path), monkeypatch, capsys)
+    assert code == 0 and out["action"] == "skipped" and calls == []
+    assert "make model-capacity MODEL=qwen" in out["reason"]
+
+
+def test_ensure_local_combo_cli_skips_without_a_passed_interference_gate(tmp_path, monkeypatch, capsys):
+    config = _lite_config(tmp_path)
+    _write_lite_card(config, interference=False)
+    code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+    assert code == 0 and out["action"] == "skipped" and calls == []
+    assert "make model-interference" in out["reason"]
+
+
+def test_ensure_local_combo_cli_skips_on_a_stale_card(tmp_path, monkeypatch, capsys):
+    config = _lite_config(tmp_path)
+    _write_lite_card(config)
+    data = yaml.safe_load(config.read_text())
+    next(m for m in data["models"] if m["alias"] == "qwen")["ctx_size"] = 262144
+    config.write_text(yaml.safe_dump(data))
+    code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+    assert code == 0 and out["action"] == "skipped" and calls == []
+
+
+def test_ensure_local_combo_cli_skips_an_alias_that_cannot_name_a_card(tmp_path, monkeypatch, capsys):
+    config = _lite_config(tmp_path, enabled_alias="Qwen3")
+    code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+    assert code == 0 and out["action"] == "skipped" and calls == []
+    assert "cannot name a capacity card" in out["reason"]
+
+
+def test_ensure_local_combo_cli_uses_the_card_usable_context(tmp_path, monkeypatch, capsys):
+    config = _lite_config(tmp_path)
+    _write_lite_card(config)
+    code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+    assert code == 0 and out["action"] == "created"
+    assert calls == [("qwen", 131072)]
+
+
+def test_combo_context_cli_passes_card_limits(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    seen: list = []
+
+    def fake(*args, **kwargs):
+        seen.append(kwargs["local_limits"])
+        return []
+
+    monkeypatch.setattr(llmenv, "compute_combo_context", fake)
+    config = _lite_config(tmp_path)
+    assert llmenv.main(["--config", str(config), "omniroute", "combo-context"]) == 0
+    _write_lite_card(config)
+    assert llmenv.main(["--config", str(config), "omniroute", "combo-context"]) == 0
+    assert seen == [{}, {"qwen": (131072, 8192)}]
