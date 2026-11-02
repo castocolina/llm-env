@@ -260,6 +260,17 @@ reject_symlink_components() {
 # Run llmenv.py and return its JSON on stdout.
 llmenv() { uv run "${REPO_DIR}/llmenv.py" "$@"; }
 
+# llmenv_budget_json CONFIG MODELS_DIR: prints the `llmenv budget` JSON and returns 0 for any verdict (an infeasible fit
+# exits 1 but is still a verdict); returns 1 with the reason on stderr when there is none. llmenv's own stderr is kept.
+llmenv_budget_json() {
+    local out err
+    out="$(llmenv --config "$1" budget --models-dir "$2" || true)"
+    jq -e 'type == "object"' <<<"$out" >/dev/null 2>&1 || { echo "llmenv budget printed no JSON object: $out" >&2; return 1; }
+    err="$(jq -r '.error // empty' <<<"$out")"
+    [ -z "$err" ] || { echo "llmenv budget failed: $err" >&2; return 1; }
+    printf '%s\n' "$out"
+}
+
 # True when the named podman container exists and is running (missing container: false, silently).
 container_running() { [ "$(podman inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
 

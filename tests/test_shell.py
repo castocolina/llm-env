@@ -217,6 +217,28 @@ def test_presets_helpers_read_a_generated_ini(tmp_path: pathlib.Path) -> None:
     assert result.stdout.splitlines() == ["99", "40", "12", "<empty>"]
 
 
+@pytest.mark.parametrize(("out", "rc", "code", "stderr_part"), [
+    ('{"feasible": false, "available_mib": 1}', 1, 0, ""),
+    ('{"error": "gpu.pci_address is not set"}', 1, 1, "llmenv budget failed: gpu.pci_address is not set"),
+    ("", 1, 1, "llmenv budget printed no JSON object"),
+])
+def test_llmenv_budget_json_reads_a_verdict_whatever_its_exit_code(tmp_path: pathlib.Path, out: str, rc: int, code: int, stderr_part: str) -> None:
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "uv").write_text('#!/usr/bin/bash\nprintf "%s" "$STUB_OUT"\nexit "$STUB_RC"\n')
+    (stub / "uv").chmod(0o755)
+    result = subprocess.run(
+        ["/usr/bin/bash", "-c", 'source tools/lib.sh; llmenv_budget_json "$1" "$2"', "bash", str(tmp_path / "models.yml"), str(tmp_path)],
+        cwd=ROOT, env=os.environ | {"PATH": f"{stub}:{os.environ['PATH']}", "STUB_OUT": out, "STUB_RC": str(rc)},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == code and stderr_part in result.stderr
+    if code == 0:
+        assert json.loads(result.stdout) == json.loads(out)
+    else:
+        assert result.stdout == ""
+
+
 def _mock_command(directory: pathlib.Path, name: str) -> None:
     command = directory / name
     command.write_text("#!/usr/bin/bash\nexit 0\n")
