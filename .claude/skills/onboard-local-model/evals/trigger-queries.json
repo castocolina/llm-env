@@ -36,7 +36,7 @@
     "should_trigger": true
   },
   {
-    "query": "our llama.cpp image is ~1500 builds behind and laya is a couple releases behind on pypi: worth pulling a new vulkan build, trying rocm, or upgrading laya to free vram?",
+    "query": "our llama.cpp image is ~1500 builds behind: worth pulling a new vulkan build or trying rocm to get more tok/s?",
     "should_trigger": true
   },
   {
@@ -76,7 +76,7 @@
     "should_trigger": false
   },
   {
-    "query": "fine-tune gemma4, the model llm-server serves, with LoRA on our commit history so pi gets better at our code",
+    "query": "laya is 25 releases behind, should I update laya or switch System One to something smaller?",
     "should_trigger": false
   }
 ]

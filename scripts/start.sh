@@ -47,15 +47,10 @@ fi
 system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
 if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
     system_one_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
-    system_one_models="$(yq -r '.system_one.models' "$CONFIG_PATH")"
     podman image exists "$system_one_image" || die "system-one image missing; run 'make setup'"
     podman volume exists llm-env-system-one-cache \
         || die "system-one weights cache missing; run 'make setup'"
-    if ! podman run --rm \
-            -e LAYA_REVISION=reviewed -e "LAYA_MODELS=${system_one_models}" \
-            -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
-            -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
-            --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py verify; then
+    if ! system_one_cache_check "$system_one_image" verify; then
         die "system-one weights incomplete for configured models; run 'make setup'"
     fi
 fi
@@ -207,6 +202,12 @@ if [ "$scope" = "all" ]; then
     log_step "Ensuring the z.ai weekly-quota reset timer is installed"
     bash "${REPO_DIR}/setup/enable-omniroute-zai-reset.sh" \
         || log_warn "could not enable the z.ai reset timer; run 'bash setup/enable-omniroute-zai-reset.sh' manually"
+
+    if [ "$system_one_enabled" = "true" ]; then
+        log_step "Ensuring the weekly System One upstream check is installed"
+        bash "${REPO_DIR}/setup/enable-system-one-check.sh" \
+            || log_warn "could not enable the System One check timer; run 'bash setup/enable-system-one-check.sh' manually"
+    fi
 fi
 
 log_step "Waiting for OmniRoute"

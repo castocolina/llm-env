@@ -1,0 +1,1 @@
+{"info": {"requires_dist": ["torch>=2.0.0", "transformers>=4.48.0", "fastapi>=0.110.0; extra == \"serve\"", "onnx; extra == \"onnx\""]}}

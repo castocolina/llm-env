@@ -150,14 +150,7 @@ if [ "$system_one_enabled" = "true" ]; then
         bash "${REPO_DIR}/scripts/system-one-build.sh" || system_one_off "System One image build failed"
     fi
     log_step "Prefetching Laya weights (${system_one_models}) into llm-env-system-one-cache"
-    # :z relabels the script bind for Fedora SELinux.
-    podman run --rm \
-        -e LAYA_REVISION=reviewed \
-        -e "LAYA_MODELS=${system_one_models}" \
-        -v llm-env-system-one-cache:/home/laya/.cache/huggingface \
-        -v "${REPO_DIR}/scripts/system-one-cache-check.py:/opt/system-one-cache-check.py:ro,z" \
-        --entrypoint python3 "$system_one_image" /opt/system-one-cache-check.py prefetch \
-        || system_one_off "System One weight prefetch failed"
+    system_one_cache_check "$system_one_image" prefetch || system_one_off "System One weight prefetch failed"
     SYSTEM_ONE_ENABLED=true yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
 fi
 if [ "$llm_server_enabled" = "true" ]; then

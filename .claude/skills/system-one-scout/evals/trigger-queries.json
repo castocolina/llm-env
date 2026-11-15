@@ -1,0 +1,74 @@
+[
+  {
+    "query": "is laya outdated? anything worth updating to?",
+    "should_trigger": true
+  },
+  {
+    "query": "make status says System One: laya 0.4.2 -> 0.4.27 available, what do I gain and what could break?",
+    "should_trigger": true
+  },
+  {
+    "query": "make update-system-one ended with 'deferred: deadline', what does that mean, did it change anything?",
+    "should_trigger": true
+  },
+  {
+    "query": "the system one update printed 'error: rolled back to laya 0.4.2', what happened and what now?",
+    "should_trigger": true
+  },
+  {
+    "query": "hay alguna alternativa a jev/laya open source que quepa en menos de 5GB de vram? conviene cambiar de sistema?",
+    "should_trigger": true
+  },
+  {
+    "query": "could we serve Laya through llama.cpp's /v1/systemone instead of the ROCm torch image to save VRAM?",
+    "should_trigger": true
+  },
+  {
+    "query": "I want to try the typed-decisions checkpoint next to english and multilingual on 8010, how do I apply that without make restart?",
+    "should_trigger": true
+  },
+  {
+    "query": "new laya release pulls in vegaml, is that safe for us offline?",
+    "should_trigger": true
+  },
+  {
+    "query": "upgrade the local system one server to 0.4.22 tonight when nobody is using it",
+    "should_trigger": true
+  },
+  {
+    "query": "ask laya whether this PR title matches the diff, yes or no",
+    "should_trigger": false
+  },
+  {
+    "query": "use jev to pick which of these three test failures to fix first",
+    "should_trigger": false
+  },
+  {
+    "query": "onboard Qwen3.8-9B-Instruct-GGUF for pi beside laya, does it fit?",
+    "should_trigger": false
+  },
+  {
+    "query": "our llama.cpp vulkan image is 1500 builds behind, should I pull a new one?",
+    "should_trigger": false
+  },
+  {
+    "query": "system-one's memory cap keeps getting clipped at 5120 MiB, how do I re-derive the limit",
+    "should_trigger": false
+  },
+  {
+    "query": "update omniroute to the latest image without interrupting running agents",
+    "should_trigger": false
+  },
+  {
+    "query": "make gpu-status says something else holds VRAM, which process is it?",
+    "should_trigger": false
+  },
+  {
+    "query": "what typed-judgment features should our app use through the TypeSafe API?",
+    "should_trigger": false
+  },
+  {
+    "query": "phoenix dashboard shows laya spans with errors, how do I open the traces?",
+    "should_trigger": false
+  }
+]

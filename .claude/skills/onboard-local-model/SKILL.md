@@ -1,6 +1,6 @@
 ---
 name: onboard-local-model
-description: Find, fit, benchmark and onboard a local agentic-coding LLM (GGUF) for this repo's llama.cpp router beside System One (Laya). Use when the user names a models.yml alias, a Hugging Face repo or URL, a .gguf file or a model name to download, add, try, swap or re-measure; says the local model got slower; asks which model fits the VRAM or beats the current one; compares quants (Q4_K_M/Q5_K_M/Q6_K); wants tok/s at depth, ctx_size, KV or n_cpu_moe tuned, the capacity card or my-coding-lite; scores it against Haiku, Luna or Composer; asks if the llama.cpp image or Laya is outdated; or wants one ladder challenge generated or verified, even as "a faster model for pi", "what LLM can I run locally" or "modelo agéntico que quepa en mi GPU". Not for OmniRoute combos except my-coding-lite, container memory limits, gpu-status, asking Laya for a judgment, cloud providers, temperature/top_p, LoRA fine-tuning or converting safetensors to GGUF.
+description: Find, fit, benchmark and onboard a local agentic-coding LLM (GGUF) for this repo's llama.cpp router beside System One (Laya). Use when the user names a models.yml alias, a Hugging Face repo or URL, a .gguf file or a model name to download, add, try, swap or re-measure; says the local model got slower; asks which model fits the VRAM or beats the current one; compares quants (Q4_K_M/Q5_K_M/Q6_K); wants tok/s at depth, ctx_size, KV or n_cpu_moe tuned, the capacity card or my-coding-lite; scores it against Haiku, Luna or Composer; asks if the llama.cpp image is outdated; or wants one ladder challenge generated or verified, even as "a faster model for pi", "what LLM can I run locally" or "modelo agéntico que quepa en mi GPU". Not for OmniRoute combos except my-coding-lite, container memory limits, gpu-status, asking Laya for a judgment, updating Laya or replacing it (system-one-scout), cloud providers, temperature/top_p, LoRA fine-tuning or converting safetensors to GGUF.
 ---
 
 # Onboard a local model
@@ -28,7 +28,6 @@ Follow the row's flow file; load the others only at the step that names them. Ro
 | tune it: context, KV, tok/s at depth, capacity card, `my-coding-lite` | `references/tuning.md` | `references/scoring.md` at T1 | `onboard-flow.md`, `selection-criteria.md` |
 | score a local model against Haiku, Luna or Composer | `references/anchors.md` | `references/scoring.md` | `onboard-flow.md` unless a candidate is named |
 | llama.cpp image, Vulkan or ROCm, server flags | `references/runtimes.md` | | every other file |
-| System One (Laya) outdated, or VRAM it could give back | `references/system-one.md` | | every other file |
 | one ladder challenge (generate, verify, debug), the challenge library, a `leak_suspect` row | `references/challenges.md` | `references/scoring.md` to calibrate | every other file |
 
 - `resolve-target.sh` exit 2 is an error (a bad path, a near-miss alias, a non-model URL, usage): report its message and stop;

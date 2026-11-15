@@ -319,25 +319,6 @@
       ]
     },
     {
-      "id": "system-one-check",
-      "prompt": "is laya outdated? anything that would use less vram or fix the busy cpu core?",
-      "setup": "Premise: llm-server is RUNNING and serving gemma4. system-one-check.sh reads its answers from SO_FIXTURE_DIR=.claude/skills/onboard-local-model/evals/files/system-one/ with SO_DOCKERFILE=.claude/skills/onboard-local-model/evals/files/system-one/Dockerfile instead of the network. DRY RUN for evaluation: read-only commands only; do not build, pull, run or recreate anything and do not stop containers. Answer in English.",
-      "files": [
-        "evals/files/system-one/Dockerfile",
-        "evals/files/system-one/pypi.json",
-        "evals/files/system-one/torch-index.html"
-      ],
-      "expected_output": "system-one-check.sh reports the pin against the latest release with the yanked one not counted, the report is a table with the unread release notes marked as not verified, the newer rocm index is not an upgrade by version, a trial runs only after freeing the GPU and replacing production is G6.",
-      "assertions": [
-        "system-one-check.sh with SO_FIXTURE_DIR and SO_DOCKERFILE reports Laya pinned 0.4.2 and latest 0.5.0, 2 releases behind (the yanked 0.4.4 not counted), torch 2.14.1 on rocm7.2",
-        "The report is a table of pin, latest, gap, what the gap contains and risk; it does not claim what the gap contains when github.since_pin is null (release notes unread offline), and says so",
-        "torch 2.15.0 on rocm7.14 is not an upgrade by version: the rocm7.2 pin works around the ROCR busy-spin and moves only with the fix released and the 10-minute idle check",
-        "A trial image is built under another tag; the trial container runs on port 8011 only after freeing the GPU (G2, llm-server is serving) and is removed afterwards; replacing production is G6",
-        "The /v1/systemone contract stays and any upgrade is valued against the 4.26 GB steady VRAM, not against newness",
-        "Nothing was built, pulled, run, stopped or recreated"
-      ]
-    },
-    {
       "id": "generate-one-challenge",
       "prompt": "generate one layer-2 ladder challenge with seed 11 the way the effort ladder would, show me its prompt and prove it is intact. Do not run any agent, effort run or benchmark. Answer in English.",
       "expected_output": "One layer-2 challenge is generated with gen-challenge.sh --seed 11 into a new directory under ./tmp/ without a reference, its prompt is shown, gen-challenge.sh --verify reports it intact, and the directory is removed at the end.",

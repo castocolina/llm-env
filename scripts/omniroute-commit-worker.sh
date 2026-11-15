@@ -7,6 +7,9 @@ trap 'rm -rf "$work"' EXIT   # first: the worker owns $work (password file inclu
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=service-replace.sh
+source "$REPO_DIR/scripts/service-replace.sh"
 unset COMPOSE_FILE COMPOSE_INSPECT_DIR
 llm=(uv run --project "$REPO_DIR" "$REPO_DIR/llmenv.py" omniroute-update)
 trap_signals_to_exit
@@ -24,6 +27,7 @@ while IFS="=" read -r k v; do
     esac
 done <"$work/commit.env"
 container_id="" image_ref="" project="" stop_seconds="" pinned="" provider="" state=""
+# shellcheck disable=SC2034 # project/provider are read by replace_service.
 while IFS="=" read -r k v; do
     case "$k" in
         container_id) container_id="$v" ;; image_ref) image_ref="$v" ;; project) project="$v" ;;
@@ -75,16 +79,8 @@ if [[ "$pinned" != "1" ]]; then
     pm tag "$staged_id" "$image_ref" || fail "tag"
 fi
 up_file="$compose_path"                                           # absent target: the deployed compose file
-if [[ -n "$container_id" ]]; then                                 # running or stopped target: replace it
-    pm stop --time "$stop_seconds" "$container_id" || fail "stop"
-    pm rm "$container_id" || fail "rm"                            # by ID only: no forced or dependency-following removal
-    up_file="$work/projection.yml"
-fi
-if [[ -n "$(pm ps --all --filter name='^omniroute$' --format '{{.ID}}')" ]]; then
-    fail "name still in use after removal"                        # never remove an unexpected same-name container
-fi
-"${backend_env[@]}" "$provider" --in-pod false --env-file /dev/null -p "$project" -f "$up_file" \
-    up -d --no-deps --no-recreate --no-build --pull never omniroute 9>&- || fail "up"
+[[ -z "$container_id" ]] || up_file="$work/projection.yml"        # running or stopped target: replace it
+replace_service omniroute "$container_id" "$stop_seconds" "$up_file"
 rc=0
 verify_out="$(cli verify-commit --dir "$work" --service omniroute --old-id "$container_id" \
     --config-id "$config_id" --timeout "$health_timeout" --password-file "$work/pw")" || rc=$?

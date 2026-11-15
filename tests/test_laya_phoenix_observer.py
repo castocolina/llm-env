@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,15 @@ def test_exporter_rejects_nonlocal_or_unexpected_endpoints() -> None:
         except ValueError:
             continue
         raise AssertionError(f"unsafe endpoint accepted: {endpoint}")
+
+
+def test_update_smoke_exporter_url_passes_the_allowlist() -> None:
+    # The update's CPU smoke runs the real observer; a URL it rejects kills the candidate at startup.
+    script = (Path(__file__).parents[1] / "scripts/update-system-one.sh").read_text()
+    urls = re.findall(r"LAYA_PHOENIX_URL=(\S+)", script)
+    assert urls
+    for url in urls:
+        observer.BoundedPhoenixExporter(url.strip("'\""), post=lambda body: None)
 
 
 def test_request_body_is_forwarded_incrementally_and_capture_is_bounded() -> None:

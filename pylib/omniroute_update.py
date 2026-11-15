@@ -672,7 +672,7 @@ def preflight(cfg, config_path, compose_path, env, run, provider: str | None = N
         tuple(sorted({v.get("NetworkID") for v in ((doc.get("NetworkSettings") or {}).get("Networks") or {}).values()})),
         tuple(sorted(m["Name"] for m in doc.get("Mounts") or [] if m.get("Type") == "volume")),
         tuple(siblings), mode, live_port or port,
-        ", ".join(config_drift(svc, doc)) if service == "omniroute" and cid else "")
+        ", ".join(config_drift(svc, doc)) if cid else "")
     return dep, snap, fingerprint(parts), effective
 
 

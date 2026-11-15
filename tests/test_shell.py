@@ -5559,6 +5559,14 @@ def test_start_installs_the_zai_reset_timer(tmp_path: pathlib.Path) -> None:
     assert "enable --now llm-env-zai-reset.timer" in calls.read_text()
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_start_installs_the_system_one_check_timer_only_with_system_one(tmp_path: pathlib.Path, enabled: bool) -> None:
+    """The weekly, report-only Laya upstream check exists only where System One runs."""
+    result, _config, calls = run_lifecycle_script(tmp_path, "scripts/start.sh", system_one_enabled=enabled)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("enable --now llm-env-system-one-check.timer" in calls.read_text()) is enabled
+
+
 def test_start_chains_provider_provision_once_omniroute_is_ready(
     tmp_path: pathlib.Path,
 ) -> None:

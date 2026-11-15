@@ -36,6 +36,7 @@ make disable-boot             # Disable start at boot
 make status                   # Show service status and print endpoints/credentials
 make show-secrets              # Print endpoints/credentials without starting anything
 make update-omniroute          # Idle-aware OmniRoute-only update; applies a changed omniroute service definition too, once idle (defers unless idle and verified; first characterizes an unprofiled running image into ~/.local/state/llm-env/omniroute-profiles; a stopped/absent container is updated without waiting)
+make update-system-one [LAYA_VERSION=x.y.z]  # Idle-aware Laya update: build candidate, CPU smoke, swap system-one when /health is idle, roll back on failure, rewrite the Dockerfile pin; at the pinned version it applies a re-rendered system_one config change (drift) once idle
 make migrate-remote-setup      # One-time remote-setup recreation without its OmniRoute dependency
 make logs                      # Tail service logs
 make setup-local-llm-agents    # Configure normal Pi/OpenCode client profiles
@@ -165,7 +166,8 @@ model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB resident, peak at
    for everyone by editing `DEFAULT_POLICY` in `pylib/resources.py` (plus its
    tests and the research doc).
 4. `bash setup/render-unit.sh`, then `make update-omniroute` for OmniRoute (it
-   waits for idle); for another service, recreate it when it is idle (or
+   waits for idle), `make update-system-one` for System One (same idle-gated
+   drift path); for another service, recreate it when it is idle (or
    `make restart` when no agent session uses OmniRoute).
 
 ## Rules

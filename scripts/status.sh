@@ -73,6 +73,17 @@ if command -v curl >/dev/null 2>&1; then
     fi
 fi
 
+# The weekly System One check's last report (setup/enable-system-one-check.sh); read-only, never fetched here.
+so_check="${XDG_STATE_HOME:-$HOME/.local/state}/llm-env/system-one-check.json"
+if [ -r "$so_check" ]; then
+    jq -r '"System One: laya " + .pinned.laya + (if .latest.releases_behind > 0
+        then " -> " + .latest.laya + " available (" + (.latest.releases_behind | tostring) + " releases"
+             + (if .weights.reviewed_revisions_changed then ", new reviewed weights" else "" end)
+             + "; checked " + .checked_at + "); run make update-system-one"
+        else " is current (checked " + .checked_at + ")" end)' "$so_check" 2>/dev/null \
+        || printf 'System One check: UNKNOWN (unreadable %s)\n' "$so_check"
+fi
+
 if [ -f "$CONFIG_PATH" ]; then
     bash "$(dirname "${BASH_SOURCE[0]}")/print-endpoints.sh"
 else

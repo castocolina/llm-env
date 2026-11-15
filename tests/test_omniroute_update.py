@@ -724,6 +724,15 @@ def test_preflight_remote_setup_service_passes_generic_checks_only(tmp_path):
     preflight(cfg2, cp2, comp2, env2, run2, provider=prov2, service="remote-setup")
 
 
+def test_preflight_reports_drift_for_a_non_omniroute_service(tmp_path):
+    # System One is updated through the same drift path: a re-rendered image differs from the running one.
+    cfg, cp, comp, prov, env, run = preflight_world(
+        tmp_path, effective=_remote_setup_effective(),
+        extra_containers={RS: inspect_doc(RS, name="remote-setup", deps=[OMNI])})
+    dep, _snap, _fp, _out = preflight(cfg, cp, comp, env, run, provider=prov, service="remote-setup")
+    assert "image" in dep.drift.split(", ")
+
+
 def test_preflight_remote_setup_defers_on_incoming_dependent(tmp_path):
     third = "7" * 64
     cfg, cp, comp, prov, env, run = preflight_world(

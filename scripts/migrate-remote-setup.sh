@@ -5,6 +5,9 @@ set -euo pipefail
 # shellcheck disable=SC1091 # Resolved from this script at runtime.
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
+# shellcheck disable=SC1091 # Resolved from this script at runtime.
+# shellcheck source=service-replace.sh
+source "$REPO_DIR/scripts/service-replace.sh"
 require_cmd podman jq yq uv flock setsid timeout
 
 # tools/lib.sh exports COMPOSE_FILE and COMPOSE_INSPECT_DIR; the CLI rejects every COMPOSE_* variable,
@@ -16,11 +19,12 @@ unset COMPOSE_FILE COMPOSE_INSPECT_DIR
 llm=(uv run --project "$REPO_DIR" "$REPO_DIR/llmenv.py" omniroute-update)
 backend_env_init
 cli() { "${llm[@]}" "$@" 9>&-; }
-# shellcheck disable=SC2154 # backend_env is filled by backend_env_init above.
+# shellcheck disable=SC2154,SC2329 # backend_env is filled by backend_env_init above; pm is called by replace_service.
 pm() { "${backend_env[@]}" podman "$@" 9>&-; }
 health_timeout="${LLM_ENV_HEALTH_TIMEOUT_SECONDS:-60}"
 [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || { echo "error: invalid LLM_ENV_HEALTH_TIMEOUT_SECONDS" >&2; exit 1; }
 
+# shellcheck disable=SC2034 # project/provider are read by replace_service.
 read_deploy() {   # sets container_id image_id project stop_seconds provider from $work/deploy.env
     container_id="" image_id="" project="" stop_seconds="" provider=""
     while IFS="=" read -r k v; do
@@ -49,11 +53,7 @@ if [[ "${1:-}" == "--worker" ]]; then
     rc=0
     cli preflight --recheck --budget 60 --config "$config_path" --compose "$compose_path" --out-dir "$work" >"$work/recheck.out" || rc=$?
     if (( rc != 0 )); then cat "$work/recheck.out"; exit "$rc"; fi
-    pm stop --time "$stop_seconds" "$container_id" || fail "stop"
-    pm rm "$container_id" || fail "rm"                              # by ID only
-    if [[ -n "$(pm ps --all --filter name='^remote-setup$' --format '{{.ID}}')" ]]; then fail "name still in use after removal"; fi
-    "${backend_env[@]}" "$provider" --in-pod false --env-file /dev/null -p "$project" -f "$work/projection.yml" \
-        up -d --no-deps --no-recreate --no-build --pull never remote-setup 9>&- || fail "up"
+    replace_service remote-setup "$container_id" "$stop_seconds" "$work/projection.yml"
     cli verify-commit --dir "$work" --service remote-setup --old-id "$container_id" --expect-no-deps \
         --timeout "$health_timeout" >"$work/verify.out" || fail "verify-commit"
     echo "remote-setup recreated without its native dependency"

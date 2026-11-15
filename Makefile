@@ -1,6 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity model-report \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context local-combo backup \
-        combo-backup combo-restore connections-backup update-omniroute migrate-remote-setup logs validate test test-phoenix clean prune
+        combo-backup combo-restore connections-backup update-omniroute update-system-one migrate-remote-setup logs validate test test-phoenix clean prune
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -125,6 +125,8 @@ connections-backup:
 
 update-omniroute:
 	@bash tools/run-target.sh update-omniroute -- bash scripts/update-omniroute.sh
+update-system-one:
+	@bash tools/run-target.sh update-system-one -- env $(if $(LAYA_VERSION),LAYA_VERSION="$(LAYA_VERSION)") bash scripts/update-system-one.sh
 migrate-remote-setup:
 	@bash tools/run-target.sh migrate-remote-setup -- bash scripts/migrate-remote-setup.sh
 

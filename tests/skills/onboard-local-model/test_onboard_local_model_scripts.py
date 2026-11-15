@@ -27,7 +27,7 @@ from pylib.agent_runner import DEFAULT_RUNTIME_SECONDS
 
 RUNNER_CAP = int(DEFAULT_RUNTIME_SECONDS)
 
-SCRIPT_NAMES = ["latency-profile", "preflight", "hf-scout", "bench-fit", "effort-run", "score", "gpu-sample", "system-one-check", "wait-gpu-release",
+SCRIPT_NAMES = ["latency-profile", "preflight", "hf-scout", "bench-fit", "effort-run", "score", "gpu-sample", "wait-gpu-release",
                 "tune-sweep", "tune-pick", "tune-apply", "quant-headroom", "gen-challenge", "compare-runs", "resolve-target", "rank-candidates",
                 "fetch-gguf", "new-alias", "live-entry"]
 
@@ -332,28 +332,6 @@ def test_bench_fit_keeps_system_one_warm_while_benchmarking(tmp_path: Path) -> N
     warm = next(i for i, line in enumerate(lines) if "127.0.0.1:8010/v1/systemone" in line)
     assert warm < lines.index("BENCH")
     assert out["system_one_warm"] is True
-
-
-def test_system_one_check_counts_releases_behind_and_newest_torch_per_index(tmp_path: Path) -> None:
-    (tmp_path / "Dockerfile").write_text("ARG TORCH_VERSION=2.14.1\nARG TORCH_INDEX=rocm7.2\nARG LAYA_VERSION=0.4.2\n")
-    releases = {v: [{"upload_time": f"2026-10-{i + 10}T00:00:00", "yanked": v == "0.4.4"}] for i, v in enumerate(["0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.10"])}
-    (tmp_path / "pypi.json").write_text(json.dumps({"info": {"requires_python": ">=3.10", "project_urls": {"Homepage": "https://x"}}, "releases": releases}))
-    wheels = "".join(
-        f'<a href="torch-{v}%2B{tag}-cp311-cp311-manylinux_2_28_x86_64.whl">w</a>\n'
-        for v, tag in [("2.14.0", "rocm7.2"), ("2.14.1", "rocm7.2"), ("2.15.0", "rocm7.14"), ("2.14.1", "cpu")]
-    )
-    (tmp_path / "torch-index.html").write_text(wheels)
-    (tmp_path / "hf.json").write_text(json.dumps({"id": "org/laya", "lastModified": "2026-10-03", "sha": "abc"}))
-    result = _run(
-        "bash", SCRIPTS / "system-one-check.sh",
-        env={"SO_FIXTURE_DIR": str(tmp_path), "SO_DOCKERFILE": str(tmp_path / "Dockerfile"), "PATH": "/usr/bin:/bin"},
-    )
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout)
-    assert out["pinned"] == {"laya": "0.4.2", "torch": "2.14.1", "torch_index": "rocm7.2"}
-    assert out["latest"]["laya"] == "0.4.10" and out["latest"]["releases_behind"] == 2, "yanked 0.4.4 must not count"
-    assert out["torch_latest_per_rocm_index"] == {"rocm7.2": "2.14.1", "rocm7.14": "2.15.0"}
-    assert out["github"]["since_pin"] is None and out["pin_watch"] == [], "offline fixtures skip gh"
 
 
 def _row(
@@ -982,9 +960,9 @@ def test_skill_description_fits_the_spec_limit() -> None:
 # Every route the description promises has a positive; every Not-for boundary has a near-miss negative.
 TRIGGER_ROUTES = {"alias": r"models\.yml", "hf": r"huggingface\.co", "gguf": r"\.gguf", "quant": r"\bq[4-6]\b",
                   "challenge": r"ladder challenge", "depth": r"tok/s", "card": r"capacity card", "anchor": r"haiku|luna|composer",
-                  "runtime": r"llama\.cpp image", "system one": r"laya is", "scout": r"quepa|fits"}
+                  "runtime": r"llama\.cpp image", "scout": r"quepa|fits"}
 TRIGGER_BOUNDARIES = {"omniroute": r"omniroute", "combo": r"\bcombo\b", "memory limits": r"memory cap", "gpu-status": r"gpu-status",
-                      "laya judgment": r"ask laya", "cloud": r"openrouter", "sampling": r"temperature", "fine-tuning": r"fine-tune",
+                      "laya judgment": r"ask laya", "laya update": r"update laya", "cloud": r"openrouter", "sampling": r"temperature", "fine-tuning": r"fine-tune",
                       "quantizing": r"quantize", "challenge": r"challenge"}
 
 
@@ -1092,7 +1070,7 @@ def test_skill_and_touched_docs_treat_jev_as_a_black_box() -> None:
 
 
 REF_NAMES = ("anchors", "challenges", "fit-math", "local-gguf", "onboard-flow", "runtimes", "scoring", "selection-criteria", "served-alias",
-             "system-one", "tuning")
+             "tuning")
 
 
 # One level deep: SKILL.md alone says when to load a reference. A reference names another only by its path, and only these pairs:
@@ -3027,14 +3005,6 @@ def test_eval_gguf_alias_collision_fixture_matches_its_assertions() -> None:
     by_alias = {m["alias"]: m["file"] for m in yaml.safe_load((FIX / "models.yml").read_text())["models"]}
     assert by_alias["ornith"] == "ornith-1.0-9b-Q4_K_M.gguf" and fixture.name not in by_alias.values() and "ornith-2" not in by_alias
     assert all(s in _asserts("gguf-alias-collision") for s in ("ornith-2", "Q5_K_M", "ornith-1.0-9b-Q4_K_M.gguf"))
-
-
-def test_eval_system_one_fixtures_match_their_assertions() -> None:
-    env = {"SO_FIXTURE_DIR": str(FIX / "system-one"), "SO_DOCKERFILE": str(FIX / "system-one" / "Dockerfile"), "PATH": "/usr/bin:/bin"}
-    out = json.loads(_run("bash", SCRIPTS / "system-one-check.sh", env=env).stdout)
-    assert (out["pinned"]["laya"], out["latest"]["laya"], out["latest"]["releases_behind"]) == ("0.4.2", "0.5.0", 2)
-    assert out["torch_latest_per_rocm_index"]["rocm7.14"] == "2.15.0"
-    assert all(s in _asserts("system-one-check") for s in ("0.4.2", "0.5.0", "2 releases behind", "rocm7.14"))
 
 
 def test_eval_bare_name_fixture_matches_its_assertions() -> None:

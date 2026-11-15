@@ -543,6 +543,33 @@ OmniRoute (`podman restart omniroute`) in two cases only:
 Set these in a drop-in (`systemctl --user edit llm-env-omniroute-heal.service`,
 `[Service]` `Environment=` lines); `make start` rewrites the unit itself.
 
+## System One updates
+
+`make update-system-one [LAYA_VERSION=x.y.z]` updates Laya, the local System One server, to a newer PyPI release
+(default: the newest, from `scripts/system-one-check.sh`). Laya has no registry image: it is built locally from the
+`ARG LAYA_VERSION` pin in `docker/system-one/Dockerfile`, so the updater works like this:
+
+1. Builds the candidate as `localhost/llm-env-system-one:rocm-cand`. Production is untouched.
+2. Prefetches its weights into the cache volume with the candidate's own loader.
+3. Smoke-tests the candidate on CPU in a throwaway container: `/health` plus an English and a Spanish typed request.
+4. Waits until Laya's `/health` reports `idle_seconds` >= `LLM_ENV_UPDATE_IDLE_SECONDS` (default 300). It defers
+   with exit 75 after `LLM_ENV_UPDATE_MAX_WAIT_SECONDS` (default 10800).
+5. Keeps the running base as `:rocm-prev`, promotes the candidate, re-renders, and replaces only `system-one`. The
+   replacement goes through the same preflight, projection, replace and verify-commit path as OmniRoute
+   (`scripts/service-replace.sh`).
+6. Sends the same typed requests again and prints how much the answers moved. This is information only.
+7. On any failure after step 5, retags `:rocm-prev` and recreates. Success rewrites the Dockerfile pin; commit it.
+
+It is also the deferred restart for System One configuration. With the target equal to the pin, a rendered
+`system-one` service that differs from the running container (edit `system_one` in `models.yml`, for example
+`models`, then `bash setup/render-unit.sh`) prints `drift: <fields>`, prefetches the configured weights, and recreates
+the container through the same idle gate. The result is `updated system-one configuration`. A failed config swap is
+reported, not rolled back.
+
+The torch/ROCm pin is never changed (see the Dockerfile comment). Exit codes and result lines follow
+`update-omniroute`: `0` for `unchanged` or `updated laya <old> -> <new>`, `75` for `deferred: <reason>` (`deadline`,
+`health`, `lock`), and `1` for an error, with rollback once the swap has started.
+
 ## Remote setup
 
 Any other machine on the LAN can configure its own Pi/OpenCode sessions

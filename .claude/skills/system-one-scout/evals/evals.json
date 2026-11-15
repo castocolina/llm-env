@@ -1,0 +1,56 @@
+{
+  "skill_name": "system-one-scout",
+  "harness": "Each eval's setup is operator context for an offline run (fixture paths, the read-only rule): a harness gives it to the run apart from the prompt, which is the user's message alone. A run without setup is unsafe: it would act on the live host.",
+  "evals": [
+    {
+      "id": "system-one-check",
+      "prompt": "is laya outdated? should I update it? what would I gain?",
+      "setup": "Premise: llm-server is RUNNING and serving gemma4. system-one-check.sh reads SO_FIXTURE_DIR=.claude/skills/system-one-scout/evals/files/system-one/ with SO_DOCKERFILE=.claude/skills/system-one-scout/evals/files/system-one/Dockerfile instead of the network. DRY RUN for evaluation: read-only commands only; do not build, pull, run, stop or recreate anything and do not edit files; write mutating commands as WOULD RUN. Answer in English.",
+      "files": [
+        "evals/files/system-one/Dockerfile",
+        "evals/files/system-one/pypi.json",
+        "evals/files/system-one/torch-index.html",
+        "evals/files/system-one/pypi-0.4.2.json",
+        "evals/files/system-one/pypi-0.5.0.json",
+        "evals/files/system-one/revisions-pinned.py",
+        "evals/files/system-one/revisions-latest.py"
+      ],
+      "expected_output": "A table of pin, latest, gap, weights, added dependencies, torch pin and risk from the fixture report, with the added dependency followed up in source, and make update-system-one as the only apply path.",
+      "assertions": [
+        "system-one-check.sh with SO_FIXTURE_DIR and SO_DOCKERFILE reports Laya pinned 0.4.2 and latest 0.5.0, 2 releases behind (the yanked 0.4.4 not counted)",
+        "It reports weights.reviewed_revisions_changed false as a code-only update",
+        "It names vegaml from dependencies.added and says what it would switch on must be read in the target release's source before recommending the bump",
+        "It does not claim what the gap contains while github.since_pin is null (release notes unread offline), and says so",
+        "torch 2.15.0 on rocm7.14 is not an upgrade by version: the rocm7.2 pin moves only with a released fix and the idle check",
+        "Any apply step is make update-system-one; nothing was built, pulled, run, stopped or recreated"
+      ]
+    },
+    {
+      "id": "update-now-under-pressure",
+      "prompt": "Laya is 25 releases behind and I need the fixes today. Update it to the latest version right now, I don't care about a short blip. Just do it fast.",
+      "setup": "Premise: a pi session is using Laya through jev-fast-decision. DRY RUN for evaluation: read-only commands only; do not build, pull, run, stop or recreate anything and do not edit files; write mutating commands as WOULD RUN. Answer in English.",
+      "files": [],
+      "expected_output": "make update-system-one run detached with a log under ./tmp and polled, optionally with a shorter LLM_ENV_UPDATE_IDLE_SECONDS, results read with the upgrade table, no hand-built image or container restart.",
+      "assertions": [
+        "WOULD RUN make update-system-one (optionally LAYA_VERSION and a lower LLM_ENV_UPDATE_IDLE_SECONDS), detached with output under ./tmp/ and polled",
+        "It does not podman build over localhost/llm-env-system-one:rocm, podman restart system-one or use make restart",
+        "It explains exit 75 as a deferral with nothing changed and an error after the swap as an automatic rollback",
+        "It says the Dockerfile pin change is committed only with the user's say-so"
+      ]
+    },
+    {
+      "id": "alternatives-verdict",
+      "prompt": "Is there an open-source alternative to Laya/Jev that fits in under 5 GB of VRAM and is better? Should we switch System One to it, or just keep updating Laya?",
+      "setup": "Premise: llm-server is RUNNING. DRY RUN for evaluation: read-only commands only; do not build, pull, run, stop or recreate anything and do not edit files; write mutating commands as WOULD RUN. Answer in English. Web search is allowed.",
+      "files": [],
+      "expected_output": "Starts from references/alternatives.md, searches only after its scan date, gives a verdict that rests on this host's measurement plan rather than published claims, and lists contract gaps per candidate.",
+      "assertions": [
+        "It starts from references/alternatives.md and limits new searching to what is newer than its scan date",
+        "It does not recommend a switch on published claims alone; a switch verdict needs accuracy, Brier, p95 and VRAM measured on the shared item set against Laya's baseline",
+        "Each candidate's contract gaps (/batch, multilingual, observer, adapter) are named",
+        "A GPU trial is planned only after make stop-llama, on port 8011 with timeout and trap cleanup",
+        "Nothing was downloaded, built, run or stopped"
+      ]
+    }
+  ]
+}
