@@ -5,7 +5,7 @@ FROM python:3.11-slim-trixie
 ARG TORCH_VERSION=2.14.1
 # shortcut: ROCR 1.21 AsyncEventsLoop busy-spins one core after the first GPU kernel (https://github.com/ROCm/rocm-systems/issues/12674, https://github.com/ROCm/TheRock/issues/7051); move back to the newest index once a release carries rocm-systems PR #7898; re-run the idle check.
 ARG TORCH_INDEX=rocm7.2
-ARG LAYA_VERSION=0.4.2
+ARG LAYA_VERSION=0.4.31
 ARG GPU_ARCH
 ENV PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false \
     TORCH_DISABLE_NATIVE_JIT=1 LAYA_DEVICE=cuda LAYA_PRELOAD=1 \
