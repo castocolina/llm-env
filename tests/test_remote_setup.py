@@ -1638,6 +1638,8 @@ def test_setup_sh_prints_nothing_until_curl_has_closed_the_pipe(monkeypatch):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env={**os.environ, "HOME": "/nonexistent"},
+        # No controlling terminal: otherwise the master-key prompt opens the runner's /dev/tty and waits on a human.
+        start_new_session=True,
     )
     assert process.stdin is not None and process.stderr is not None
     process.stdin.write(script.encode())
