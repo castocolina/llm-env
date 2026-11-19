@@ -38,6 +38,15 @@ MISSING_MSG = (
     "(never delete the Grafana data volume); aborting before generation or start"
 )
 
+# Grafana 13.3.1's optional plugin preinstall / analytics update checks drove a
+# disposable 1 GiB probe to 1051295744 bytes (757 MB file cache); with these
+# disabled the peak stayed at 284037120 bytes (~1.7 MB cache) within the 512 MiB cap.
+GRAFANA_QUIET_ENV = {
+    "GF_PLUGINS_PREINSTALL_DISABLED": "true",
+    "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
+    "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES": "false",
+}
+
 # Every family Task 1 declares (pylib/observe_metrics.py).
 TASK1_FAMILIES = {
     "llm_env_source_up",
@@ -125,6 +134,15 @@ def test_grafana_definition(compose: dict) -> None:
     assert env["GF_USERS_ALLOW_SIGN_UP"] == "false"
     assert env["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
     assert env["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
+
+
+def test_grafana_disables_background_plugin_installs_and_update_checks(compose: dict) -> None:
+    env = compose["services"]["grafana"]["environment"]
+    for key, value in GRAFANA_QUIET_ENV.items():
+        assert env.get(key) == value  # string value, not a YAML bool
+    vm_env = compose["services"]["victoriametrics"].get("environment", {})
+    for key in GRAFANA_QUIET_ENV:
+        assert key not in vm_env  # Grafana-only, never on VictoriaMetrics
 
 
 def test_grafana_mounts_exactly_three_provisioning_paths_read_only(compose: dict) -> None:

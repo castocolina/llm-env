@@ -585,6 +585,13 @@ limits with `podman volume inspect llm-env-observe_metrics llm-env-observe_grafa
 `podman compose --project-name llm-env-observe --file docker/observe/compose.yml ps`, or read the
 containers' host cgroups.
 
+Grafana prefers the plugins shipped in its pinned image: optional background plugin installs and
+analytics update checks (`GF_PLUGINS_PREINSTALL_DISABLED`, `GF_ANALYTICS_CHECK_FOR_UPDATES`,
+`GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`) are disabled to stay within the measured cap. With the
+stock installer a disposable 1 GiB probe peaked at 1.05 GB (757 MB file cache); with these off it
+held ~271 MiB and the dashboard API still worked. Update versions through the pinned image, not by
+installing plugins at runtime.
+
 A `llm-env-observe` systemd user timer runs `scripts/observe-publish.sh` every 60s. The one-shot
 collects host container and OmniRoute metrics with `llmenv.py observe-metrics --push` under a
 45s timeout. It first checks VictoriaMetrics' `/health` with a 2s budget and exits quietly when
