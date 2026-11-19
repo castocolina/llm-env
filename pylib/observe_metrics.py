@@ -112,7 +112,10 @@ def render_metrics(
     for name, key in _CONTAINER_GAUGES:
         samples = []
         for svc, row in rows.items():
-            value = _running_value(row) if key is None else _container_value(row, key)
+            running = _running_value(row)
+            if key is not None and running != 1:
+                continue  # a confirmed-stopped row emits only running=0, even with stale fields
+            value = running if key is None else _container_value(row, key)
             literal = _fmt(value)
             if literal is not None:
                 samples.append(f'{name}{{service="{svc}"}} {literal}')
@@ -168,12 +171,12 @@ def read_omniroute_health(
     try:
         token = bounded_login(base, password, deadline)
         bounded_get(base, path, token, deadline)  # prime: stale-while-revalidate endpoint
-        if clock() >= deadline:
+        if clock() + PRIME_GAP_S > deadline:  # never sleep a gap that cannot fit the source budget
             return None
         sleep(PRIME_GAP_S)
         doc, age = fetch()
         if not fresh(age):
-            if clock() >= deadline:
+            if clock() + 1 > deadline:  # same deadline: no extension for the retry
                 return None
             sleep(1)
             doc, age = fetch()
@@ -240,7 +243,8 @@ def collect_metrics(
 
     def health_worker() -> None:
         try:
-            health_q.put(read_omniroute_health(port, password, deadline_s=deadline_s))
+            remaining = max(0.0, deadline - time.monotonic())
+            health_q.put(read_omniroute_health(port, password, deadline_s=min(10.0, remaining)))
         except Exception:  # noqa: BLE001 -- a failed worker is a down source, never a traceback
             health_q.put(None)
 
@@ -278,8 +282,7 @@ def publish_metrics(text: str) -> None:
         conn.request("POST", "/api/v1/import/prometheus", body=text,
                      headers={"Content-Type": "text/plain; version=0.0.4"})
         response = conn.getresponse()
-        status = response.status
-        response.read()
+        status = response.status  # status only: never allocate or wait on an arbitrary response body
         if not 200 <= status < 300:
             raise OSError(f"metrics publish returned HTTP {status}")
     finally:

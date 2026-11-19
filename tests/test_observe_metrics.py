@@ -59,6 +59,28 @@ def test_render_emits_running_and_stopped_and_skips_unknown():
     assert 'llm_env_source_up{source="omniroute"} 0' in text
 
 
+def test_render_stopped_row_emits_only_running_zero_even_with_stale_fields():
+    from pylib.observe_metrics import render_metrics
+
+    row = _running_row(state="not running")  # stale numeric fields left on a now-stopped row
+    text = render_metrics({"remote_setup": row}, None)
+
+    assert 'llm_env_container_running{service="remote_setup"} 0' in text
+    for name in (
+        "llm_env_container_memory_current_mib",
+        "llm_env_container_memory_peak_mib",
+        "llm_env_container_memory_cap_mib",
+        "llm_env_container_memory_swap_mib",
+        "llm_env_container_cpu_avg_cores",
+        "llm_env_container_memory_psi_full_avg300",
+        "llm_env_container_uptime_seconds",
+        "llm_env_container_vram_mib",
+        "llm_env_container_memory_events_max_total",
+        "llm_env_container_oom_kills_total",
+    ):
+        assert f'{name}{{service="remote_setup"}}' not in text
+
+
 def test_render_reads_flat_psi_key_and_ignores_other_nested_mappings():
     from pylib.observe_metrics import render_metrics
 
@@ -279,6 +301,59 @@ def test_read_health_deferral_is_secret_free(monkeypatch, capsys):
     assert "SUPERSECRET-PW" not in captured.out + captured.err
 
 
+class _Clock:
+    """Deterministic source clock: sleep advances it, so budget-fit checks are exact."""
+
+    def __init__(self, now=100.0):
+        self.now, self.sleeps = now, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_read_health_skips_prime_sleep_when_gap_exceeds_remaining_budget(monkeypatch):
+    import pylib.observe_metrics as om
+
+    clock = _Clock()
+
+    def login(base, pw, deadline):
+        clock.now += 0.95  # 1.0 s budget -> 0.05 s left, less than PRIME_GAP_S
+        return "TOKEN"
+
+    monkeypatch.setattr(om, "bounded_login", login)
+    monkeypatch.setattr(om, "bounded_get", lambda base, path, token, deadline: _health_body())
+
+    assert om.read_omniroute_health(1, "pw", deadline_s=1.0, clock=clock, sleep=clock.sleep) is None
+    assert clock.sleeps == []  # never sleep a gap that cannot fit
+
+
+def test_read_health_skips_retry_when_one_second_wont_fit(monkeypatch):
+    import pylib.observe_metrics as om
+    from pylib.omniroute_activity import PRIME_GAP_S
+
+    clock = _Clock()
+    gets = []
+    stale = _health_body(ts_offset_ms=-100000)
+
+    def get(base, path, token, deadline):
+        gets.append(1)
+        if len(gets) == 1:  # prime GET
+            return b"primed"
+        clock.now += 1.1  # second GET leaves 102 - 101.3 = 0.7 s, less than the 1 s retry gap
+        return stale
+
+    monkeypatch.setattr(om, "bounded_login", lambda base, pw, deadline: "TOKEN")
+    monkeypatch.setattr(om, "bounded_get", get)
+
+    assert om.read_omniroute_health(1, "pw", deadline_s=2.0, clock=clock, sleep=clock.sleep) is None
+    assert clock.sleeps == [PRIME_GAP_S]  # the prime gap fit, the retry gap did not
+    assert len(gets) == 2  # no retry GET
+
+
 # ---- Group 3: collector ----
 
 def _install_collector(monkeypatch, *, states, proc_text=None, health=None, live_impl=None):
@@ -420,19 +495,43 @@ def test_collect_ignores_hung_worker_and_keeps_peer(monkeypatch, hung):
         assert 'llm_env_omniroute_active_heavy' not in text
 
 
+@pytest.mark.parametrize("requested,expected", [(25, 10), (3, 3)])
+def test_collect_health_worker_budget_is_min_of_ten_and_remaining(monkeypatch, requested, expected):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+    monkeypatch.setattr(om, "time", SimpleNamespace(monotonic=lambda: 1000.0, time=lambda: 1700000000.0))
+    seen = {}
+    monkeypatch.setattr(om, "read_omniroute_health", lambda *a, **k: (seen.update(k), None)[1])
+
+    om.collect_metrics({}, None, port=1, password="pw", deadline_s=requested)
+    assert seen["deadline_s"] == expected
+
+
 # ---- Group 4: publisher and CLI ----
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status, self.body, self.reads = status, body, 0
+
+    def read(self):
+        self.reads += 1
+        return self.body
+
 
 class _FakeConn:
     def __init__(self, status, body=b""):
         self.status, self.body = status, body
         self.closed = False
         self.request_args = self.request_kwargs = None
+        self.response = _FakeResponse(0, b"")
 
     def request(self, *args, **kwargs):
         self.request_args, self.request_kwargs = args, kwargs
 
     def getresponse(self):
-        return SimpleNamespace(status=self.status, read=lambda: self.body)
+        self.response = _FakeResponse(self.status, self.body)
+        return self.response
 
     def close(self):
         self.closed = True
@@ -468,6 +567,18 @@ def test_publish_posts_fixed_payload_and_accepts_204(monkeypatch, capsys):
     }
     assert conn.closed
     assert capsys.readouterr().out == ""
+
+
+def test_publish_checks_status_without_reading_response_body(monkeypatch):
+    import pylib.observe_metrics as om
+
+    conn = _FakeConn(204, body=b"x" * 4096)
+    _install_http(monkeypatch, conn)
+
+    om.publish_metrics("payload\n")
+
+    assert conn.response.reads == 0  # never drain arbitrary bytes from the importer
+    assert conn.closed
 
 
 @pytest.mark.parametrize("status,accepted", [(200, True), (204, True), (299, True), (300, False), (500, False)])
