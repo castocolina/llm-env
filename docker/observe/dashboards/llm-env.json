@@ -1,0 +1,202 @@
+{
+  "uid": "llm-env-observe",
+  "title": "llm-env observe",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "60s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Source status (up)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_source_up[90s])",
+          "legendFormat": "{{source}} up",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Container memory: current / peak / cap (MiB)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_memory_current_mib[90s])",
+          "legendFormat": "{{service}} current MiB",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_memory_peak_mib[90s])",
+          "legendFormat": "{{service}} peak MiB",
+          "spanNulls": false
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_memory_cap_mib[90s])",
+          "legendFormat": "{{service}} cap MiB",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Container memory events and OOM kills (cumulative)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_memory_events_max_total[90s])",
+          "legendFormat": "{{service}} events max (cumulative)",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_oom_kills_total[90s])",
+          "legendFormat": "{{service}} OOM kills (cumulative)",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Container CPU (lifetime average since container start)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_cpu_avg_cores[90s])",
+          "legendFormat": "{{service}} average cores",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Laya VRAM (MiB)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_container_vram_mib[90s])",
+          "legendFormat": "{{service}} VRAM MiB",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "OmniRoute guard rejects and chat sheds (cumulative)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_omniroute_guard_rejects_total[90s])",
+          "legendFormat": "{{service}} guard rejects (cumulative)",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_omniroute_chat_sheds_total[90s])",
+          "legendFormat": "{{service}} chat sheds (cumulative)",
+          "spanNulls": false
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "OmniRoute active heavy and waiting",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "spanNulls": false, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_omniroute_active_heavy[90s])",
+          "legendFormat": "{{service}} active heavy",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "llm-env-metrics" },
+          "expr": "last_over_time(llm_env_omniroute_waiting[90s])",
+          "legendFormat": "{{service}} waiting",
+          "spanNulls": false
+        }
+      ]
+    }
+  ]
+}

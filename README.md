@@ -543,6 +543,58 @@ OmniRoute (`podman restart omniroute`) in two cases only:
 Set these in a drop-in (`systemctl --user edit llm-env-omniroute-heal.service`,
 `[Service]` `Environment=` lines); `make start` rewrites the unit itself.
 
+## Observe stack (Grafana and VictoriaMetrics)
+
+A separate rootless Podman Compose project (`llm-env-observe`) provides Grafana dashboards over
+VictoriaMetrics. It is fully independent of the inference stack: no GPU, socket, shared volume or
+network is used, and neither the main stack nor its containers are started, stopped or restarted.
+Grafana listens only on `127.0.0.1:3000` and VictoriaMetrics only on `127.0.0.1:8428`.
+
+Set it up from a retained checkout of this repository (a worktree is fine); the scripts read the
+compose file and provisioning files from that checkout:
+
+```bash
+bash scripts/observe-stack.sh up       # start Grafana + VictoriaMetrics and install the collector timer
+bash scripts/observe-stack.sh status   # Compose ps plus systemd timer/service status
+bash scripts/observe-stack.sh down     # stop the containers; retains volumes and the secret
+```
+
+Open `http://127.0.0.1:3000` and log in as `admin`. The admin password is generated once with
+`openssl rand -hex 24` and stored at
+`${XDG_STATE_HOME:-$HOME/.local/state}/llm-env/observe/grafana-admin-password` (directory mode
+0700, file mode 0600). It is valid only when it contains exactly 48 lowercase hex characters.
+The value never appears in the compose file, argv, logs or printed output: it is delivered to
+Grafana only through the external Podman secret `llm-env-observe-grafana-admin` and the constant
+`GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/llm-env-observe-grafana-admin`.
+
+`up` refuses to proceed **before** generating anything or starting containers when the credential
+file is present but invalid (with or without the secret), or when the secret exists but the
+credential file is missing. In either case the file and volumes are left untouched. **Recovery:**
+restore the original credential file, or reset the admin password inside the Grafana container
+with Grafana's documented procedure (for example
+`podman exec <grafana-container> grafana-cli admin reset-admin-password`), then store the new value
+in the credential file. **Never delete or recreate the Grafana data volume** — the admin bootstrap
+applies only to a new volume, and on an existing volume changing the file or secret has no effect.
+To restart the stack, run `down` then `up`. No normal `up`, `down` or `status` deletes the secret
+or the named volumes.
+
+VictoriaMetrics stores metrics for 365 days with a 100 GB free-space floor
+(`-storage.minFreeDiskSpaceBytes=100000000000`); there is no hard 2 GB cap. The two containers have
+512 MiB / 1 CPU caps each (boot-probed values, not a capacity recommendation). Inspect storage and
+limits with `podman volume inspect llm-env-observe_metrics llm-env-observe_grafana` and
+`podman compose --project-name llm-env-observe --file docker/observe/compose.yml ps`, or read the
+containers' host cgroups.
+
+A `llm-env-observe` systemd user timer runs `scripts/observe-publish.sh` every 60s. The one-shot
+collects host container and OmniRoute metrics with `llmenv.py observe-metrics --push` under a
+45s timeout. It first checks VictoriaMetrics' `/health` with a 2s budget and exits quietly when
+the backend is down, so no failing unit is recorded and no flush is forced. Missing measurements
+render as gaps, never zero (`last_over_time(...[90s])` with `spanNulls: false`).
+
+Rootless containers do not auto-start after a reboot because `podman-restart.service` is not
+enabled. After a reboot, run `bash scripts/observe-stack.sh up` again if the dashboard is needed;
+the timer is re-enabled by the same command.
+
 ## System One updates
 
 `make update-system-one [LAYA_VERSION=x.y.z]` updates Laya, the local System One server, to a newer PyPI release
