@@ -290,6 +290,8 @@ def _world(
     curl_rc: int = 0,
     systemctl_rc: int = 0,
     stub_pw: str = VALID_PW,
+    openssl_rc: int = 0,
+    mv_rc: int = 0,
 ) -> SimpleNamespace:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -303,7 +305,9 @@ fi
 exit 0
 ''')
     _stub(bin_dir, "systemctl", _JOURNAL + 'exit "$STUB_SYSTEMCTL_RC"\n')
-    _stub(bin_dir, "openssl", _JOURNAL + 'printf "%s\\n" "$STUB_PW"\n')
+    _stub(bin_dir, "openssl", _JOURNAL + 'printf "%s\\n" "$STUB_PW"\nexit "$STUB_OPENSSL_RC"\n')
+    if mv_rc:
+        _stub(bin_dir, "mv", _JOURNAL + 'exit "$STUB_MV_RC"\n')
     _stub(bin_dir, "curl", _JOURNAL + 'exit "$STUB_CURL_RC"\n')
     _stub(bin_dir, "uv", _JOURNAL + "exit 0\n")
     _stub(bin_dir, "timeout", _JOURNAL + '''\
@@ -336,6 +340,8 @@ exec "$@"
         "STUB_PW": stub_pw,
         "STUB_CURL_RC": str(curl_rc),
         "STUB_SYSTEMCTL_RC": str(systemctl_rc),
+        "STUB_OPENSSL_RC": str(openssl_rc),
+        "STUB_MV_RC": str(mv_rc),
     }
     return SimpleNamespace(env=env, calls=calls, marker=marker, pw_file=pw_file,
                            home=home, state=state)
@@ -387,6 +393,29 @@ def test_up_generates_secret_timer_and_secure_credential(tmp_path: Path) -> None
     for line in ("OnActiveSec=5s", "OnUnitActiveSec=60s", "AccuracySec=5s", "Persistent=true"):
         assert line in timer
     assert "OnCalendar" not in timer
+
+
+def test_up_openssl_failure_leaves_no_temp_credential_or_start(tmp_path: Path) -> None:
+    w = _world(tmp_path, openssl_rc=1)
+    r = _run(w, "observe-stack.sh", "up")
+    assert r.returncode != 0, r.stdout + r.stderr
+    calls = _calls(w)
+    assert "openssl <rand> <-hex> <24>" in calls
+    assert "<create>" not in calls and "<up> <-d>" not in calls
+    assert not w.pw_file.exists()  # no credential created
+    assert not w.marker.exists()  # no secret created
+    assert list(w.pw_file.parent.glob(".grafana-admin-password.*")) == []  # no temp residue
+
+
+def test_up_mv_failure_leaves_no_temp_credential_or_start(tmp_path: Path) -> None:
+    w = _world(tmp_path, mv_rc=1)
+    r = _run(w, "observe-stack.sh", "up")
+    assert r.returncode != 0, r.stdout + r.stderr
+    calls = _calls(w)
+    assert "<create>" not in calls and "<up> <-d>" not in calls
+    assert not w.pw_file.exists()  # no credential created
+    assert not w.marker.exists()  # no secret created
+    assert list(w.pw_file.parent.glob(".grafana-admin-password.*")) == []  # no temp residue
 
 
 def test_up_with_existing_secret_and_valid_file_reuses_both(tmp_path: Path) -> None:

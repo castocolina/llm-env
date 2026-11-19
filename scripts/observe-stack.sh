@@ -45,16 +45,18 @@ ensure_credential() {
 
     if [[ $have_secret -eq 0 ]]; then
         if [[ $have_file -eq 0 ]]; then
-            dir="$(dirname "$PW_FILE")"
-            mkdir -p "$dir"
-            chmod 0700 "$dir"
-            tmp="$(mktemp "${dir}/.grafana-admin-password.XXXXXX")"
-            pw="$(openssl rand -hex 24)"
-            [[ "$pw" =~ ^[0-9a-f]{48}$ ]] || { rm -f "$tmp"; abort "observe-stack: generated an invalid credential; aborting"; }
-            printf '%s\n' "$pw" >"$tmp"
-            chmod 0600 "$tmp"
-            mv -n -- "$tmp" "$PW_FILE"  # no-overwrite: a concurrent up may have created it
-            rm -f -- "$tmp"
+            (
+                dir="$(dirname "$PW_FILE")"
+                mkdir -p "$dir"
+                chmod 0700 "$dir"
+                tmp="$(mktemp "${dir}/.grafana-admin-password.XXXXXX")"
+                trap 'rm -f -- "$tmp"' EXIT  # clean the temp on any failure, including set -e aborts
+                pw="$(openssl rand -hex 24)"
+                [[ "$pw" =~ ^[0-9a-f]{48}$ ]] || abort "observe-stack: generated an invalid credential; aborting"
+                printf '%s\n' "$pw" >"$tmp"
+                chmod 0600 "$tmp"
+                mv -n -- "$tmp" "$PW_FILE"  # no-overwrite: a concurrent up may have created it
+            )
         fi
         podman secret create --ignore "$SECRET" "$PW_FILE"
     fi
