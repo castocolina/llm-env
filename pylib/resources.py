@@ -367,6 +367,7 @@ LIVE_CONTAINERS = {
     "omniroute": "omniroute",
     "remote_setup": "remote-setup",
     "system_one": "system-one",
+    "llm_server": "llm-server",
 }
 LIVE_FOOTER = [
     "Counters start over when a container is recreated (`make restart`, update); uptime is the age of the current counters.",
@@ -461,7 +462,9 @@ def read_live(
     current, peak = _num(_read(cgroup / "memory.current")), _num(_read(cgroup / "memory.peak"))
     cap_raw = _read(cgroup / "memory.max")
     cap = _num(cap_raw)  # "max" (unlimited) parses to None
-    usec = _num(_kv(cgroup / "cpu.stat").get("usage_usec"))
+    cpu = _kv(cgroup / "cpu.stat")
+    usec = _num(cpu.get("usage_usec"))
+    memory = _kv(cgroup / "memory.stat")
     events = _kv(cgroup / "memory.events")
     row: dict[str, Any] = {
         "uptime_s": int(uptime),
@@ -474,6 +477,10 @@ def read_live(
         "swap_peak_mib": _mib(_num(_read(cgroup / "memory.swap.peak"))),
         "events": {k: _num(events.get(k)) for k in ("high", "max", "oom", "oom_kill")},
         "cpu_avg_cores": None if usec is None else usec / 1e6 / uptime,
+        "anon_mib": _mib(_num(memory.get("anon"))),
+        "file_mib": _mib(_num(memory.get("file"))),
+        "cpu_throttled_periods": _num(cpu.get("nr_throttled")),
+        "cpu_throttled_s": (None if (throttled := _num(cpu.get("throttled_usec"))) is None else throttled / 1e6),
         "restart_pending": cap_raw is not None and cap != configured_cap_mib * _MIB,
         **_psi(cgroup),
     }
@@ -491,7 +498,11 @@ def live_resources(
     now = time.time() if now is None else now
     out: dict[str, Any] = {}
     for service, container in LIVE_CONTAINERS.items():
-        policy = limits[service]
+        policy = limits.get(service)
+        if policy is None:  # not configured in this caller's policy snapshot
+            continue
+        if service == "llm_server":
+            policy = {"memory_max_mib": policy.get("memory_mib", 0)}
         if policy["memory_max_mib"] <= 0:  # disabled service
             continue
         found = locate(container)

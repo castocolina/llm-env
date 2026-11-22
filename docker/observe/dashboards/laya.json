@@ -1,0 +1,2167 @@
+{
+  "uid": "llm-env-laya",
+  "title": "Laya: requests, question types, confidence",
+  "description": "Jev decision-log observability: decisions, types, self-estimated confidence and abstentions.",
+  "tags": [
+    "llm-env"
+  ],
+  "schemaVersion": 39,
+  "refresh": "60s",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Jev log source up",
+      "description": "Collector read status for the Jev decision log. 1 means readable on last collection; 0 means source unavailable.",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"jev_log\"})",
+          "legendFormat": "",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Jev state source up",
+      "description": "Persistent cursor/state health; 0 means state was unreadable or invalid.",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"jev_state\"})",
+          "legendFormat": "",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Decision freshness (seconds)",
+      "description": "Seconds since each backend’s newest logged decision. The Jev log only grows when agents ask questions, so idle periods are normal; yellow indicates age, not an outage. No series means no known decision timestamp; this is not request latency.",
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "time() - llm_env_jev_last_decision_timestamp_seconds{backend=\"laya\"}",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "time() - llm_env_jev_last_decision_timestamp_seconds{backend=\"typesafe\"}",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Decisions in selected range by backend",
+      "description": "Counter increase over the selected range, grouped by backend. Values are decisions recorded in the log, not HTTP requests.",
+      "gridPos": {
+        "x": 8,
+        "y": 9,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"laya\"}[$__range]))",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"typesafe\"}[$__range]))",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "text",
+      "title": "About this dashboard",
+      "description": "Laya request telemetry begins at the cutover after the Laya image switch; the earlier window is a gap. Question and answer text is not stored.",
+      "gridPos": {
+        "x": 16,
+        "y": 9,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Laya request telemetry\nData starts at the cutover after the Laya image switch. The earlier window is a gap: about 1,082 requests after 2026-11-20 08:19 -03 and the period before it are not recorded; 1,542 older spans were never ingested.\n\nQuestion and answer text is not stored.\n\n### Jev decisions\nConfidence is the model's own estimate, **not measured accuracy**."
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Decisions per hour by backend",
+      "description": "Decision-log rate per hour by backend, using a 15-minute window to cover 5-minute backfilled samples.",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum by (backend) (rate(llm_env_jev_decisions_total[15m]))",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Decisions per hour by type and backend",
+      "description": "Decision-log rate per hour grouped by backend and question type, using 15-minute rate windows.",
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum by (backend,type) (rate(llm_env_jev_decisions_total[15m]))",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Decisions per hour by caller",
+      "description": "Decision-log rate per hour by allowlisted caller and backend; callers outside the bounded allowlist are grouped as other.",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum by (backend,caller) (rate(llm_env_jev_decisions_total[15m]))",
+          "legendFormat": "{{backend}} / {{caller}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Lifetime decision totals by caller",
+      "description": "Cumulative decision counters by backend and caller since the current log generation; not limited to the selected time range.",
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend,caller) (llm_env_jev_decisions_total)",
+          "legendFormat": "{{backend}} / {{caller}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Laya confidence quantiles by type (p50 / p90)",
+      "description": "Selected-range top-confidence p50 and p90 by Laya question type, with a sample-count column. Types without observations show n/a; quantiles are interpolated from fixed buckets and confidence is a self-estimate, not accuracy.",
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"choice\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"choice\"}[$__range])) > 0)",
+          "legendFormat": "p50 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"choice\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"choice\"}[$__range])) > 0)",
+          "legendFormat": "p90 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"noul\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"noul\"}[$__range])) > 0)",
+          "legendFormat": "p50 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"noul\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"noul\"}[$__range])) > 0)",
+          "legendFormat": "p90 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"score\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"score\"}[$__range])) > 0)",
+          "legendFormat": "p50 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le,type) (increase(llm_env_jev_top_confidence_bucket{backend=\"laya\",type=\"score\"}[$__range]))) and on(type) (sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"score\"}[$__range])) > 0)",
+          "legendFormat": "p90 {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"choice\"}[$__range]))",
+          "legendFormat": "samples {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"noul\"}[$__range]))",
+          "legendFormat": "samples {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (type) (increase(llm_env_jev_top_confidence_count{backend=\"laya\",type=\"score\"}[$__range]))",
+          "legendFormat": "samples {{type}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "G"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "H"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "I"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Average confidence by type and backend",
+      "description": "Mean observed top confidence by backend and type over the selected range, shown only with at least 20 samples. Self-estimate, not accuracy.",
+      "gridPos": {
+        "x": 12,
+        "y": 38,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_sum[$__range])) / sum by (backend,type) (increase(llm_env_jev_top_confidence_count[$__range]))) and on (backend,type) (sum by (backend,type) (increase(llm_env_jev_top_confidence_count[$__range])) >= 20)",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "barchart",
+      "title": "Confidence bucket distribution (selected range)",
+      "description": "Non-cumulative confidence observations by backend, type and fixed bucket over the selected range. This is a histogram count, not probability density or accuracy.",
+      "gridPos": {
+        "x": 0,
+        "y": 66,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.3\"}[$__range]))",
+          "legendFormat": "{{backend}} / {{type}} <= 0.3",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.5\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.3\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.3, 0.5]",
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.6\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.5\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.5, 0.6]",
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.7\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.6\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.6, 0.7]",
+          "instant": false
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.8\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.7\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.7, 0.8]",
+          "instant": false
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.9\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.8\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.8, 0.9]",
+          "instant": false
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.95\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.9\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.9, 0.95]",
+          "instant": false
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.99\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.95\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.95, 0.99]",
+          "instant": false
+        },
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"1.0\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"0.99\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (0.99, 1.0]",
+          "instant": false
+        },
+        {
+          "refId": "J",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"+Inf\"}[$__range])) - sum by (backend,type) (increase(llm_env_jev_top_confidence_bucket{le=\"1.0\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{type}} (1.0, +Inf]",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "none",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Decision share by type: laya",
+      "description": "Share of recorded laya decisions by type over the selected range. Typesafe may have no data until it records decisions. Shares add up to 100% when data is present; zero-volume backend yields no series. No data is shown when the selected range has no recorded decisions.",
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend,type) (increase(llm_env_jev_decisions_total{backend=\"laya\"}[$__range])) / on (backend) group_left() sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"laya\"}[$__range])) and on (backend) (sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"laya\"}[$__range])) > 0)",
+          "legendFormat": "{{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "percent"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Abstention rate by backend and type",
+      "description": "Fallback-needed decisions divided by answered decisions over the selected range; displayed only at 20+ answered samples. This is model abstention/deferral to caller, not an error or proof the caller invoked fallback.",
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_fallback_needed_total[$__range])) / sum by (backend,type) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range]))) and on (backend,type) (sum by (backend,type) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range])) >= 20)",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "percent",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Error outcome rate by backend",
+      "description": "Error-outcome decisions divided by all decisions over the selected range; no observations yield n/a. Zero-fills an absent error counter only when that backend has decisions in the selected range; a backend with no decisions remains n/a.",
+      "gridPos": {
+        "x": 12,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(((sum by (backend) (increase(llm_env_jev_decisions_total{outcome=\"error\"}[$__range]))) or on (backend) (0 * sum by (backend) (increase(llm_env_jev_decisions_total[$__range]))) ) / sum by (backend) (increase(llm_env_jev_decisions_total[$__range]))) and on (backend) (sum by (backend) (increase(llm_env_jev_decisions_total[$__range])) > 0)",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "percent",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Answered share by backend",
+      "description": "Answered decisions divided by all logged outcomes over selected range; answered share = 1 - abstention-and-error share. No observations yields no series.",
+      "gridPos": {
+        "x": 0,
+        "y": 86,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range])) / sum by (backend) (increase(llm_env_jev_decisions_total[$__range]))) and on (backend) (sum by (backend) (increase(llm_env_jev_decisions_total[$__range])) > 0)",
+          "legendFormat": "{{backend}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "percent",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Abstention rate comparison by backend and type",
+      "description": "Selected-range fallback-needed share among answered decisions. This is model abstention/deferral, not an error or confirmed downstream fallback.",
+      "gridPos": {
+        "x": 12,
+        "y": 86,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,type) (increase(llm_env_jev_fallback_needed_total[$__range])) / sum by (backend,type) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range]))) and on (backend,type) (sum by (backend,type) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range])) > 0)",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "percent",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "p50 confidence comparison by backend and type",
+      "description": "p50 top-confidence by backend/type over selected range, shown only with at least 20 observations per series. Interpolated from fixed buckets; confidence is not accuracy.",
+      "gridPos": {
+        "x": 0,
+        "y": 94,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (backend,type,le) (increase(llm_env_jev_top_confidence_bucket[$__range]))) and on (backend,type) (sum by (backend,type) (increase(llm_env_jev_top_confidence_count[$__range])) >= 20)",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Decision volume by backend and type",
+      "description": "Cumulative counter increases over selected range by backend/type; logged decisions, not HTTP requests.",
+      "gridPos": {
+        "x": 12,
+        "y": 94,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend,type) (increase(llm_env_jev_decisions_total[$__range]))",
+          "legendFormat": "{{backend}} / {{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Top caller abstention share by backend",
+      "description": "Selected-range fallback-needed share for the top five callers by decision volume; shown only with at least 20 decisions and a nonzero denominator. This is model abstention/deferral, not error or confirmed downstream fallback.",
+      "gridPos": {
+        "x": 0,
+        "y": 102,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (backend,caller) (increase(llm_env_jev_fallback_needed_total[$__range])) / on (backend,caller) sum by (backend,caller) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range]))) and on (backend,caller) (sum by (backend,caller) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range])) >= 20) and on (backend,caller) topk(5, sum by (backend,caller) (increase(llm_env_jev_decisions_total{outcome=\"answered\"}[$__range])))",
+          "legendFormat": "{{backend}} / {{caller}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Section: Overview."
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Volume",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Section: Volume."
+    },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "QUESTION TYPES AND CERTAINTY",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Section: QUESTION TYPES AND CERTAINTY."
+    },
+    {
+      "id": 103,
+      "type": "row",
+      "title": "ABSTENTIONS AND ERRORS",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 76,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Section: ABSTENTIONS AND ERRORS."
+    },
+    {
+      "id": 104,
+      "type": "row",
+      "title": "LAYA VS TYPESAFE",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Section: LAYA VS TYPESAFE."
+    },
+    {
+      "id": 105,
+      "type": "row",
+      "title": "REQUESTS",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 110,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Laya HTTP request metrics from the host span-file collector."
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Requests per hour by endpoint and status class",
+      "description": "Request counter increases normalized over the selected range; sparse-series safe.",
+      "gridPos": {
+        "x": 0,
+        "y": 111,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum by (endpoint,status) (increase(llm_env_laya_requests_total{endpoint=\"/v1/systemone\"}[$__range])) / $__range_s",
+          "legendFormat": "{{endpoint}} {{status}}",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum by (endpoint,status) (increase(llm_env_laya_requests_total{endpoint=\"/v1/systemone/batch\"}[$__range])) / $__range_s",
+          "legendFormat": "{{endpoint}} {{status}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Request duration p50 / p90 / p99",
+      "description": "Selected-range histogram quantiles. No observations produce n/a, not NaN.",
+      "gridPos": {
+        "x": 12,
+        "y": 111,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone\"}[$__range])) > 0)",
+          "legendFormat": "p50 {{endpoint}}",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone\"}[$__range])) > 0)",
+          "legendFormat": "p90 {{endpoint}}",
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone\"}[$__range])) > 0)",
+          "legendFormat": "p99 {{endpoint}}",
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone/batch\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone/batch\"}[$__range])) > 0)",
+          "legendFormat": "p50 {{endpoint}}",
+          "instant": false
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone/batch\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone/batch\"}[$__range])) > 0)",
+          "legendFormat": "p90 {{endpoint}}",
+          "instant": false
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le,endpoint) (increase(llm_env_laya_duration_ms_bucket{endpoint=\"/v1/systemone/batch\"}[$__range]))) and on(endpoint) (sum by(endpoint) (increase(llm_env_laya_duration_ms_count{endpoint=\"/v1/systemone/batch\"}[$__range])) > 0)",
+          "legendFormat": "p99 {{endpoint}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "n/a",
+          "custom": {
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Answers by type",
+      "description": "Answer counts in the selected range by validated decision type.",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by(type) (increase(llm_env_laya_answers_total{type=\"noul\"}[$__range]))",
+          "legendFormat": "{{type}}",
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by(type) (increase(llm_env_laya_answers_total{type=\"choice\"}[$__range]))",
+          "legendFormat": "{{type}}",
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by(type) (increase(llm_env_laya_answers_total{type=\"score\"}[$__range]))",
+          "legendFormat": "{{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "custom": {
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Laya file source up",
+      "description": "Collector can read the Laya span file; the file is created only after the first Laya request on the new image.",
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"laya\"})",
+          "legendFormat": "",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Decision share by type: typesafe",
+      "description": "Share of recorded typesafe decisions by type over the selected range. Typesafe may have no data until it records decisions. Shares add up to 100% when data is present; zero-volume backend yields no series. No data is shown when the selected range has no recorded decisions.",
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (backend,type) (increase(llm_env_jev_decisions_total{backend=\"typesafe\"}[$__range])) / on (backend) group_left() sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"typesafe\"}[$__range])) and on (backend) (sum by (backend) (increase(llm_env_jev_decisions_total{backend=\"typesafe\"}[$__range])) > 0)",
+          "legendFormat": "{{type}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "percent"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 106,
+      "type": "row",
+      "title": "REQUESTS (per request)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 120,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "description": "Notable Laya HTTP requests from the last 24 hours."
+    },
+    {
+      "id": 27,
+      "type": "table",
+      "title": "Notable Laya requests (errors, batches, slow, truncated)",
+      "description": "This table shows at most 100 notable requests from the last 24 h (a fixed collector window, not the time picker), newest first. Plain successes are counted in the per-hour panels and are not listed here.",
+      "gridPos": {
+        "x": 0,
+        "y": 121,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "llm_env_laya_request_duration_ms",
+          "legendFormat": "{{span_id}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "llm_env_laya_request_questions",
+          "legendFormat": "{{span_id}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "llm_env_laya_request_confidence_mean",
+          "legendFormat": "{{span_id}}",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "span_id": true,
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "ts": "Request time",
+              "endpoint": "Endpoint",
+              "status": "Status",
+              "batch": "Batch",
+              "Value #A": "Duration (ms)",
+              "Value #B": "Questions",
+              "Value #C": "Mean confidence",
+              "error_type": "Error type"
+            },
+            "indexByName": {
+              "ts": 0,
+              "endpoint": 1,
+              "status": 2,
+              "batch": 3,
+              "Value #A": 4,
+              "Value #B": 5,
+              "Value #C": 6,
+              "error_type": 7
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Time",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Laya request duration (notable requests)",
+      "description": "Slowest notable Laya request (ms) per endpoint and status while it stays in the collector window (last 24 h, at most 100 requests). Plain successes are counted in the per-hour panels and are not listed here.",
+      "gridPos": {
+        "x": 0,
+        "y": 131,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "max by (endpoint, status) (llm_env_laya_request_duration_ms)",
+          "legendFormat": "{{endpoint}} {{status}}",
+          "instant": false,
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "llm-env dashboards",
+      "type": "dashboards",
+      "tags": [
+        "llm-env"
+      ],
+      "asDropdown": true
+    }
+  ],
+  "version": 1
+}

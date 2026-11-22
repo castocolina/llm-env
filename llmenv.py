@@ -63,6 +63,7 @@ from pylib.gguf import (
     read_gguf_header,
     validate_gguf,
 )
+from pylib.observe_metrics import collect_metrics, publish_metrics
 from pylib.omniroute import (
     OmniRouteError,
     compute_combo_context,
@@ -460,6 +461,47 @@ def cmd_resources(args: argparse.Namespace) -> int:
         payload["live_tables"] = format_live(payload["live"])
         payload["live_footer"] = LIVE_FOOTER
     return emit(payload)
+
+_OBSERVE_METRICS_ERROR = "observe-metrics: collection or publish failed"
+
+
+def cmd_observe_jev_backfill(args: argparse.Namespace) -> int:
+    from pylib.observe_jev_backfill import run_backfill
+
+    try:
+        run_backfill(log=Path(args.log), state_path=Path(args.state), vm=args.vm,
+                     step_seconds=args.step_seconds, until=args.until,
+                     out=Path(args.out), push=args.push)
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"observe-jev-backfill: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_observe_metrics(args: argparse.Namespace) -> int:
+    # Every dispatched error is sanitized: no invalid config secret text, no JSON fail() output.
+    try:
+        cfg = require_valid_config(load_config(Path(args.config)))
+        limits = limits_for(cfg, host_resources())
+        pci = (cfg.get("gpu") or {}).get("pci_address") or None
+        port = cfg["omniroute"]["port"]
+        password = cfg["omniroute"]["initial_password"]
+        llama_server = cfg["server"]
+        text = collect_metrics(
+            limits, pci, port=port, password=password,
+            llama_url=f"http://127.0.0.1:{llama_server['port']}",
+            llama_api_key=llama_server["api_key"],
+            llama_enabled=bool((cfg.get("llm_server") or {}).get("enabled", True)),
+        )
+        if args.push:
+            publish_metrics(text)
+        else:
+            sys.stdout.write(text)
+        return 0
+    except Exception:  # noqa: BLE001 -- every dispatched error is sanitized, never a config secret or fail() JSON
+        print(_OBSERVE_METRICS_ERROR, file=sys.stderr)
+        return 1
+
 
 def cmd_interference(args: argparse.Namespace) -> int:
     from pylib import interference
@@ -884,6 +926,21 @@ def build_parser() -> argparse.ArgumentParser:
     resources_parser.add_argument("--config", default=argparse.SUPPRESS)
     resources_parser.add_argument("--live", action="store_true")
     resources_parser.set_defaults(func=cmd_resources)
+
+    observe_parser = sub.add_parser("observe-metrics")
+    observe_parser.add_argument("--config", default=argparse.SUPPRESS)
+    observe_parser.add_argument("--push", action="store_true")
+    observe_parser.set_defaults(func=cmd_observe_metrics)
+
+    backfill_parser = sub.add_parser("observe-jev-backfill")
+    backfill_parser.add_argument("--log", default=str(Path.home() / ".local/state/ai-kit/jev-answers.jsonl"))
+    backfill_parser.add_argument("--state", default=str(Path.home() / ".local/state/llm-env/observe/jev-state.json"))
+    backfill_parser.add_argument("--vm", default="http://127.0.0.1:8428")
+    backfill_parser.add_argument("--step-seconds", type=positive_int, default=300)
+    backfill_parser.add_argument("--until")
+    backfill_parser.add_argument("--out", default="jev-backfill.prom")
+    backfill_parser.add_argument("--push", action="store_true")
+    backfill_parser.set_defaults(func=cmd_observe_jev_backfill)
 
     interference_parser = sub.add_parser("interference")
     interference_parser.add_argument("--config", default=argparse.SUPPRESS)

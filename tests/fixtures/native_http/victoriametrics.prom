@@ -1,0 +1,132 @@
+vm_http_request_duration_seconds_sum{path="/metrics"} 0.023799989000000004
+vm_http_request_duration_seconds_count{path="/metrics"} 7
+vm_http_request_errors_total{path="*", reason="unsupported"} 0
+vm_http_request_errors_total{path="*", reason="wrong_auth_key"} 0
+vm_http_request_errors_total{path="*", reason="wrong_basic_auth"} 0
+vm_http_request_errors_total{path="/api/v1/admin/status/metric_names_stats/reset"} 0
+vm_http_request_errors_total{path="/api/v1/admin/tsdb/delete_series"} 0
+vm_http_request_errors_total{path="/api/v1/export"} 0
+vm_http_request_errors_total{path="/api/v1/export/csv"} 0
+vm_http_request_errors_total{path="/api/v1/export/native"} 0
+vm_http_request_errors_total{path="/api/v1/import", protocol="vmimport"} 0
+vm_http_request_errors_total{path="/api/v1/import/csv", protocol="csvimport"} 0
+vm_http_request_errors_total{path="/api/v1/import/native", protocol="nativeimport"} 0
+vm_http_request_errors_total{path="/api/v1/import/prometheus", protocol="prometheusimport"} 0
+vm_http_request_errors_total{path="/api/v1/label/{}/values"} 0
+vm_http_request_errors_total{path="/api/v1/labels"} 0
+vm_http_request_errors_total{path="/api/v1/metadata"} 0
+vm_http_request_errors_total{path="/api/v1/query"} 21
+vm_http_request_errors_total{path="/api/v1/query_range"} 8
+vm_http_request_errors_total{path="/api/v1/series"} 0
+vm_http_request_errors_total{path="/api/v1/series/count"} 0
+vm_http_request_errors_total{path="/api/v1/status/metric_names_stats"} 0
+vm_http_request_errors_total{path="/api/v1/status/top_queries"} 0
+vm_http_request_errors_total{path="/api/v1/status/tsdb"} 0
+vm_http_request_errors_total{path="/api/v1/write", protocol="promremotewrite"} 0
+vm_http_request_errors_total{path="/datadog/api/beta/sketches", protocol="datadog"} 0
+vm_http_request_errors_total{path="/datadog/api/v1/series", protocol="datadog"} 0
+vm_http_request_errors_total{path="/datadog/api/v2/series", protocol="datadog"} 0
+vm_http_request_errors_total{path="/federate"} 0
+vm_http_request_errors_total{path="/functions"} 0
+vm_http_request_errors_total{path="/functions/<func_name>"} 0
+vm_http_request_errors_total{path="/influx/write", protocol="influx"} 0
+vm_http_request_errors_total{path="/metrics/expand"} 0
+vm_http_request_errors_total{path="/metrics/find"} 0
+vm_http_request_errors_total{path="/metrics/index.json"} 0
+vm_http_request_errors_total{path="/newrelic/infra/v2/metrics/events/bulk", protocol="newrelic"} 0
+vm_http_request_errors_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"} 0
+vm_http_request_errors_total{path="/render"} 0
+vm_http_request_errors_total{path="/snapshot/delete"} 0
+vm_http_request_errors_total{path="/snapshot/delete_all"} 0
+vm_http_request_errors_total{path="/tags"} 0
+vm_http_request_errors_total{path="/tags/<tag_name>"} 0
+vm_http_request_errors_total{path="/tags/autoComplete/tags"} 0
+vm_http_request_errors_total{path="/tags/autoComplete/values"} 0
+vm_http_request_errors_total{path="/tags/delSeries"} 0
+vm_http_request_errors_total{path="/tags/findSeries"} 0
+vm_http_request_errors_total{path="/tags/tagMultiSeries"} 0
+vm_http_request_errors_total{path="/tags/tagSeries"} 0
+vm_http_request_errors_total{path="/target_response"} 0
+vm_http_request_errors_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"} 0
+vm_http_requests_total{path="*/favicon.ico"} 0
+vm_http_requests_total{path="/-/reload"} 0
+vm_http_requests_total{path="/api/v1/admin/status/metric_names_stats/reset"} 0
+vm_http_requests_total{path="/api/v1/admin/tsdb/delete_series"} 0
+vm_http_requests_total{path="/api/v1/alerts"} 0
+vm_http_requests_total{path="/api/v1/buildinfo"} 2
+vm_http_requests_total{path="/api/v1/export"} 64
+vm_http_requests_total{path="/api/v1/export/csv"} 0
+vm_http_requests_total{path="/api/v1/export/native"} 0
+vm_http_requests_total{path="/api/v1/import", protocol="vmimport"} 0
+vm_http_requests_total{path="/api/v1/import/csv", protocol="csvimport"} 0
+vm_http_requests_total{path="/api/v1/import/native", protocol="nativeimport"} 0
+vm_http_requests_total{path="/api/v1/import/prometheus", protocol="prometheusimport"} 2522
+vm_http_requests_total{path="/api/v1/label/{}/values"} 14
+vm_http_requests_total{path="/api/v1/labels"} 0
+vm_http_requests_total{path="/api/v1/metadata"} 0
+vm_http_requests_total{path="/api/v1/notifiers"} 0
+vm_http_requests_total{path="/api/v1/query"} 2768
+vm_http_requests_total{path="/api/v1/query_exemplars"} 0
+vm_http_requests_total{path="/api/v1/query_range"} 4583
+vm_http_requests_total{path="/api/v1/rules"} 0
+vm_http_requests_total{path="/api/v1/series"} 12
+vm_http_requests_total{path="/api/v1/series/count"} 1
+vm_http_requests_total{path="/api/v1/status/active_queries"} 0
+vm_http_requests_total{path="/api/v1/status/config"} 0
+vm_http_requests_total{path="/api/v1/status/metric_names_stats"} 0
+vm_http_requests_total{path="/api/v1/status/top_queries"} 0
+vm_http_requests_total{path="/api/v1/status/tsdb"} 6
+vm_http_requests_total{path="/api/v1/targets"} 0
+vm_http_requests_total{path="/api/v1/write", protocol="promremotewrite"} 0
+vm_http_requests_total{path="/config"} 0
+vm_http_requests_total{path="/datadog/api/beta/sketches", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/api/v1/check_run", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/api/v1/metadata", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/api/v1/series", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/api/v1/validate", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/api/v2/series", protocol="datadog"} 0
+vm_http_requests_total{path="/datadog/intake", protocol="datadog"} 0
+vm_http_requests_total{path="/debug/pprof/"} 0
+vm_http_requests_total{path="/debug/pprof/cmdline"} 0
+vm_http_requests_total{path="/debug/pprof/default"} 0
+vm_http_requests_total{path="/debug/pprof/mutex"} 0
+vm_http_requests_total{path="/debug/pprof/profile"} 0
+vm_http_requests_total{path="/debug/pprof/symbol"} 0
+vm_http_requests_total{path="/debug/pprof/trace"} 0
+vm_http_requests_total{path="/expand-with-exprs"} 0
+vm_http_requests_total{path="/federate"} 0
+vm_http_requests_total{path="/functions"} 0
+vm_http_requests_total{path="/functions/<func_name>"} 0
+vm_http_requests_total{path="/influx/health", protocol="influx"} 0
+vm_http_requests_total{path="/influx/ping", protocol="influx"} 0
+vm_http_requests_total{path="/influx/query", protocol="influx"} 0
+vm_http_requests_total{path="/influx/write", protocol="influx"} 0
+vm_http_requests_total{path="/metric-relabel-debug"} 0
+vm_http_requests_total{path="/metrics"} 8
+vm_http_requests_total{path="/metrics/expand"} 0
+vm_http_requests_total{path="/metrics/find"} 0
+vm_http_requests_total{path="/metrics/index.json"} 0
+vm_http_requests_total{path="/newrelic", protocol="newrelic"} 0
+vm_http_requests_total{path="/newrelic/infra/v2/metrics/events/bulk", protocol="newrelic"} 0
+vm_http_requests_total{path="/newrelic/inventory/deltas", protocol="newrelic"} 0
+vm_http_requests_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"} 0
+vm_http_requests_total{path="/prettify-query"} 0
+vm_http_requests_total{path="/render"} 0
+vm_http_requests_total{path="/service-discovery"} 0
+vm_http_requests_total{path="/snapshot/create"} 0
+vm_http_requests_total{path="/snapshot/delete"} 0
+vm_http_requests_total{path="/snapshot/delete_all"} 0
+vm_http_requests_total{path="/snapshot/list"} 0
+vm_http_requests_total{path="/tags"} 0
+vm_http_requests_total{path="/tags/<tag_name>"} 0
+vm_http_requests_total{path="/tags/autoComplete/tags"} 0
+vm_http_requests_total{path="/tags/autoComplete/values"} 0
+vm_http_requests_total{path="/tags/delSeries"} 0
+vm_http_requests_total{path="/tags/findSeries"} 0
+vm_http_requests_total{path="/tags/tagMultiSeries"} 0
+vm_http_requests_total{path="/tags/tagSeries"} 0
+vm_http_requests_total{path="/target-relabel-debug"} 0
+vm_http_requests_total{path="/target_response"} 0
+vm_http_requests_total{path="/targets"} 0
+vm_http_requests_total{path="/vmalert"} 0
+vm_http_requests_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"} 0

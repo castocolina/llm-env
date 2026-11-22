@@ -1,0 +1,55 @@
+# Isolated observability stack: Grafana dashboards over VictoriaMetrics.
+#
+# Owned by scripts/observe-stack.sh as a SEPARATE rootless Podman Compose
+# project (llm-env-observe). No dependency on the inference stack: no GPU, no
+# socket, no main-state bind, no shared volumes or network. Loopback-only
+# publication. The Grafana admin password arrives exclusively through an
+# external named secret; it is never interpolated here or written to argv.
+# VictoriaMetrics uses a 128 MiB trial cap after checking live ingestion and dashboard queries.
+# Grafana retains its boot-tested 512 MiB memory cap.
+services:
+  victoriametrics:
+    image: docker.io/victoriametrics/victoria-metrics:v1.156.0@sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=365d
+      - -storage.minFreeDiskSpaceBytes=100000000000
+      - -search.latencyOffset=0s
+    ports: ["127.0.0.1:8428:8428"]
+    volumes: ["metrics:/storage"]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 1.0
+
+  grafana:
+    image: docker.io/grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/llm-env-observe-grafana-admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro,z
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro,z
+      - ./dashboards:/etc/grafana/dashboards:ro,z
+    secrets:
+      - source: llm-env-observe-grafana-admin
+        uid: '472'
+        mode: '0400'
+        target: llm-env-observe-grafana-admin
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+
+secrets:
+  llm-env-observe-grafana-admin:
+    external: true
+
+volumes:
+  metrics: {}
+  grafana: {}

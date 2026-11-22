@@ -1,0 +1,584 @@
+{
+  "uid": "llm-env-llama",
+  "title": "llama.cpp: model, throughput, cache and resources",
+  "description": "llama.cpp router metrics. Sleeping or unavailable models have no value samples.",
+  "tags": [
+    "llm-env"
+  ],
+  "schemaVersion": 39,
+  "refresh": "60s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Scrape policy and limits",
+      "description": "A reachable router with no loaded alias is source-up, with model status only. Sleeping, loading and unloaded models are never requested on model-scoped endpoints. Child counters may reset on unload/sleep wake; Prometheus rate() handles resets. No samples means n/a, not zero.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "The router is source-up when reachable and returning a valid model list, even if every model is sleeping/unloaded; during that normal state only model-status samples are available. Outages (stopped, unreachable, unauthorized, server error or invalid model list) set source_up=0 and have no value samples, so Grafana shows n/a. Child counters can reset on unload/sleep wake; Prometheus rate() handles resets. This llama.cpp build exports no KV-cache usage metric, so no KV-cache panel is available."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "llama source up",
+      "description": "1 means the router returned a valid model list; 0 means stopped, unreachable, unauthorized, server error or invalid response. Model values remain absent during an outage.",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_env_source_up{source=\"llama\"}",
+          "legendFormat": "up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Loaded models",
+      "description": "Current loaded aliases. No sample means source unavailable; zero means reachable router with none loaded.",
+      "gridPos": {
+        "x": 4,
+        "y": 3,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_env_llama_models_loaded and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "loaded"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Model status",
+      "description": "Current status for each listed alias. Only loaded aliases are scraped; sleeping, loading and unloaded aliases never receive metrics/slots/props requests.",
+      "gridPos": {
+        "x": 8,
+        "y": 3,
+        "w": 16,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_env_llama_model_state and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "unloaded",
+                  "color": "gray"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "loading",
+                  "color": "blue"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "2": {
+                  "text": "sleeping",
+                  "color": "yellow"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "3": {
+                  "text": "loaded",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "4": {
+                  "text": "other",
+                  "color": "red"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "noValue": "n/a",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Slot context and processing",
+      "description": "Loaded model slot context and processing flag from one slots read per alias; sleeping models have no samples. Counters reset on child restart; rate() handles resets. Processing is shown on a separate right axis from context-token capacity.",
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(llm_env_llama_slot_context_tokens and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} context tokens"
+        },
+        {
+          "refId": "B",
+          "expr": "(llm_env_llama_slot_processing and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} processing"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 0
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Prompt and generation throughput",
+      "description": "Counter-derived token/s uses rate(tokens)/rate(seconds) over five minutes; instantaneous gauges are llama.cpp lifetime averages and can lag workload shifts. Child counters reset on unload/sleep wake; rate() handles resets. Sleeping/down models show n/a.",
+      "gridPos": {
+        "x": 12,
+        "y": 7,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "((rate(llm_env_llama_tokens_predicted_total[5m]) / (rate(llm_env_llama_tokens_predicted_seconds_total[5m]) > 0)) and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} generation counter-derived"
+        },
+        {
+          "refId": "B",
+          "expr": "((rate(llm_env_llama_prompt_tokens_total[5m]) / (rate(llm_env_llama_prompt_seconds_total[5m]) > 0)) and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} prompt counter-derived"
+        },
+        {
+          "refId": "C",
+          "expr": "(llm_env_llama_predicted_tokens_seconds and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} generation gauge"
+        },
+        {
+          "refId": "D",
+          "expr": "(llm_env_llama_prompt_tokens_seconds and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} prompt gauge"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tokens per minute",
+      "description": "Prompt and generated token counters converted to per-minute rates. Counters may reset when the child unloads or wakes; rate() handles resets. No samples while sleeping/down means n/a.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(60 * rate(llm_env_llama_prompt_tokens_total[5m])) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} prompt"
+        },
+        {
+          "refId": "B",
+          "expr": "(60 * rate(llm_env_llama_tokens_predicted_total[5m])) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} generated"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cache and request load",
+      "description": "Cache reuse ratio is cached prompt tokens / (processed + cached) prompt tokens over the selected range. Request and busy-slot metrics are instantaneous. Counters reset on child restart; rate()/increase() handle resets. Sleeping/down models show n/a. Maximum tokens use a separate right axis from request and cache ratios.",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "((increase(llm_env_llama_prompt_tokens_cached_total[$__range]) / (increase(llm_env_llama_prompt_tokens_total[$__range]) + increase(llm_env_llama_prompt_tokens_cached_total[$__range])) > 0) and on(model) (llm_env_llama_model_status{status=\"loaded\"} == 1)) and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} cache reuse"
+        },
+        {
+          "refId": "B",
+          "expr": "llm_env_llama_requests_processing and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} processing requests"
+        },
+        {
+          "refId": "C",
+          "expr": "llm_env_llama_requests_deferred and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} deferred requests"
+        },
+        {
+          "refId": "D",
+          "expr": "llm_env_llama_n_busy_slots_per_decode and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} busy slots/decode"
+        },
+        {
+          "refId": "E",
+          "expr": "llm_env_llama_n_tokens_max and on() (llm_env_source_up{source=\"llama\"} == 1)",
+          "legendFormat": "{{model}} maximum tokens (gauge; source high-water mark, not rate-able)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "E"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 0
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 200000
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "llm-server container CPU and memory",
+      "description": "Host cgroup CPU lifetime average and memory current/peak, filtered to the llm-server container. Samples are n/a when stopped or unavailable; they are not llama.cpp VRAM metrics. CPU is shown on the left axis and memory on the right axis.",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_env_container_cpu_avg_cores{service=\"llm_server\"}",
+          "legendFormat": "CPU cores"
+        },
+        {
+          "refId": "B",
+          "expr": "llm_env_container_memory_current_mib{service=\"llm_server\"}",
+          "legendFormat": "memory current MiB"
+        },
+        {
+          "refId": "C",
+          "expr": "llm_env_container_memory_peak_mib{service=\"llm_server\"}",
+          "legendFormat": "memory peak MiB"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "drawStyle": "line",
+            "spanNulls": false,
+            "axisPlacement": "right"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "text",
+      "title": "VRAM availability",
+      "description": "Container-scoped VRAM is not available for llm-server from the current collector; do not infer it from host-wide or Laya VRAM.",
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 6
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Per-container llm-server VRAM is not currently available from the collector. The existing VRAM family is not a per-container llama-server reading."
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "llm-env dashboards",
+      "type": "dashboards",
+      "tags": [
+        "llm-env"
+      ],
+      "asDropdown": true
+    }
+  ]
+}

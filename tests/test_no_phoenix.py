@@ -4,6 +4,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKENS = ("pho" + "enix", "zai", "z." + "ai")
 ALLOWLIST_FILES = {
     "docs/prds/omniroute-smart-routing-research/data-sources-quota.md",
+    # negative assertions: they prove the retired container is not emitted or listed
+    "tests/test_observe_metrics.py",
+    "tests/test_resources.py",
 }
 ALLOWLIST = {"docs/superpowers", ".claude/handoffs"}
 

@@ -1,0 +1,2084 @@
+{
+  "uid": "llm-env-observe",
+  "title": "llm-env observe",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "60s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Container memory: current / peak / cap (MiB)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never",
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRefId",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_current_mib[90s])",
+          "legendFormat": "{{service}} current MiB",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_peak_mib[90s])",
+          "legendFormat": "{{service}} peak MiB",
+          "spanNulls": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_cap_mib[90s])",
+          "legendFormat": "{{service}} cap MiB",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows current memory, observed peak, and configured cap from samples seen in the last 90 seconds. Sustained use near the cap warrants checking the service workload and memory breakdown. A base-10 logarithmic scale keeps low and high service values visible together."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Memory p95 and headroom",
+      "description": "Shows memory p95 over 6 hours and cap minus observed peak from the last 90 seconds. Headroom 0 means the container touched its cap; check its memory cap and the anonymous-versus-file-cache panel. A symmetric log scale preserves zero headroom while keeping service memory ranges visible.",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "quantile_over_time(0.95, llm_env_container_memory_current_mib[6h])",
+          "legendFormat": "{{service}} p95 current",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_cap_mib[90s]) - last_over_time(llm_env_container_memory_peak_mib[90s])",
+          "legendFormat": "{{service}} headroom",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never",
+            "scaleDistribution": {
+              "type": "symlog",
+              "log": 10,
+              "linearThreshold": 1
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Swap (MiB)",
+      "description": "Shows swap currently used, using samples from the last 90 seconds. Unexpected or sustained use warrants checking memory pressure and the container cap. A symmetric log scale preserves zero swap use while keeping service ranges visible.",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_swap_mib[90s])",
+          "legendFormat": "{{service}} swap",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never",
+            "scaleDistribution": {
+              "type": "symlog",
+              "log": 10,
+              "linearThreshold": 1
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Memory pressure (PSI full avg300)",
+      "description": "Shows full memory-pressure stall percentage (avg300) from the last 90 seconds. Sustained PSI at or above 5 warrants checking the container cap and anonymous-versus-file-cache breakdown.",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_psi_full_avg300[90s])",
+          "legendFormat": "{{service}} PSI full avg300",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Container CPU (lifetime average since container start)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_cpu_avg_cores[90s])",
+          "legendFormat": "{{service}} average cores",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows average CPU cores used since each container started; compare with its configured CPU limit when performance degrades."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "CPU throttling (seconds throttled per minute)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "60 * sum by (service) (rate(llm_env_container_cpu_throttled_seconds_total[5m]))",
+          "legendFormat": "{{service}}",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows seconds of CPU throttling per minute, calculated as a 5-minute rate. Sustained throttling means the CPU limit is constraining work; check the service's CPU limit and workload."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Container memory: anonymous vs file cache (MiB)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            },
+            "scaleDistribution": {
+              "type": "symlog",
+              "log": 10,
+              "linearThreshold": 1
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_anon_mib[90s])",
+          "legendFormat": "{{service}} anon",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_file_mib[90s])",
+          "legendFormat": "{{service}} file cache",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows anonymous memory and file cache from samples in the last 90 seconds. The cap counts both; if memory is high, use this split to see whether anonymous use or reclaimable cache dominates. A symmetric log scale preserves zero values while keeping anonymous and file-cache ranges visible."
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Laya VRAM (MiB)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_vram_mib[90s])",
+          "legendFormat": "{{service}} VRAM MiB",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows Laya GPU memory from the last 90 seconds. Unexpected growth or use near available VRAM warrants checking model and GPU workloads."
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "OmniRoute active heavy and waiting",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_omniroute_active_heavy[90s])",
+          "legendFormat": "{{service}} active heavy",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_omniroute_waiting[90s])",
+          "legendFormat": "{{service}} waiting",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows active heavy requests and queued requests from the last 90 seconds. Persistent waiting means demand may exceed capacity; check active work and admission limits."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "OmniRoute guard rejects and chat sheds (cumulative)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_omniroute_guard_rejects_total[90s])",
+          "legendFormat": "{{service}} guard rejects (cumulative)",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_omniroute_chat_sheds_total[90s])",
+          "legendFormat": "{{service}} chat sheds (cumulative)",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows cumulative OmniRoute guard rejections and chat shedding since collection began. Rising counts mean admission limits are rejecting work; check the guard limits and recent request load."
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Container memory events and OOM kills (cumulative)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_events_max_total[90s])",
+          "legendFormat": "{{service}} events max (cumulative)",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_oom_kills_total[90s])",
+          "legendFormat": "{{service}} OOM kills (cumulative)",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows cumulative memory-limit events and OOM kills since collection began; rising counts indicate memory pressure or restart risk."
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Container inventory",
+      "description": "Shows running state, uptime, current memory, cap, and headroom using the last sample in each 3-minute window. Stopped services remain visible; memory is n/a while stopped.",
+      "gridPos": {
+        "x": 0,
+        "y": 88,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_running[3m])",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_uptime_seconds[3m]) and on(service) (last_over_time(llm_env_container_running[3m]) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_current_mib[3m]) and on(service) (last_over_time(llm_env_container_running[3m]) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_container_memory_cap_mib[3m]) and on(service) (last_over_time(llm_env_container_running[3m]) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(last_over_time(llm_env_container_memory_cap_mib[3m]) - last_over_time(llm_env_container_memory_peak_mib[3m])) and on(service) (last_over_time(llm_env_container_running[3m]) == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Stopped",
+                        "color": "red"
+                      },
+                      "1": {
+                        "text": "Running",
+                        "color": "green"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Uptime"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Memory current|Memory cap|Headroom"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "mbytes"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Service",
+            "desc": false
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "State",
+              "Value #B": "Uptime",
+              "Value #C": "Memory current",
+              "Value #D": "Memory cap",
+              "Value #E": "Headroom",
+              "llm_env_container_running": "State",
+              "service": "Service"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "row",
+      "title": "Filesystem",
+      "gridPos": {
+        "x": 0,
+        "y": 96,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Filesystem used ratio",
+      "description": "Filesystem used ratio. Values are sampled on each collector tick; store sizes use a bounded scan cached for ten minutes. /var/home is the host filesystem backing the home mount. Thresholds mark 70% and 85% used.",
+      "gridPos": {
+        "x": 0,
+        "y": 97,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_used_ratio{mount=\"tmp\"}[90s])",
+          "legendFormat": "tmp used ratio",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_used_ratio{mount=\"var_home\"}[90s])",
+          "legendFormat": "var_home used ratio",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Filesystem free (GiB)",
+      "description": "Filesystem free space in GiB. Values are sampled on each collector tick; store sizes use a bounded scan cached for ten minutes. /var/home is the host filesystem backing the home mount.",
+      "gridPos": {
+        "x": 0,
+        "y": 105,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_bytes{mount=\"tmp\",kind=\"free\"}[90s]) / 1073741824",
+          "legendFormat": "tmp free GiB",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_bytes{mount=\"var_home\",kind=\"free\"}[90s]) / 1073741824",
+          "legendFormat": "var_home free GiB",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "gbytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "bargauge",
+      "title": "Largest repo tmp entries",
+      "description": "Largest repository tmp directories by scanned bytes; the bounded scan is cached for ten minutes. Values may be lower bounds when entries are unreadable.",
+      "gridPos": {
+        "x": 0,
+        "y": 113,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_repo_tmp_top_bytes[90s])",
+          "legendFormat": "{{rank}} {{dir}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Filesystem store sizes",
+      "description": "Size in bytes of the stores that must stay bounded (repo tmp, VictoriaMetrics data, podman storage, pytest roots). Only the VictoriaMetrics series draws a red line at its 2 GB budget. A size is a lower bound when the unreadable entries panel beside it shows a count above zero. Scans are bounded and cached for ten minutes.",
+      "gridPos": {
+        "x": 0,
+        "y": 121,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_store_bytes[90s])",
+          "legendFormat": "{{store}} bytes",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "victoriametrics bytes"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 2000000000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "line"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Filesystem unreadable entries",
+      "description": "Count of files and directories the scan could not read, per store (permission or I/O errors, for example rootless podman overlay directories owned by a subuid). Above zero means the matching store size beside it is a lower bound.",
+      "gridPos": {
+        "x": 8,
+        "y": 137,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_store_unreadable_entries[90s])",
+          "legendFormat": "{{store}} unreadable entries",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Filesystem scan age and truncation",
+      "description": "Filesystem scan age in seconds and a 0/1 flag that is 1 when the time budget cut the last scan short. The scan is bounded and cached for ten minutes.",
+      "gridPos": {
+        "x": 16,
+        "y": 137,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_scan_age_seconds[90s])",
+          "legendFormat": "scan age seconds",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_fs_scan_truncated[90s])",
+          "legendFormat": "scan truncated",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 1,
+      "type": "state-timeline",
+      "title": "Source status (up)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 145
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "last_over_time(llm_env_source_up[90s])",
+          "legendFormat": "{{source}} up",
+          "spanNulls": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      },
+      "description": "Shows whether each metrics source reported in the last 90 seconds. A zero means collection is unavailable; check the source and treat dependent readings as stale. State bands distinguish down (red) from up (green) over time."
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "VictoriaMetrics store vs 2 GB budget",
+      "description": "Store size as a fraction of the 2 GB budget. VictoriaMetrics has no size-cap flag; this is a warning panel, not enforcement.",
+      "gridPos": {
+        "x": 0,
+        "y": 129,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "llm_env_fs_store_bytes{store=\"victoriametrics\"} / 2000000000",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "No data"
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Store growth per day",
+      "description": "Linear derivative of store bytes over the selected range, converted to bytes/day. History only exists since the filesystem source was installed on 2026-11-21; values need a day or more to mean anything.",
+      "gridPos": {
+        "x": 8,
+        "y": 129,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "deriv(llm_env_fs_store_bytes[$__range]) * 86400",
+          "legendFormat": "{{store}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No data",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "Days until /var/home reaches 85 % used",
+      "description": "Linear projection from the selected-range usage-ratio slope; short history can make projections unstable, and non-positive slopes or missing data show No data. 0 days means usage is already above 85 %.",
+      "gridPos": {
+        "x": 16,
+        "y": 129,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "clamp_max(clamp_min((0.85 - predict_linear(llm_env_fs_used_ratio{mount=\"var_home\"}[$__range], 0)) / deriv(llm_env_fs_used_ratio{mount=\"var_home\"}[$__range]) / 86400, 0), 3650) and on() (deriv(llm_env_fs_used_ratio{mount=\"var_home\"}[$__range]) > 0)",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 14
+              },
+              {
+                "color": "green",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "No data"
+      }
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "Days until /tmp reaches 85 % used",
+      "description": "Linear projection from the selected-range usage-ratio slope; short history can make projections unstable, and non-positive slopes or missing data show No data. 0 days means usage is already above 85 %.",
+      "gridPos": {
+        "x": 0,
+        "y": 137,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "clamp_max(clamp_min((0.85 - predict_linear(llm_env_fs_used_ratio{mount=\"tmp\"}[$__range], 0)) / deriv(llm_env_fs_used_ratio{mount=\"tmp\"}[$__range]) / 86400, 0), 3650) and on() (deriv(llm_env_fs_used_ratio{mount=\"tmp\"}[$__range]) > 0)",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "noValue": "No data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 14
+              },
+              {
+                "color": "green",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "No data"
+      }
+    },
+    {
+      "id": 41,
+      "type": "row",
+      "title": "Remote setup (installer)",
+      "gridPos": {
+        "x": 0,
+        "y": 153,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "remote-setup requests (current run)",
+      "description": "Total requests the remote-setup server has counted in its current run, all routes and status classes. The server rewrites its counter file only when a request arrives, so after a container restart the previous run's numbers stay until the first new request; counters then start from zero. Routes are only /setup.sh, /config, other and healthcheck. Requests from the container's own 5 second health probe (route healthcheck) are excluded here.",
+      "gridPos": {
+        "x": 0,
+        "y": 154,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(llm_env_remote_setup_requests_total{route!=\"healthcheck\"})",
+          "legendFormat": "value",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "No data: remote-setup has not published counters (restart it onto the new code)"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "noValue": "No data: remote-setup has not published counters (restart it onto the new code)"
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "remote-setup request rate by class",
+      "description": "Requests per minute by status class (2xx to 5xx, or error when no status was sent), from a 5 minute window. The server rewrites its counter file only when a request arrives, so after a container restart the previous run's numbers stay until the first new request; counters then start from zero. Routes are only /setup.sh, /config, other and healthcheck. Requests from the container's own 5 second health probe (route healthcheck) are excluded here.",
+      "gridPos": {
+        "x": 0,
+        "y": 162,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (class) (rate(llm_env_remote_setup_requests_total{route!=\"healthcheck\"}[5m])) * 60",
+          "legendFormat": "{{class}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "custom": {
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "remote-setup mean latency (ms)",
+      "description": "Mean handler time in ms per route over a 5 minute window; empty when the route had no traffic in the window. The server rewrites its counter file only when a request arrives, so after a container restart the previous run's numbers stay until the first new request; counters then start from zero. Routes are only /setup.sh, /config, other and healthcheck. Requests from the container's own 5 second health probe (route healthcheck) are excluded here.",
+      "gridPos": {
+        "x": 0,
+        "y": 170,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (route) (rate(llm_env_remote_setup_request_duration_ms_sum{route!=\"healthcheck\"}[5m])) / sum by (route) (rate(llm_env_remote_setup_request_duration_ms_count{route!=\"healthcheck\"}[5m])) and on (route) (sum by (route) (rate(llm_env_remote_setup_request_duration_ms_count{route!=\"healthcheck\"}[5m])) > 0)",
+          "legendFormat": "{{route}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "stat",
+      "title": "remote-setup 5xx and error (current run)",
+      "description": "Requests counted as 5xx or error in the current run; red at 1 or more. The server rewrites its counter file only when a request arrives, so after a container restart the previous run's numbers stay until the first new request; counters then start from zero. Routes are only /setup.sh, /config, other and healthcheck. Failed health probes count here too, because a failing probe is a real fault.",
+      "gridPos": {
+        "x": 0,
+        "y": 178,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(llm_env_remote_setup_requests_total{class=~\"5xx|error\"})",
+          "legendFormat": "value",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "noValue": "No data"
+      }
+    },
+    {
+      "id": 46,
+      "type": "row",
+      "title": "HTTP services (native counters)",
+      "gridPos": {
+        "x": 0,
+        "y": 187,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 47,
+      "type": "timeseries",
+      "title": "HTTP requests per minute by service",
+      "description": "HTTP requests per minute: Grafana from its request-duration histogram count (all handled requests), VictoriaMetrics from its total request counter. These native counters include the stack's own traffic (the collector's scrape of each /metrics endpoint and the dashboard's own queries), start at zero when the service restarts, and are aggregated across all paths.",
+      "gridPos": {
+        "x": 0,
+        "y": 188,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (service) (rate(llm_env_native_http_requests_total[5m]) or rate(llm_env_native_http_requests_all_total[5m])) * 60",
+          "legendFormat": "{{service}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 48,
+      "type": "timeseries",
+      "title": "HTTP errors per minute by service",
+      "description": "Errors per minute: Grafana requests answered with a 5xx status, and VictoriaMetrics native request errors (its counters have no status classes, so only errors are shown). These native counters include the stack's own traffic (the collector's scrape of each /metrics endpoint and the dashboard's own queries), start at zero when the service restarts, and are aggregated across all paths.",
+      "gridPos": {
+        "x": 12,
+        "y": 188,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(rate(llm_env_native_http_requests_total{service=\"grafana\",class=\"5xx\"}[5m])) * 60",
+          "legendFormat": "grafana 5xx/min",
+          "spanNulls": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(rate(llm_env_native_http_request_errors_total{service=\"victoriametrics\"}[5m])) * 60",
+          "legendFormat": "victoriametrics errors/min",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "victoriametrics errors/min"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "reqpm"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "timeseries",
+      "title": "Mean Grafana request latency (ms)",
+      "description": "Mean Grafana request handling time over five minutes, shown only when it handled requests in the window. VictoriaMetrics has no latency here: its native duration metric only times its own /metrics endpoint. These native counters include the stack's own traffic (the collector's scrape of each /metrics endpoint and the dashboard's own queries), start at zero when the service restarts, and are aggregated across all paths.",
+      "gridPos": {
+        "x": 0,
+        "y": 197,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(sum by (service) (rate(llm_env_native_http_request_duration_seconds_sum[5m])) / sum by (service) (rate(llm_env_native_http_request_duration_seconds_count[5m])) * 1000) and on (service) (sum by (service) (rate(llm_env_native_http_request_duration_seconds_count[5m])) > 0)",
+          "legendFormat": "{{service}}",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        }
+      }
+    }
+  ],
+  "tags": [
+    "llm-env"
+  ],
+  "links": [
+    {
+      "title": "llm-env dashboards",
+      "type": "dashboards",
+      "tags": [
+        "llm-env"
+      ],
+      "asDropdown": true
+    }
+  ]
+}

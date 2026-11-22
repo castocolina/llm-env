@@ -1,0 +1,1057 @@
+{
+  "uid": "llm-env-omniroute",
+  "title": "OmniRoute: requests, tokens, latency",
+  "description": "Client calls, tokens, time to first token and most used models.",
+  "tags": [
+    "llm-env"
+  ],
+  "schemaVersion": 39,
+  "refresh": "60s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Client calls (1h)",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(increase(llm_env_omniroute_calls_total[1h]))",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "Total successful and failed client calls recorded in the last hour."
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Success rate (1h)",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(increase(llm_env_omniroute_calls_total{status=\"2xx\"}[1h])) / sum(increase(llm_env_omniroute_calls_total[1h]))",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "Share of calls that succeeded during the last hour. A falling rate means requests are failing; inspect route and upstream health."
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "TTFT p50 (1h)",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (increase(llm_env_omniroute_ttft_ms_bucket[1h])))",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "Shows median time to first token for calls with recorded TTFT over the last 1 hour. A high or rising value means users wait longer before responses begin; check upstream latency and load."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "TTFT p95 (1h)",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(llm_env_omniroute_ttft_ms_bucket[1h])))",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "95th-percentile time to first token over the last hour. A rising value means users wait longer before responses begin."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Tokens (1h)",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(increase(llm_env_omniroute_tokens_total{kind=~\"prompt|completion\"}[1h]))",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "Prompt and completion tokens produced during the last hour. A sudden increase can signal a workload or routing change."
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "OmniRoute usage source up",
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"omniroute_usage\"})",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "n/a",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      },
+      "description": "1 when the OmniRoute usage read worked on the last collection; 0 means these panels are stale."
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Calls per minute by route",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "60 * sum by (route) (rate(llm_env_omniroute_calls_total[5m]))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Client request rate per minute by route; direct identifies requests without a combo."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Calls per minute by status class",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "60 * sum by (status) (rate(llm_env_omniroute_calls_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "scaleDistribution": {
+              "type": "symlog",
+              "log": 10,
+              "linearThreshold": 1
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Client request rate per minute grouped by HTTP status class. A symmetric log scale preserves zero and keeps rare status classes visible."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "TTFT by route (p50 / p95)",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, route) (rate(llm_env_omniroute_ttft_ms_bucket[15m])))",
+          "legendFormat": "p50 {{route}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(llm_env_omniroute_ttft_ms_bucket[15m])))",
+          "legendFormat": "p95 {{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Shows p50 and p95 time to first token by route, calculated from 15 m rates. A high or rising p95 means slower response starts; compare routes and check upstream latency."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Call duration p95 by route",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(llm_env_omniroute_duration_ms_bucket[15m])))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Shows p95 full response duration by route, calculated from a 15 m rate. A high or rising value means longer calls; check route-specific upstream and model load."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Tokens per minute",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "60 * sum by (kind) (rate(llm_env_omniroute_tokens_total{kind=~\"prompt|completion\"}[10m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Shows prompt and completion tokens per minute, calculated from a 10-minute rate of lifetime token counters. Prompt tokens include cached input."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Estimated cost per hour (USD)",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "3600 * sum(rate(llm_env_omniroute_cost_usd_total[1h]))",
+          "legendFormat": "all models"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "median",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Shows estimated hourly cost from observed cost-counter increases over a 1 h rate window. Unexpected cost growth warrants checking model usage and routing."
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Most used models (selected range)",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "topk(15, sum by (provider, model) (increase(llm_env_omniroute_requests_total[$__range])) > 0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (provider, model) (increase(llm_env_omniroute_tokens_total{kind=\"prompt\"}[$__range])) and on (provider, model) topk(15, sum by (provider, model) (increase(llm_env_omniroute_requests_total[$__range])) > 0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum by (provider, model) (increase(llm_env_omniroute_tokens_total{kind=\"completion\"}[$__range])) and on (provider, model) topk(15, sum by (provider, model) (increase(llm_env_omniroute_requests_total[$__range])) > 0)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Prompt tokens|Completion tokens"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Requests",
+            "desc": true
+          }
+        ]
+      },
+      "description": "Top 15 provider/model pairs by requests over the dashboard time range, with their tokens (usage history counters). other = models outside the 36 most used at first collection.",
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "Requests",
+              "Value #B": "Prompt tokens",
+              "Value #C": "Completion tokens"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Cache hit rate",
+      "description": "Shows cached input as a share of prompt tokens over the last 1 hour; this indicates cache savings. A low rate means less input is served from cache; review cache behavior and prompt reuse.",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 24,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "sum(increase(llm_env_omniroute_tokens_total{kind=\"cached\"}[1h])) / sum(increase(llm_env_omniroute_tokens_total{kind=\"prompt\"}[1h]))",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Collector health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Usage collector up",
+      "description": "Shows whether the OmniRoute usage collection succeeded on the latest scrape (instant). A zero or n/a means usage data may be stale; check the usage collector and its source.",
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"omniroute_usage\"})",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Usage state up",
+      "description": "Shows whether the persistent usage state source is available now (instant). A zero indicates a collection problem; check the usage-state source and collector.",
+      "gridPos": {
+        "x": 6,
+        "y": 42,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "min(llm_env_source_up{source=\"usage_state\"})",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Usage gaps (1h)",
+      "description": "Counts usage rows that could not be reconciled in the last 1 hour (increase); n/a means the usage source is unavailable. A positive count warrants checking collector logs and usage-state reconciliation.",
+      "gridPos": {
+        "x": 12,
+        "y": 42,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(increase(llm_env_usage_gap_total[1h]) or on() vector(0)) and on() (min(llm_env_source_up{source=\"omniroute_usage\"}) == 1)",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Skipped usage rows (1h)",
+      "description": "Counts usage rows intentionally skipped in the last 1 hour (increase); n/a means the usage source is unavailable. Unexpected skips warrant checking collector logs and the skipped-row reason.",
+      "gridPos": {
+        "x": 18,
+        "y": 42,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "llm-env-metrics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "llm-env-metrics"
+          },
+          "expr": "(increase(llm_env_usage_skipped_rows_total[1h]) or on() vector(0)) and on() (min(llm_env_source_up{source=\"omniroute_usage\"}) == 1)",
+          "legendFormat": "",
+          "spanNulls": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "noValue": "n/a"
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "llm-env dashboards",
+      "type": "dashboards",
+      "tags": [
+        "llm-env"
+      ],
+      "asDropdown": true
+    }
+  ]
+}
