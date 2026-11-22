@@ -507,6 +507,29 @@ def _live(cgroup, cap_mib=1000):
     return read_live(cgroup, 0, cap_mib, now=100)
 
 
+def test_llm_server_is_in_live_container_inventory():
+    from pylib.resources import LIVE_CONTAINERS
+
+    assert LIVE_CONTAINERS["llm_server"] == "llm-server"
+
+
+def test_live_memory_and_cpu_throttling_counters(tmp_path):
+    cgroup = _cgroup(tmp_path / "c")
+    (cgroup / "memory.stat").write_text("anon 536870912\nfile 1073741824\nother 12\n")
+    (cgroup / "cpu.stat").write_text("usage_usec 10\nnr_throttled 7\nthrottled_usec 2500000\n")
+
+    row = _live(cgroup)
+
+    assert (row["anon_mib"], row["file_mib"]) == (512, 1024)
+    assert (row["cpu_throttled_periods"], row["cpu_throttled_s"]) == (7, 2.5)
+
+
+def test_live_missing_memory_stat_is_unknown(tmp_path):
+    row = _live(_cgroup(tmp_path / "c"))
+
+    assert row["anon_mib"] is None and row["file_mib"] is None
+
+
 def test_live_ok(tmp_path):
     row = _live(_cgroup(tmp_path / "c"))
     assert row["verdict"] == "OK"
@@ -551,12 +574,15 @@ def test_live_unlimited_cap_has_no_ratios(tmp_path):
 
 
 def test_live_resources_stopped_container_and_disabled_service(tmp_path):
+    from pylib.resources import LIVE_CONTAINERS
+
     cg = _cgroup(tmp_path / "c")
     limits = {s: dict(p) for s, p in DEFAULT_POLICY.items()}
     limits["phoenix"] = dict.fromkeys(POLICY_KEYS, 0)  # disabled: omitted
     found = {"omniroute": (cg, 1, 0.0), "remote-setup": (None, 2, 0.0)}
     live = live_resources(limits, locate=lambda name: found.get(name), now=100)
     assert set(live) == {"omniroute", "remote_setup", "system_one"}
+    assert "phoenix" not in LIVE_CONTAINERS
     assert live["omniroute"]["state"] == "running" and live["omniroute"]["cap_mib"] == 1000
     assert live["remote_setup"]["verdict"] == "n/a"  # running, cgroup not found
     assert live["system_one"] == {"state": "not running"}

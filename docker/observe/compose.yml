@@ -5,7 +5,8 @@
 # socket, no main-state bind, no shared volumes or network. Loopback-only
 # publication. The Grafana admin password arrives exclusively through an
 # external named secret; it is never interpolated here or written to argv.
-# The 512 MiB / 1 CPU caps are boot-probed values, not a capacity recommendation.
+# VictoriaMetrics uses a 128 MiB trial cap after checking live ingestion and dashboard queries.
+# Grafana retains its boot-tested 512 MiB memory cap.
 services:
   victoriametrics:
     image: docker.io/victoriametrics/victoria-metrics:v1.156.0@sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970
@@ -17,7 +18,7 @@ services:
     ports: ["127.0.0.1:8428:8428"]
     volumes: ["metrics:/storage"]
     restart: unless-stopped
-    mem_limit: 512m
+    mem_limit: 128m
     cpus: 1.0
 
   grafana:

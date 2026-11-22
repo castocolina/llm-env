@@ -16,6 +16,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+@pytest.fixture(autouse=True)
+def _stub_filesystem_collector(monkeypatch):
+    import pylib.observe_metrics as om
+
+    monkeypatch.setattr(om, "collect_fs", lambda: 'llm_env_source_up{source="fs"} 1\n')
+
+
+@pytest.fixture(autouse=True)
+def _stub_native_http_collector(monkeypatch):
+    """No collect_metrics test may open a real connection to Grafana or VictoriaMetrics."""
+    import pylib.observe_metrics as om
+
+    monkeypatch.setattr(om, "collect_native_http",
+                        lambda: 'llm_env_source_up{source="grafana_http"} 0\nllm_env_source_up{source="victoriametrics_http"} 0\n')
+
+
 def _running_row(**overrides):
     """A read_live-shaped running row with every flat key present."""
     row = {
@@ -26,6 +42,10 @@ def _running_row(**overrides):
         "cap_mib": 1024,
         "swap_mib": 0,
         "cpu_avg_cores": 0.25,
+        "anon_mib": 128,
+        "file_mib": 256,
+        "cpu_throttled_periods": 7,
+        "cpu_throttled_s": 2.5,
         "psi_full_avg300": 0.0,
         "vram_mib": 1234,
         "events": {"high": 0, "max": 2, "oom": 0, "oom_kill": 3},
@@ -77,8 +97,42 @@ def test_render_stopped_row_emits_only_running_zero_even_with_stale_fields():
         "llm_env_container_vram_mib",
         "llm_env_container_memory_events_max_total",
         "llm_env_container_oom_kills_total",
+        "llm_env_container_memory_anon_mib",
+        "llm_env_container_memory_file_mib",
+        "llm_env_container_cpu_throttled_periods_total",
+        "llm_env_container_cpu_throttled_seconds_total",
     ):
         assert f'{name}{{service="remote_setup"}}' not in text
+
+
+def test_render_exposes_memory_and_cpu_throttling_metrics():
+    from pylib.observe_metrics import render_metrics
+
+    text = render_metrics({"omniroute": _running_row()}, None)
+    expected = {
+        "llm_env_container_memory_anon_mib": ("gauge", "128"),
+        "llm_env_container_memory_file_mib": ("gauge", "256"),
+        "llm_env_container_cpu_throttled_periods_total": ("counter", "7"),
+        "llm_env_container_cpu_throttled_seconds_total": ("counter", "2.5"),
+    }
+    for name, (kind, value) in expected.items():
+        assert f"# TYPE {name} {kind}" in text
+        assert f'{name}{{service="omniroute"}} {value}' in text
+
+
+def test_render_new_metrics_omit_none_values():
+    from pylib.observe_metrics import render_metrics
+
+    row = _running_row(anon_mib=None, file_mib=None, cpu_throttled_periods=None, cpu_throttled_s=None)
+    text = render_metrics({"omniroute": row}, None)
+
+    for name in (
+        "llm_env_container_memory_anon_mib",
+        "llm_env_container_memory_file_mib",
+        "llm_env_container_cpu_throttled_periods_total",
+        "llm_env_container_cpu_throttled_seconds_total",
+    ):
+        assert name not in text
 
 
 def test_render_reads_flat_psi_key_and_ignores_other_nested_mappings():
@@ -356,7 +410,7 @@ def test_read_health_skips_retry_when_one_second_wont_fit(monkeypatch):
 
 # ---- Group 3: collector ----
 
-def _install_collector(monkeypatch, *, states, proc_text=None, health=None, live_impl=None):
+def _install_collector(monkeypatch, *, states, proc_text=None, health=None, live_impl=None, container_names=None):
     """Stub only the slow/external levels: podman, cgroup reads, live_resources and health."""
     import pylib.observe_metrics as om
     from pylib.resources import LIVE_CONTAINERS
@@ -365,6 +419,11 @@ def _install_collector(monkeypatch, *, states, proc_text=None, health=None, live
 
     def fake_run(argv, **kwargs):
         calls["run"].append((argv, kwargs))
+        if argv[1:3] == ["ps", "-a"]:
+            if isinstance(container_names, BaseException):
+                raise container_names
+            names = container_names if container_names is not None else LIVE_CONTAINERS.values()
+            return SimpleNamespace(stdout="\n".join(names))
         value = states.get(argv[-1], "false 0 0\n")
         if isinstance(value, BaseException):
             raise value
@@ -404,6 +463,45 @@ def _install_collector(monkeypatch, *, states, proc_text=None, health=None, live
     return calls
 
 
+def _assert_strict_prometheus_text(text):
+    import re
+
+    sample = re.compile(r'^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^{}]*\})? [^\s]+$')
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    assert "\\n" not in text
+    assert "\n\n" not in text
+    types, helps, series = set(), set(), set()
+    for line in text.splitlines():
+        if line.startswith("# TYPE "):
+            name = line.split()[2]
+            assert name not in types
+            types.add(name)
+        elif line.startswith("# HELP "):
+            name = line.split()[2]
+            assert name not in helps
+            helps.add(name)
+        else:
+            match = sample.fullmatch(line)
+            assert match, line
+            metric = line.rsplit(" ", 1)[0]
+            assert metric not in series
+            series.add(metric)
+            value = line.rsplit(" ", 1)[1]
+            assert math.isfinite(float(value)) or value in ("+Inf", "-Inf", "NaN")
+
+
+def test_combined_exposition_is_strictly_valid_with_jev_worker_failure(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: "llm_env_usage_probe 1\n")
+    monkeypatch.setattr(om, "collect_jev", lambda **k: (_ for _ in ()).throw(RuntimeError()))
+    text = om.collect_metrics({}, None, port=1, password="pw")
+    _assert_strict_prometheus_text(text)
+    assert 'llm_env_source_up{source="jev_log"} 0' in text
+    assert text.count("# TYPE llm_env_source_up ") == 1
+
+
 def test_collect_locator_true_runs_with_type_container_and_cgroup(monkeypatch):
     import pylib.observe_metrics as om
 
@@ -412,7 +510,7 @@ def test_collect_locator_true_runs_with_type_container_and_cgroup(monkeypatch):
 
     text = om.collect_metrics({}, None, port=1, password="pw")
 
-    argv, kwargs = calls["run"][0]
+    argv, kwargs = next(call for call in calls["run"] if call[0][1:3] != ["ps", "-a"])
     assert argv == [
         "podman", "inspect", "--type", "container", "-f",
         "{{.State.Running}} {{.State.Pid}} {{.State.StartedAt.Unix}}", "omniroute",
@@ -423,6 +521,42 @@ def test_collect_locator_true_runs_with_type_container_and_cgroup(monkeypatch):
     assert found[0] == om.CGROUP_ROOT / "machine.slice/libpod-abc.scope"
     assert 'llm_env_container_running{service="omniroute"} 1' in text
     assert 'llm_env_source_up{source="containers"} 1' in text
+
+
+def test_collect_container_list_failure_marks_source_down(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={}, container_names=subprocess.CalledProcessError(1, "podman ps -a"))
+
+    text = om.collect_metrics({}, None, port=1, password="pw")
+
+    assert 'llm_env_source_up{source="containers"} 0' in text
+    assert 'llm_env_container_running{service="omniroute"}' not in text
+
+
+def test_collect_does_not_emit_retired_phoenix_container(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+
+    text = om.collect_metrics({}, None, port=1, password="pw")
+
+    assert 'service="phoenix"' not in text
+    assert 'llm_env_container_running{service="omniroute"} 0' in text
+
+
+def test_collect_missing_configured_container_is_stopped_not_incomplete(monkeypatch):
+    import pylib.observe_metrics as om
+    from pylib.resources import LIVE_CONTAINERS
+
+    names = [name for name in LIVE_CONTAINERS.values() if name not in ("omniroute", "remote-setup")]
+    _install_collector(monkeypatch, states={}, container_names=names)
+
+    text = om.collect_metrics({}, None, port=1, password="pw")
+
+    assert 'llm_env_container_running{service="omniroute"} 0' in text
+    assert 'llm_env_source_up{source="containers"} 1' in text
+    assert 'llm_env_container_running{service="remote_setup"} 0' in text
 
 
 def test_collect_locator_false_is_confirmed_stopped_not_incomplete(monkeypatch):
@@ -447,8 +581,9 @@ def test_collect_locator_false_is_confirmed_stopped_not_incomplete(monkeypatch):
 ])
 def test_collect_unknown_rows_filtered_while_peer_emits(monkeypatch, value, proc_text):
     import pylib.observe_metrics as om
-
-    _install_collector(monkeypatch, states={"omniroute": value}, proc_text=proc_text)
+    from pylib.resources import LIVE_CONTAINERS
+    _install_collector(monkeypatch, states={"omniroute": value}, proc_text=proc_text,
+                       container_names=LIVE_CONTAINERS.values())
 
     text = om.collect_metrics({}, None, port=1, password="pw")
 
@@ -606,10 +741,68 @@ def test_publish_never_logs_response_body(monkeypatch, capsys):
     assert "SENSITIVE BODY" not in captured.out + captured.err
 
 
+def test_native_http_source_isolated_and_timeout_falls_back(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: "")
+    monkeypatch.setattr(om, "collect_jev", lambda **k: "")
+    monkeypatch.setattr(om, "collect_native_http", lambda: 'llm_env_source_up{source="grafana_http"} 1\nllm_env_source_up{source="victoriametrics_http"} 0\n')
+    text = om.collect_metrics({}, None, port=1, password="pw")
+    assert 'llm_env_source_up{source="grafana_http"} 1' in text
+    assert 'llm_env_source_up{source="victoriametrics_http"} 0' in text
+    assert om.valid_exposition_fragment(text)
+
+    monkeypatch.setattr(om, "collect_native_http", lambda: (time.sleep(0.2), "never")[1])
+    timed_out = om.collect_metrics({}, None, port=1, password="pw", deadline_s=0)
+    assert 'llm_env_source_up{source="grafana_http"} 0\n' in timed_out
+    assert 'llm_env_source_up{source="victoriametrics_http"} 0\n' in timed_out
+    assert "\\\\n" not in timed_out
+    assert om.valid_exposition_fragment(timed_out)
+
+
+def test_llama_timeout_fallback_is_valid_exposition(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+
+    def slow_llama(**_kwargs):
+        time.sleep(0.3)  # still running when the deadline passes: the collector must fall back
+        return 'llm_env_source_up{source="llama"} 1\n'
+
+    monkeypatch.setattr(om, "collect_llama", slow_llama)
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: "")
+    monkeypatch.setattr(om, "collect_jev", lambda **k: "")
+
+    text = om.collect_metrics({}, None, port=1, password="pw", llama_url="http://127.0.0.1:8000",
+                              llama_api_key="key", deadline_s=0)
+    assert 'llm_env_source_up{source="llama"} 0\n' in text
+    assert 'source="llama_invalid"' not in text  # a timed-out llama must not invent a source
+    assert "\\n" not in text  # no literal backslash-n anywhere in the exposition
+    assert om.valid_exposition_fragment(text)
+
+
+def test_fast_llama_waits_for_slow_usage_and_jev(monkeypatch):
+    import pylib.observe_metrics as om
+
+    _install_collector(monkeypatch, states={})
+    def slow(value):
+        time.sleep(0.08)
+        return value
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: slow("usage_probe 1\n"))
+    monkeypatch.setattr(om, "collect_jev", lambda **k: slow("jev_probe 1\n"))
+    monkeypatch.setattr(om, "collect_llama", lambda **k: 'llm_env_source_up{source="llama"} 1\n')
+    text = om.collect_metrics({}, None, port=1, password="pw", llama_url="http://127.0.0.1:8000",
+                              llama_api_key="key", deadline_s=0.5)
+    assert "usage_probe 1" in text and "jev_probe 1" in text
+
+
 def _cfg():
     return {
         "gpu": {"pci_address": "0000:03:00.0"},
         "omniroute": {"port": 8080, "initial_password": "SUPERSECRET"},
+        "server": {"port": 8000, "api_key": "CUSTOM-LLAMA-KEY"},
+        "llm_server": {"enabled": True},
     }
 
 
@@ -628,8 +821,10 @@ def _install_cli(monkeypatch, *, fail_at=None, collect_text=None):
             raise ValueError("password=SUPERSECRET")
         collect_stub = failing_collect
     else:
-        def ok_collect(limits, pci, *, port, password):
-            seen.update(limits=limits, pci=pci, port=port, password=password)
+        def ok_collect(limits, pci, *, port, password, **kwargs):
+            seen.update(limits=limits, pci=pci, port=port, password=password,
+                        llama_url=kwargs.get("llama_url"), llama_api_key=kwargs.get("llama_api_key"),
+                        llama_enabled=kwargs.get("llama_enabled"))
             return collect_text or 'llm_env_source_up{source="containers"} 0\nllm_env_source_up{source="omniroute"} 0\n'
         collect_stub = ok_collect
     monkeypatch.setattr(llmenv, "collect_metrics", collect_stub)
@@ -654,10 +849,12 @@ def test_cli_default_prints_status_only_exposition_and_exits_zero(monkeypatch, c
     out = capsys.readouterr()
     assert out.out == 'llm_env_source_up{source="containers"} 0\nllm_env_source_up{source="omniroute"} 0\n'
     assert out.err == ""
+    assert "CUSTOM-LLAMA-KEY" not in out.out + out.err
     assert "published" not in seen
     assert seen == {
         "config_path": "cfg.yml", "limits": {"limits": True}, "pci": "0000:03:00.0",
-        "port": 8080, "password": "SUPERSECRET",
+        "port": 8080, "password": "SUPERSECRET", "llama_url": "http://127.0.0.1:8000",
+        "llama_api_key": "CUSTOM-LLAMA-KEY", "llama_enabled": True,
     }
 
 
@@ -709,3 +906,55 @@ def test_cli_argparse_usage_error_is_not_wrapped(capsys):
     with pytest.raises(SystemExit) as exc:
         llmenv.main(["observe-metrics", "--bogus"])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("fragment", [
+    'x 1\\n\n',
+    '# TYPE x gauge\n# TYPE x gauge\n',
+    'x{a="raw"quote"} 1\n',
+    'x{a="raw\nnewline"} 1\n',
+    'x{a=\"bad\\\"quote\"} 1\n',
+    'x NaN\n',
+    'x Inf\n',
+    'x 1',
+    'x 1\n\n',
+])
+def test_fragment_guard_drops_invalid_source_text(monkeypatch, fragment):
+    import pylib.observe_metrics as om
+    _install_collector(monkeypatch, states={})
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: fragment)
+    monkeypatch.setattr(om, "collect_jev", lambda **k: "")
+    text = om.collect_metrics({}, None, port=1, password="pw")
+    assert 'llm_env_source_up{source="omniroute_usage"} 0' in text
+    assert 'llm_env_source_up{source="omniroute_usage_invalid"} 1' in text
+    assert fragment.strip() not in text
+    assert om.valid_exposition_fragment(text)
+
+
+def test_valid_combined_exposition_keeps_normal_sources_unchanged(monkeypatch):
+    import pylib.observe_metrics as om
+    _install_collector(monkeypatch, states={})
+    usage = '# HELP usage_probe Probe.\n# TYPE usage_probe gauge\nusage_probe{x="escaped\\nvalue"} 1.5\n'
+    jev = 'jev_probe{label="ok"} 2\n'
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: usage)
+    monkeypatch.setattr(om, "collect_jev", lambda **k: jev)
+    monkeypatch.setattr(om, "collect_fs", lambda: 'llm_env_source_up{source="fs"} 1\nfs_probe 1\n')
+    text = om.collect_metrics({}, None, port=1, password="pw")
+    assert usage + jev + 'llm_env_source_up{source="llama"} 0\n' in text
+    assert 'llm_env_source_up{source="laya_requests"} 0\n' in text
+    assert om.valid_exposition_fragment(text)
+    assert text.endswith('llm_env_source_up{source="fs"} 1\nfs_probe 1\n')
+    assert om.valid_exposition_fragment(text)
+
+
+def test_fragment_guard_rejects_duplicate_family_across_sources(monkeypatch):
+    import pylib.observe_metrics as om
+    _install_collector(monkeypatch, states={})
+    monkeypatch.setattr(om, "collect_usage", lambda *a, **k: '# TYPE llm_env_source_up gauge\n')
+    monkeypatch.setattr(om, "collect_jev", lambda **k: 'jev_probe 1\n')
+    text = om.collect_metrics({}, None, port=1, password="pw")
+    assert 'source="omniroute_usage_invalid"} 1' in text
+    assert om.valid_exposition_fragment(text)
+    assert not om.valid_exposition_fragment('x NaN\n')
+    assert not om.valid_exposition_fragment('x Inf\n')
+    assert not om.valid_exposition_fragment('# TYPE x gauge\n# TYPE x gauge\nx 1\n')

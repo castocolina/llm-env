@@ -456,6 +456,19 @@ def cmd_resources(args: argparse.Namespace) -> int:
 _OBSERVE_METRICS_ERROR = "observe-metrics: collection or publish failed"
 
 
+def cmd_observe_jev_backfill(args: argparse.Namespace) -> int:
+    from pylib.observe_jev_backfill import run_backfill
+
+    try:
+        run_backfill(log=Path(args.log), state_path=Path(args.state), vm=args.vm,
+                     step_seconds=args.step_seconds, until=args.until,
+                     out=Path(args.out), push=args.push)
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"observe-jev-backfill: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_observe_metrics(args: argparse.Namespace) -> int:
     # Every dispatched error is sanitized: no invalid config secret text, no JSON fail() output.
     try:
@@ -464,7 +477,13 @@ def cmd_observe_metrics(args: argparse.Namespace) -> int:
         pci = (cfg.get("gpu") or {}).get("pci_address") or None
         port = cfg["omniroute"]["port"]
         password = cfg["omniroute"]["initial_password"]
-        text = collect_metrics(limits, pci, port=port, password=password)
+        llama_server = cfg["server"]
+        text = collect_metrics(
+            limits, pci, port=port, password=password,
+            llama_url=f"http://127.0.0.1:{llama_server['port']}",
+            llama_api_key=llama_server["api_key"],
+            llama_enabled=bool((cfg.get("llm_server") or {}).get("enabled", True)),
+        )
         if args.push:
             publish_metrics(text)
         else:
@@ -949,6 +968,16 @@ def build_parser() -> argparse.ArgumentParser:
     observe_parser.add_argument("--config", default=argparse.SUPPRESS)
     observe_parser.add_argument("--push", action="store_true")
     observe_parser.set_defaults(func=cmd_observe_metrics)
+
+    backfill_parser = sub.add_parser("observe-jev-backfill")
+    backfill_parser.add_argument("--log", default=str(Path.home() / ".local/state/ai-kit/jev-answers.jsonl"))
+    backfill_parser.add_argument("--state", default=str(Path.home() / ".local/state/llm-env/observe/jev-state.json"))
+    backfill_parser.add_argument("--vm", default="http://127.0.0.1:8428")
+    backfill_parser.add_argument("--step-seconds", type=positive_int, default=300)
+    backfill_parser.add_argument("--until")
+    backfill_parser.add_argument("--out", default="jev-backfill.prom")
+    backfill_parser.add_argument("--push", action="store_true")
+    backfill_parser.set_defaults(func=cmd_observe_jev_backfill)
 
     interference_parser = sub.add_parser("interference")
     interference_parser.add_argument("--config", default=argparse.SUPPRESS)

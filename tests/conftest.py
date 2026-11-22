@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+from observe_state_guard import REAL_LLM_ENV_STATE
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -26,6 +27,26 @@ def _no_stale_pwd() -> None:
     """
     os.environ.pop("PWD", None)
 
+
+
+@pytest.fixture(autouse=True)
+def _isolate_observe_state(request, tmp_path, monkeypatch):
+    if not request.module.__name__.rsplit(".", 1)[-1].startswith("test_observe_"):
+        yield
+        return
+    state_home = tmp_path / "state-home"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    original_open = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        candidate = path.expanduser()
+        if candidate.resolve().is_relative_to(REAL_LLM_ENV_STATE):
+            raise AssertionError(f"test opened real state: {path}")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    yield
 
 
 @pytest.fixture(autouse=True, scope="session")
