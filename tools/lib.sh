@@ -242,6 +242,20 @@ require_cmd() {
     done
 }
 
+# Remove the superseded images of OUR local builds once a build or an update is done: untagged, unreferenced images that
+# carry a label our builds stamp (System One base: llm-env.gpu-arch; span-observer derivative: llm-env.span-observer-sha256).
+# They are what a moved tag leaves behind (the old :rocm-prev, the old candidate), several GB each, and they pile up.
+# Scoped on purpose: dangling images without these labels, such as the untagged previous OmniRoute image kept for
+# rollback, are never touched, and neither is any image a tag or a container still uses. Never fails the caller.
+prune_superseded_build_images() {
+    local label removed
+    for label in llm-env.gpu-arch llm-env.span-observer-sha256; do
+        removed="$(podman image prune --force --filter "label=${label}" 2>/dev/null)" || continue
+        [[ -z "$removed" ]] || log_info "removed $(printf '%s\n' "$removed" | wc -l) superseded image(s) (${label})"
+    done
+    return 0
+}
+
 # Reject symlink components anywhere below the filesystem root in $1.
 # Callers pass a fully-chosen path (e.g. a private state or build-scratch
 # directory); the path below the chosen root must be ordinary directories.

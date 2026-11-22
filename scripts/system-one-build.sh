@@ -17,3 +17,4 @@ log_step "Building ${image} for ${arch} (large ROCm image; first build takes sev
 podman build --label "llm-env.gpu-arch=${arch}" --build-arg "GPU_ARCH=${arch}" \
     ${LAYA_VERSION:+--build-arg "LAYA_VERSION=${LAYA_VERSION}"} -t "$image" "${REPO_DIR}/docker/system-one"
 log_info "built ${image}"
+prune_superseded_build_images   # the build moved the tag: its previous image is now untagged garbage

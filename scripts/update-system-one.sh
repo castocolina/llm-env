@@ -105,6 +105,7 @@ if [[ "${1:-}" == "--worker" ]]; then
             | ([range(0; $x | length) as $i | select($x[$i].team.choice != $y[$i].team.choice
                 or $x[$i].urgent.noul != $y[$i].urgent.noul)] | length) as $f
             | "answers: largest probability change \($d); changed decisions \($f)/\($x | length) (information only)"'
+        prune_superseded_build_images   # the promoted swap moved :rocm-prev: its former image is garbage now
         if [[ "$mode" == "drift" ]]; then echo "updated system-one configuration"; exit 0; fi
         sed -i "s/^ARG LAYA_VERSION=.*/ARG LAYA_VERSION=${new_version}/" "$dockerfile"
         echo "previous image kept as ${prev}; commit docker/system-one/Dockerfile"

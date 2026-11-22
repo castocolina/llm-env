@@ -26,4 +26,11 @@ else
         -t "$image" "$REPO_DIR/docker/system-one" > "$log" 2>&1 \
         || { tail -80 "$log" >&2; die "System One span observer derivative build failed; base image and weights are preserved"; }
 fi
+# Derivatives of earlier base images or sources are keyed by a hash and never reused: drop them (an image a running
+# container still uses refuses removal and stays until the next build). A rollback rebuilds its derivative in seconds.
+while IFS= read -r stale; do
+    [[ -n "$stale" && "$stale" != "$image" ]] || continue
+    podman rmi "$stale" >/dev/null 2>&1 || true
+done < <(podman images --format '{{.Repository}}:{{.Tag}}' --filter 'reference=localhost/llm-env-system-one-span-sink' 2>/dev/null || true)
+prune_superseded_build_images
 printf '%s\n' "$image"

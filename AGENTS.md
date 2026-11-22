@@ -171,6 +171,8 @@ model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB resident, peak at
 ## Rules
 
 Experiments using `podman system reset|prune|migrate` or any `--root`/`--runroot` isolation must also isolate `--tmpdir`, `--network-config-dir`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF` and `XDG_RUNTIME_DIR` (or use a separate user), and never run in the owner's session. On 2026-11-20, containers kept running while Podman reported them exited; container DNS broke.
+Such an experiment removes its private graph root in the same run's trap with `podman unshare rm -rf <dir>`: a plain `rm -rf` cannot enter the overlay layers, which belong to subuids (this left a 2.8 GB `tmp/stop-723` that the owner could not delete).
+Local image builds (`system-one-build.sh`, `system-one-observer-build.sh`, `update-system-one.sh`) call `prune_superseded_build_images` from `tools/lib.sh` when they finish; it removes only untagged images carrying the `llm-env.gpu-arch` or `llm-env.span-observer-sha256` label, never a blanket `podman image prune` (the untagged previous OmniRoute image is a rollback copy).
 
 After editing any `.sh` file, run `make validate`.
 After editing any `.py` file, run `make validate && make test`.
