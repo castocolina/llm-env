@@ -61,7 +61,7 @@ def collect_fs(*, state_path: Path | None = None, paths: dict[str, Path] | None 
                scan_budget_s: float = 20) -> str:
     paths = paths if paths is not None else {"tmp": Path("/tmp"), "var_home": Path(os.environ.get("HOME", "/var/home")).resolve().parent}
     store_paths = store_paths if store_paths is not None else {
-        "repo_tmp": Path(__file__).resolve().parents[4] / "tmp",
+        "repo_tmp": Path(__file__).resolve().parents[1] / "tmp",
         "victoriametrics": Path(os.environ.get("LLM_ENV_VM_DATA_PATH", Path.home() / ".local/share/containers/storage/volumes/llm-env-observe_metrics/_data")),
         "podman_storage": Path(os.environ.get("HOME", "/var/home")) / ".local/share/containers/storage",
         "pytest_roots": Path("/tmp") / f"pytest-of-{os.environ.get('USER', '')}",

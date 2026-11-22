@@ -295,3 +295,18 @@ def test_walk_errors_do_not_break_source_and_top5_is_bounded(tmp_path):
                       store_paths={"repo_tmp": root}, statvfs=lambda _: Stat(), clock=lambda: 0)
     assert sum('llm_env_fs_repo_tmp_top_bytes{' in line for line in text.splitlines()) == 5
     assert 'llm_env_fs_scan_errors' in text
+
+
+def test_default_repo_tmp_store_is_the_checkout_tmp(tmp_path, monkeypatch):
+    from pylib import observe_fs
+
+    seen = []
+
+    def walk(root, *_args):  # the real walk skips a root that does not exist, so record the path before that
+        seen.append(Path(root))
+        return 0, 0, {}, 0, False
+
+    monkeypatch.setattr(observe_fs, "_walk", walk)
+    observe_fs.collect_fs(state_path=tmp_path / "state.json", paths={}, clock=lambda: 0)
+    # derived from the module location, not from the directory depth of one particular checkout or worktree
+    assert Path(__file__).resolve().parents[1] / "tmp" in seen
