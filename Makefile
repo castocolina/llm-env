@@ -145,9 +145,9 @@ clean:
 prune:
 	@bash tools/run-target.sh prune -- bash scripts/prune.sh
 
-# Removes this stack's stale images; DRY_RUN=1 only lists them.
+# Removes this stack's stale images and other projects' unused images created >= STALE_DAYS (default 90; 0 = stack only) ago; DRY_RUN=1 only lists them.
 prune-stale-images:
-	@bash tools/run-target.sh prune-stale-images -- bash scripts/prune-stale-images.sh $(if $(filter 1,$(DRY_RUN)),--dry-run)
+	@bash tools/run-target.sh prune-stale-images -- bash scripts/prune-stale-images.sh $(if $(filter 1,$(DRY_RUN)),--dry-run) $(if $(STALE_DAYS),--stale-days "$(STALE_DAYS)")
 
 
 # Unknown targets: show help instead of make's bare "No rule to make target".

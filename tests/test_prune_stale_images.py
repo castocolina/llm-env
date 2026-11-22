@@ -1,4 +1,5 @@
-"""make prune-stale-images removes only this stack's stale images, unless --dry-run, and never forces anything."""
+"""make prune-stale-images removes this stack's stale images and other projects' unused images created >= N days ago,
+unless --dry-run, and never forces anything."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -37,35 +39,61 @@ def _id(char: str) -> str:
     return char * 64
 
 
+DAY = 86400
+NOW = int(time.time())
+MISSING = object()  # no Created and no CreatedAt at all
+
+
 def _image(char: str, names: list[str] | None = None, digests: list[str] | None = None,
-           labels: dict[str, str] | None = None, created: int = 100, containers: int = 0) -> dict[str, object]:
-    return {"Id": _id(char), "Names": names, "RepoDigests": digests or [], "Labels": labels or {}, "Size": 1000,
-            "Created": created, "Containers": containers}
+           labels: dict[str, str] | None = None, age_days: int = 10, containers: int = 0,
+           created: object = None) -> dict[str, object]:
+    image: dict[str, object] = {"Id": _id(char), "Names": names, "RepoDigests": digests or [], "Labels": labels or {},
+                                "Size": 1000, "Containers": containers}
+    if created is None:
+        image["Created"] = NOW - age_days * DAY
+    elif created is not MISSING:
+        image["Created"], image["CreatedAt"] = created, created
+    return image
 
 
-# What each image is, the id it has, and whether it is a stale stack image (True) or must survive (False).
+# Rule under test: age = whole days since creation; an other-project image is old when age >= 90 (exactly 90: removed).
 IMAGES = [
     _image("r", [f"{LLAMA}:server-rocm"]),                                                       # stale tag (refusal test)
     _image("a", ["localhost/llm-env-system-one-span-sink:old"], containers=1),                   # in use (running)
     _image("s", ["localhost/llm-env-old-tool:1"]),                                               # in use (stopped container)
-    _image("b", ["localhost/llm-env-system-one:rocm"]),                                          # configured
-    _image("p", ["localhost/llm-env-system-one:rocm-prev"]),                                     # System One rollback copy
+    _image("b", ["localhost/llm-env-system-one:rocm"], age_days=200),                            # configured, old
+    _image("p", ["localhost/llm-env-system-one:rocm-prev"], age_days=200),                       # rollback copy, old
     _image("n", [f"{OMNI}:next"]),                                                               # configured
-    _image("o", [f"{OMNI}@sha256:{'1' * 64}"], [f"{OMNI}@sha256:{'1' * 64}"], created=100),      # older untagged: stale
-    _image("q", [f"{OMNI}@sha256:{'2' * 64}"], [f"{OMNI}@sha256:{'2' * 64}"], created=200),      # newest untagged: rollback
+    _image("o", [f"{OMNI}@sha256:{'1' * 64}"], [f"{OMNI}@sha256:{'1' * 64}"], age_days=300),     # older untagged: stale
+    _image("q", [f"{OMNI}@sha256:{'2' * 64}"], [f"{OMNI}@sha256:{'2' * 64}"], age_days=200),     # newest untagged: rollback
     _image("l", [f"{OMNI}:latest"]),                                                             # stale tag
     _image("u", None, labels={"llm-env.gpu-arch": "gfx1201"}),                                   # superseded build: stale
     _image("d", ["localhost/llm-env-system-one-retired:abc"]),                                   # retired derivative: stale
-    _image("x", ["docker.io/library/python:3.12-slim"]),                                         # other project, unused
-    _image("z", None, labels={"io.buildah.version": "1.45.1"}),                                  # dangling, not ours
+    _image("x", ["docker.io/library/python:3.12-slim"]),                                         # other project, unused, 10 d
+    _image("z", None, labels={"io.buildah.version": "1.45.1"}),                                  # dangling, not ours, 10 d
     _image("g", None, [f"{LLAMA}@sha256:{'3' * 64}"]),                                           # untagged llama pull: stale
     _image("c", ["localhost/llm-env-old-tool:2", "docker.io/other/project:1"]),                 # co-tagged with a foreign repo
+    # other projects' images, by age
+    _image("e", ["docker.io/library/debian:11"], age_days=91),                                   # unused, 91 d: removed
+    _image("f", ["docker.io/library/debian:12"], age_days=89),                                   # unused, 89 d: kept
+    _image("h", ["docker.io/library/ubuntu:20.04"], age_days=90),                                # unused, exactly 90 d: removed
+    _image("k", None, age_days=120),                                                             # old dangling: removed by ID
+    _image("m", ["docker.io/library/mysql:8.4"], age_days=400),                                  # old, stopped container
+    _image("y", ["docker.io/library/python:3.13-alpine"], age_days=400),                         # old, configured
+    _image("j", ["docker.io/library/fedora:42"], created="last tuesday"),                        # unparsable date
+    _image("i", ["docker.io/library/archlinux:latest"], created=MISSING),                        # missing date
+    _image("t", ["docker.io/library/registry:2"], age_days=1000),                                # old, the updater proof's
 ]
-STALE = {f"{LLAMA}:server-rocm", f"{OMNI}:latest", _id("o"), _id("u"), "localhost/llm-env-system-one-retired:abc", _id("g")}
+STACK_STALE = {f"{LLAMA}:server-rocm", f"{OMNI}:latest", _id("o"), _id("u"), "localhost/llm-env-system-one-retired:abc",
+               _id("g")}
+FOREIGN_OLD = {"docker.io/library/debian:11", "docker.io/library/ubuntu:20.04", _id("k")}
+STALE = STACK_STALE | FOREIGN_OLD
 KEPT = {
     "in-use-running": _id("a"), "in-use-stopped": _id("s"), "configured": _id("b"), "rollback-system-one": _id("p"),
     "configured-omniroute": _id("n"), "rollback-omniroute": _id("q"), "unrelated-project": _id("x"),
-    "foreign-dangling": _id("z"), "co-tagged-foreign": _id("c"),
+    "foreign-dangling": _id("z"), "co-tagged-foreign": _id("c"), "foreign-89-days": _id("f"),
+    "foreign-old-stopped-container": _id("m"), "foreign-old-configured": _id("y"), "foreign-unparsable-date": _id("j"),
+    "foreign-missing-date": _id("i"), "foreign-old-proof-image": _id("t"),
 }
 
 
@@ -79,9 +107,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
     fake.mkdir()
     (fake / "images.json").write_text(json.dumps(IMAGES))
     (fake / "containers.json").write_text(json.dumps([{"ImageID": _id("a"), "State": "running"},
-                                                      {"ImageID": _id("s"), "State": "exited"}]))
+                                                      {"ImageID": _id("s"), "State": "exited"},
+                                                      {"ImageID": _id("m"), "State": "exited"}]))
     refs = {"localhost/llm-env-system-one:rocm": "b", "localhost/llm-env-system-one:rocm-prev": "p", f"{OMNI}:next": "n",
-            f"{LLAMA}:server-vulkan": "v"}  # remote_setup's python image is absent from the store: protects nothing
+            f"{LLAMA}:server-vulkan": "v", "docker.io/library/python:3.13-alpine": "y", "docker.io/library/registry:2": "t"}
     (fake / "refs").write_text("".join(f"{ref}\t{_id(char)}\n" for ref, char in refs.items()))
     config = tmp_path / "models.yml"
     config.write_text(f"gpu:\n  image: {LLAMA}:server-vulkan\nomniroute:\n  image: {OMNI}:next\n"
@@ -114,15 +143,41 @@ def test_dry_run_prints_the_table_and_removes_nothing(tmp_path: Path) -> None:
     assert not _removals(env)
     assert "ACTION" in result.stdout and "REASON" in result.stdout and "dry run: nothing removed" in result.stdout
     assert f"remove  {OMNI}:latest" in result.stdout and "rollback copy" in result.stdout
-    assert "candidates total 6.00kB" in result.stdout
+    assert "candidates total 9.00kB" in result.stdout
 
 
-def test_default_run_removes_exactly_the_stale_stack_images(tmp_path: Path) -> None:
+def test_default_run_removes_stack_stale_and_old_unused_foreign_images(tmp_path: Path) -> None:
     env = _env(tmp_path)
     result = _run(env)
     assert result.returncode == 0, result.stderr
     assert _removals(env) == STALE
-    assert "freed 6.00kB" in result.stdout
+    assert "freed 9.00kB" in result.stdout
+
+
+def test_the_table_shows_age_and_why(tmp_path: Path) -> None:
+    out = _run(_env(tmp_path), "--dry-run").stdout
+    rows = {line.split()[1]: line for line in out.splitlines() if line.startswith(("keep ", "remove "))}
+    assert "AGE_D" in out
+    assert " 91  unused >= 90 d: other project, no container, created 91 d ago" in rows["docker.io/library/debian:11"]
+    assert " 89  other project, created 89 d ago (< 90 d)" in rows["docker.io/library/debian:12"]
+    assert "?  other project, creation date unknown" in rows["docker.io/library/fedora:42"]
+    assert "stack-stale: tag not configured" in rows[f"{OMNI}:latest"]
+    assert "in use by a container" in rows["docker.io/library/mysql:8.4"]
+
+
+def test_stale_days_0_keeps_every_foreign_image(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    result = _run(env, "--stale-days", "0")
+    assert result.returncode == 0, result.stderr
+    assert _removals(env) == STACK_STALE
+    assert "other project (STALE_DAYS=0)" in result.stdout
+
+
+def test_a_bad_stale_days_value_fails_closed(tmp_path: Path) -> None:
+    env = _env(tmp_path)
+    result = _run(env, "--stale-days", "ninety")
+    assert result.returncode != 0 and "--stale-days must be a whole number" in result.stderr
+    assert not _removals(env)
 
 
 @pytest.mark.parametrize("kind", sorted(KEPT))
@@ -141,7 +196,7 @@ def test_a_refusal_is_reported_and_the_run_continues(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert f"kept     {LLAMA}:server-rocm  podman refused: Error: image has dependent children" in result.stdout
     assert _removals(env) == STALE  # attempted once, then every later candidate still went
-    assert "removed 5 image(s), 1 refused" in result.stdout and "freed 5.00kB" in result.stdout
+    assert "removed 8 image(s), 1 refused" in result.stdout and "freed 8.00kB" in result.stdout
 
 
 def test_an_unreadable_container_list_fails_closed(tmp_path: Path) -> None:
@@ -182,3 +237,4 @@ def test_make_removes_by_default_and_only_lists_with_dry_run_1() -> None:
                               capture_output=True, text=True, check=True).stdout
     assert "scripts/prune-stale-images.sh --dry-run" in recipe("DRY_RUN=1")
     assert "--dry-run" not in recipe() and "--dry-run" not in recipe("DRY_RUN=0")
+    assert '--stale-days "0"' in recipe("STALE_DAYS=0") and "--stale-days" not in recipe()

@@ -80,7 +80,9 @@ make prune
 Reclaim disk from superseded image builds and updates with
 `make prune-stale-images` (it removes what is unused, unconfigured and not a
 rollback copy; `make prune-stale-images DRY_RUN=1` only lists it). Rollback copies (`:rocm-prev`, the newest
-untagged OmniRoute image) and other projects' images are always kept.
+untagged OmniRoute image) are always kept. Other projects' images are removed only when no container uses
+them and they were created at least `STALE_DAYS` (default 90) days ago; Podman keeps no last-use time, so
+the creation date stands in for it, and `STALE_DAYS=0` limits the run to this stack's images.
 
 Enabled models are all routable. `runtime.models_max` is a separate residency
 limit; the target configuration keeps one model resident and unloads it before
