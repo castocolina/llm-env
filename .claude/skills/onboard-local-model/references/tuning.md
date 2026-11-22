@@ -1,6 +1,6 @@
 # Capacity and tuning procedure
 
-Loaded for tuning, the capacity card, `my-coding-lite` and quant comparisons.
+Loaded for tuning, the capacity card, `my-local-worker` and quant comparisons.
 
 Ask yourself first:
 - Which limit binds first for this model: VRAM at the target context, RAM for offload, or decode speed at depth?
@@ -9,7 +9,7 @@ Ask yourself first:
 
 ## When
 
-The owner asks for the best context and speed for the current model, a capacity card, or `my-coding-lite`. Needs
+The owner asks for the best context and speed for the current model, a capacity card, or `my-local-worker`. Needs
 `llm_server.enabled: true` (already set before step T1, or enabled in T2) and the model served (the sweep itself runs with llm-server stopped).
 
 ## Procedure
@@ -39,7 +39,7 @@ Every step is one command; the gates and the bypass rule are those of `SKILL.md`
   `<seeds>`). The ladder is a benchmark run (`SKILL.md` rule 2): state its upper bound first (`references/scoring.md`,
   Running a lane).
 - T9. `make local-combo`, then `make setup-local-llm-agents`. Confirm with
-  `jq '.providers["router-env"].models[] | select(.id == "my-coding-lite")' ~/.pi/agent/models.json`. Finish with `podman ps -a` and a
+  `jq '.providers["router-env"].models[] | select(.id == "my-local-worker")' ~/.pi/agent/models.json`. Finish with `podman ps -a` and a
   `ps` by PID for everything this run started.
 
 The full program continues with Quant headroom.
@@ -107,7 +107,7 @@ A declined G-T3 has nothing to restore: only `make start-llama`.
 
 ## Quant headroom
 
-Ends the tuning program, after T8 (T9 only builds `my-coding-lite`). A check never starts a download or edits `models.yml`; `check` writes
+Ends the tuning program, after T8 (T9 only builds `my-local-worker`). A check never starts a download or edits `models.yml`; `check` writes
 `<LLM_ENV_SCOUT_OUT>/model-tune/quant-<stamp>-<pid>/candidates.json` (default root `<repo>/tmp`) and the card's `quants` section. Candidates are the next quants of the same
 Hugging Face repo at the entry's commit (default `Q5_K_M,Q6_K`; `--quants` overrides); sizes and sha256 come from the repo
 tree. A `resolve/main/` entry url is resolved only when its `size_bytes` equals the tree size, else pin the url first (P0). An entry url with a sub-folder (`resolve/<sha>/<folder>/<file>`) works: each candidate is looked up at that path with the quant token replaced (in any case; `UD-` tokens such as `UD-Q5_K_XL` too) and downloads under its base name.
@@ -194,9 +194,9 @@ none omitted), one at a time, its upper bound stated first. Order: P0-P2; Q1; P3
 - Every candidate skipped at Q2 or Q3 (none measured): no G-Q3; `make start-llama` when llm-server was serving at P0 (or T1), then the
   Hand-back bullet.
 - Q5 and Q8 are benchmark runs (`SKILL.md` rule 2), one at a time.
-- `make start-llama` creates or updates `my-coding-lite` for the served alias once that alias has a current card and a passed
+- `make start-llama` creates or updates `my-local-worker` for the served alias once that alias has a current card and a passed
   interference gate (`scripts/start.sh`), so Q11 and a G-Q3 yes need no `make local-combo`. While a candidate without a card is served
-  (Q6-Q9), `my-coding-lite` still names `<a>` and fails; Q11 brings it back.
+  (Q6-Q9), `my-local-worker` still names `<a>` and fails; Q11 brings it back.
 - Gate G-Q3 (switch the default quant), once after the loop. A candidate `<b>` qualifies only when its Q7 gate passed, the Q8
   `compare-runs.sh` (`<a>` first) passes the replace rule (`references/scoring.md`, Score, item 6), and its Q10 tg and pp at the
   reference depth stay within about 3 % of `<a>` or the slowdown is stated as the trade. None qualifies: keep `<a>` and name the part

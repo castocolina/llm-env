@@ -7,7 +7,8 @@ measured result.
 
 Any replacement must serve `/v1/systemone` and `/batch` with `noul`, `choice` and score answers, plus probabilities.
 It must handle multilingual input (Spanish is routine here), run on ROCm or Vulkan beside the llama.cpp coding model,
-and carry the Phoenix observer, or that observer must be re-homed. A candidate that misses one of these needs an adapter
+and provide request telemetry through the span file `~/.local/state/llm-env/laya-spans/laya-spans.jsonl`, read by the
+observe collector and shown in Grafana, or that telemetry must be re-homed. A candidate that misses one of these needs an adapter
 and client changes. Name each one in the verdict.
 
 ## Candidates (claims are published numbers; nothing here is measured on this host yet)

@@ -20,7 +20,7 @@
     "should_trigger": true
   },
   {
-    "query": "pi crawls in long sessions since the 256k change: what tok/s do we actually get at 128k depth? then write the capacity card and set up my-coding-lite",
+    "query": "pi crawls in long sessions since the 256k change: what tok/s do we actually get at 128k depth? then write the capacity card and set up my-local-worker",
     "should_trigger": true
   },
   {

@@ -46,8 +46,8 @@ of contract gaps.
 
 ## Never
 
-- Never build over `localhost/llm-env-system-one:rocm` by hand: it is the rollback point, and the running container uses
-  a `-phoenix` derivative that only `setup/render-unit.sh` rebuilds, so a hand build plus restart keeps the old code.
+- Never build over `localhost/llm-env-system-one:rocm` by hand: the rollback source is the previous image tag `:rocm-prev`; use `make update-system-one`
+  so the idle-gated update path applies and verifies the candidate image.
 - Never use `make restart` for a Laya change: it also restarts OmniRoute and cuts every agent session.
 - Never move the torch/ROCm pin on version numbers: `rocm7.2` works around an idle CPU busy-spin that newer wheels still have.
 - Never recommend a switch on published benchmark claims alone: the Jev numbers in model cards are third-party runs on other

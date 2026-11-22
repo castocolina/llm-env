@@ -68,7 +68,7 @@
     "should_trigger": false
   },
   {
-    "query": "phoenix dashboard shows laya spans with errors, how do I open the traces?",
+    "query": "where can I see Laya request telemetry in Grafana?",
     "should_trigger": false
   }
 ]

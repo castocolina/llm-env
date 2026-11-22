@@ -33,8 +33,8 @@ preflight and names the step that hands llm-server back.
   it was stopped: the route's hand-back step runs `make stop-llama` last, so llm-server ends as it was found, a kept
   change included (the report says that `make start-llama` serves it).
 - `make start-llama` says the stack is not running: **Gate G-R1** before `make start`, then `preflight.sh` again. Its
-  facts: `make start` renders the units, migrates the config, (re)installs the OmniRoute healer and z.ai weekly-reset
-  timers, and brings up every stack container that is down (OmniRoute, remote-setup, System One, Phoenix with System One,
+  facts: `make start` renders the units, migrates the config, (re)installs the OmniRoute healer
+  timer, and brings up every stack container that is down (OmniRoute, remote-setup, System One,
   llm-server); System One loads its weights before it is healthy; the hand-back stops only llm-server, so the rest stays
   up. A no to G-R1: no local lane runs; the route reports what it has, says that nothing was measured, and stops.
 - `make start-llama` or `make start` fails its budget check: its output is the result. Report it and stop; never loosen

@@ -1069,14 +1069,14 @@ def test_skill_and_touched_docs_treat_jev_as_a_black_box() -> None:
     assert not offenders, offenders
 
 
-REF_NAMES = ("anchors", "challenges", "fit-math", "local-gguf", "onboard-flow", "runtimes", "scoring", "selection-criteria", "served-alias",
+REF_NAMES = ("anchors", "challenges", "context-ladder", "fit-math", "local-gguf", "onboard-flow", "runtimes", "scoring", "selection-criteria", "served-alias",
              "tuning")
 
 
 # One level deep: SKILL.md alone says when to load a reference. A reference names another only by its path, and only these pairs:
 # files its SKILL.md route row loads, plus onboard-flow -> selection-criteria (the research subagent's brief, handed over by path).
 CITES = {"onboard-flow": {"fit-math", "local-gguf", "scoring", "selection-criteria"}, "local-gguf": {"onboard-flow"},
-         "served-alias": {"scoring"}, "tuning": {"scoring"}, "anchors": {"scoring"}, "challenges": {"scoring"}}
+         "served-alias": {"scoring"}, "tuning": {"scoring"}, "anchors": {"scoring"}, "challenges": {"scoring"}, "context-ladder": set()}
 BARE_REF = re.compile(rf"(?<!references/)\b(?:{'|'.join(map(re.escape, REF_NAMES))})\.md\b")  # evals write the path without backticks
 NICKNAMES = ("effort-ladder reference", "effort-ladder brief", "Local GGUF reference", "Local GGUF route", "anchors reference",
              "research brief", "fit math loaded", "the runtime route", "the quant route", "section 7 brief", "the reference table",
@@ -1138,7 +1138,7 @@ RETIRED_COPIES = ("may run inline", "skipped at Q2 (none measured)", "No other s
                   "screens with the same flag presets", "`budget` reports 0 MiB of RAM for llm-server",
                   "`make clean` keeps them; `make prune` deletes them", "or a failed step after G2:", "G2 stopped nothing",
                   "CLI (every `--out` must resolve", "| `drop-minus-one` |", "R5 G3, interference",
-                  "record whether `my-coding-lite` exists", "only when Q1 recorded", "`my-coding-lite`, when it exists, is unavailable")
+                  "record whether `my-local-worker` exists", "only when Q1 recorded", "`my-local-worker`, when it exists, is unavailable")
 
 
 def test_shared_rules_are_stated_once() -> None:
@@ -1148,7 +1148,7 @@ def test_shared_rules_are_stated_once() -> None:
     assert not [(rel, c) for rel, p in files.items() for c in RETIRED_COPIES if c in _md(p)]
 
 
-SKILL_MD_MAX_BYTES = 11_000  # lowered from the 14,500 target of 2026-10-31-judge-round-1-fixes; raise only with a reason
+SKILL_MD_MAX_BYTES = 11_200  # lowered from the 14,500 target of 2026-10-31-judge-round-1-fixes; raised 11,000 -> 11,200 on 2026-11-21 for the context-ladder route row
 
 
 def test_skill_md_is_a_router_that_loads_every_reference() -> None:
@@ -1180,7 +1180,7 @@ def test_skill_md_routes_near_misses_runs_long_commands_detached_and_names_the_g
     assert "overrides another row's Do NOT load cell" not in text and "also serves authoring" not in text
     meta = yaml.safe_load(SKILL_MD.read_text().split("---")[1])
     assert not [w for w in DESCRIPTION_ROUTES if w not in meta["description"]]
-    assert all(w in meta["description"] for w in ("temperature/top_p", "LoRA fine-tuning", "converting safetensors to GGUF", "except my-coding-lite"))
+    assert all(w in meta["description"] for w in ("temperature/top_p", "LoRA fine-tuning", "converting safetensors to GGUF", "except my-local-worker"))
     assert not [w for w in ("sampling", "quantizing", "other combos") if w in meta["description"]]
 
 
@@ -1372,13 +1372,13 @@ def test_a_kept_switch_moves_my_coding_lite_and_a_revert_restores_the_router_pro
     step9 = _section(_md(REFS / "onboard-flow.md"), "9. **Keep or revert", "## Entry template")
     keep = _section(step9, "- Keep:", "- A declined G1")
     assert keep.index("`make local-combo`") < keep.index("`make setup-local-llm-agents`")
-    assert "7a.6's `make start-llama` skipped `my-coding-lite`" in keep and "a `skipped` line: report its reason" in keep
+    assert "7a.6's `make start-llama` skipped `my-local-worker`" in keep and "a `skipped` line: report its reason" in keep
     after = _section(step9, "- After that bullet", "- Profile:")
     assert "setup-local-llm-agents" not in after and "stops there" not in after
     profile = _section(step9, "- Profile:", "- Hand-back:")
     assert "not kept and 7a.7 ran, whatever the first step-1 read found: `make setup-local-llm-agents`" in profile
     tuning = _md(REFS / "tuning.md")
-    assert "`make start-llama` creates or updates `my-coding-lite` for the served alias" in tuning
+    assert "`make start-llama` creates or updates `my-local-worker` for the served alias" in tuning
     assert "make local-combo" not in _section(tuning, "- Q11.", "- A failed Q4-Q6") + _section(tuning, "- G-Q3 yes:", "- Hand-back,")
     evals = (SKILL / "evals" / "evals.json").read_text()
     assert "Q1 recorded" not in evals and "the Q1 record" not in evals and "the combo is not created" not in evals
@@ -3048,7 +3048,7 @@ def test_eval_quant_switch_fixtures_match_their_assertions() -> None:
     assert (delta["ladder"], delta["overall"]) == (1, 22.2) and out["warnings"] == []
     text = _asserts("quant-switch-yes")
     assert all(s in text for s in ("ladder delta 1", "overall delta 22.2", "compare-runs.sh --correctness-only",
-                                   "make llama-enable MODEL=gemma4-q5_k_m", "moves my-coding-lite to gemma4-q5_k_m",
+                                   "make llama-enable MODEL=gemma4-q5_k_m", "moves my-local-worker to gemma4-q5_k_m",
                                    "no separate make local-combo", "make llama-enable MODEL=gemma4,"))
 
 

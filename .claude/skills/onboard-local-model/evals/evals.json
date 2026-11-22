@@ -199,7 +199,7 @@
         "evals/files/models.yml",
         "evals/files/preflight-served.json"
       ],
-      "expected_output": "capacity show finds no card for gemma4, so P0 (gemma4's url is a pinned Hugging Face resolve url), P1 interference, and P2 G-T2 plus bench-fit.sh at 0,32768,130560 with make model-capacity DEPTH run before Q1. Q1 runs check without the flag while llm-server is stopped. The gemma4 ladder lane (P3) runs only if a candidate fits. G-Q1 and G-Q2 are separate gates. Both quants run on one seed set through the router profile. The upper bound is stated. No fitting candidate means the plan ends with make start-llama. G-Q3 is the owner's call. Q11 restores gemma4, and its make start-llama creates or updates my-coding-lite for gemma4.",
+      "expected_output": "capacity show finds no card for gemma4, so P0 (gemma4's url is a pinned Hugging Face resolve url), P1 interference, and P2 G-T2 plus bench-fit.sh at 0,32768,130560 with make model-capacity DEPTH run before Q1. Q1 runs check without the flag while llm-server is stopped. The gemma4 ladder lane (P3) runs only if a candidate fits. G-Q1 and G-Q2 are separate gates. Both quants run on one seed set through the router profile. The upper bound is stated. No fitting candidate means the plan ends with make start-llama. G-Q3 is the owner's call. Q11 restores gemma4, and its make start-llama creates or updates my-local-worker for gemma4.",
       "assertions": [
         "The plan follows `references/tuning.md`, Quant headroom: quant-headroom.sh check --alias gemma4, and only a candidate with fits true goes on (fits false or null is not fetched)",
         "uv run llmenv.py --config <fixture> capacity show --alias gemma4 reports no capacity card, so before Q1 the steps run in order: P0 finds gemma4's url pinned to a huggingface.co resolve/<sha> url, P1 make model-interference while served, P2 G-T2, then bench-fit.sh --alias gemma4 --depths 0,32768,130560 and make model-capacity MODEL=gemma4 DEPTH=<bench json>; tune-sweep.sh and tune-apply.sh are not run",
@@ -211,13 +211,13 @@
         "The upper bound is stated before dispatch as 5 x 3 x 2 x 300 s (layers x challenges per layer x tiers x timeout) per lane",
         "When no candidate has fits true, the plan ends with make start-llama, because P2 stopped llm-server, and no ladder lane has run",
         "Switching the default quant is gate G-Q3, the owner's call; with permissions bypassed the current quant is kept and the comparison table announced",
-        "Q11 restores the original alias (make stop-llama, make llama-enable MODEL=gemma4, make start-llama, make setup-local-llm-agents); its make start-llama creates or updates my-coding-lite for gemma4 once gemma4's card and interference gate are current, so no separate make local-combo runs",
+        "Q11 restores the original alias (make stop-llama, make llama-enable MODEL=gemma4, make start-llama, make setup-local-llm-agents); its make start-llama creates or updates my-local-worker for gemma4 once gemma4's card and interference gate are current, so no separate make local-combo runs",
         "Nothing was downloaded, no container was stopped or started and no configuration was edited"
       ]
     },
     {
       "id": "tune-capacity-card",
-      "prompt": "write the capacity card for the local model and set up my-coding-lite. Give me the ordered plan with its gates.",
+      "prompt": "write the capacity card for the local model and set up my-local-worker. Give me the ordered plan with its gates.",
       "setup": "The fixture config is .claude/skills/onboard-local-model/evals/files/models.yml (LLM_ENV_CONFIG; llm-server is serving its enabled gemma4) and preflight.sh already printed .claude/skills/onboard-local-model/evals/files/preflight-served.json; use that JSON as its output. DRY RUN for evaluation: read-only commands only (cat, yq, jq, the skill scripts' --help); do not stop or start containers, edit models.yml or start sweeps, benchmarks or ladders. Answer in English.",
       "files": [
         "evals/files/models.yml",
@@ -231,7 +231,7 @@
         "tune-pick ranks ctx first, then tg at min(131072, ctx - 512) with a 20 t/s floor, and tune-apply.sh runs under G-T3 with its backup path stated",
         "make benchmark is not run in this procedure because on a Vulkan failure it can rewrite gpu.backend to cpu",
         "make model-interference runs, then make model-capacity with DEPTH, and again with SCORE from a router-profile ladder (--efforts low,high --per-layer 3)",
-        "make local-combo and make setup-local-llm-agents run last, confirmed with the jq check of my-coding-lite in ~/.pi/agent/models.json",
+        "make local-combo and make setup-local-llm-agents run last, confirmed with the jq check of my-local-worker in ~/.pi/agent/models.json",
         "No container was stopped or started and no configuration was edited"
       ]
     },
@@ -397,11 +397,11 @@
         "evals/files/quant/q4.jsonl",
         "evals/files/quant/q5.jsonl"
       ],
-      "expected_output": "The candidate qualifies under the G-Q3 rule (replace rule passed, pp/tg within 3 %, interference passed); the yes branch serves gemma4-q5_k_m (its make start-llama moves my-coding-lite to it), refreshes the router profile, and keeps gemma4 disabled as the rollback.",
+      "expected_output": "The candidate qualifies under the G-Q3 rule (replace rule passed, pp/tg within 3 %, interference passed); the yes branch serves gemma4-q5_k_m (its make start-llama moves my-local-worker to it), refreshes the router profile, and keeps gemma4 disabled as the rollback.",
       "assertions": [
         "compare-runs.sh --correctness-only with q4.jsonl first gives ladder delta 1 and overall delta 22.2 for gemma4-q5_k_m: the replace rule passes (ladder delta >= 0 and overall delta > 10)",
         "The decision also checks tg and pp within about 3 % of gemma4 (-2.1 % and -1.4 %) and the passed Q7 interference gate",
-        "The yes branch, in order: make stop-llama, make llama-enable MODEL=gemma4-q5_k_m, make start-llama (it moves my-coding-lite to gemma4-q5_k_m: its card and Q7 gate are current), make check-server, make setup-local-llm-agents; no separate make local-combo",
+        "The yes branch, in order: make stop-llama, make llama-enable MODEL=gemma4-q5_k_m, make start-llama (it moves my-local-worker to gemma4-q5_k_m: its card and Q7 gate are current), make check-server, make setup-local-llm-agents; no separate make local-combo",
         "gemma4 stays in models.yml, disabled, as the rollback, and all of Q11 restores it: make stop-llama, make llama-enable MODEL=gemma4, make start-llama, make setup-local-llm-agents",
         "Nothing was executed besides compare-runs.sh"
       ]
@@ -632,15 +632,15 @@
     {
       "id": "onboard-keep",
       "prompt": "foo-9b beat gemma4 in today's onboarding and I approve G5: keep foo-9b. What runs now, in order?",
-      "setup": "Premise: steps 1-8 of an onboarding of foo-9b (a Hugging Face candidate) ran on this host with the fixture config .claude/skills/onboard-local-model/evals/files/models.yml. The first step-1 read was .claude/skills/onboard-local-model/evals/files/preflight-served.json (llm-server serving gemma4). 7a added foo-9b, ran make llama-enable MODEL=foo-9b and make setup, and its make start-llama printed `my-coding-lite: skipped (no capacity card; run make model-capacity MODEL=foo-9b and make model-interference)`. 7a.7 ran make setup-local-llm-agents. 7b's interference gate passed and make model-capacity wrote foo-9b's card. DRY RUN for evaluation: read-only commands only (cat, yq, jq); list the commands you would run, in order, without running them. Answer in English.",
+      "setup": "Premise: steps 1-8 of an onboarding of foo-9b (a Hugging Face candidate) ran on this host with the fixture config .claude/skills/onboard-local-model/evals/files/models.yml. The first step-1 read was .claude/skills/onboard-local-model/evals/files/preflight-served.json (llm-server serving gemma4). 7a added foo-9b, ran make llama-enable MODEL=foo-9b and make setup, and its make start-llama printed `my-local-worker: skipped (no capacity card; run make model-capacity MODEL=foo-9b and make model-interference)`. 7a.7 ran make setup-local-llm-agents. 7b's interference gate passed and make model-capacity wrote foo-9b's card. DRY RUN for evaluation: read-only commands only (cat, yq, jq); list the commands you would run, in order, without running them. Answer in English.",
       "files": [
         "evals/files/models.yml",
         "evals/files/preflight-served.json"
       ],
-      "expected_output": "Keep: make local-combo moves my-coding-lite from llama-cpp/gemma4 (no longer served) to llama-cpp/foo-9b now that foo-9b has a card and a passed interference gate, then make setup-local-llm-agents refreshes the router profile; nothing is rolled back and llm-server keeps serving foo-9b.",
+      "expected_output": "Keep: make local-combo moves my-local-worker from llama-cpp/gemma4 (no longer served) to llama-cpp/foo-9b now that foo-9b has a card and a passed interference gate, then make setup-local-llm-agents refreshes the router profile; nothing is rolled back and llm-server keeps serving foo-9b.",
       "assertions": [
         "Keep runs make local-combo, then make setup-local-llm-agents",
-        "The answer says why: 7a.6's make start-llama skipped my-coding-lite (no capacity card for foo-9b yet), so my-coding-lite still routes to llama-cpp/gemma4, which the router no longer serves once foo-9b is the enabled model; 7b's card and gate let it move to llama-cpp/foo-9b",
+        "The answer says why: 7a.6's make start-llama skipped my-local-worker (no capacity card for foo-9b yet), so my-local-worker still routes to llama-cpp/gemma4, which the router no longer serves once foo-9b is the enabled model; 7b's card and gate let it move to llama-cpp/foo-9b",
         "Nothing is rolled back and no make stop-llama runs: the first step-1 read (preflight-served.json) found llm-server serving",
         "models.yml.example gets the foo-9b entry with enabled false only when the owner wants a repo default",
         "Nothing was executed"

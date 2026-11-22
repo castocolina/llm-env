@@ -208,7 +208,7 @@ nothing): steps 1-4, then 7a.1-7a.4 (Gate G3), then `L=~/.config/llm-env/models.
      6. `make start-llama`, then `make status`, `make check-server` and `make check-with-agents`. When the last step-1 read
         found the stack down (preflight `services.omniroute_running` false; never after a yes to G-R1, which started it),
         G3's facts also say that this step runs `make start`
-        instead, which renders the units, migrates the config, (re)installs the OmniRoute healer and z.ai timers and brings
+        instead, which renders the units, migrates the config, (re)installs the OmniRoute healer timer and brings
         up every stack container that is down.
      7. `make setup-local-llm-agents` (the router profile gets `llama-cpp/<alias>`).
    - **7b. Interference and capacity.** `make model-interference`, then `make model-capacity MODEL=<alias> DEPTH=<bench json>`
@@ -242,7 +242,7 @@ nothing): steps 1-4, then 7a.1-7a.4 (Gate G3), then `L=~/.config/llm-env/models.
    - `podman image inspect --format '{{.Id}}' <gpu.image>` after 7a differs from the 7c Id: the table says the next container
      recreation (`make restart`) serves a build these numbers did not measure.
 9. **Keep or revert (Gate G5).**
-   - Keep: `make local-combo`, then `make setup-local-llm-agents`. 7a.6's `make start-llama` skipped `my-coding-lite` (the candidate
+   - Keep: `make local-combo`, then `make setup-local-llm-agents`. 7a.6's `make start-llama` skipped `my-local-worker` (the candidate
      had no card yet), so it still names `llama-cpp/<baseline>`, which the router no longer serves. 7b's card and interference gate let it
      move to `llama-cpp/<alias>` now (a `skipped` line: report its reason). Add the entry to `models.yml.example` with `enabled: false`
      only when the owner wants a repo default. A host that was

@@ -3,7 +3,8 @@
 ## What must not break
 
 - Contract: Jev-compatible `POST /v1/systemone` and `/batch` on loopback `system_one.port` (8010). Its clients are
-  `make check-server`, `make model-interference`, the Phoenix observer baked into the image and the jev-fast-decision
+  `make check-server`, `make model-interference`, the Laya span observer that writes request records to
+  `~/.local/state/llm-env/laya-spans/laya-spans.jsonl` for the observe collector and Grafana, and the jev-fast-decision
   ladder. A change to the contract is a client change, not an image bump.
 - Footprint (measured, `models.yml.example`): about 4.26 GB steady VRAM with `english,multilingual`. `english` alone saves
   about 200 MiB but returns HTTP 500 on non-English and short English input. Idle unload after 600 s frees about 3.7 GB,
