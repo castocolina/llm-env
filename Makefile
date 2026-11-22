@@ -1,6 +1,6 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity model-report \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context local-combo backup \
-        combo-backup combo-restore connections-backup update-omniroute update-system-one migrate-remote-setup logs validate test clean prune
+        combo-backup combo-restore connections-backup update-omniroute update-system-one migrate-remote-setup logs validate test clean prune prune-stale-images
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -144,6 +144,10 @@ clean:
 
 prune:
 	@bash tools/run-target.sh prune -- bash scripts/prune.sh
+
+# Dry run by default; APPLY=1 removes (any other value stays a dry run).
+prune-stale-images:
+	@bash tools/run-target.sh prune-stale-images -- bash scripts/prune-stale-images.sh $(if $(filter 1,$(APPLY)),--apply)
 
 
 # Unknown targets: show help instead of make's bare "No rule to make target".

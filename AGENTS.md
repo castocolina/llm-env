@@ -47,6 +47,7 @@ make model-interference  # Gate: does the local model slow System One or raise c
 make local-combo         # Create/update the local-only OmniRoute combo my-local-worker from the card
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
+make prune-stale-images [APPLY=1]  # Dry-run table of this stack's unused, unconfigured, non-rollback Podman images; APPLY=1 removes them one plain podman rmi at a time (other projects' images untouched)
 make dev-setup                 # Install dev-only tooling
 uv tool install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push  # one-time: enable the git hooks below
 make validate                  # shellcheck + ruff + pyright
