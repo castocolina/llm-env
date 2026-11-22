@@ -43,45 +43,18 @@ make check-server
   unloads) Laya drops its checkpoints and frees about 3.7 GB of VRAM. The
   next request reloads them in about 0.4 s.
 
-### Laya request history in Phoenix
+### Laya request telemetry
 
-When System One is enabled, normal `make start` also starts Phoenix and the
-server-side observer records real Laya requests in the `laya` project. Open
-`http://127.0.0.1:6006/projects` (or the configured
-`LLM_ENV_PHOENIX_PORT`) and select **laya**. History begins when the observer
-is deployed; earlier requests are not backfilled. Use normal `make stop` to
-stop the dashboard. Its owned data volume survives normal stops and starts.
-
-The observer records request state and questions, typed answers and their
-probabilities/confidence fields, model/routing metadata, known usage, timing,
-HTTP status/errors, and batch structure. It does not record HTTP headers and
-redacts credential-like JSON keys. Each request and response capture is
-limited to 24,000 bytes; truncation is marked. Export uses a 128-record
-in-memory queue, a 64 KiB record cap, and a 1.5-second background HTTP
-timeout. If Phoenix is unavailable or the queue fills, exports can be lost;
-those failures and drops are logged. This is best-effort history, not a
-complete audit log. Trace details show the captured input/output; do not
-assume every attribute is available as a native chart or that confidence
-means correctness. Comparative observer latency overhead has not been measured.
-
-Phoenix binds to loopback and disables authentication. This blocks LAN
-publication, but **does not protect traces from other users or processes on
-the same machine**. Treat prompts, state, and model output in this dashboard
-as locally accessible private data. No Phoenix telemetry or off-host export
-is enabled. The configured seven-day retention policy
-(`LLM_ENV_PHOENIX_RETENTION_DAYS`, default `7`) is a scheduled cleanup policy,
-not a storage quota or a guarantee that every record has been deleted on time.
-`make status` reports only the bounded first page of up to 1,000 spans; its
-range and counts describe that page, and the `completeness` field indicates
-whether Phoenix reports another page. Cgroup `memory.low` (best-effort
-protection) and `memory.min` (hard protection) are distinct; neither should be
-read as the other. CPU quota is reported from `NanoCpus` when available, with
+Laya writes privacy-filtered request records (no question or answer text) to
+`~/.local/state/llm-env/laya-spans/laya-spans.jsonl`, bounded to the current
+file and one rotation. The host observe collector reads this file and publishes
+request counts, durations, answer types, and confidence histograms to Grafana;
+older history is not backfilled. Cgroup `memory.low` (best-effort protection)
+and `memory.min` (hard protection) are distinct; neither should be read as the
+other. CPU quota is reported from `NanoCpus` when available, with
 `CpuQuota/CpuPeriod` as the compatible fallback.
 
-The current resource policy gives Phoenix a 192 MiB soft memory hint and caps
-it at 1 GiB memory and 1 CPU. CPU shares are 256 relative shares under
-contention, not guaranteed cores. The cap is benchmark-derived (804 MiB peak
-+ 20 %); re-derive it with `make resources-benchmark`. Browser E2E discovery uses an installed Playwright package or a
+Browser E2E discovery uses an installed Playwright package or a
 local npm cache; set `LLM_ENV_PLAYWRIGHT_ROOT` to a Playwright package
 location or `LLM_ENV_CHROMIUM_EXECUTABLE` to an existing Chromium binary when
 automatic discovery is unavailable. The test does not install packages.
@@ -198,9 +171,6 @@ make stop-llama && make llama-enable MODEL=<alias> && make start-llama
 - llm-server missing from the compose file while still running (after
   `make llama-disable` and before `make restart`): `make start` leaves it
   running. `make stop` or `make restart` removes it through `--remove-orphans`.
-- System One disabled, then `make start` while Phoenix still runs: `make start`
-  no longer stops Phoenix, so it keeps running. `make restart` stops it, even
-  when System One is disabled.
 - While llm-server is stopped, the mDNS unit's `ExecStartPre` polls its
   `/health`, fails after the timeout, and clears on `make start-llama`.
 - An inactive server unit with containers still running (the unit failed,
@@ -223,7 +193,7 @@ Afterwards verify that `yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.y
 is unchanged. If it is not, restore from that backup and report it. Prefer the
 skill's `bench-fit.sh` for screening.
 
-## Local model capacity and my-coding-lite
+## Local model capacity and my-local-worker
 
 A local model's measured limits live in one card per alias,
 `~/.config/llm-env/capacity/<alias>.json` (directory 0700, file 0600, written
@@ -256,7 +226,7 @@ context_tokens)`, or `null`.
   so these are service-level limits; a relative p95 rise (more than 50 % and more than 10 ms over the baseline) is
   only reported as `regression_warning`, never a failure;
 - a `memory.events` `high`, `max`, `oom` or `oom_kill` counter grows for
-  omniroute, remote-setup, system-one, phoenix or llm-server;
+  omniroute, remote-setup, system-one or llm-server;
 - a container's counters reset (its uptime went down) between snapshots;
 - no load request completes inside the window;
 - a service running before the load is not running after it.
@@ -273,7 +243,7 @@ running, the gate refuses (`run 'make start'`). Run directories land in
 `<root>/model-interference/<stamp>-<pid>`, where `<root>` is `tmp/` in the repo
 unless `LLM_ENV_SCOUT_OUT` names another root.
 
-**my-coding-lite (`make local-combo`).** An OmniRoute combo with one member,
+**my-local-worker (`make local-combo`).** An OmniRoute combo with one member,
 `llama-cpp/<alias>` on the `llm-env-local` connection, strategy `priority`, and
 `context_length` set to the usable context. It has no cloud fallbacks, so the
 local floor is never lowered. The tool owns the combo: drift is overwritten, as
@@ -294,7 +264,13 @@ accepted and persisted, and the combo itself is listed in `/v1/models` with its
 a new `context_length` persisted. With llm-server down, a chat to the combo
 returns 502 and the combo stays in OmniRoute.
 
-**Clients.** `make setup-local-llm-agents` lists `router-env/my-coding-lite` in
+The local combo is `my-local-worker`. `my-coding-lite` is the executor combo and is never touched by `make local-combo`.
+
+For local clients, select `router-env/my-local-worker`. Performance tests
+(context fill and difficulty ladders) default to this combo through OmniRoute;
+direct llama.cpp is also an option.
+
+**Clients.** `make setup-local-llm-agents` lists `router-env/my-local-worker` in
 pi and opencode only while llm-server is enabled and the card is current; a
 combo with no known minimum is dropped. Remote installers never list it: their
 `llama-cpp` members have no local limits, so the combo has no known minimum. The router
@@ -318,7 +294,7 @@ known not to fit, the verdict is written as `no headroom for Q5_K_M/Q6_K at ctx
 N, free MiB X`. A fitting candidate is trialled in ascending size with the same
 depths and ladder; the first one that fails the interference gate stops the
 trials. Each trial ends by restoring the original quant, so the default is never
-switched silently. `my-coding-lite` is unavailable while a candidate is served.
+switched silently. `my-local-worker` is unavailable while a candidate is served.
 Run outputs go to `<root>/model-tune/quant-<stamp>-<pid>`, using the same
 `LLM_ENV_SCOUT_OUT` root.
 The ladder challenges are generated per run from the skill's reference projects (`gen-challenge.sh`, seeded, each proven to fail as shipped and to pass with its reference fix before a model sees it), copied into isolated directories under `<repo>/tmp/`; the scripts refuse an `--out` outside it, and nothing runs in or against the owner's project.
@@ -460,7 +436,7 @@ container without its native dependency on OmniRoute. It requires the
 **deployed** `docker-compose.yml` to already have no
 `services.remote-setup.depends_on` — re-render it first (see "Updates"
 above; `make setup` re-renders, and its side effects include a device-probe
-`podman run --rm`, Phoenix prepare and observer-image build when System One
+`podman run --rm` and observer-image build when System One
 is enabled, a legacy `llm-mdns.service` stop, and a `systemctl --user
 daemon-reload`). The migration never rewrites the deployed compose file.
 While remote-setup is down or `/config` cannot reach OmniRoute, `/config`
@@ -505,15 +481,6 @@ updater shell is cleaned up by its orphaned observer. The password file exists
 only while a reader needs it (until the observer's first verdict, then again
 from the hand-off). A SIGKILL before observation starts can still leave a
 directory behind (no password file yet, but the projection can hold environment values); it lives on the tmpfs until logout.
-
-### z.ai weekly-quota reset
-
-`make start` also installs a 5-minute `llm-env-zai-reset` systemd user timer that runs
-`scripts/zai-reset-weekly.sh`. When an active z.ai connection's weekly quota (OmniRoute `GET /api/usage/<id>`)
-reaches 99 %, it redeems one `WEEK` reset card through OmniRoute (`POST /api/usage/glm-reset-card`), at most once
-per weekly window (the window's `resetAt` is recorded in `~/.cache/llm-env/zai-reset-state.json`; the idempotency key
-is derived from it). Without a card it does nothing. `bash scripts/zai-reset-weekly.sh --dry-run` reports what it
-would do without redeeming; `journalctl --user -u llm-env-zai-reset` has each run.
 
 ### OmniRoute healer
 

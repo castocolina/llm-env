@@ -48,7 +48,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/model-capacity.sh` | `make model-capacity`: takes only `--depth` (bench-fit JSON), `--score` (score JSON) and `--profile` (latency-profile JSON), writes the depth, ladder and profile sections, then shows the card. Quants are written by `quant-headroom.sh check` (via `llmenv capacity headroom`); interference and ram by `model-interference.sh` |
 | `scripts/model-interference.sh` | `make model-interference`: load test of the local model against System One, OmniRoute and container memory counters; run dirs under `LLM_ENV_SCOUT_OUT` (default `tmp/`) |
 | `scripts/model-report.sh` | `make model-report`: prints the card report and saves it as `<config dir>/capacity/<alias>.report.md` (0600) |
-| `scripts/omniroute-local-combo.sh` | `make local-combo`: creates or updates the local-only OmniRoute combo `my-coding-lite` from the card; skips unless llm-server is enabled and running |
+| `scripts/omniroute-local-combo.sh` | `make local-combo`: creates or updates the local-only OmniRoute combo `my-local-worker` from the card; skips unless llm-server is enabled and running |
 
 ## Container Lifecycle
 
@@ -68,8 +68,7 @@ every `make start`:
 
 Resource policy is layered: `pylib/resources.py` holds the benchmark-derived
 defaults, `resources.overrides.<service>` in `models.yml` holds user intent,
-and `llmenv render-compose`, `scripts/phoenix.sh` and `scripts/check-setup.sh`
-recompute the effective policy from those on every run. Nothing persists the
+and `llmenv render-compose` and `scripts/check-setup.sh` recompute the effective policy from those on every run. Nothing persists the
 effective policy (the old `resources.<service>` mirror is dropped on load). Boot
 (`setup/enable-boot.sh` -> `setup/render-unit.sh`) renders through the same
 path and then starts the rendered compose file.
@@ -84,9 +83,11 @@ directly for the same view: `podman compose -f
 ~/.config/llm-env/docker-compose.yml logs -f`, `podman compose -f
 ~/.config/llm-env/docker-compose.yml ps`.
 
+Laya's observer writes bounded, privacy-filtered request records (without question or answer text) to the host span file at `~/.local/state/llm-env/laya-spans/laya-spans.jsonl`. The host observe collector reads that file and publishes request telemetry to Grafana; existing history is not backfilled.
+
 ### Lifecycle commands, flags and the unit
 
-- `ExecStart` is `scripts/start.sh` in boot mode (`LLM_ENV_BOOT_UNIT=1`), which ends in `podman compose … up -d --no-recreate --no-deps --pull=never` and prepares the external Phoenix network first: starting existing containers never tears them down, and their dependents with them. The unit retries a failed start up to 4 times in 15 minutes (`Restart=on-failure`). `ExecStop` is `down --remove-orphans`, which also removes containers the rendered file no longer lists.
+- `ExecStart` is `scripts/start.sh` in boot mode (`LLM_ENV_BOOT_UNIT=1`), which ends in `podman compose … up -d --no-recreate --no-deps --pull=never`: starting existing containers never tears them down, and their dependents with them. The unit retries a failed start up to 4 times in 15 minutes (`Restart=on-failure`). `ExecStop` is `down --remove-orphans`, which also removes containers the rendered file no longer lists.
 - With the unit active, `make start` runs `podman compose -f <file> up -d --no-recreate --no-deps --pull=never` directly; with the unit inactive it runs `systemctl --user start llm-server.service`, whose `ExecStart` runs the same script again in boot mode. `make start-llama` runs the same direct `up` for `llm-server` only. `--pull=never` skips podman-compose's pre-pull, so the direct `up` makes no registry call. Containers that must be created still get their image through `podman create`. The unit's ExecStart keeps the default pre-pull.
 - `make start-llama` and `make stop-llama` never touch the unit. It stays `active` whether llm-server runs or not, as it already does when a container crashes. `make stop-llama` runs `podman stop llm-server` and never removes the container.
 - `make stop` with the unit inactive and the compose file present runs `podman compose -f <file> down --remove-orphans` directly, after a warning. That removes containers a failed unit (for example, one whose start hit `TimeoutStartSec`) left running, so `make restart` recreates them.
@@ -97,7 +98,6 @@ directly for the same view: `podman compose -f
 - Boot runs the last rendered file without rendering. After an unclean shutdown it may start leftover exited containers as they were; `make restart` applies the current config.
 - The mDNS unit's ExecStartPre polls llm-server `/health` and fails after its timeout while llm-server is stopped; it clears on `make start-llama`.
 - `make start` prints one hint that running containers keep their definition; `make restart` applies pending definition changes.
-- Failure: System One disabled, then `make start` while Phoenix still runs. `make start` no longer stops Phoenix, so it keeps running. Recover with `make restart`, which stops Phoenix even when System One is disabled.
 - Failure: an active `make start` while an image tag is missing locally or the registry is unreachable. The direct `up` uses `--pull=never`, so no registry call is made: running containers are untouched and the exit status is 0. A container that must be created pulls through `podman create` and fails only if that image is unavailable. Retry when the registry is reachable.
 
 When both `llm_server.enabled` and `system_one.enabled` are true the stack
@@ -236,7 +236,7 @@ reference; the real file is generated, see below).
 | `make stop` / `systemctl --user stop llm-server.service` (`podman compose down --remove-orphans`, no `-v`; with the unit inactive and the compose file present, the same `down` runs directly) | removed, volumes detached | removed, volume detached | **kept** | **kept** | **kept** | untouched |
 | `make start` (running containers untouched; missing ones created, exited ones started) | running ones keep their definition; missing ones recreated | running ones keep their state; missing ones recreated | reattached, same data | reattached, same data | reattached, same data | untouched |
 | `make restart` (`make stop`, then a fresh render and `make start`) | recreated with the current definition, new cgroup lifetime | recreated | **kept** | **kept** | **kept** | untouched |
-| `make start-llama` / `make stop-llama` | only llm-server started or stopped (never removed); OmniRoute, remote-setup and Phoenix untouched | untouched | **kept** | **kept** | **kept** | untouched |
+| `make start-llama` / `make stop-llama` | only llm-server started or stopped (never removed); OmniRoute and remote-setup untouched | untouched | **kept** | **kept** | **kept** | untouched |
 | host reboot (`start_at_boot` unit, or manual `make start` after) | after a clean shutdown (ExecStop ran `down`): recreated. After an unclean shutdown: exited containers started as they were, without a render since (`make restart` applies the current config) | same rule | **kept** | **kept** | **kept** | untouched |
 | `make clean` (`podman compose down -v`, then `podman volume rm` of the Laya cache) | removed | removed | **destroyed** — explicitly warned before confirming | **destroyed** — explicitly warned before confirming | **destroyed** — next `make setup` re-downloads the weights | untouched (models are never deleted) |
 
@@ -441,7 +441,7 @@ and the problem is specifically in OmniRoute's routing/provider config.
   `bench-fit.sh` per-run outputs (`bench-<alias>.json`, `gpu-<alias>.csv`, `llama-bench-<alias>.json`/`.err`)
   inside a stamp- or run-id-named directory.
 - `llama-cpp` combo members take their limits only from current capacity cards, never from the OmniRoute catalog.
-- The `my-coding-lite` combo is owned by this tool (overwritten on drift, like `llm-env-local`).
+- The `my-local-worker` combo is owned by this tool (overwritten on drift, like `llm-env-local`). `my-coding-lite` is the executor combo and is never touched by it.
 - Agent client configs reference the router key file, never the key.
 
 ## Platform

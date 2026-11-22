@@ -17,7 +17,7 @@ make system-one-build        # Build the local System One (Laya) GPU image
 make system-one-benchmark    # Benchmark the running System One server and record the load table
 make resources-snapshot      # Point-in-time snapshot: per-service CPU/RAM policy, overrides and live cgroup counters (OK/WATCH/ALERT, read-only, no load)
 make resources-benchmark SERVICE=omniroute  # Measure a container to re-derive its limits (omniroute|attach|report)
-make start                   # Start whatever is not running (never stops a running container); installs the OmniRoute healer and z.ai weekly-reset timers
+make start                   # Start whatever is not running (never stops a running container); installs the OmniRoute healer timer
 make stop                    # Stop the whole stack
 make restart                 # Stop everything, re-render and start (applies config changes)
 make start-llama            # Start llm-server only; needs the stack running (unit active) and llm_server.enabled true; the rest is left alone
@@ -44,7 +44,7 @@ make key-reset                 # Rotate the server API key
 make model-report MODEL=<alias>  # One-page plain-text account of the model from its card (also saved as capacity/<alias>.report.md)
 make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>] [PROFILE=<latency.json>]  # Write/show the measured capacity card (~/.config/llm-env/capacity/<alias>.json)
 make model-interference  # Gate: does the local model slow System One or raise container memory events
-make local-combo         # Create/update the local-only OmniRoute combo my-coding-lite from the card
+make local-combo         # Create/update the local-only OmniRoute combo my-local-worker from the card
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
 make dev-setup                 # Install dev-only tooling
@@ -108,8 +108,7 @@ backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening
 
 Per-service CPU/RAM policy defaults live in `pylib/resources.py`
 (`DEFAULT_POLICY`). Persistent changes go in `models.yml` under
-`resources.overrides.<service>` (`omniroute`, `remote_setup`, `system_one`,
-`phoenix`). The old generated `resources.<service>` mirror is retired and
+`resources.overrides.<service>` (`omniroute`, `remote_setup`, `system_one`). The old generated `resources.<service>` mirror is retired and
 dropped on load (`resources.llm_server` stays).
 Manage overrides with `uv run llmenv.py resource-override show|set|check|clear`.
 `make resources-snapshot` also prints, per running container and read-only from its host
@@ -126,8 +125,7 @@ change. `bash setup/render-unit.sh` re-renders the compose file and unit for the
 next `make restart` or boot and does not touch running containers (boot starts the last
 rendered file). For an `omniroute` change, run `make update-omniroute`: it
 recreates only OmniRoute, once it has no load. To apply to the whole running stack, run `make restart`: it stops and
-starts OmniRoute, remote-setup, System One and (when System One is enabled)
-Phoenix, so in-flight requests are interrupted, System One reloads its weights
+starts OmniRoute, remote-setup and System One, so in-flight requests are interrupted, System One reloads its weights
 before it is healthy, and every container begins a new cgroup lifetime
 (`memory.peak` and counters start over). Run it when no agent
 session is using OmniRoute.
@@ -171,6 +169,8 @@ model-load transient (idle ~2.5 GiB, loaded ~3.9 GiB resident, peak at
    `make restart` when no agent session uses OmniRoute).
 
 ## Rules
+
+Experiments using `podman system reset|prune|migrate` or any `--root`/`--runroot` isolation must also isolate `--tmpdir`, `--network-config-dir`, `CONTAINERS_CONF`, `CONTAINERS_STORAGE_CONF` and `XDG_RUNTIME_DIR` (or use a separate user), and never run in the owner's session. On 2026-11-20, containers kept running while Podman reported them exited; container DNS broke.
 
 After editing any `.sh` file, run `make validate`.
 After editing any `.py` file, run `make validate && make test`.

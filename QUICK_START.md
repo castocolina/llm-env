@@ -34,32 +34,13 @@ make status
 make logs
 ```
 
-## Laya request history
+## Laya request telemetry
 
-With System One enabled, `make start` starts Phoenix alongside Laya. Open
-`http://127.0.0.1:6006/projects` and choose the `laya` project (or use the
-configured `LLM_ENV_PHOENIX_PORT`). The observer captures real server-side
-request and response JSON, including state, questions, typed answers,
-probabilities/confidence, known usage, routing, timing, errors, and batch
-structure. It does not capture headers and redacts credential-like JSON
-fields. History starts at deployment; older calls are not backfilled.
-
-Phoenix is loopback-only and has no authentication. Other users/processes on
-the same machine can access the traces. The dashboard may contain private
-prompts, state, and outputs. Each direction is capped at 24,000 captured
-bytes; each exported record is capped at 64 KiB. A bounded queue holds up to
-128 records and export runs in the background with a 1.5-second request
-timeout. Unavailable Phoenix, oversized records, or a full queue can cause
-loss; drops are logged. The default seven-day retention policy is configured
-with `LLM_ENV_PHOENIX_RETENTION_DAYS`; it is scheduled cleanup, not a quota or
-deletion-time guarantee. Normal `make stop` retains the data
-volume. Phoenix has a 192 MiB soft memory hint, 1 GiB hard memory, 256 relative
-CPU shares, and a 1 CPU hard cap, derived from a measured run (483 MiB resident,
-804 MiB peak) by the sizing rule in AGENTS.md.
-Confidence is not correctness, native charts are not guaranteed for every
-field, and observer latency overhead has not been measured. Phoenix telemetry
-and off-host export are disabled. See [README](README.md#laya-request-history-in-phoenix)
-for the privacy boundary and browser-test discovery settings.
+Laya writes privacy-filtered request records (no question or answer text) to
+`~/.local/state/llm-env/laya-spans/laya-spans.jsonl`, bounded to the current
+file and one rotation. The host observe collector reads the file and publishes
+request counts, durations, answer types, and confidence histograms to Grafana.
+Earlier history is not backfilled.
 
 ## Start at boot
 
@@ -90,7 +71,7 @@ It is not zero-downtime and observation is not admission control.
 `make migrate-remote-setup` recreates the remote-setup container without its
 native OmniRoute dependency. It refuses to run until the deployed compose is
 re-rendered without the remote-setup `depends_on` (re-run `make setup`; it
-device-probes with `podman run --rm`, prepares Phoenix and builds the
+device-probes with `podman run --rm` and builds the
 observer image when System One is enabled, stops a legacy `llm-mdns.service`
 and runs `systemctl --user daemon-reload`). While remote-setup is down,
 `/config` answers 503 + `Retry-After: 5` instead of hanging.
