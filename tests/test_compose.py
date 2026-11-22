@@ -133,7 +133,7 @@ def test_nonzero_resource_limits_are_applied():
 
 def test_sleep_idle_seconds_becomes_a_command_flag():
     _, document = compose_dict()
-    assert document["services"]["llm-server"]["command"] == ["--sleep-idle-seconds", "300"]
+    assert document["services"]["llm-server"]["command"] == ["--sleep-idle-seconds", "300", "--metrics"]
 
 
 def test_omniroute_service_uses_configured_image_and_port():
@@ -594,15 +594,12 @@ def test_system_one_uses_fresh_local_observer_image_when_provided(monkeypatch):
     assert document["services"]["system-one"]["image"] == "localhost/system-one-observer:current"
 
 
-def test_system_one_uses_existing_internal_phoenix_network_without_changing_default():
+def test_system_one_uses_default_network_without_userns_override():
     document = system_one_document({**CFG, "system_one": SYSTEM_ONE})
     service = document["services"]["system-one"]
-    assert service["networks"] == ["default", "phoenix-trace"]
-    assert service["environment"]["LAYA_PHOENIX_URL"] == "http://phoenix:6006/v1/projects/laya/spans"
-    assert document["networks"]["default"] == {}
-    assert document["networks"]["phoenix-trace"] == {
-        "name": "llm-env-phoenix_internal", "external": True
-    }
+    assert service["networks"] == ["default"]
+    assert "userns_mode" not in service
+    assert document["networks"] == {"default": {}}
 
 
 def test_system_one_service_rendered_when_enabled():

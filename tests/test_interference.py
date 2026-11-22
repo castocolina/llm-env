@@ -11,7 +11,6 @@ LIMITS = {
     "omniroute": {"memory_max_mib": 2048},
     "remote_setup": {"memory_max_mib": 256},
     "system_one": {"memory_max_mib": 5120},
-    "phoenix": {"memory_max_mib": 1024},
     "llm_server": {"memory_mib": 12000},
 }
 
@@ -135,8 +134,8 @@ def test_evaluate_fails_when_a_container_restarted_between_snapshots(tmp_path):
 
 
 def test_evaluate_fails_when_a_service_stops_during_the_window(tmp_path):
-    before = snap(phoenix={"state": "not running"})
-    after = snap(system_one={"state": "not running"}, phoenix={"state": "not running"})
+    before = snap()
+    after = snap(system_one={"state": "not running"})
     del after["services"]["llm_server"]
     report = evaluate(make_run(tmp_path, before=before, after=after))
     assert report["services_stopped"] == ["system_one", "llm_server"]

@@ -22,6 +22,8 @@ case "$1" in
   build) [[ -z "${FAIL_BUILD:-}" ]] || exit 1
          while [[ $# -gt 0 ]]; do [[ "$1" == -t ]] && { echo cand-id >"$W/tags/$(key "$2")"; }; shift; done ;;
   port) echo "127.0.0.1:18001" ;;
+  run) for arg in "$@"; do [[ "$arg" == *:/var/log/laya:Z ]] && { dir="${arg%%:/var/log/laya:Z}"; mkdir -p "$dir"; printf '{"v":1,"endpoint":"/v1/systemone"}\n' >"$dir/laya-spans.jsonl"; }; done ;;
+  unshare) echo "podman unshare $*" >>"$W/calls"; [[ "$2" == rm && "$3" == -rf ]] && rm -rf "$4" ;;
   ps) if [[ "$*" == *label=* ]]; then echo new-cid; fi ;;
   inspect) echo "obs-cand-id true" ;;
   *) ;;
@@ -74,7 +76,7 @@ printf 'services:\n  system-one:\n    image: localhost/obs:%s\n' "$base" >"$HOME
 def world(tmp_path):
     repo, home, w = tmp_path / "repo", tmp_path / "home", tmp_path / "w"
     for rel in ("tools/lib.sh", "scripts/update-system-one.sh", "scripts/service-replace.sh",
-                "scripts/system-one-build.sh", "scripts/system-one-cache-check.py", "docker/system-one/Dockerfile"):
+                "scripts/system-one-build.sh", "scripts/system-one-cache-check.py", "scripts/prepare-laya-spans.sh", "docker/system-one/Dockerfile"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / rel, repo / rel)
     # The tests own the pin: the real Dockerfile moves with every update.
@@ -108,7 +110,11 @@ def world(tmp_path):
 
         def run(self, **env):
             e = {"PATH": f"{bin_}:{os.environ['PATH']}", "HOME": str(home), "W": str(w), "TMPDIR": str(tmp_path),
-                 "LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS": "2", "LAYA_VERSION": "0.4.27", **env}
+                 "LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS": "2", "LAYA_VERSION": "0.4.27"}
+            e.update({key: value for key, value in env.items() if value is not None})
+            for key, value in env.items():
+                if value is None:
+                    e.pop(key, None)
             return subprocess.run(["bash", str(repo / "scripts/update-system-one.sh")], env=e, text=True,
                                   capture_output=True, timeout=120, check=False)
 
@@ -123,6 +129,7 @@ def world(tmp_path):
             return (w / "tags" / ref.replace("/", "_").replace(":", "_")).read_text().strip()
 
         lock = w / "lock"
+        tmpdir = tmp_path
 
     return World()
 
@@ -162,6 +169,9 @@ def test_a_failed_cpu_smoke_test_is_an_error_with_production_untouched(world):
     assert r.returncode == 1 and "smoke test failed; production untouched" in r.stderr
     assert mutations(world.calls()) == [] and world.tag(BASE) == "old-id"
     assert any(c.startswith("podman rm -f llm-env-system-one-smoke-") for c in world.calls())
+    cleanup = [c for c in world.calls() if c.startswith("podman unshare rm -rf ")]
+    assert len(cleanup) == 1 and cleanup[0].split()[-1].startswith(f"{world.tmpdir}/span-sink.")
+    assert not Path(cleanup[0].split()[-1]).exists()
 
 
 def test_a_failed_verify_rolls_back_to_the_previous_image(world):
@@ -174,6 +184,26 @@ def test_a_failed_verify_rolls_back_to_the_previous_image(world):
     assert world.dockerfile.read_text() == pin
 
 
+def test_unset_tmpdir_uses_and_cleans_only_the_default_span_sink(world):
+    marker = Path("/tmp/pha6-preserve-" + str(os.getpid()))
+    marker.mkdir()
+    try:
+        result = world.run(TMPDIR=None)
+        assert result.returncode == 0, result.stderr
+        calls = world.calls()
+        cleanup = [c for c in calls if c.startswith("podman unshare rm -rf ")]
+        assert len(cleanup) == 1
+        sink = Path(cleanup[0].split()[-1])
+        assert sink.parent == Path("/tmp") and sink.name.startswith("span-sink.")
+        assert not sink.exists()
+        assert any(c.startswith("podman unshare chown 10001:10001 /tmp/span-sink.") for c in calls)
+        run = next(c for c in calls if c.startswith("podman run -d --name llm-env-system-one-smoke-"))
+        assert f"{sink}:/var/log/laya:Z" in run
+        assert marker.is_dir()
+    finally:
+        marker.rmdir()
+
+
 def test_success_promotes_the_candidate_and_rewrites_the_pin(world):
     r = world.run()
     assert r.returncode == 0, r.stderr
@@ -183,6 +213,9 @@ def test_success_promotes_the_candidate_and_rewrites_the_pin(world):
     assert world.tag(BASE) == "cand-id" and world.tag(BASE.replace(":rocm", ":rocm-prev")) == "old-id"
     assert "ARG LAYA_VERSION=0.4.27" in world.dockerfile.read_text()
     assert any(c.startswith("podman stop --time 10 old-cid") for c in world.calls())
+    cleanup = [c for c in world.calls() if c.startswith("podman unshare rm -rf ")]
+    assert len(cleanup) == 1 and cleanup[0].split()[-1].startswith(f"{world.tmpdir}/span-sink.")
+    assert not Path(cleanup[0].split()[-1]).exists()
 
 
 def test_config_drift_at_the_pinned_version_recreates_through_the_idle_gate_without_a_build(world):

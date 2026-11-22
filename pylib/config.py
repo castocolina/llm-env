@@ -103,7 +103,7 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         # Retired generated data: the `resources.<service>` mirror (nothing reads it;
         # `make resources-snapshot` shows the effective policy) and the evidence-gate reference
         # removed on 2026-10-24. Existing files may still carry them.
-        for service in ("omniroute", "remote_setup", "phoenix", "system_one"):
+        for service in ("omniroute", "remote_setup", "system_one"):
             resources.pop(service, None)
         overrides = resources.get("overrides")
         if isinstance(overrides, dict):

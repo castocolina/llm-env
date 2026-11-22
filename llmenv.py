@@ -78,17 +78,6 @@ from pylib.omniroute_combos import (
     ensure_local_combo,
     restore_combos,
 )
-from pylib.phoenix_trial import (
-    PhoenixTrialError,
-    load_expected_file,
-    load_manifest,
-    mark_attempt,
-    prepare_run,
-    seed_spans,
-    validate_expected,
-    verify_run,
-    volume_bytes,
-)
 from pylib.presets import write_presets
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import (
@@ -105,7 +94,6 @@ from pylib.resources import (
     validate_overrides,
 )
 from pylib.transcript import classify_transcript
-from pylib.zai_reset import check as zai_reset_check
 
 DEVICE_LINE_RE = re.compile(
     r"^\s*(?P<id>\S+):\s*(?P<name>.*?)\s*\((?P<total_mib>\d+)\s*MiB.*\)$",
@@ -301,6 +289,9 @@ def limits_for(
     )
 
 
+PODMAN_INSPECT_TIMEOUT_SECONDS = 10
+
+
 def cmd_budget(args: argparse.Namespace) -> int:
     cfg = require_valid_config(load_config(Path(args.config)))
     facts = detect()
@@ -322,6 +313,22 @@ def cmd_budget(args: argparse.Namespace) -> int:
     )
     runtime = cfg["runtime"]
     system_one = cfg.get("system_one", {})
+    system_one_resident = 0
+    if system_one.get("enabled") and compositor_used:
+        try:
+            pid = subprocess.run(
+                ["podman", "inspect", "--format", "{{.State.Pid}}", "system-one"],
+                capture_output=True, text=True, check=True,
+                timeout=PODMAN_INSPECT_TIMEOUT_SECONDS,
+            ).stdout.strip()
+            if re.fullmatch(r"[1-9][0-9]*", pid):
+                measured = process_vram_mib(int(pid), pci)
+                if measured is not None:
+                    system_one_resident = min(max(0, measured), system_one["vram_reserve_mib"])
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    system_one_resident = min(system_one_resident, compositor_used)
+    compositor_used = max(0, compositor_used - system_one_resident)
     result = compute_budget(
         vram_total_mib=gpu["vram_total_mib"],
         compositor_used_mib=compositor_used,
@@ -336,6 +343,8 @@ def cmd_budget(args: argparse.Namespace) -> int:
         vram_budget_ceiling_mib=cfg["gpu"].get("vram_budget_ceiling_mib") or None,
         extra_reserved_mib=system_one["vram_reserve_mib"] if system_one.get("enabled") else 0,
     )
+    result["system_one_resident_mib"] = system_one_resident
+    result["compositor_used_mib_excluding_system_one"] = compositor_used
     result["compositor_on_this_gpu"] = compositor_used > 0
     result["models_max"] = cfg["runtime"]["models_max"]
     # compute_budget()'s own feasible/shortfall_mib/remedies describe only
@@ -548,7 +557,7 @@ _APPLY_HINT = (
     "`bash setup/render-unit.sh` re-renders the compose file and unit for the next `make restart` or boot "
     "and does not touch running containers. To apply this to the running stack now, run "
     "`make restart` (stop, then start): OmniRoute, remote-setup, System One and, when System One "
-    "is enabled, Phoenix are stopped and started again, so in-flight requests are interrupted, "
+    "is enabled, containers are stopped and started again, so in-flight requests are interrupted, "
     "System One reloads its weights before it is healthy, and every container begins a "
     "new cgroup lifetime (memory.peak and counters start over)"
 )
@@ -675,9 +684,6 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
     if args.action == "fix-codex-context":
         fixed = fix_codex_context_overrides(base_url, initial_password)
         return emit({"fixed": fixed})
-    if args.action == "zai-reset":
-        results = zai_reset_check(base_url, initial_password, Path(args.state_file).expanduser(), dry_run=args.dry_run)
-        return emit({"results": results}, 1 if any(r["action"] == "error" for r in results) else 0)
     if args.action == "combo-context":
         from pylib import capacity
 
@@ -810,49 +816,6 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     return emit({"written": written, "path": str(path)})
 
 
-def cmd_phoenix_trial(args: argparse.Namespace) -> int:
-    try:
-        if args.action == "fixture-check":
-            manifest = load_manifest(args.manifest)
-            return emit(
-                {
-                    "schema_version": 1,
-                    "status": "valid",
-                    "fixture_version": manifest["fixture_version"],
-                    "summary": manifest["expected_summary"],
-                }
-            )
-        if args.action == "prepare":
-            manifest = load_manifest(args.manifest)
-            return emit(dict(prepare_run(manifest, args.state_dir, run_id=args.run_id)))
-        if args.action == "mark-attempt":
-            return emit(dict(mark_attempt(args.expected)))
-        if args.action == "volume-bytes":
-            return emit({"bytes": volume_bytes(args.path)})
-        if args.action in ("seed", "verify"):
-            if args.expected == "-":
-                from pylib.phoenix_trial import loads_strict_object
-
-                expected = validate_expected(loads_strict_object(sys.stdin.read()))
-            else:
-                expected = load_expected_file(args.expected)
-            if args.action == "seed":
-                receipt = seed_spans(
-                    args.base_url, expected, timeout_seconds=args.timeout_seconds
-                )
-            else:
-                receipt = verify_run(
-                    args.base_url,
-                    run_id=args.run_id,
-                    expected=expected,
-                    timeout_seconds=args.timeout_seconds,
-                )
-            return emit(dict(receipt))
-        raise PhoenixTrialError("unsupported Phoenix trial action")
-    except PhoenixTrialError as exc:
-        return fail(str(exc))
-
-
 def cmd_agent_runtime_cap(args: argparse.Namespace) -> int:
     return emit({"runtime_seconds": int(DEFAULT_RUNTIME_SECONDS)})
 
@@ -959,16 +922,7 @@ def build_parser() -> argparse.ArgumentParser:
             "restore-combos",
             "backup-connections",
             "ensure-local-combo",
-            "zai-reset",
         ],
-    )
-    omniroute_parser.add_argument(
-        "--state-file",
-        default="~/.cache/llm-env/zai-reset-state.json",
-        help="zai-reset: where the redeemed weekly window is recorded",
-    )
-    omniroute_parser.add_argument(
-        "--dry-run", action="store_true", help="zai-reset: report what would be redeemed, redeem nothing"
     )
     omniroute_parser.add_argument("--auth-path", default="~/.codex/auth.json")
     omniroute_parser.add_argument(
@@ -1068,29 +1022,6 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--config", default=argparse.SUPPRESS)
     migrate.set_defaults(func=cmd_migrate_config)
 
-    phoenix_trial_parser = sub.add_parser("phoenix-trial")
-    phoenix_trial_sub = phoenix_trial_parser.add_subparsers(dest="action", required=True)
-    fixture_check = phoenix_trial_sub.add_parser("fixture-check")
-    fixture_check.add_argument("--manifest", type=Path, required=True)
-    prepare = phoenix_trial_sub.add_parser("prepare")
-    prepare.add_argument("--manifest", type=Path, required=True)
-    prepare.add_argument("--state-dir", type=Path, required=True)
-    prepare.add_argument("--run-id", default=None)
-    mark = phoenix_trial_sub.add_parser("mark-attempt")
-    mark.add_argument("--expected", type=Path, required=True)
-    seed = phoenix_trial_sub.add_parser("seed")
-    seed.add_argument("--base-url", required=True)
-    seed.add_argument("--expected", required=True)
-    seed.add_argument("--timeout-seconds", type=finite_positive_float, default=60.0)
-    verify = phoenix_trial_sub.add_parser("verify")
-    verify.add_argument("--base-url", required=True)
-    verify.add_argument("--run-id", required=True)
-    verify.add_argument("--expected", required=True)
-    verify.add_argument("--timeout-seconds", type=finite_positive_float, default=60.0)
-    volume = phoenix_trial_sub.add_parser("volume-bytes")
-    volume.add_argument("--path", type=Path, required=True)
-    phoenix_trial_parser.set_defaults(func=cmd_phoenix_trial)
-
     sub.add_parser("agent-runtime-cap").set_defaults(func=cmd_agent_runtime_cap)
 
     run_agent = sub.add_parser("run-agent-bounded")
@@ -1137,7 +1068,6 @@ def main(argv: list[str] | None = None) -> int:
         DetectError,
         ResourceError,
         OmniRouteError,
-        PhoenixTrialError,
     ) as exc:
         return fail(str(exc))
     except OSError as exc:

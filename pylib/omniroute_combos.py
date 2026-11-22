@@ -217,7 +217,7 @@ def restore_combos(
     return results
 
 
-LOCAL_COMBO_NAME = "my-coding-lite"
+LOCAL_COMBO_NAME = "my-local-worker"
 _MEMBER_KEYS = ("model", "providerId", "connectionId", "label")
 
 
@@ -256,7 +256,7 @@ def _matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
 def ensure_local_combo(
     base_url: str, dashboard_password: str, alias: str, context_length: int
 ) -> dict[str, Any]:
-    """Create or update the local-only my-coding-lite combo; the tool owns it, so drift is overwritten."""
+    """Create or update the local-only my-local-worker combo; the tool owns it, so drift is overwritten."""
     result: dict[str, Any] = {
         "combo": LOCAL_COMBO_NAME,
         "model": f"llama-cpp/{alias}",

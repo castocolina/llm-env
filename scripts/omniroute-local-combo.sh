@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # omniroute-local-combo.sh — create or update the local-only OmniRoute combo
-# my-coding-lite from the capacity card. Skips (exit 0) unless llm-server is
+# my-local-worker from the capacity card. Skips (exit 0) unless llm-server is
 # enabled and running; llmenv skips again when the card or interference gate is
 # not current. Never stops, restarts or recreates a container.
 #
@@ -16,11 +16,11 @@ require_cmd yq jq uv podman
 migrate_config_file || die "configuration migration failed"
 
 if [ "$(yq -r '.llm_server.enabled' "$CONFIG_PATH")" != "true" ]; then
-    log_info "llm-server disabled -- skipping my-coding-lite"
+    log_info "llm-server disabled -- skipping my-local-worker"
     exit 0
 fi
 if ! container_running llm-server; then
-    log_info "llm-server is not running -- skipping my-coding-lite"
+    log_info "llm-server is not running -- skipping my-local-worker"
     exit 0
 fi
 
@@ -31,4 +31,4 @@ wait_for_tcp_port "$omniroute_port" \
 result="$(llmenv --config "$CONFIG_PATH" omniroute ensure-local-combo)" \
     || die "$(jq -r '.error // "ensure-local-combo failed"' <<<"$result")"
 
-jq -r '"my-coding-lite: \(.action)" + (if .reason then " (\(.reason))" else "" end)' <<<"$result"
+jq -r '"my-local-worker: \(.action)" + (if .reason then " (\(.reason))" else "" end)' <<<"$result"

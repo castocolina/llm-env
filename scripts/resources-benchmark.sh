@@ -2,7 +2,7 @@
 # resources-benchmark.sh — measure a container to re-derive its CPU/RAM policy (pylib/resource_benchmark.py).
 #   SERVICE=omniroute (default): throwaway OmniRoute (same image/env, fake upstream) through cold start,
 #       first requests, a load ramp and a cooldown; removed afterwards. Never touches the live container.
-#   SERVICE=attach CONTAINERS="system-one llm-env-phoenix_phoenix_1" [RUN="make system-one-benchmark"]
+#   SERVICE=attach CONTAINERS="system-one system-one" [RUN="make system-one-benchmark"]
 #       [DURATION=60] [COOLDOWN=60] [PCI=0000:03:00.0 | RENDER=renderD128]: read-only sampling of running
 #       containers while RUN (or just DURATION seconds) runs; VRAM too for system-one or a given GPU.
 #   SERVICE=report FILE=tmp/resource-benchmark/<run>.json [HEADROOM=0.2]: recompute a saved run.

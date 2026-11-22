@@ -484,11 +484,252 @@ class _FakeOmniRouteHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def _start_server(handler_class):
+def _start_server(handler_class, counters=None):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+    server.__dict__["request_counters"] = counters
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
+
+
+def test_request_counters_track_success_and_unknown_paths(tmp_path, monkeypatch):
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        for path in ("/setup.sh", "/unknown"):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+            conn.request("GET", path)
+            response = conn.getresponse()
+            response.read()
+            conn.close()
+        _wait_for_requests(counters, 2)
+        snapshot = counters.snapshot()
+        assert snapshot["requests"] == {"/setup.sh|2xx": 1, "other|4xx": 1}
+        assert snapshot["latency"]["/setup.sh"]["count"] == 1
+        assert snapshot["latency"]["other"]["count"] == 1
+        sample_path = os.environ.get("RS1_SAMPLE_COUNTERS")
+        if sample_path:
+            Path(sample_path).write_text(json.dumps(snapshot, indent=2) + "\n")
+        assert stat.S_IMODE((tmp_path / "request-counters.json").stat().st_mode) == 0o600
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_request_counters_keep_query_secrets_out_of_file(tmp_path):
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/x?key=SECRET")
+        response = conn.getresponse()
+        response.read()
+        conn.close()
+        for _ in range(100):
+            if counters.snapshot()["requests"]:
+                break
+            time.sleep(0.01)
+        assert counters.snapshot()["requests"] == {"other|4xx": 1}
+        data = (tmp_path / "request-counters.json").read_text()
+        assert "SECRET" not in data and "/x?key=SECRET" not in data
+        assert counters.snapshot()["requests"] == {"other|4xx": 1}
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_request_counters_count_unauthorized_config_without_reading_body(tmp_path, monkeypatch):
+    from pylib.remote_setup import RequestCounters
+
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/config", body="body-must-not-be-read")
+        response = conn.getresponse()
+        response.read()
+        conn.close()
+        _wait_for_requests(counters, 1)
+        assert counters.snapshot()["requests"] == {"/config|4xx": 1}
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_request_counter_write_failure_does_not_change_response_and_is_reported_next_time(tmp_path, monkeypatch):
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    replace = os.replace
+    try:
+        monkeypatch.setattr(remote_setup_module.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("disk")))
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/unknown")
+        response = conn.getresponse()
+        assert response.status == 404
+        response.read()
+        conn.close()
+        for _ in range(100):
+            if counters.write_errors:
+                break
+            time.sleep(0.01)
+        monkeypatch.setattr(remote_setup_module.os, "replace", replace)
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/unknown")
+        response = conn.getresponse()
+        assert response.status == 404
+        response.read()
+        conn.close()
+        for _ in range(100):
+            if (tmp_path / "request-counters.json").exists():
+                break
+            time.sleep(0.01)
+        assert json.loads((tmp_path / "request-counters.json").read_text())["write_errors"] == 1
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def _wait_for_requests(counters, expected: int) -> None:
+    """The handler records just after the response is written: wait until `expected` requests are counted."""
+    for _ in range(300):
+        if sum(counters.snapshot()["requests"].values()) >= expected:
+            return
+        time.sleep(0.01)
+
+
+def _counted_after(tmp_path, send):
+    """Run one raw interaction against a real server and return the recorded requests."""
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.connect()
+        send(conn)
+        for _ in range(200):
+            if counters.snapshot()["requests"]:
+                break
+            time.sleep(0.01)
+        conn.close()
+        return counters.snapshot()["requests"]
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_request_counters_classify_a_rejected_request_line_by_the_status_sent(tmp_path):
+    # the stdlib answers a bad request line with a real 400: it is a 4xx, not "error"
+    assert _counted_after(tmp_path, lambda c: c.send(b"NOT HTTP\r\n\r\n")) == {"other|4xx": 1}
+
+
+def test_request_counters_classify_stdlib_send_error_statuses(tmp_path):
+    def post(conn):
+        conn.request("POST", "/setup.sh", body=b"x")
+        conn.getresponse().read()
+    assert _counted_after(tmp_path, post) == {"/setup.sh|5xx": 1}  # 501 from the stdlib, not "error"
+
+    def long_path(conn):
+        conn.request("GET", "/" + "a" * 70000)
+        conn.getresponse().read()
+    assert _counted_after(tmp_path, long_path) == {"other|4xx": 1}  # 414, path never stored
+
+
+def test_request_counters_count_a_connection_with_no_request_as_error(tmp_path):
+    def silent(conn):
+        conn.sock.shutdown(1)  # half-close: EOF before any request line
+    assert _counted_after(tmp_path, silent) == {"other|error": 1}
+
+
+def test_request_counters_separate_the_urllib_health_probe_from_installer_requests(tmp_path, monkeypatch):
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    _use_real_opencode_updater(monkeypatch)
+    _use_real_install_agent_clients_lib(monkeypatch)
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        port = server.server_address[1]
+        import urllib.request
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/setup.sh", timeout=5).read()  # what the compose health check sends
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/setup.sh", headers={"User-Agent": "curl/8.9.0"})  # a real installer client
+        conn.getresponse().read()
+        conn.close()
+        for _ in range(300):  # the handler records just after the response is written: wait for both
+            if sum(counters.snapshot()["requests"].values()) == 2:
+                break
+            time.sleep(0.01)
+        assert counters.snapshot()["requests"] == {"healthcheck|2xx": 1, "/setup.sh|2xx": 1}
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_request_counters_label_a_query_on_a_known_route_as_other(tmp_path):
+    def get(conn):
+        conn.request("GET", "/setup.sh?token=SECRET")
+        conn.getresponse().read()
+    requests = _counted_after(tmp_path, get)
+    assert list(requests) == ["other|4xx"]  # the router 404s it, so the label must not say /setup.sh
+    assert "SECRET" not in (tmp_path / "request-counters.json").read_text()
+
+
+def test_request_counters_reset_after_server_restart(tmp_path):
+    from pylib.remote_setup import RequestCounters
+
+    path = tmp_path / "request-counters.json"
+    counters = RequestCounters(path)
+    counters.record("other", "4xx", 1)
+    old_started = counters.snapshot()["started"]
+    restarted = RequestCounters(path)
+    assert restarted.snapshot()["requests"] == {}
+    assert restarted.snapshot()["started"] != old_started
+
+
+def test_request_counters_update_and_write_under_the_lock(tmp_path, monkeypatch):
+    import os as real_os
+
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    held = []
+    real_replace = real_os.replace
+    monkeypatch.setattr(real_os, "replace", lambda a, b: (held.append(counters.lock.locked()), real_replace(a, b))[1])
+    counters.record("other", "2xx", 1.0)
+    assert held == [True]  # the read-modify-write and the file write share one lock
+
+
+def test_request_counters_concurrent_requests_are_not_lost(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pylib.remote_setup import RequestCounters
+
+    counters = RequestCounters(tmp_path / "request-counters.json")
+    server, thread = _start_server(RemoteSetupHandler, counters)
+    try:
+        def request():
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+            conn.request("GET", "/unknown")
+            response = conn.getresponse()
+            response.read()
+            conn.close()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: request(), range(8)))
+        _wait_for_requests(counters, 8)
+        assert counters.snapshot()["requests"] == {"other|4xx": 8}
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 def test_setup_sh_is_served_without_auth_and_embeds_the_request_host(tmp_path, monkeypatch):

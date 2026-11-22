@@ -7,6 +7,7 @@ import functools
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import sys
@@ -384,7 +385,16 @@ def cmd_characterize(args, collect=None, store_dir: Path | None = None) -> int:
         with _bounded(args.budget):
             evidence = collect(config_id, log=lambda m: phase(f"characterizing: {m}"))
     except Exception as exc:  # any harness failure: its own cleanup ran, nothing was stored
-        raise UpdateError(f"the characterization failed ({type(exc).__name__}: {str(exc)[:300]}); "
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+        output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
+        if output:
+            lines = [line.strip() for line in str(output).splitlines() if line.strip()]
+            lines = lines[-8:]
+            lines = [re.sub(r"(?i)(authorization\s*:\s*bearer\s+)\S+", r"\1[REDACTED]",
+                            re.sub(r"(?i)((?:[\w-]*(?:key|token|password|secret)[\w-]*)\s*[=:]\s*)[^\s,;]+",
+                                   r"\1[REDACTED]", line)[:200]) for line in lines]
+            detail += "; stderr tail: " + " | ".join(lines)
+        raise UpdateError(f"the characterization failed ({detail}); "
                           "nothing was stored") from exc
     phase("deriving")
     candidate, ev_path, profile_path = omniroute_characterize.derive_and_store(evidence, store_dir, log=phase)

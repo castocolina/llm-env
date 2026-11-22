@@ -14,10 +14,6 @@ from pylib.resources import (
     OMNIROUTE_MEMORY_MAX_MIB,
     OMNIROUTE_MEMORY_MIN_MIB,
     OVERRIDABLE_SERVICES,
-    PHOENIX_CPUS_MAX,
-    PHOENIX_CPUS_MIN,
-    PHOENIX_MEMORY_MAX_MIB,
-    PHOENIX_MEMORY_MIN_MIB,
     POLICY_KEYS,
     REMOTE_SETUP_CPU_MAX,
     REMOTE_SETUP_CPU_MIN,
@@ -267,8 +263,8 @@ def test_system_one_reservation_shrinks_llm_server_remainder():
     )
     # Caps stay on the service; the host floor subtracts the reservation, same as OmniRoute's min.
     assert with_one["system_one"] == DEFAULT_POLICY["system_one"]
-    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIN_MIB - PHOENIX_MEMORY_MIN_MIB
-    assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - SYSTEM_ONE_CPUS_MIN - PHOENIX_CPUS_MIN
+    assert with_one["llm_server"]["memory_mib"] == base["llm_server"]["memory_mib"] - SYSTEM_ONE_MEMORY_MIN_MIB
+    assert with_one["llm_server"]["cpus"] == base["llm_server"]["cpus"] - SYSTEM_ONE_CPUS_MIN
     assert with_one["llm_server"]["memory_mib"] <= 32768 - memory_floor_mib - 2560
 
 
@@ -276,7 +272,7 @@ def test_system_one_host_floor_uses_the_reservation_not_the_cap():
     cpu = HOST_CPU_FLOOR + OMNIROUTE_CPU_MIN + REMOTE_SETUP_CPU_MIN + 1
     memory = (
         HOST_MEMORY_FLOOR_MIB + OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
-        + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
+        + SYSTEM_ONE_MEMORY_MIN_MIB
     )
     compute_resource_limits(cpu + 1, memory + 1, system_one_enabled=True)
     with pytest.raises(ResourceError, match=r"System One's budgeted minimum \(1 CPU-share unit, 2560 MiB\)"):
@@ -313,8 +309,6 @@ def test_default_policy_matches_the_module_constants():
         "memory_min_mib": SYSTEM_ONE_MEMORY_MIN_MIB,
         "memory_max_mib": SYSTEM_ONE_MEMORY_MIB,
     }
-    assert DEFAULT_POLICY["phoenix"]["cpus_max"] == PHOENIX_CPUS_MAX
-    assert DEFAULT_POLICY["phoenix"]["memory_max_mib"] == PHOENIX_MEMORY_MAX_MIB
     assert set(OVERRIDABLE_SERVICES) == set(DEFAULT_POLICY)
     assert all(set(policy) == set(POLICY_KEYS) for policy in DEFAULT_POLICY.values())
 
@@ -327,12 +321,11 @@ def test_shipped_defaults_are_the_benchmark_derived_policy():
         # Explicit exception to the sizing rule (peak clipped by its own cap); see pylib/resources.py.
         "system_one": {"cpus_min": 1, "cpus_max": 2, "memory_min_mib": 2560, "memory_max_mib": 5120},
         # Live peak 804 MiB 2 h after a restart: 804 * 1.2 = 965 -> 1024.
-        "phoenix": {"cpus_min": 0.25, "cpus_max": 1, "memory_min_mib": 192, "memory_max_mib": 1024},
     }
 
 
-def test_baseline_hard_memory_caps_sum_to_8256_mib():
-    assert sum(p["memory_max_mib"] for p in DEFAULT_POLICY.values()) == 2048 + 64 + 5120 + 1024 == 8256
+def test_baseline_hard_memory_caps_sum_to_7232_mib():
+    assert sum(p["memory_max_mib"] for p in DEFAULT_POLICY.values()) == 2048 + 64 + 5120 == 7232
 
 
 def test_effective_policy_without_overrides_is_the_default_and_a_copy():
@@ -399,7 +392,6 @@ def test_override_of_a_disabled_service_is_inert():
         16, 32768, overrides={"system_one": {"memory_max_mib": 5120, "memory_min_mib": 3000}}
     )
     assert result["system_one"] == dict.fromkeys(POLICY_KEYS, 0)
-    assert result["phoenix"] == dict.fromkeys(POLICY_KEYS, 0)
     assert result["overrides_applied"] == {}
     assert result["totals"] == base["totals"]
     assert result["llm_server"] == base["llm_server"]
@@ -434,10 +426,10 @@ def test_totals_report_hard_caps_and_soft_reservations():
     result = compute_resource_limits(
         16, 65536, llm_server_enabled=False, system_one_enabled=True
     )
-    assert result["totals"]["hard_memory_cap_mib"] == 8256
+    assert result["totals"]["hard_memory_cap_mib"] == 7232
     assert result["totals"]["soft_memory_reservation_mib"] == (
         OMNIROUTE_MEMORY_MIN_MIB + REMOTE_SETUP_MEMORY_MIN_MIB
-        + SYSTEM_ONE_MEMORY_MIN_MIB + PHOENIX_MEMORY_MIN_MIB
+        + SYSTEM_ONE_MEMORY_MIN_MIB
     )
 
 
@@ -479,7 +471,6 @@ def test_a_cap_below_the_default_is_warned_about_with_the_benchmark_target():
 def test_lowered_cap_warnings_skip_disabled_services():
     # A disabled service carries an all-zero policy: nothing to warn about.
     assert lowered_cap_warnings({"system_one": dict.fromkeys(POLICY_KEYS, 0)}) == []
-    assert len(lowered_cap_warnings({"phoenix": {**DEFAULT_POLICY["phoenix"], "memory_max_mib": 512}})) == 1
 
 
 # --- live cgroup counters -------------------------------------------------
@@ -553,7 +544,6 @@ def test_live_unlimited_cap_has_no_ratios(tmp_path):
 def test_live_resources_stopped_container_and_disabled_service(tmp_path):
     cg = _cgroup(tmp_path / "c")
     limits = {s: dict(p) for s, p in DEFAULT_POLICY.items()}
-    limits["phoenix"] = dict.fromkeys(POLICY_KEYS, 0)  # disabled: omitted
     found = {"omniroute": (cg, 1, 0.0), "remote-setup": (None, 2, 0.0)}
     live = live_resources(limits, locate=lambda name: found.get(name), now=100)
     assert set(live) == {"omniroute", "remote_setup", "system_one"}

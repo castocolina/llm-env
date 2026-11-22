@@ -50,6 +50,7 @@ if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
     podman image exists "$system_one_image" || die "system-one image missing; run 'make setup'"
     podman volume exists llm-env-system-one-cache \
         || die "system-one weights cache missing; run 'make setup'"
+    bash "${REPO_DIR}/scripts/prepare-laya-spans.sh"
     if ! system_one_cache_check "$system_one_image" verify; then
         die "system-one weights incomplete for configured models; run 'make setup'"
     fi
@@ -102,7 +103,7 @@ fi
 
 if [ "$skip_start" -eq 0 ]; then
     log_step "Computing resource limits"
-    # Render paths (`llmenv render-compose`, `phoenix.sh`) recompute the effective
+    # Render paths recompute the effective
     # policy (defaults + resources.overrides) on every run; nothing is copied back
     # into models.yml except the llm_server remainder.
     resources_json="$(mktemp)"
@@ -125,10 +126,6 @@ if [ "$skip_start" -eq 0 ]; then
         fi
         log_info "llm-server policy limits: ${cpus} CPU cores max, ${memory_mib} MiB memory max"
     fi
-    if [ "$system_one_enabled" = "true" ]; then
-        log_info "$(jq -r '.phoenix | "Phoenix policy: \(.memory_min_mib) MiB soft memory reservation, \(.memory_max_mib) MiB hard cap, \(.cpus_max) CPUs max"' "$resources_json")"
-    fi
-
     # Effective policy (totals and any active overrides), computed by llmenv so the
     # wording is unit-tested; resources.overrides itself is never rewritten here.
     jq -r '.summary[]?' "$resources_json" | while IFS= read -r summary_line; do
@@ -137,9 +134,6 @@ if [ "$skip_start" -eq 0 ]; then
 
     if [ "$boot_unit" = "1" ]; then
         [ -f "$COMPOSE_FILE" ] || die "no rendered compose file at ${COMPOSE_FILE}; run 'make start' once"
-        # The compose file references the internal Phoenix network as external, so it must exist before `up`
-        # (rendering normally creates it).
-        [ "$system_one_enabled" != "true" ] || bash "${REPO_DIR}/scripts/phoenix.sh" prepare
     else
         bash "${REPO_DIR}/setup/render-unit.sh"
     fi
@@ -186,10 +180,6 @@ if [ "$scope" = "all" ] && [ "$system_one_enabled" = "true" ]; then
         exit 1
     fi
     log_info "System One is ready"
-    # The Phoenix dashboard is a System One companion: readiness failure
-    # here fails `make start`, and the boot unit, which runs this same script.
-    log_step "Starting the Phoenix dashboard"
-    bash "${REPO_DIR}/scripts/phoenix.sh" start
 fi
 
 if [ "$scope" = "all" ]; then
@@ -198,10 +188,6 @@ if [ "$scope" = "all" ]; then
     log_step "Ensuring the OmniRoute admission-lease healer is installed"
     bash "${REPO_DIR}/setup/enable-omniroute-heal.sh" \
         || log_warn "could not enable the OmniRoute healer timer; run 'bash setup/enable-omniroute-heal.sh' manually"
-
-    log_step "Ensuring the z.ai weekly-quota reset timer is installed"
-    bash "${REPO_DIR}/setup/enable-omniroute-zai-reset.sh" \
-        || log_warn "could not enable the z.ai reset timer; run 'bash setup/enable-omniroute-zai-reset.sh' manually"
 
     if [ "$system_one_enabled" = "true" ]; then
         log_step "Ensuring the weekly System One upstream check is installed"
@@ -226,7 +212,7 @@ if wait_for_tcp_port "$omniroute_port"; then
         if [ "$provisioned" -eq 1 ]; then
             log_info "OmniRoute connection configured"
             bash "${REPO_DIR}/scripts/omniroute-local-combo.sh" \
-                || log_warn "could not ensure the my-coding-lite combo; run 'make local-combo'"
+                || log_warn "could not ensure the my-local-worker combo; run 'make local-combo'"
         else
             jq -r '.error // "provisioning failed"' <<<"$response" >&2
             log_warn "OmniRoute provisioning failed; configure it manually via the dashboard"

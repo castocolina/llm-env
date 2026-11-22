@@ -882,6 +882,51 @@ def test_running_differences_are_reported_as_drift_names_without_values(tmp_path
     assert "old-secret-value" not in repr(dep) and PASSWORD not in repr(dep)
 
 
+@pytest.mark.parametrize("stderr,expected", [
+    ("line1\nError: crun: setting cpu quota\nline3", "Error: crun: setting cpu quota"),
+    ("\n".join(f"line{i}" for i in range(5000)), None),
+    ("OMNIROUTE_API_KEY=abc123secret\nAuthorization: Bearer abc123secret", "abc123secret"),
+])
+def test_characterization_failure_diagnostic(stderr, expected, tmp_path, capsys):
+    import argparse
+    import subprocess
+
+    from pylib.omniroute_cli import cmd_characterize
+
+    def fail(config_id, log):
+        raise subprocess.CalledProcessError(125, ["podman-compose", "up"], stderr=stderr)
+
+    rc = cmd_characterize(argparse.Namespace(config_id="sha256:" + "9" * 64, budget=10),
+                          collect=fail, store_dir=tmp_path / "store")
+    message = capsys.readouterr().err
+    assert rc == 1 and "nothing was stored" in message
+    assert "stderr tail:" in message
+    if expected == "abc123secret":
+        assert expected not in message
+    elif expected:
+        assert expected in message
+    else:
+        tail = message.split("stderr tail: ", 1)[1]
+        lines = tail.split(" | ")
+        assert len(lines) <= 8 and all(len(line) <= 200 for line in lines)
+        assert len(tail) <= 8 * 200 + 7 * 3
+
+
+def test_characterization_runtime_error_keeps_its_existing_message(tmp_path, capsys):
+    import argparse
+
+    from pylib.omniroute_cli import cmd_characterize
+
+    def fail(config_id, log):
+        raise RuntimeError("precondition failed")
+
+    rc = cmd_characterize(argparse.Namespace(config_id="sha256:" + "8" * 64, budget=10),
+                          collect=fail, store_dir=tmp_path / "store")
+    message = capsys.readouterr().err
+    assert rc == 1 and "RuntimeError: precondition failed" in message
+    assert "stderr tail:" not in message
+
+
 def test_env_list_or_map_form_and_order_create_no_drift():
     svc = {"image": "docker.io/diegosouzapw/omniroute:latest", "ports": ["0.0.0.0:20128:20128"], "restart": "unless-stopped",
            "mem_limit": "2g", "mem_reservation": "768m", "cpus": 2, "cpu_shares": 1024,

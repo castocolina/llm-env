@@ -105,7 +105,7 @@ def render_compose(
             "LLAMA_ARG_PORT": str(server["port"]),
             "LLAMA_API_KEY": _dollar_escape(server["api_key"]),
         },
-        "command": ["--sleep-idle-seconds", str(server["sleep_idle_seconds"])],
+        "command": ["--sleep-idle-seconds", str(server["sleep_idle_seconds"]), "--metrics"],
         "healthcheck": {
             "test": [
                 "CMD-SHELL",
@@ -270,9 +270,12 @@ def render_compose(
             "devices": ["/dev/kfd", "/dev/dri:/dev/dri"],
             "group_add": ["keep-groups"],
             "security_opt": ["label=disable"],
-            "volumes": ["system-one-cache:/home/laya/.cache/huggingface"],
+            "volumes": [
+                "system-one-cache:/home/laya/.cache/huggingface",
+                f"{os.path.expanduser('~')}/.local/state/llm-env/laya-spans:/var/log/laya:Z",
+            ],
             "ports": [f"127.0.0.1:{system_one['port']}:8000"],
-            "networks": ["default", "phoenix-trace"],
+            "networks": ["default"],
             "environment": {
                 "LAYA_MODELS": _dollar_escape(system_one["models"]),
                 "LAYA_MAX_LOADED": str(
@@ -285,7 +288,7 @@ def render_compose(
                 # No runtime downloads. An unprepared checkpoint fails instead of fetching.
                 "HF_HUB_OFFLINE": "1",
                 "ROCR_VISIBLE_DEVICES": system_one_rocr_index,
-                "LAYA_PHOENIX_URL": "http://phoenix:6006/v1/projects/laya/spans",
+                "LAYA_SPAN_SINK": "/var/log/laya/laya-spans.jsonl",
             },
             "healthcheck": {
                 # slim image has no curl
@@ -317,10 +320,7 @@ def render_compose(
         volumes["system-one-cache"] = {"name": "llm-env-system-one-cache"}
     document = {"services": services, "volumes": volumes}
     if system_one_service is not None:
-        document["networks"] = {
-            "default": {},
-            "phoenix-trace": {"name": "llm-env-phoenix_internal", "external": True},
-        }
+        document["networks"] = {"default": {}}
     return HEADER_COMMENT + yaml.safe_dump(
         document, sort_keys=False, default_flow_style=False
     )

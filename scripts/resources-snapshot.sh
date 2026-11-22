@@ -20,8 +20,8 @@ echo "Policy"
 jq -r '
   . as $r
   | ["service","mem_min_mib","mem_max_mib","cpus_min","cpus_max","source"],
-    (["omniroute","remote_setup","system_one","phoenix"][]
-      | . as $n | $r[$n] | select(.memory_max_mib > 0)
+    ( ["omniroute","remote_setup","system_one"][] as $n
+      | $r[$n] | select(.memory_max_mib > 0)
       | [$n, .memory_min_mib, .memory_max_mib, .cpus_min, .cpus_max,
          (if $r.overrides_applied[$n] then "override: " + ($r.overrides_applied[$n] | join(",")) else "default" end)]),
     ["llm_server", 0, $r.llm_server.memory_mib, 0, $r.llm_server.cpus, "computed remainder"]

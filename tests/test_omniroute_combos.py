@@ -393,14 +393,14 @@ def _local_combo_server(monkeypatch, *, providers=LOCAL_PROVIDERS, combos=()):
             return FakeResponse(providers)
         if request.get_method() == "GET":
             return FakeResponse({"combos": list(combos), "total": len(combos)})
-        return FakeResponse({"name": "my-coding-lite"})
+        return FakeResponse({"name": "my-local-worker"})
 
     monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
     return calls
 
 
 def _local_combo(payload, **extra):
-    return _combo("my-coding-lite", **{k: v for k, v in payload.items() if k != "name"}, **extra)
+    return _combo("my-local-worker", **{k: v for k, v in payload.items() if k != "name"}, **extra)
 
 
 def _writes(calls):
@@ -409,6 +409,32 @@ def _writes(calls):
 
 def _ensure(alias="qwen", context_length=131072):
     return ensure_local_combo("http://127.0.0.1:20128", "dashboard-pw", alias, context_length)
+
+
+def test_local_combo_name_is_reserved_for_local_worker():
+    assert combos_module.LOCAL_COMBO_NAME == "my-local-worker"
+    assert combos_module.LOCAL_COMBO_NAME != "my-coding-lite"
+
+
+def test_ensure_local_combo_does_not_touch_executor_combo(monkeypatch):
+    executor = {
+        "id": "executor-combo-id",
+        "name": "my-coding-lite",
+        "strategy": "fallback",
+        "models": [{"id": "executor-member", "model": "codex/gpt-6-luna-high"}],
+    }
+    calls = _local_combo_server(monkeypatch, combos=[executor])
+    assert _ensure()["action"] == "created"
+    assert executor == {
+        "id": "executor-combo-id",
+        "name": "my-coding-lite",
+        "strategy": "fallback",
+        "models": [{"id": "executor-member", "model": "codex/gpt-6-luna-high"}],
+    }
+    assert _writes(calls) == [
+        ("POST", "/api/combos", local_combo_payload("qwen", "conn-1", 131072))
+    ]
+    assert "my-coding-lite" not in json.dumps(_writes(calls))
 
 
 def test_ensure_local_combo_creates_a_local_only_priority_combo(monkeypatch):
@@ -443,7 +469,7 @@ def test_ensure_local_combo_updates_drifted_context_or_members(monkeypatch):
     calls = _local_combo_server(monkeypatch, combos=[_local_combo(drifted)])
     assert _ensure()["action"] == "updated"
     assert _writes(calls) == [
-        ("PUT", "/api/combos/id-my-coding-lite", local_combo_payload("qwen", "conn-1", 131072))
+        ("PUT", "/api/combos/id-my-local-worker", local_combo_payload("qwen", "conn-1", 131072))
     ]
 
 

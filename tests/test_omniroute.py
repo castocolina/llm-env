@@ -621,7 +621,7 @@ def test_compute_combo_context_corrects_stale_and_hidden_models(monkeypatch):
 
 def _lite_combo_result(monkeypatch, catalog_data, **kwargs):
     combos_payload = {
-        "combos": [{"name": "my-coding-lite", "models": [_combo_member("llama-cpp", "qwen")]}]
+        "combos": [{"name": "my-local-worker", "models": [_combo_member("llama-cpp", "qwen")]}]
     }
     monkeypatch.setattr(
         omniroute_module.urllib.request,
@@ -638,7 +638,7 @@ def test_compute_combo_context_resolves_llama_cpp_members_from_local_limits(monk
 
     assert result == [
         {
-            "combo": "my-coding-lite",
+            "combo": "my-local-worker",
             "members": [
                 {
                     "provider": "llama-cpp",

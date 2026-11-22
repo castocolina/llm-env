@@ -140,8 +140,8 @@ max_wait="$(sed -n 's/^max_deferred_wait=//p' <<<"$overrides_out")"
 [[ "$min_wait" =~ ^[0-9]+$ && "$max_wait" =~ ^[0-9]+$ ]] || exit 1
 
 work="$(private_work_dir)"
-smoke=""   # named only once it exists, so the trap removes nothing else
-trap '[[ -z "$smoke" ]] || pm rm -f "$smoke" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+smoke="" sink_dir=""   # named only once each resource exists, so the trap removes nothing else
+trap '[[ -z "$smoke" ]] || pm rm -f "$smoke" >/dev/null 2>&1 || true; [[ -z "$sink_dir" ]] || pm unshare rm -rf "$sink_dir" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 trap_signals_to_exit
 acquire_update_lock --container system-one
 
@@ -171,16 +171,27 @@ if [[ "$mode" == "version" ]]; then
     echo "phase: smoke-testing the candidate on CPU"
     models="$(yq -r '.system_one.models' "$config_path")"
     smoke="llm-env-system-one-smoke-$$"
+    # Keep the sink outside XDG_RUNTIME_DIR: the container uid cannot traverse its 0700 work directory.
+    sink_dir="$(mktemp -d "${TMPDIR:-/tmp}/span-sink.XXXXXX")"
+    bash "$REPO_DIR/scripts/prepare-laya-spans.sh" "$sink_dir"
     pm run -d --name "$smoke" -p 127.0.0.1::8000 -e LAYA_DEVICE=cpu -e LAYA_REVISION=reviewed -e HF_HUB_OFFLINE=1 \
-        -e "LAYA_MODELS=${models}" -e LAYA_PHOENIX_URL=http://127.0.0.1:6006/v1/projects/laya/spans \
-        -v llm-env-system-one-cache:/home/laya/.cache/huggingface "$cand" >/dev/null
+        -e "LAYA_MODELS=${models}" -e LAYA_SPAN_SINK=/var/log/laya/laya-spans.jsonl \
+        -v "$sink_dir:/var/log/laya:Z" -v llm-env-system-one-cache:/home/laya/.cache/huggingface "$cand" >/dev/null
     smoke_port="$(pm port "$smoke" 8000/tcp | sed -n '1s/.*://p')"
     if ! LLM_ENV_HEALTH_TIMEOUT_SECONDS="$health_timeout" wait_for_health "$smoke_port" || ! probes "$smoke_port" >/dev/null; then
         pm logs --tail 30 "$smoke" >&2 || true
         echo "error: candidate smoke test failed; production untouched" >&2
         exit 1
     fi
+    for _ in {1..30}; do [[ -s "$sink_dir/laya-spans.jsonl" ]] && break; sleep 1; done
+    if [[ ! -s "$sink_dir/laya-spans.jsonl" ]] || ! jq -e 'select(.v == 1 and .endpoint == "/v1/systemone")' "$sink_dir/laya-spans.jsonl" >/dev/null; then
+        pm logs --tail 30 "$smoke" >&2 || true
+        echo "error: candidate span sink smoke test failed; production untouched" >&2
+        exit 1
+    fi
     pm rm -f "$smoke" >/dev/null
+    pm unshare rm -rf "$sink_dir" >/dev/null 2>&1 || true
+    sink_dir=""
 fi
 
 # Idle gate: Laya's own clock of the last request. A /health poll does not reset it.

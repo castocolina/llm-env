@@ -23,6 +23,8 @@ import re
 import signal
 import tempfile
 import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,54 @@ KEY_NAME = "llm-env-remote-agents"
 CACHE_PATH = Path("/app/data/api-key.json")
 CONFIG_DEADLINE_SECONDS = 20.0
 _config_flight = threading.Lock()
+
+
+class RequestCounters:
+    def __init__(self, path: Path):
+        self.path = path
+        self.started = datetime.now(UTC).isoformat()
+        self.requests: dict[str, int] = {}
+        self.latency: dict[str, dict[str, float | int]] = {}
+        self.write_errors = 0
+        self.lock = threading.Lock()
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "v": 1,
+                "started": self.started,
+                "requests": dict(self.requests),
+                "latency": {route: dict(values) for route, values in self.latency.items()},
+                "write_errors": self.write_errors,
+            }
+
+    def record(self, route: str, status_class: str, elapsed_ms: float) -> None:
+        with self.lock:
+            key = f"{route}|{status_class}"
+            self.requests[key] = self.requests.get(key, 0) + 1
+            latency = self.latency.setdefault(route, {"count": 0, "sum_ms": 0.0})
+            latency["count"] = int(latency["count"]) + 1
+            latency["sum_ms"] = float(latency["sum_ms"]) + elapsed_ms
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=".request-counters-")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        json.dump({
+                            "v": 1,
+                            "started": self.started,
+                            "requests": self.requests,
+                            "latency": self.latency,
+                            "write_errors": self.write_errors,
+                        }, handle)
+                    os.chmod(tmp_name, 0o600)
+                    os.replace(tmp_name, self.path)
+                except BaseException:
+                    Path(tmp_name).unlink(missing_ok=True)
+                    raise
+            except Exception:  # noqa: BLE001 -- telemetry must not affect HTTP responses
+                self.write_errors += 1
+
 
 # Mounted read-only by pylib/compose.py's remote-setup service (see Task
 # 2) alongside pylib/ itself. NOT served over HTTP -- the design defines
@@ -578,6 +628,43 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
     # exposure, not unbounded resource consumption.
     timeout = 10
 
+    def setup(self):
+        self._request_started = time.monotonic()
+        self._request_route = "other"
+        self._request_recorded = False
+        super().setup()
+
+    def handle_one_request(self):
+        self._request_started = time.monotonic()
+        self._request_route = "other"
+        self._request_recorded = False
+        self._last_status = None
+        try:
+            super().handle_one_request()
+        except TimeoutError:
+            self._record_request("error")
+            return
+        finally:
+            status = self._last_status
+            self._record_request(f"{status // 100}xx" if status is not None else "error")
+
+    def _record_request(self, status_class: str) -> None:
+        if self._request_recorded:
+            return
+        self._request_recorded = True
+        # exact match only: the router matches the raw path too, so a query string is "other" (and never stored)
+        route = getattr(self, "path", "")
+        self._request_route = route if route in ("/setup.sh", "/config") else "other"
+        # shortcut: the compose health check is a urllib GET of /setup.sh every 5 s; match its default User-Agent so
+        # probes do not drown real installer requests. Upgrade to a dedicated header if a real client ever uses urllib.
+        headers = getattr(self, "headers", None)
+        if self._request_route == "/setup.sh" and headers is not None and str(headers.get("User-Agent", "")).startswith("Python-urllib/"):
+            self._request_route = "healthcheck"
+        counters = getattr(self.server, "request_counters", None)
+        if counters is not None:
+            counters.record(self._request_route, status_class,
+                            (time.monotonic() - self._request_started) * 1000)
+
     # log_message() is not told the status it is reporting, so remember
     # what send_response() last emitted and gate the log on that.
     _last_status: int | None = None
@@ -710,7 +797,8 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         """Always logged, never gated: log_error() fires for problems the
         base class handles before any send_response() ran (a timed-out or
         malformed request line), so self._last_status would still hold the
-        PREVIOUS request's status on a kept-alive connection."""
+        PREVIOUS request's status on a kept-alive connection. Counting is
+        done once per request in handle_one_request, from the status sent."""
         http.server.BaseHTTPRequestHandler.log_message(self, format, *args)
 
 
@@ -740,6 +828,7 @@ def install_termination_handlers(server: http.server.HTTPServer) -> None:
 def main() -> None:
     port = int(os.environ.get("REMOTE_SETUP_PORT", "20130"))
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), RemoteSetupHandler)
+    server.__dict__["request_counters"] = RequestCounters(CACHE_PATH.parent / "request-counters.json")
     install_termination_handlers(server)
     server.serve_forever()
 

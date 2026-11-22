@@ -39,7 +39,7 @@ def make_repo_copy(tmp_path, profile_entries):
     dst = tmp_path / "repo"
     if not dst.exists():  # a second call in the same test only rewrites the profile list
         shutil.copytree(REPO, dst, ignore=shutil.ignore_patterns(
-            ".git", ".venv", "tmp", "docs", ".docs", "__pycache__", ".pytest_cache", "node_modules", ".codegraph"),
+            ".git", ".venv", "tmp", "docs", ".docs", "__pycache__", ".pytest_cache", "node_modules", ".codegraph", ".claude"),
             ignore_dangling_symlinks=True)
     (dst / "pylib/omniroute_activity_profiles.json").write_text(json.dumps({"schema": 1, "profiles": profile_entries}))
     return dst

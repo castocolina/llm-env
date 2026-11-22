@@ -409,7 +409,6 @@ fi
 if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; then
     system_one_base="http://127.0.0.1:$(yq -r '.system_one.port' "$CONFIG_PATH")"
     system_one_probe="llm-env-check-${BASHPID}-$(date +%s%N)"
-    system_one_response_model=""
     log_step "System One"
     request_record "system-one health" \
         "curl --silent --show-error --max-time 10 ${system_one_base}/health" \
@@ -436,7 +435,6 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; the
             close_diagnostic_capture 1
             bad "Verdict: FAIL stage=answer identity=${1} expected=${4}"
         else
-            system_one_response_model="$(jq -r '.model // empty' "$REQUEST_BODY_FILE")"
             close_diagnostic_capture 0
             ok "Verdict: PASS identity=${1}"
         fi
@@ -464,57 +462,6 @@ else
     log_warn "Verdict: SKIP identity=system-one reason=system-one is disabled"
 fi
 
-if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ]; then
-    phoenix_base="$(bash "${REPO_DIR}/scripts/phoenix.sh" endpoint)"
-    phoenix_spans="$(mktemp "${diagnostic_dir}/phoenix-laya-spans.XXXXXX")"
-    log_step "Phoenix Laya history"
-    if ! curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS \
-        "$phoenix_base/readyz" >/dev/null 2>&1; then
-        bad "Verdict: FAIL stage=Phoenix readiness reason=/readyz is not ready"
-    else
-        phoenix_verified=0
-        phoenix_deadline=$((SECONDS + 10))
-        phoenix_error="newly collected Laya request not found within the bounded readback window"
-        while ((SECONDS < phoenix_deadline)); do
-            phoenix_remaining=$((phoenix_deadline - SECONDS))
-            ((phoenix_remaining <= 5)) || phoenix_remaining=5
-            if ! curl --noproxy '*' --connect-timeout 2 --max-time "$phoenix_remaining" \
-                --max-filesize 8388608 -fsS \
-                "$phoenix_base/v1/projects/laya/spans?limit=1000&sort=id&order=desc" \
-                -o "$phoenix_spans" 2>/dev/null || ! jq -e '
-                  (.data | type == "array") and has("next_cursor") and
-                  (.next_cursor == null or (.next_cursor | type == "string"))
-                ' "$phoenix_spans" >/dev/null 2>&1; then
-                phoenix_error="bounded laya spans API query failed or was malformed"
-                break
-            fi
-            if [[ -n "$system_one_response_model" ]] && jq -e \
-                --arg marker "$system_one_probe" --arg model "$system_one_response_model" '
-                  any(.data[];
-                    .status_code == "OK" and .attributes["laya.http_status"] == 200 and
-                    (try (.attributes["input.value"] | fromjson | .state.llm_env_probe == $marker) catch false) and
-                    (try (.attributes["output.value"] | fromjson |
-                      .model == $model and (.answers | type == "object") and (.answers | length > 0)) catch false))
-                ' "$phoenix_spans" >/dev/null 2>&1; then
-                phoenix_verified=1
-                break
-            fi
-            sleep 0.2
-        done
-        if [[ "$phoenix_verified" == 1 ]]; then
-            laya_summary="$(jq -r '
-              "records_in_page=" + (.data | length | tostring) +
-              " completeness=" + (if .next_cursor == null then "complete" else "incomplete (bounded first page)" end)
-            ' "$phoenix_spans")"
-            ok "Verdict: PASS identity=Phoenix history newly collected Laya request verified project=laya ${laya_summary}"
-        else
-            bad "Verdict: FAIL stage=Phoenix history reason=${phoenix_error}"
-        fi
-    fi
-else
-    log_step "Phoenix Laya history"
-    log_warn "Verdict: SKIP identity=Phoenix history reason=System One is disabled"
-fi
 
 echo
 log_step "Results: ${PASS} passed, ${FAIL} failed"

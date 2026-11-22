@@ -217,15 +217,19 @@ def test_docs_describe_capacity_card_gate_and_local_combo() -> None:
     agents = (ROOT / "AGENTS.md").read_text()
     readme = (ROOT / "README.md").read_text()
     architecture = (ROOT / ".agents/architecture.md").read_text()
+    help_text = (ROOT / "scripts/help.sh").read_text()
 
+    assert "my-coding-lite" not in help_text
     assert "make model-capacity MODEL=<alias>" in agents
     assert "make model-interference" in agents
     assert "make local-combo" in agents
 
     for fragment in (
         "~/.config/llm-env/capacity/<alias>.json",
-        "my-coding-lite",
-        "router-env/my-coding-lite",
+        "my-local-worker",
+        "router-env/my-local-worker",
+        "my-coding-lite` is the executor combo and is never touched by `make local-combo`",
+        "context fill and difficulty ladders",
         "quant-headroom.sh",
         "no headroom for",
         "LLM_ENV_SCOUT_OUT",

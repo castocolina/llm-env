@@ -57,15 +57,6 @@ SYSTEM_ONE_CPUS = 2  # hard cap; CPU peak 1.07-1.55 cores
 SYSTEM_ONE_MEMORY_MIN_MIB = 2560
 SYSTEM_ONE_MEMORY_MIB = 5120  # hard cap; see the exception above
 
-# Phoenix (pinned arizephoenix/phoenix), started with System One in its own
-# compose project: ~150 MiB resident under a short benchmark, but 483 MiB
-# resident and a 804 MiB peak 2 h after a restart with real Laya traffic
-# (804 * 1.2 = 965 -> 1024). Re-derive the reservation over hours, not minutes.
-PHOENIX_CPUS_MIN = 0.25  # -> cpu_shares 256
-PHOENIX_CPUS_MAX = 1
-PHOENIX_MEMORY_MIN_MIB = 192
-PHOENIX_MEMORY_MAX_MIB = 1024
-
 # OmniRoute's own chat-admission gate (src/shared/middleware/chatBodyAdmission.ts
 # upstream) bounds concurrent "heavy" requests (large tool/context bodies --
 # routine for coding agents) to avoid heap amplification. The queue wait is
@@ -106,12 +97,6 @@ DEFAULT_POLICY: dict[str, dict[str, Any]] = {
         "cpus_max": SYSTEM_ONE_CPUS,
         "memory_min_mib": SYSTEM_ONE_MEMORY_MIN_MIB,
         "memory_max_mib": SYSTEM_ONE_MEMORY_MIB,
-    },
-    "phoenix": {
-        "cpus_min": PHOENIX_CPUS_MIN,
-        "cpus_max": PHOENIX_CPUS_MAX,
-        "memory_min_mib": PHOENIX_MEMORY_MIN_MIB,
-        "memory_max_mib": PHOENIX_MEMORY_MAX_MIB,
     },
 }
 OVERRIDABLE_SERVICES = tuple(DEFAULT_POLICY)
@@ -201,14 +186,12 @@ class ResourceError(Exception):
 def _floor_words(
     system_one_enabled: bool,
     system_one: Mapping[str, Any],
-    phoenix: Mapping[str, Any],
 ) -> str:
     words = "the conservative host budget and OmniRoute/remote-setup policy minima"
     if system_one_enabled:
         words += (
             f", System One's budgeted minimum ({system_one['cpus_min']} CPU-share unit, "
-            f"{system_one['memory_min_mib']} MiB) and Phoenix's budgeted minimum "
-            f"({phoenix['cpus_min']} CPU share units, {phoenix['memory_min_mib']} MiB)"
+            f"{system_one['memory_min_mib']} MiB)"
         )
     return words
 
@@ -230,7 +213,6 @@ def compute_resource_limits(
     omniroute = effective_policy("omniroute", overrides)
     remote_setup = effective_policy("remote_setup", overrides)
     system_one = effective_policy("system_one", overrides)
-    phoenix = effective_policy("phoenix", overrides)
     cpu_floor = HOST_CPU_FLOOR + omniroute["cpus_min"] + remote_setup["cpus_min"]
     memory_floor_mib = (
         HOST_MEMORY_FLOOR_MIB
@@ -240,34 +222,30 @@ def compute_resource_limits(
     if system_one_enabled:
         cpu_floor += system_one["cpus_min"]
         memory_floor_mib += system_one["memory_min_mib"]
-        # Phoenix shares the System One enable flag: it is charged whenever
-        # System One is on, including the llm-server-disabled gateway mode.
-        cpu_floor += phoenix["cpus_min"]
-        memory_floor_mib += phoenix["memory_min_mib"]
     if llm_server_enabled:
         if host_cpu_count <= cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; more than {cpu_floor} are "
-                f"required to reserve {_floor_words(system_one_enabled, system_one, phoenix)} and still "
+                f"required to reserve {_floor_words(system_one_enabled, system_one)} and still "
                 "run llm-server"
             )
         if host_memory_total_mib <= memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; more than "
                 f"{memory_floor_mib} MiB is required to reserve "
-                f"{_floor_words(system_one_enabled, system_one, phoenix)} and still run llm-server"
+                f"{_floor_words(system_one_enabled, system_one)} and still run llm-server"
             )
     else:
         if host_cpu_count < cpu_floor:
             raise ResourceError(
                 f"host has {host_cpu_count} CPUs; at least {cpu_floor} are "
-                f"required to reserve {_floor_words(system_one_enabled, system_one, phoenix)}"
+                f"required to reserve {_floor_words(system_one_enabled, system_one)}"
             )
         if host_memory_total_mib < memory_floor_mib:
             raise ResourceError(
                 f"host has {host_memory_total_mib} MiB RAM; at least "
                 f"{memory_floor_mib} MiB is required to reserve "
-                f"{_floor_words(system_one_enabled, system_one, phoenix)}"
+                f"{_floor_words(system_one_enabled, system_one)}"
             )
 
     if llm_server_enabled:
@@ -309,16 +287,15 @@ def compute_resource_limits(
     system_one_policy = (
         system_one if system_one_enabled else dict.fromkeys(POLICY_KEYS, 0)
     )
-    phoenix_policy = phoenix if system_one_enabled else dict.fromkeys(POLICY_KEYS, 0)
     active = ["omniroute", "remote_setup"] + (
-        ["system_one", "phoenix"] if system_one_enabled else []
+        ["system_one"] if system_one_enabled else []
     )
     overrides_applied = {
         service: sorted(key for key in overrides[service] if key in POLICY_KEYS)
         for service in active
         if overrides and overrides.get(service)
     }
-    policies = [omniroute, remote_setup, system_one_policy, phoenix_policy]
+    policies = [omniroute, remote_setup, system_one_policy]
     return {
         "host_cpu_floor": HOST_CPU_FLOOR,
         "host_memory_floor_mib": HOST_MEMORY_FLOOR_MIB,
@@ -329,7 +306,6 @@ def compute_resource_limits(
             "memory_mib": llm_server_memory_mib,
         },
         "system_one": system_one_policy,
-        "phoenix": phoenix_policy,
         "overrides_applied": overrides_applied,
         "totals": {
             "hard_memory_cap_mib": llm_server_memory_mib
@@ -391,7 +367,6 @@ LIVE_CONTAINERS = {
     "omniroute": "omniroute",
     "remote_setup": "remote-setup",
     "system_one": "system-one",
-    "phoenix": "llm-env-phoenix_phoenix_1",
 }
 LIVE_FOOTER = [
     "Counters start over when a container is recreated (`make restart`, update); uptime is the age of the current counters.",

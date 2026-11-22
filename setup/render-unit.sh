@@ -71,10 +71,9 @@ if [ "$system_one_enabled" = "true" ]; then
     render="$(llmenv detect | jq -r --arg p "$pci" '.gpus[] | select(.pci_address == $p) | .render_node')" || die "System One: GPU detection failed; cannot resolve a render node for ${pci}"
     [ -n "$render" ] || die "system_one: configured GPU ${pci} has no render node; run 'make setup'"
     system_one_rocr_index="$(llmenv rocr-index --render-node "$render")" || die "System One: cannot map ${render} to a ROCm device; see message above"
-    # Compose references an external internal-only Phoenix network. Prepare
-    # it before the service projection and build only the tiny local observer
-    # derivative; the cached ROCm base is never reinstalled.
-    bash "${REPO_DIR}/scripts/phoenix.sh" prepare
+    # Build only the tiny local span observer derivative; the cached ROCm base is never reinstalled.
+    # Span records live at ~/.local/state/llm-env/laya-spans/laya-spans.jsonl; retained to the current file plus one 20 MiB rotation.
+    bash "${REPO_DIR}/scripts/prepare-laya-spans.sh"
     LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE="$(bash "${REPO_DIR}/scripts/system-one-observer-build.sh")"
     export LLM_ENV_SYSTEM_ONE_OBSERVER_IMAGE
 fi
@@ -173,13 +172,6 @@ if [ "$start_at_boot" = "true" ]; then
 else
     install_section=""
 fi
-# Only the stop side is a unit hook: scripts/start.sh (the unit's ExecStart) starts Phoenix itself.
-if [ "$system_one_enabled" = "true" ]; then
-    phoenix_stop=$'ExecStopPost=/usr/bin/bash '"${REPO_DIR}/scripts/phoenix.sh"$' stop'
-else
-    phoenix_stop=""
-fi
-
 # The user manager's PATH is minimal at boot; the start script needs the directories of the tools it uses.
 unit_path=""
 add_unit_path() {
@@ -209,7 +201,6 @@ Environment=LLM_ENV_BOOT_UNIT=1
 Environment=PATH=${unit_path}
 ExecStart=/usr/bin/bash ${REPO_DIR}/scripts/start.sh
 ExecStop=podman compose -f $(basename "$COMPOSE_FILE") down --remove-orphans
-${phoenix_stop}
 TimeoutStartSec=900
 Restart=on-failure
 RestartSec=30

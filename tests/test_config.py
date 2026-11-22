@@ -1123,7 +1123,6 @@ def test_load_drops_the_retired_mirror_and_evidence_reference(tmp_path):
     and a `memory_max_evidence` reference are dropped on load; llm_server and the override stay."""
     cfg = make_cfg()
     cfg["resources"]["omniroute"] = {"cpus_min": 1, "cpus_max": float("inf"), "memory_min_mib": 1024, "memory_max_mib": 3072}
-    cfg["resources"]["phoenix"] = {"cpus_min": 2, "cpus_max": 1, "memory_min_mib": 256, "memory_max_mib": 1024}
     cfg["resources"]["remote_setup"] = {"cpus_min": 1, "cpus_max": 1}
     cfg["resources"]["overrides"] = {
         "omniroute": {"memory_max_mib": 2560, "memory_max_evidence": {"path": "/gone.json", "sha256": "x"}}
