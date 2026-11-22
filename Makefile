@@ -145,9 +145,9 @@ clean:
 prune:
 	@bash tools/run-target.sh prune -- bash scripts/prune.sh
 
-# Dry run by default; APPLY=1 removes (any other value stays a dry run).
+# Removes this stack's stale images; DRY_RUN=1 only lists them.
 prune-stale-images:
-	@bash tools/run-target.sh prune-stale-images -- bash scripts/prune-stale-images.sh $(if $(filter 1,$(APPLY)),--apply)
+	@bash tools/run-target.sh prune-stale-images -- bash scripts/prune-stale-images.sh $(if $(filter 1,$(DRY_RUN)),--dry-run)
 
 
 # Unknown targets: show help instead of make's bare "No rule to make target".

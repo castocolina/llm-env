@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prune-stale-images.sh — reclaim the images this stack's builds and updates left in the rootless Podman store.
-# Dry run unless --apply. An image is removed only when it is ours (a localhost/llm-env-* name, the omniroute or
+# Removes by default; --dry-run only lists (make DRY_RUN=1). An image is removed only when it is ours (a localhost/llm-env-* name, the omniroute or
 # llama.cpp repository, or untagged with an llm-env.* label), no container (running, stopped or build) uses it, no
 # configuration names it, and it is not a rollback copy. Every other image in the store is never touched.
 # Removal is one plain `podman rmi` per tag or ID; a refusal (children, in use) is reported as kept, never forced.
@@ -9,11 +9,11 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-apply=0
+apply=1
 case "${1:-}" in
-    --apply) apply=1 ;;
+    --dry-run) apply=0 ;;
     "") ;;
-    *) die "usage: prune-stale-images.sh [--apply]" ;;
+    *) die "usage: prune-stale-images.sh [--dry-run]" ;;
 esac
 require_cmd podman jq yq numfmt
 [ -f "$CONFIG_PATH" ] || die "no config at ${CONFIG_PATH}; run 'make setup' first (the configured images must be known)"
@@ -77,7 +77,7 @@ foreign="$(jq -r --argjson n "$(grep -c . <<<"$plan" || true)" 'unique_by(.Id) |
 images_bytes() { podman system df --format json | jq -r '.[] | select(.Type == "Images") | .RawSize'; }
 human() { numfmt --to=si --suffix=B --format='%.2f' "$1"; }
 
-log_step "Stale image plan ($([ "$apply" = 1 ] && echo apply || echo 'dry run; APPLY=1 to remove'))"
+log_step "Stale image plan ($([ "$apply" = 1 ] && echo remove || echo 'dry run: nothing is removed'))"
 printf '%-7s %-62s %10s  %s\n' ACTION IMAGE SIZE REASON
 candidate_bytes=0
 while IFS=$'\t' read -r action _ bytes shown reason _; do

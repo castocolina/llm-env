@@ -78,8 +78,8 @@ make prune
 ```
 
 Reclaim disk from superseded image builds and updates with
-`make prune-stale-images` (a dry run that lists what it would remove), then
-`make prune-stale-images APPLY=1`. Rollback copies (`:rocm-prev`, the newest
+`make prune-stale-images` (it removes what is unused, unconfigured and not a
+rollback copy; `make prune-stale-images DRY_RUN=1` only lists it). Rollback copies (`:rocm-prev`, the newest
 untagged OmniRoute image) and other projects' images are always kept.
 
 Enabled models are all routable. `runtime.models_max` is a separate residency

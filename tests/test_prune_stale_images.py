@@ -1,4 +1,4 @@
-"""make prune-stale-images removes only this stack's stale images, only with --apply, and never forces anything."""
+"""make prune-stale-images removes only this stack's stale images, unless --dry-run, and never forces anything."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def _removals(env: dict[str, str]) -> set[str]:
 
 def test_dry_run_prints_the_table_and_removes_nothing(tmp_path: Path) -> None:
     env = _env(tmp_path)
-    result = _run(env)
+    result = _run(env, "--dry-run")
     assert result.returncode == 0, result.stderr
     assert not _removals(env)
     assert "ACTION" in result.stdout and "REASON" in result.stdout and "dry run: nothing removed" in result.stdout
@@ -117,9 +117,9 @@ def test_dry_run_prints_the_table_and_removes_nothing(tmp_path: Path) -> None:
     assert "candidates total 6.00kB" in result.stdout
 
 
-def test_apply_removes_exactly_the_stale_stack_images(tmp_path: Path) -> None:
+def test_default_run_removes_exactly_the_stale_stack_images(tmp_path: Path) -> None:
     env = _env(tmp_path)
-    result = _run(env, "--apply")
+    result = _run(env)
     assert result.returncode == 0, result.stderr
     assert _removals(env) == STALE
     assert "freed 6.00kB" in result.stdout
@@ -128,7 +128,7 @@ def test_apply_removes_exactly_the_stale_stack_images(tmp_path: Path) -> None:
 @pytest.mark.parametrize("kind", sorted(KEPT))
 def test_protected_and_foreign_images_are_never_removed(tmp_path: Path, kind: str) -> None:
     env = _env(tmp_path)
-    _run(env, "--apply")
+    _run(env)
     image = next(i for i in IMAGES if i["Id"] == KEPT[kind])
     targets = {KEPT[kind], *(image["Names"] or [])}  # type: ignore[misc]
     assert not targets & _removals(env), kind
@@ -137,7 +137,7 @@ def test_protected_and_foreign_images_are_never_removed(tmp_path: Path, kind: st
 def test_a_refusal_is_reported_and_the_run_continues(tmp_path: Path) -> None:
     env = _env(tmp_path)
     Path(env["FAKE_DIR"], "refuse").write_text(f"{LLAMA}:server-rocm\n")
-    result = _run(env, "--apply")
+    result = _run(env)
     assert result.returncode == 0, result.stderr
     assert f"kept     {LLAMA}:server-rocm  podman refused: Error: image has dependent children" in result.stdout
     assert _removals(env) == STALE  # attempted once, then every later candidate still went
@@ -147,7 +147,7 @@ def test_a_refusal_is_reported_and_the_run_continues(tmp_path: Path) -> None:
 def test_an_unreadable_container_list_fails_closed(tmp_path: Path) -> None:
     env = _env(tmp_path)
     Path(env["FAKE_DIR"], "ps-fails").write_text("1")
-    result = _run(env, "--apply")
+    result = _run(env)
     assert result.returncode != 0 and "podman ps failed" in result.stderr
     assert not _removals(env)
 
@@ -156,7 +156,7 @@ def test_no_banned_command_is_ever_invoked(tmp_path: Path) -> None:
     env = _env(tmp_path)
     Path(env["FAKE_DIR"], "refuse").write_text(f"{OMNI}:latest\n")
     _run(env)
-    _run(env, "--apply")
+    _run(env)
     calls = _calls(env)
     assert calls
     for call in calls:
@@ -176,9 +176,9 @@ def test_no_banned_command_is_ever_invoked(tmp_path: Path) -> None:
         assert banned not in text
 
 
-def test_make_applies_only_with_apply_1() -> None:
+def test_make_removes_by_default_and_only_lists_with_dry_run_1() -> None:
     def recipe(*args: str) -> str:
         return subprocess.run(["/usr/bin/make", "--no-print-directory", "-n", "prune-stale-images", *args], cwd=ROOT,
                               capture_output=True, text=True, check=True).stdout
-    assert "scripts/prune-stale-images.sh --apply" in recipe("APPLY=1")
-    assert "--apply" not in recipe() and "--apply" not in recipe("APPLY=0")
+    assert "scripts/prune-stale-images.sh --dry-run" in recipe("DRY_RUN=1")
+    assert "--dry-run" not in recipe() and "--dry-run" not in recipe("DRY_RUN=0")
