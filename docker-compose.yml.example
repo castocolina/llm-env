@@ -109,7 +109,6 @@ services:
       OMNIROUTE_INTERNAL_URL: http://omniroute:20128
       OMNIROUTE_PORT: '20128'
       OMNIROUTE_DASHBOARD_PASSWORD: ''
-      MODELS_JSON: '[]'
     depends_on:
       omniroute:
         condition: service_healthy

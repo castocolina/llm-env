@@ -8,7 +8,6 @@ presets.ini via configparser.
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from collections.abc import Mapping
@@ -182,24 +181,8 @@ def render_compose(
 
     remote_setup_cfg = cfg.get("remote_setup", {})
     remote_setup_port = remote_setup_cfg.get("port", 20130)
-    # No llama.cpp instance ever runs in this mode (Task: GPU-optional setup),
-    # so a remote machine's setup.sh must never be handed "enabled" llama-cpp
-    # models that don't actually exist behind any OmniRoute connection --
-    # leftover `enabled: true` rows in models.yml are otherwise vestigial and
-    # would silently create dead provider entries on the remote machine.
-    enabled_models = (
-        [
-            {
-                "alias": model["alias"],
-                "ctx_size": model["ctx_size"],
-                "client_max_output_tokens": model["client_max_output_tokens"],
-            }
-            for model in cfg.get("models", [])
-            if model.get("enabled")
-        ]
-        if llm_server_enabled
-        else []
-    )
+    # No model list is baked in here: /config reads OmniRoute's combos live on
+    # every request (pylib/omniroute.py::client_models).
     remote_setup_service: dict[str, Any] = {
         "image": _dollar_escape(
             remote_setup_cfg.get("image", "docker.io/library/python:3.13-alpine")
@@ -232,7 +215,6 @@ def render_compose(
             "OMNIROUTE_DASHBOARD_PASSWORD": _dollar_escape(
                 omniroute_cfg.get("initial_password", "")
             ),
-            "MODELS_JSON": _dollar_escape(json.dumps(enabled_models)),
         },
         "restart": "unless-stopped",
         "healthcheck": {

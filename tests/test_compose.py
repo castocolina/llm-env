@@ -433,32 +433,16 @@ def test_remote_setup_environment_defaults_master_key_to_empty_string():
     assert document["services"]["remote-setup"]["environment"]["OMNI_ROUTER_MASTER_KEY"] == ""
 
 
-def test_remote_setup_models_json_lists_only_enabled_models_alias_ctx_and_output_tokens():
+def test_remote_setup_bakes_no_model_list():
+    """/config reads OmniRoute's combos live; enabled models.yml rows must not reach the render."""
     cfg = {
         **CFG,
-        "models": [
-            {"alias": "a", "enabled": True, "ctx_size": 8192, "client_max_output_tokens": 4096},
-            {"alias": "b", "enabled": False, "ctx_size": 8192, "client_max_output_tokens": 4096},
-        ],
-    }
-    _, document = compose_dict(cfg)
-    import json as _json
-    models_json = _json.loads(document["services"]["remote-setup"]["environment"]["MODELS_JSON"])
-    assert models_json == [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]
-
-
-def test_remote_setup_models_json_is_empty_when_llm_server_disabled():
-    cfg = {
-        **CFG,
-        "llm_server": {"enabled": False},
         "models": [
             {"alias": "a", "enabled": True, "ctx_size": 8192, "client_max_output_tokens": 4096},
         ],
     }
     _, document = compose_dict(cfg)
-    import json as _json
-    models_json = _json.loads(document["services"]["remote-setup"]["environment"]["MODELS_JSON"])
-    assert models_json == []
+    assert "MODELS_JSON" not in document["services"]["remote-setup"]["environment"]
 
 
 def test_remote_setup_service_has_no_native_dependency_on_omniroute():
@@ -481,7 +465,6 @@ def test_remote_setup_service_is_unchanged_except_the_removed_dependency():
             "OMNIROUTE_PORT": "20128",
             "OMNIROUTE_DASHBOARD_PASSWORD": "test-password",
             "OMNI_ROUTER_MASTER_KEY": "",
-            "MODELS_JSON": "[]",
             "REMOTE_SETUP_PORT": "20130",
         },
         "ports": ["0.0.0.0:20130:20130"],

@@ -2018,6 +2018,68 @@ def test_omniroute_combo_context_reports_the_true_minimum(tmp_path):
         thread.join()
 
 
+class _MutableCombosHandler(http.server.BaseHTTPRequestHandler):
+    combos: ClassVar[list] = []
+
+    def _reply(self, payload, set_cookie=None):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self._reply({"success": True}, set_cookie="auth_token=tok; Path=/; HttpOnly")
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._reply({"object": "list", "data": [
+                {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
+                 "context_length": 500000, "max_output_tokens": 128000}]})
+        else:
+            self._reply({"combos": type(self).combos})
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_client_models_reads_the_live_combos_on_every_run(tmp_path):
+    def combo(name):
+        return {"name": name, "models": [{"kind": "model", "providerId": "grok-cli", "model": "grok-cli/grok-4.6"}]}
+
+    _MutableCombosHandler.combos = [combo("my-coding")]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _MutableCombosHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # The config enables llama.cpp model `a`: it must never be listed directly.
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=server.server_address[1], initial_password="dashboard-pw"
+        )
+
+        def ids():
+            result = run("--config", str(config), "omniroute", "client-models")
+            assert result.returncode == 0, result.stderr
+            return [m["id"] for m in json.loads(result.stdout)["models"]]
+
+        assert ids() == ["my-coding"]
+        _MutableCombosHandler.combos = [combo("my-coding-renamed"), combo("my-referee-one")]
+        assert ids() == ["my-coding-renamed", "my-referee-one"]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    # OmniRoute gone: fail closed with an error and no password.
+    result = run("--config", str(config), "omniroute", "client-models")
+    assert result.returncode != 0
+    assert "login failed" in json.loads(result.stdout)["error"]
+    assert "dashboard-pw" not in result.stdout + result.stderr
+
+
 def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
     _RecordingComboContextHandler.received = []
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RecordingComboContextHandler)
@@ -2974,6 +3036,26 @@ def test_combo_context_cli_passes_card_limits(tmp_path, monkeypatch, capsys):
     _write_lite_card(config)
     assert llmenv.main(["--config", str(config), "omniroute", "combo-context"]) == 0
     assert seen == [{}, {"qwen": (131072, 8192)}]
+
+
+def test_client_models_cli_passes_card_limits_and_the_published_health_url(tmp_path, monkeypatch, capsys):
+    import llmenv
+
+    seen: list = []
+
+    def fake(*args, **kwargs):
+        seen.append(kwargs)
+        return [{"id": "my-local-worker"}]
+
+    monkeypatch.setattr(llmenv, "client_models", fake)
+    config = _lite_config(tmp_path)
+    _write_lite_card(config)
+    port = yaml.safe_load(config.read_text())["server"]["port"]
+    assert llmenv.main(["--config", str(config), "omniroute", "client-models"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"models": [{"id": "my-local-worker"}]}
+    assert seen == [
+        {"local_limits": {"qwen": (131072, 8192)}, "local_health_url": f"http://127.0.0.1:{port}/health"}
+    ]
 
 
 def test_agent_runtime_cap_prints_the_bounded_runner_default() -> None:

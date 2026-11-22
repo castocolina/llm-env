@@ -1522,7 +1522,7 @@ def test_setup_rejects_comma_separated_model_selection(
     assert "curl " not in calls.read_text()
 
 
-def test_reverse_setup_selection_drives_client_model_order(
+def test_reverse_setup_selection_reorders_models_yml(
     tmp_path: pathlib.Path,
 ) -> None:
     setup_result, _calls, config = run_setup_with_numbered_selection(
@@ -1554,29 +1554,7 @@ def test_reverse_setup_selection_drives_client_model_order(
     # (VALID_AGENT_SETUP_CONFIG has no ornith-35b entry) -- it lands after
     # every pre-existing alias, so it's last here too.
     )["models"]] == ["ornith", "gemma4", "old-model", "ornith-35b"]
-
-    result, _, pi_path, settings_path, opencode_paths, state_path = (
-        run_setup_local_llm_agents(tmp_path, config_text=config.read_text())
-    )
-
-    assert result.returncode == 0, result.stderr
-    pi_provider = json.loads(pi_path.read_text())["providers"]["router-env"]
-    assert [model["id"] for model in pi_provider["models"]] == [
-        "llama-cpp/ornith",
-        "llama-cpp/gemma4",
-    ]
-    assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "router-env/llama-cpp/ornith",
-        "router-env/llama-cpp/gemma4",
-    ]
-    opencode_provider = json.loads(opencode_paths[2].read_text())["provider"][
-        "router-env"
-    ]
-    assert list(opencode_provider["models"]) == ["llama-cpp/ornith", "llama-cpp/gemma4"]
-    assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
-        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
-    ]
+    # Client model lists no longer follow this order: setup-local-llm-agents lists OmniRoute's live combos.
 
 
 def run_gpu_status_with_stubs(
@@ -6071,6 +6049,15 @@ def test_opencode_config_editor_adds_provider_member_with_comments_and_trailing_
     assert parsed["provider"]["router-env"] == provider
 
 
+# What `llmenv omniroute client-models` returns: OmniRoute's live combos, never a direct llama-cpp/<alias>.
+DEFAULT_CLIENT_MODELS_JSON = (
+    '{"models":['
+    '{"id":"my-coding","label":"my-coding (combo)","ctx_size":131072,"client_max_output_tokens":8192},'
+    '{"id":"my-local-worker","label":"my-local-worker (combo)","ctx_size":131072,'
+    '"client_max_output_tokens":8192,"limiting_model":"llama-cpp/qwen"}]}'
+)
+
+
 def run_setup_local_llm_agents(
     tmp_path: pathlib.Path,
     *,
@@ -6087,7 +6074,7 @@ def run_setup_local_llm_agents(
     fail_move_number: int | None = None,
     health_exit: int = 0,
     failing_command: str | None = None,
-    combo_context_case: str = 'printf \'{"combos": []}\\n\'',
+    client_models_case: str = f"printf '{DEFAULT_CLIENT_MODELS_JSON}\\n'",
 ) -> tuple[
     subprocess.CompletedProcess[str],
     pathlib.Path,
@@ -6175,7 +6162,7 @@ def run_setup_local_llm_agents(
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
         "  *'omniroute issue-key'*) printf '{\"api_key\": \"%s\"}\\n' \"$OMNIROUTE_API_KEY\" ;;\n"
-        f"  *'omniroute combo-context'*) {combo_context_case} ;;\n"
+        f"  *'omniroute client-models'*) {client_models_case} ;;\n"
         "  *) exec \"$REAL_UV\" \"$@\" ;;\n"
         "esac\n"
     )
@@ -6221,8 +6208,8 @@ def test_setup_creates_missing_opencode_state_only_for_compatible_1_18_10(
     assert json.loads(state_path.read_text()) == {
         "recent": [],
         "favorite": [
-            {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
-            {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
+            {"providerID": "router-env", "modelID": "my-coding"},
+            {"providerID": "router-env", "modelID": "my-local-worker"},
         ],
         "variant": {},
     }
@@ -6275,8 +6262,8 @@ def test_setup_existing_state_does_not_require_version_or_path_compatibility(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
-        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "router-env", "modelID": "my-coding"},
+        {"providerID": "router-env", "modelID": "my-local-worker"},
     ]
 
 
@@ -6358,12 +6345,12 @@ def test_partial_rename_failure_is_explicit_and_idempotent_rerun_repairs_it(
 
     assert repaired.returncode == 0, repaired.stderr
     assert json.loads(settings_path.read_text())["enabledModels"] == [
-        "router-env/llama-cpp/gemma4",
-        "router-env/llama-cpp/ornith",
+        "router-env/my-coding",
+        "router-env/my-local-worker",
     ]
     assert json.loads(state_path.read_text())["favorite"][:2] == [
-        {"providerID": "router-env", "modelID": "llama-cpp/gemma4"},
-        {"providerID": "router-env", "modelID": "llama-cpp/ornith"},
+        {"providerID": "router-env", "modelID": "my-coding"},
+        {"providerID": "router-env", "modelID": "my-local-worker"},
     ]
 
 
@@ -6387,8 +6374,8 @@ def test_setup_local_llm_agents_creates_private_provider_files(
             "supportsReasoningEffort": False,
         },
         "models": [
-            {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
-            {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "my-coding", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "my-local-worker", "contextWindow": 131072, "maxTokens": 8192},
         ],
     }
     assert not config_json.exists()
@@ -6401,12 +6388,12 @@ def test_setup_local_llm_agents_creates_private_provider_files(
             "apiKey": f"{{file:{tmp_path}/home/.config/router-env/api-key}}",
         },
         "models": {
-            "llama-cpp/gemma4": {
-                "name": "gemma4",
+            "my-coding": {
+                "name": "my-coding (combo)",
                 "limit": {"context": 131072, "output": 8192},
             },
-            "llama-cpp/ornith": {
-                "name": "ornith",
+            "my-local-worker": {
+                "name": "my-local-worker (combo)",
                 "limit": {"context": 131072, "output": 8192},
             },
         },
@@ -6428,57 +6415,26 @@ def test_setup_local_llm_agents_creates_private_provider_files(
     assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
-def test_setup_local_llm_agents_maps_combos_alongside_llama_cpp_models(
+def test_setup_local_llm_agents_lists_only_the_live_combos_never_enabled_local_models(
     tmp_path: pathlib.Path,
 ) -> None:
-    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            combo_context_case=(
-                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
-                '"min_max_output_tokens":128000}]}\\n\''
-            ),
-        )
-    )
-    _config_json, _opencode_json, opencode_jsonc = opencode_paths
-
-    assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
-    assert {"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000} in pi_models
-    assert any(model["id"] == "llama-cpp/gemma4" for model in pi_models)
-    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["router-env"]["models"]
-    assert opencode_models["my-coding"] == {
-        "name": "my-coding (combo)",
-        "limit": {"context": 200000, "output": 128000},
-    }
-
-
-LITE_COMBO_JSON = (
-    '{"combo":"my-local-worker","members":[{"provider":"llama-cpp","model":"qwen",'
-    '"context_window":131072,"max_output_tokens":8192}],"min_context_window":131072,'
-    '"min_max_output_tokens":8192,"limiting_member":"llama-cpp/qwen"}'
-)
-
-
-def test_setup_local_llm_agents_maps_my_coding_lite_with_card_limits(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, _calls, pi_path, settings_path, opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            combo_context_case=f"printf '{{\"combos\":[{LITE_COMBO_JSON}]}}\\n'",
-        )
+    # VALID_AGENT_SETUP_CONFIG enables gemma4 and ornith with llm_server on: none of them may be listed directly.
+    result, calls, pi_path, settings_path, opencode_paths, _state_path = (
+        run_setup_local_llm_agents(tmp_path)
     )
 
     assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
-    assert {"id": "my-local-worker", "contextWindow": 131072, "maxTokens": 8192} in pi_models
-    assert "router-env/my-local-worker" in json.loads(settings_path.read_text())["enabledModels"]
+    assert "omniroute client-models" in calls.read_text()
+    pi_ids = [m["id"] for m in json.loads(pi_path.read_text())["providers"]["router-env"]["models"]]
+    assert pi_ids == ["my-coding", "my-local-worker"]
+    assert json.loads(settings_path.read_text())["enabledModels"] == [
+        "router-env/my-coding",
+        "router-env/my-local-worker",
+    ]
     opencode_models = json.loads(opencode_paths[2].read_text())["provider"]["router-env"]["models"]
-    assert opencode_models["my-local-worker"] == {
-        "name": "my-local-worker (combo)",
-        "limit": {"context": 131072, "output": 8192},
-    }
+    assert list(opencode_models) == ["my-coding", "my-local-worker"]
+    assert "llama-cpp/gemma4" not in result.stdout and "llama-cpp/ornith" not in result.stdout
+    assert "enabled model: my-local-worker (context 131072 -> [from llama-cpp/qwen])" in result.stdout
 
 
 STALE_LLM_ENV_PI_PROFILE = {
@@ -6530,35 +6486,9 @@ def test_setup_local_llm_agents_does_not_create_the_llm_env_pi_profile_or_touch_
     result, *_ = run_setup_local_llm_agents(
         other,
         config_text=VALID_AGENT_SETUP_CONFIG + "llm_server:\n  enabled: false\n",
-        combo_context_case='printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,"min_max_output_tokens":128000}]}\\n\'',
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(off_profile.read_text()) == STALE_LLM_ENV_PI_PROFILE
-
-
-def test_setup_local_llm_agents_drops_local_only_combos_when_llm_server_disabled(
-    tmp_path: pathlib.Path,
-) -> None:
-    mixed = (
-        '{"combo":"my-coding","members":[{"provider":"codex","model":"gpt-5.6-sol-high"},'
-        '{"provider":"llama-cpp","model":"qwen"}],"min_context_window":200000,'
-        '"min_max_output_tokens":128000}'
-    )
-    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            config_text=VALID_AGENT_SETUP_CONFIG.replace(
-                "omniroute:\n", "llm_server:\n  enabled: false\nomniroute:\n", 1
-            ),
-            combo_context_case=f"printf '{{\"combos\":[{LITE_COMBO_JSON},{mixed}]}}\\n'",
-        )
-    )
-
-    assert result.returncode == 0, result.stderr
-    pi_ids = [m["id"] for m in json.loads(pi_path.read_text())["providers"]["router-env"]["models"]]
-    assert pi_ids == ["my-coding"]
-    opencode_models = json.loads(opencode_paths[2].read_text())["provider"]["router-env"]["models"]
-    assert list(opencode_models) == ["my-coding"]
 
 
 def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
@@ -6567,10 +6497,10 @@ def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
     result, _calls, _pi_path, _settings_path, _opencode_paths, _state_path = (
         run_setup_local_llm_agents(
             tmp_path,
-            combo_context_case=(
-                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
-                '"min_max_output_tokens":128000,'
-                '"limiting_member":"grok-cli/grok-composer-2.5-fast"}]}\\n\''
+            client_models_case=(
+                'printf \'{"models":[{"id":"my-coding","label":"my-coding (combo)","ctx_size":200000,'
+                '"client_max_output_tokens":128000,'
+                '"limiting_model":"grok-cli/grok-composer-2.5-fast"}]}\\n\''
             ),
         )
     )
@@ -6582,72 +6512,13 @@ def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
     )
 
 
-def test_setup_local_llm_agents_falls_back_to_capped_output_when_combo_output_unknown(
+def test_setup_local_llm_agents_dies_clearly_when_client_models_fails(
     tmp_path: pathlib.Path,
 ) -> None:
-    result, _calls, pi_path, _settings_path, _opencode_paths, _state_path = (
+    result, calls, pi_path, _settings_path, _opencode_paths, _state_path = (
         run_setup_local_llm_agents(
             tmp_path,
-            combo_context_case=(
-                'printf \'{"combos":[{"combo":"my-planning","min_context_window":500000,'
-                '"min_max_output_tokens":null}]}\\n\''
-            ),
-        )
-    )
-
-    assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
-    assert {"id": "my-planning", "contextWindow": 500000, "maxTokens": 128000} in pi_models
-
-
-def test_setup_local_llm_agents_skips_combos_with_no_known_context_window(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, _calls, pi_path, _settings_path, _opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            combo_context_case=(
-                'printf \'{"combos":[{"combo":"mystery","min_context_window":null,'
-                '"min_max_output_tokens":null}]}\\n\''
-            ),
-        )
-    )
-
-    assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
-    assert not any(model["id"] == "mystery" for model in pi_models)
-
-
-def test_setup_local_llm_agents_omits_llama_cpp_models_when_llm_server_disabled(
-    tmp_path: pathlib.Path,
-) -> None:
-    config_text = VALID_AGENT_SETUP_CONFIG + "llm_server:\n  enabled: false\n"
-    result, _calls, pi_path, _settings_path, opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            config_text=config_text,
-            combo_context_case=(
-                'printf \'{"combos":[{"combo":"my-coding","min_context_window":200000,'
-                '"min_max_output_tokens":128000}]}\\n\''
-            ),
-        )
-    )
-    _config_json, _opencode_json, opencode_jsonc = opencode_paths
-
-    assert result.returncode == 0, result.stderr
-    pi_models = json.loads(pi_path.read_text())["providers"]["router-env"]["models"]
-    assert pi_models == [{"id": "my-coding", "contextWindow": 200000, "maxTokens": 128000}]
-    opencode_models = json.loads(opencode_jsonc.read_text())["provider"]["router-env"]["models"]
-    assert list(opencode_models.keys()) == ["my-coding"]
-
-
-def test_setup_local_llm_agents_dies_clearly_when_combo_context_fails(
-    tmp_path: pathlib.Path,
-) -> None:
-    result, _calls, _pi_path, _settings_path, _opencode_paths, _state_path = (
-        run_setup_local_llm_agents(
-            tmp_path,
-            combo_context_case=(
+            client_models_case=(
                 'printf \'{"error":"OmniRoute is unreachable"}\\n\'; exit 1'
             ),
         )
@@ -6655,6 +6526,9 @@ def test_setup_local_llm_agents_dies_clearly_when_combo_context_fails(
 
     assert result.returncode != 0
     assert "OmniRoute is unreachable" in result.stdout + result.stderr
+    assert not pi_path.parent.exists()
+    assert "mv " not in calls.read_text()
+    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
 
 
 def test_setup_local_llm_agents_secures_existing_client_directories_and_files(
@@ -6698,12 +6572,12 @@ def test_setup_local_llm_agents_updates_every_global_file_that_defines_the_provi
         parsed = json.loads(re.sub(r"(?m)^\s*//[^\n]*", "", text))
         provider = parsed["provider"]["router-env"]
         assert provider["models"] == {
-            "llama-cpp/gemma4": {
-                "name": "gemma4",
+            "my-coding": {
+                "name": "my-coding (combo)",
                 "limit": {"context": 131072, "output": 8192},
             },
-            "llama-cpp/ornith": {
-                "name": "ornith",
+            "my-local-worker": {
+                "name": "my-local-worker (combo)",
                 "limit": {"context": 131072, "output": 8192},
             },
         }
@@ -6866,8 +6740,8 @@ def test_setup_local_llm_agents_replaces_only_the_local_pi_provider(
             "supportsReasoningEffort": False,
         },
         "models": [
-            {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
-            {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "my-coding", "contextWindow": 131072, "maxTokens": 8192},
+            {"id": "my-local-worker", "contextWindow": 131072, "maxTokens": 8192},
         ],
     }
 
@@ -6890,8 +6764,8 @@ def test_setup_local_llm_agents_migrates_legacy_pi_provider_key(
         "baseUrl": "https://example.invalid/v1"
     }
     assert updated["providers"]["router-env"]["models"] == [
-        {"id": "llama-cpp/gemma4", "contextWindow": 131072, "maxTokens": 8192},
-        {"id": "llama-cpp/ornith", "contextWindow": 131072, "maxTokens": 8192},
+        {"id": "my-coding", "contextWindow": 131072, "maxTokens": 8192},
+        {"id": "my-local-worker", "contextWindow": 131072, "maxTokens": 8192},
     ]
 
 
@@ -6916,8 +6790,8 @@ def test_setup_local_llm_agents_puts_router_models_first_and_keeps_other_models(
     assert result.returncode == 0, result.stderr
     settings = json.loads(settings_path.read_text())
     assert settings["enabledModels"] == [
-        "router-env/llama-cpp/gemma4",
-        "router-env/llama-cpp/ornith",
+        "router-env/my-coding",
+        "router-env/my-local-worker",
         *expected_tail,
     ]
     if settings_text and "theme" in settings_text:

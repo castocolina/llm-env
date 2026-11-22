@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pylib.omniroute import OmniRouteError, _login, _request, compute_combo_context
+from pylib.omniroute import OmniRouteError, _login, _request, client_models
 
 KEY_NAME = "llm-env-remote-agents"
 CACHE_PATH = Path("/app/data/api-key.json")
@@ -337,7 +337,8 @@ def _fetch_config_inputs(base_url: str, password: str, box: dict[str, Any]) -> N
             box["error"] = f"could not reach OmniRoute: {exc}"
             return
         try:
-            box["combos"] = compute_combo_context(base_url, password)
+            # Read live on every /config: a combo change needs no re-render or restart.
+            box["models"] = client_models(base_url, password)
         except OmniRouteError as exc:
             box["error"] = f"could not fetch OmniRoute combos: {exc}"
     except Exception as exc:  # noqa: BLE001 # surfaced to the request thread, which re-raises it as the existing JSON 500
@@ -521,64 +522,6 @@ def validate_host_header(host_header: str) -> bool:
     otherwise inject shell syntax into /setup.sh's output, or a malformed
     authority could produce a broken base URL in /config."""
     return parse_host_header(host_header) is not None
-
-
-def _build_unified_models(
-    llm_server_models: list[dict[str, Any]], combos: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Build the client-visible model list SETUP_SCRIPT_TEMPLATE consumes
-    verbatim (no further prefixing/correction happens in bash).
-
-    Mirrors setup/setup-local-llm-agents.sh's own equivalent jq construction
-    -- keep both in sync if this shape changes. Each entry:
-        {id, label, ctx_size, client_max_output_tokens}
-    - llm-server models: id="llama-cpp/<alias>" (only ever non-empty when
-      llm_server.enabled is true -- see pylib/compose.py's enabled_models).
-    - OmniRoute combos: id=<combo name> (OmniRoute routes combos by their
-      bare name, not a provider-prefixed id, confirmed live), always
-      included regardless of llm_server.enabled -- combos route to real,
-      live provider connections and are the point of remote-setup's
-      OmniRoute-only mode. ctx_size uses the corrected minimum
-      (compute_combo_context) since OmniRoute's own /v1/models and
-      /api/combos do not reflect manual context-window overrides (see
-      compute_combo_context's docstring). A combo with no known context
-      window across any member is skipped entirely rather than mapped with
-      a fabricated limit. Local-only combos never reach remote clients:
-      compute_combo_context leaves llama-cpp members unresolved without local
-      limits, so the members-based filter of setup-local-llm-agents.sh needs
-      no mirror here.
-    """
-    models = [
-        {
-            "id": f"llama-cpp/{model['alias']}",
-            "label": model["alias"],
-            "ctx_size": model["ctx_size"],
-            "client_max_output_tokens": model["client_max_output_tokens"],
-        }
-        for model in llm_server_models
-    ]
-    for combo in combos:
-        ctx_size = combo.get("min_context_window")
-        if not isinstance(ctx_size, int):
-            continue
-        max_output = combo.get("min_max_output_tokens")
-        if not isinstance(max_output, int):
-            client_max_output_tokens = min(ctx_size, 128000)
-        elif max_output > ctx_size:
-            client_max_output_tokens = ctx_size
-        else:
-            client_max_output_tokens = max_output
-        model: dict[str, Any] = {
-            "id": combo["combo"],
-            "label": f"{combo['combo']} (combo)",
-            "ctx_size": ctx_size,
-            "client_max_output_tokens": client_max_output_tokens,
-        }
-        limiting_member = combo.get("limiting_member")
-        if isinstance(limiting_member, str):
-            model["limiting_model"] = limiting_member
-        models.append(model)
-    return models
 
 
 def build_config_response(
@@ -766,12 +709,10 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         if "error" in box:
             self._write_unavailable(box["error"])
             return
-        api_key, combos = box["api_key"], box["combos"]
+        api_key, models = box["api_key"], box["models"]
 
         host = host_without_port(host_header)
         omniroute_port = os.environ.get("OMNIROUTE_PORT", "")
-        llm_server_models = json.loads(os.environ.get("MODELS_JSON", "[]"))
-        models = _build_unified_models(llm_server_models, combos)
         response = build_config_response(
             host=host,
             omniroute_port=omniroute_port,

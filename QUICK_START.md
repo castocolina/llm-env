@@ -133,8 +133,8 @@ After `make start`, configure normal Pi and OpenCode sessions once:
 make setup-local-llm-agents
 ```
 
-The command reads the private API key and enabled models from `models.yml`,
-checks that OmniRoute is healthy, and creates or fully refreshes the
+The command reads the private API key from `models.yml` and the current combos from
+OmniRoute's API, checks that OmniRoute is healthy, and creates or fully refreshes the
 `router-env` provider in both clients' normal profiles. `router-env` points at
 OmniRoute (`http://127.0.0.1:<omniroute.port>/v1`), not llm-server directly --
 OmniRoute is the router: it can dispatch a request to this machine's own
@@ -143,15 +143,14 @@ priority and quota-aware strategies, not "local models only". It preserves
 all other providers and settings and writes each updated file with mode
 `0600`. It never prints the key or writes it into the Pi or OpenCode
 configs: both reference the private key file `~/.config/router-env/api-key`
-(`0600`). Run it again after rotating the key,
-changing the port, or enabling or disabling a model.
+(`0600`). Run it again after rotating the key or
+changing the port; combo changes are picked up on every run.
 
 Clean setup maps `gemma4` to yuxinlu1's Agentic Gemma 4 12B v2 Q4_K_M
-build. The model and client records use an exact 131,072-token context and
-8,192-token output limit. Pi's global `enabledModels` starts with the setup-selected
-local aliases in setup order, which defines its model cycle; stale router-env entries are
+build. Combo records carry the context window OmniRoute computes for them. Pi's global `enabledModels` starts with the
+combos in OmniRoute's order, which defines its model cycle; stale router-env entries are
 removed, while other enabled models keep their order.
-OpenCode favorites start with the setup-selected local aliases in setup order;
+OpenCode favorites start with the same combos in the same order;
 stale local favorites are removed, while unrelated favorites retain their
 order. The command leaves explicit client defaults unchanged.
 

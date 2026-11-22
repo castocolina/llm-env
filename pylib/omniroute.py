@@ -442,6 +442,7 @@ def _resolve_member_context_window(
     provider_id: str,
     model_id: str,
     local_limits: Mapping[str, tuple[int, int]] | None = None,
+    combo_context_length: Any = None,
 ) -> int | None:
     """Resolve a combo member's real context window.
 
@@ -453,12 +454,16 @@ def _resolve_member_context_window(
     using the exact same value fix_codex_context_overrides() persists,
     instead of trusting the catalog's stale number for it.
 
-    A llama-cpp member is resolved from local_limits only (the measured
-    capacity card), never from the catalog.
+    A llama-cpp member is resolved from local_limits (the measured capacity
+    card, host only), else from its combo's own context_length in OmniRoute
+    (written from that card by `make local-combo`, readable live from the
+    remote-setup container too), never from the catalog.
     """
     if provider_id == "llama-cpp":
         limit = (local_limits or {}).get(model_id)
-        return limit[0] if limit else None
+        if limit:
+            return limit[0]
+        return combo_context_length if isinstance(combo_context_length, int) else None
     if provider_id == "codex" and _codex_gpt_5_6_family(model_id) is not None:
         return CODEX_GPT_5_6_CONTEXT_WINDOW
     if provider_id == "kimi-coding" and model_id in KIMI_CODING_K3_MODELS:
@@ -474,6 +479,7 @@ def compute_combo_context(
     combo_name: str | None = None,
     *,
     local_limits: Mapping[str, tuple[int, int]] | None = None,
+    session_token: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compute each combo's real minimum context/output window across its members.
 
@@ -493,12 +499,13 @@ def compute_combo_context(
     that is hidden from the catalog entirely (e.g. grok-composer-2.5-fast).
 
     A llama-cpp member takes both limits from local_limits (alias ->
-    (context, max output)) and never from the catalog; both are None when the
-    alias is not listed or local_limits is omitted, as in remote-setup.
+    (context, max output)) and never from the catalog. Without local_limits
+    (remote-setup), its context falls back to the combo's own context_length
+    and its max output stays None.
 
     Raises OmniRouteError if combo_name is given but no combo has that name.
     """
-    session_token = _login(base_url, dashboard_password)
+    session_token = session_token or _login(base_url, dashboard_password)
     catalog = _request("GET", f"{base_url}/v1/models", session_token)
     entries = catalog.get("data") if isinstance(catalog, dict) else None
     if not isinstance(entries, list):
@@ -544,7 +551,7 @@ def compute_combo_context(
                 continue
             model_id = model_field.split("/", 1)[-1]
             context_window = _resolve_member_context_window(
-                catalog_context_by_root, provider_id, model_id, local_limits
+                catalog_context_by_root, provider_id, model_id, local_limits, combo.get("context_length")
             )
             if provider_id == "llama-cpp":
                 limit = (local_limits or {}).get(model_id)
@@ -596,3 +603,88 @@ def compute_combo_context(
     if combo_name is not None and not results:
         raise OmniRouteError(f"no combo named {combo_name!r} found")
     return results
+
+
+def _local_only(combo: dict[str, Any]) -> bool:
+    providers = [member.get("provider") for member in combo.get("members") or []]
+    return bool(providers) and all(provider == "llama-cpp" for provider in providers)
+
+
+def _local_backend_up(base_url: str, session_token: str, health_url: str | None) -> bool:
+    """True when OmniRoute's llm-env-local connection is active and llama.cpp's
+    unauthenticated /health answers 200 right now. health_url defaults to the
+    connection's own baseUrl (resolvable inside the compose network); the host
+    passes its published port instead."""
+    connection = find_connection(
+        _extract_providers(_request("GET", f"{base_url}/api/providers", session_token))
+    )
+    if connection is None or connection.get("isActive") is False:
+        return False
+    if health_url is None:
+        data = connection.get("providerSpecificData")
+        backend = data.get("baseUrl") if isinstance(data, dict) else None
+        if not isinstance(backend, str) or not backend.startswith(("http://", "https://")):
+            return False
+        health_url = backend.rstrip("/").removesuffix("/v1") + "/health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=3) as response:
+            return response.status == 200
+    except (OSError, ValueError):  # URLError, HTTPError and timeouts are OSErrors
+        return False
+
+
+def combo_client_models(combos: list[dict[str, Any]], local_up: bool) -> list[dict[str, Any]]:
+    """Map compute_combo_context() results to the client model records
+    install-agent-clients.sh consumes: {id, label, ctx_size,
+    client_max_output_tokens[, limiting_model]}. A combo with no known context
+    window is skipped rather than given a fabricated limit, and a combo whose
+    members are all llama-cpp is skipped while the local backend is down."""
+    models: list[dict[str, Any]] = []
+    for combo in combos:
+        ctx_size = combo.get("min_context_window")
+        if not isinstance(ctx_size, int) or (_local_only(combo) and not local_up):
+            continue
+        max_output = combo.get("min_max_output_tokens")
+        if not isinstance(max_output, int):
+            client_max_output_tokens = min(ctx_size, 128000)
+        else:
+            client_max_output_tokens = min(max_output, ctx_size)
+        model: dict[str, Any] = {
+            "id": combo["combo"],
+            "label": f"{combo['combo']} (combo)",
+            "ctx_size": ctx_size,
+            "client_max_output_tokens": client_max_output_tokens,
+        }
+        limiting_member = combo.get("limiting_member")
+        if isinstance(limiting_member, str):
+            model["limiting_model"] = limiting_member
+        models.append(model)
+    return models
+
+
+def client_models(
+    base_url: str,
+    dashboard_password: str,
+    *,
+    local_limits: Mapping[str, tuple[int, int]] | None = None,
+    local_health_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """The Pi/OpenCode model list: OmniRoute's combos as they are right now.
+
+    Shared by remote-setup's /config and `llmenv omniroute client-models`
+    (setup-local-llm-agents.sh), so adding, removing or renaming a combo needs
+    no code, config, re-render or restart, and both list the same combo ids.
+    Direct provider models such as llama-cpp/<alias> are never listed: a local
+    model is reached through the combo that wraps it. Limits match too, except
+    that only the host passes local_limits (capacity card): remote-setup takes
+    a llama-cpp member's context from the combo's context_length and has no
+    source for its max output, so the generic min(context, 128000) applies.
+    """
+    session_token = _login(base_url, dashboard_password)
+    combos = compute_combo_context(
+        base_url, dashboard_password, local_limits=local_limits, session_token=session_token
+    )
+    local_up = any(_local_only(c) for c in combos) and _local_backend_up(
+        base_url, session_token, local_health_url
+    )
+    return combo_client_models(combos, local_up)

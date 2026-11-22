@@ -17,60 +17,14 @@ key_response="$(llmenv omniroute issue-key --config "$CONFIG_PATH")" \
 api_key="$(jq -r '.api_key // ""' <<<"$key_response")"
 [ -n "$api_key" ] || die "OmniRoute did not return a usable API key"
 
-# No llama.cpp instance exists behind OmniRoute in this mode (see
-# llm_server.enabled in models.yml.example): mapping "llama-cpp/<alias>"
-# model ids here would create dead provider entries with nothing to route
-# to. OmniRoute combos (below) are always mapped regardless -- they route
-# to real, live provider connections and are the whole point of this mode.
-#
-# migrate_config_file (above) always normalizes llm_server.enabled to a
-# real boolean, so a bare read is used here -- not `// true`, which would
-# silently coerce an explicit `false` back to "true" (yq/jq's `//`
-# alternative operator treats `false` as falsy, same footgun documented in
-# setup.sh and print-endpoints.sh).
-llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
-if [ "$llm_server_enabled" = "true" ]; then
-    llama_models_json="$(yq -o=json '[.models[] | select(.enabled) | {
-        "id": "llama-cpp/\(.alias)",
-        "label": .alias,
-        "ctx_size": .ctx_size,
-        "client_max_output_tokens": .client_max_output_tokens
-    }]' "$CONFIG_PATH")"
-else
-    llama_models_json='[]'
-fi
-
-# OmniRoute's own /v1/models catalog and /api/combos do not reflect
-# manually-corrected context windows (a real OmniRoute display bug -- see
-# pylib/omniroute.py::compute_combo_context for the full writeup and live
-# verification), so this uses the corrected minimum per combo instead of
-# trusting OmniRoute's own numbers, matching what `make combo-context`
-# reports.
-combo_context_response="$(llmenv omniroute combo-context --config "$CONFIG_PATH")" \
-    || die "$(jq -r '.error // "could not fetch OmniRoute combos"' <<<"$combo_context_response")"
-# A combo whose members are all llama-cpp needs the local server: drop it when
-# local inference is off. A combo without a members key is kept.
-combo_models_json="$(jq --argjson llm_enabled "$llm_server_enabled" '[.combos[]
-    | select(.min_context_window != null
-             and ($llm_enabled
-                  or (([.members[]?.provider] | length > 0 and all(. == "llama-cpp")) | not)))
-    | {
-    id: .combo,
-    label: "\(.combo) (combo)",
-    ctx_size: .min_context_window,
-    client_max_output_tokens: (
-        if .min_max_output_tokens == null then
-            ([.min_context_window, 128000] | min)
-        elif .min_max_output_tokens > .min_context_window then
-            .min_context_window
-        else
-            .min_max_output_tokens
-        end
-    ),
-    limiting_model: .limiting_member
-}]' <<<"$combo_context_response")"
-
-models_json="$(jq -s '.[0] + .[1]' <(printf '%s' "$llama_models_json") <(printf '%s' "$combo_models_json"))"
+# The model list is OmniRoute's combos as they are right now, asked of its API
+# on every run (pylib/omniroute.py::client_models, shared with remote-setup's
+# /config). Direct llama-cpp/<alias> models are not listed: the local model is
+# reached through the combo that wraps it, which stays only while llm-server
+# answers its /health.
+client_models_response="$(llmenv omniroute client-models --config "$CONFIG_PATH")" \
+    || die "$(jq -r '.error // "could not fetch OmniRoute combos"' <<<"$client_models_response")"
+models_json="$(jq -c '.models' <<<"$client_models_response")"
 
 jq -ne --arg port "$omniroute_port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
     || die "omniroute port must be an integer from 1 to 65535"

@@ -115,8 +115,8 @@ def test_quick_start_ties_pi_model_cycle_to_setup_selection_order() -> None:
     quick_start = _normalized_markdown(ROOT / "QUICK_START.md").lower()
 
     assert (
-        "pi's global `enabledmodels` starts with the setup-selected local aliases "
-        "in setup order, which defines its model cycle; stale router-env entries are "
+        "pi's global `enabledmodels` starts with the combos in omniroute's order, "
+        "which defines its model cycle; stale router-env entries are "
         "removed, while other enabled models keep their order."
     ) in quick_start
 
@@ -125,7 +125,7 @@ def test_quick_start_ties_opencode_favorites_to_setup_selection() -> None:
     quick_start = _normalized_markdown(ROOT / "QUICK_START.md").lower()
 
     assert (
-        "opencode favorites start with the setup-selected local aliases in setup order; "
+        "opencode favorites start with the same combos in the same order; "
         "stale local favorites are removed, while unrelated favorites retain their order."
     ) in quick_start
 

@@ -66,6 +66,7 @@ from pylib.gguf import (
 from pylib.observe_metrics import collect_metrics, publish_metrics
 from pylib.omniroute import (
     OmniRouteError,
+    client_models,
     compute_combo_context,
     fix_codex_context_overrides,
     import_codex_auth,
@@ -736,6 +737,18 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
             local_limits=capacity.local_limits(Path(args.config), cfg),
         )
         return emit({"combos": combos})
+    if args.action == "client-models":
+        from pylib import capacity
+
+        server_port = (cfg.get("server") or {}).get("port")
+        models = client_models(
+            base_url,
+            initial_password,
+            local_limits=capacity.local_limits(Path(args.config), cfg),
+            # llm-server's published port: the connection's own baseUrl names a compose-network host
+            local_health_url=f"http://127.0.0.1:{server_port}/health" if server_port else None,
+        )
+        return emit({"models": models})
     if args.action == "backup-combos":
         if not args.output:
             return fail("--output is required for backup-combos")
@@ -975,6 +988,7 @@ def build_parser() -> argparse.ArgumentParser:
             "import-codex",
             "fix-codex-context",
             "combo-context",
+            "client-models",
             "backup-combos",
             "restore-combos",
             "backup-connections",

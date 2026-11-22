@@ -77,6 +77,11 @@ Reclaim disk space from downloaded models (they are NOT removed by
 make prune
 ```
 
+Reclaim disk from superseded image builds and updates with
+`make prune-stale-images` (a dry run that lists what it would remove), then
+`make prune-stale-images APPLY=1`. Rollback copies (`:rocm-prev`, the newest
+untagged OmniRoute image) and other projects' images are always kept.
+
 Enabled models are all routable. `runtime.models_max` is a separate residency
 limit; the target configuration keeps one model resident and unloads it before
 loading another alias. This adds model-switch latency but avoids holding both
@@ -257,8 +262,9 @@ when `llm_server.enabled` is true and OmniRoute provisioning succeeded. `make ba
 `llm-env-local`.
 
 Observed on the pinned OmniRoute image with a throwaway instance, `/v1/models` did not list
-`llama-cpp/<model>`, so the card is the only source of a `llama-cpp` member's
-limits. A combo whose member carries `id` and `context_length` (no `config`) was
+`llama-cpp/<model>`, so the card is the first source of a `llama-cpp` member's
+limits; without it, the combo's own `context_length` stored in OmniRoute (written by
+`make local-combo`) is used. A combo whose member carries `id` and `context_length` (no `config`) was
 accepted and persisted, and the combo itself is listed in `/v1/models` with its
 `context_length`. A chat to the combo routed to the local upstream, and a PUT of
 a new `context_length` persisted. With llm-server down, a chat to the combo
@@ -270,10 +276,11 @@ For local clients, select `router-env/my-local-worker`. Performance tests
 (context fill and difficulty ladders) default to this combo through OmniRoute;
 direct llama.cpp is also an option.
 
-**Clients.** `make setup-local-llm-agents` lists `router-env/my-local-worker` in
-pi and opencode only while llm-server is enabled and the card is current; a
-combo with no known minimum is dropped. Remote installers never list it: their
-`llama-cpp` members have no local limits, so the combo has no known minimum. The router
+**Clients.** `make setup-local-llm-agents` and the remote `/setup.sh` list OmniRoute's current
+combos, read from its API on every run (adding, removing or renaming a combo needs no
+change and no restart), and never a direct `llama-cpp/<model>` entry. `router-env/my-local-worker`
+is listed while its OmniRoute connection is active and llama.cpp answers `/health`; its window
+comes from the card, else from the combo's `context_length`. The router
 key is written to `~/.config/router-env/api-key` (0600) and referenced from the
 client configs (pi `!cat`, opencode `{file:...}`), never written into them.
 When the legacy Pi profile `~/.config/llm-env/pi/models.json` (provider `llm-env`, used by
@@ -621,10 +628,10 @@ After `make start`, configure normal Pi and OpenCode sessions once:
 make setup-local-llm-agents
 ```
 
-The command reads the private API key and enabled models from `models.yml`,
-checks that the local server is healthy, and writes private client
-configuration. It never prints the key. Run it again after rotating the key,
-changing the port, or enabling or disabling a model.
+The command reads the private API key from `models.yml` and the current combos from
+OmniRoute's API, checks that the local server is healthy, and writes private client
+configuration. It never prints the key. Run it again after rotating the key or
+changing the port; combo changes are picked up on every run.
 
 `QUICK_START.md` includes copy-paste `curl`, Pi, and OpenCode client examples.
 The `make check-with-agents` output masks the key and its temporary isolated

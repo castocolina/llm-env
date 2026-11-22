@@ -12,16 +12,16 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pylib.remote_setup as remote_setup_module
-from pylib.omniroute import OmniRouteError
+from pylib.omniroute import OmniRouteError, client_models, combo_client_models
 from pylib.remote_setup import (
     RemoteSetupHandler,
-    _build_unified_models,
     build_config_response,
     host_without_port,
     master_key_matches,
@@ -183,18 +183,46 @@ def test_host_without_port_round_trips_a_validated_bracketed_ipv6_literal():
     assert host_without_port("[2001:db8::1]:20128") == "[2001:db8::1]"
 
 
-def test_build_unified_models_prefixes_llm_server_models():
-    result = _build_unified_models(
-        [{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}], []
-    )
-    assert result == [
-        {"id": "llama-cpp/a", "label": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
+def _combos_with_local_up(combos):
+    return combo_client_models(combos, True)
+
+
+LOCAL_ONLY_COMBO = {
+    "combo": "my-local-worker",
+    "members": [{"provider": "llama-cpp", "model": "qwen3-5-4b"}],
+    "min_context_window": 197120,
+    "min_max_output_tokens": None,
+    "limiting_member": "llama-cpp/qwen3-5-4b",
+}
+MIXED_COMBO = {
+    "combo": "my-coding",
+    "members": [{"provider": "codex", "model": "gpt-6"}, {"provider": "llama-cpp", "model": "qwen3-5-4b"}],
+    "min_context_window": 200000,
+    "min_max_output_tokens": 128000,
+}
+
+
+def test_combo_client_models_keeps_local_only_combos_only_while_the_backend_is_up():
+    assert [m["id"] for m in combo_client_models([LOCAL_ONLY_COMBO, MIXED_COMBO], True)] == [
+        "my-local-worker",
+        "my-coding",
     ]
+    assert [m["id"] for m in combo_client_models([LOCAL_ONLY_COMBO, MIXED_COMBO], False)] == ["my-coding"]
 
 
-def test_build_unified_models_includes_combos_with_known_context():
-    result = _build_unified_models(
-        [],
+def test_combo_client_models_keeps_the_limiting_member_provenance():
+    (model,) = combo_client_models([LOCAL_ONLY_COMBO], True)
+    assert model == {
+        "id": "my-local-worker",
+        "label": "my-local-worker (combo)",
+        "ctx_size": 197120,
+        "client_max_output_tokens": 128000,
+        "limiting_model": "llama-cpp/qwen3-5-4b",
+    }
+
+
+def test_combo_client_models_includes_combos_with_known_context():
+    result = _combos_with_local_up(
         [{"combo": "my-coding", "min_context_window": 200000, "min_max_output_tokens": 128000}],
     )
     assert result == [
@@ -207,9 +235,8 @@ def test_build_unified_models_includes_combos_with_known_context():
     ]
 
 
-def test_build_unified_models_includes_limiting_member_when_present():
-    result = _build_unified_models(
-        [],
+def test_combo_client_models_includes_limiting_member_when_present():
+    result = _combos_with_local_up(
         [
             {
                 "combo": "my-coding",
@@ -222,33 +249,30 @@ def test_build_unified_models_includes_limiting_member_when_present():
     assert result[0]["limiting_model"] == "grok-cli/grok-composer-2.5-fast"
 
 
-def test_build_unified_models_omits_limiting_model_when_absent():
-    result = _build_unified_models(
-        [],
+def test_combo_client_models_omits_limiting_model_when_absent():
+    result = _combos_with_local_up(
         [{"combo": "my-coding", "min_context_window": 200000, "min_max_output_tokens": 128000}],
     )
     assert "limiting_model" not in result[0]
 
 
-def test_build_unified_models_falls_back_to_capped_output_when_unknown():
-    result = _build_unified_models(
-        [],
+def test_combo_client_models_falls_back_to_capped_output_when_unknown():
+    result = _combos_with_local_up(
         [{"combo": "my-planning", "min_context_window": 500000, "min_max_output_tokens": None}],
     )
     assert result[0]["client_max_output_tokens"] == 128000
 
 
-def test_build_unified_models_clamps_output_above_context():
-    result = _build_unified_models(
-        [],
+def test_combo_client_models_clamps_output_above_context():
+    result = _combos_with_local_up(
         [{"combo": "weird", "min_context_window": 50000, "min_max_output_tokens": 999999}],
     )
     assert result[0]["client_max_output_tokens"] == 50000
 
 
-def test_build_unified_models_skips_combos_with_unknown_context():
-    result = _build_unified_models(
-        [], [{"combo": "mystery", "min_context_window": None, "min_max_output_tokens": None}]
+def test_combo_client_models_skips_combos_with_unknown_context():
+    result = _combos_with_local_up(
+        [{"combo": "mystery", "min_context_window": None, "min_max_output_tokens": None}]
     )
     assert result == []
 
@@ -736,7 +760,6 @@ def test_setup_sh_is_served_without_auth_and_embeds_the_request_host(tmp_path, m
     _use_real_opencode_updater(monkeypatch)
     _use_real_install_agent_clients_lib(monkeypatch)
     monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
-    monkeypatch.setenv("MODELS_JSON", "[]")
     server, thread = _start_server(RemoteSetupHandler)
     try:
         port = server.server_address[1]
@@ -753,7 +776,6 @@ def test_setup_sh_is_served_without_auth_and_embeds_the_request_host(tmp_path, m
 
 def test_setup_sh_rejects_an_invalid_host_header(monkeypatch):
     monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
-    monkeypatch.setenv("MODELS_JSON", "[]")
     server, thread = _start_server(RemoteSetupHandler)
     try:
         port = server.server_address[1]
@@ -781,7 +803,6 @@ def test_unknown_paths_404(path, monkeypatch):
     # instead, see render_setup_script()) -- a client trying to fetch it
     # directly must get a plain 404, not a 200 or a 500.
     monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
-    monkeypatch.setenv("MODELS_JSON", "[]")
     server, thread = _start_server(RemoteSetupHandler)
     try:
         port = server.server_address[1]
@@ -910,9 +931,8 @@ def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypat
             assert payload["api_key"] == "sk-live-value"
             assert payload["omniroute_base_url"] == "http://127.0.0.1:20128"
             assert payload["omniroute_dashboard_password"] == "dashboard-pw"
-            assert payload["models"] == [
-                {"id": "llama-cpp/a", "label": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}
-            ]
+            # A container rendered before the live list still carries MODELS_JSON: it is ignored.
+            assert payload["models"] == []
             assert _FakeOmniRouteHandler.keys_created == 1
 
             # Second call reuses the cached key -- no new key created.
@@ -934,7 +954,7 @@ def test_config_returns_the_scoped_key_and_omniroute_address(tmp_path, monkeypat
 
 class _FakeOmniRouteWithComboHandler(_FakeOmniRouteHandler):
     """Adds a real combo to /v1/models and /api/combos so /config's
-    server-side compute_combo_context() call has something to resolve."""
+    server-side client_models() call has something to resolve."""
 
     def do_GET(self):
         if self.path == "/v1/models":
@@ -975,7 +995,7 @@ class _FakeOmniRouteWithComboHandler(_FakeOmniRouteHandler):
         super().do_GET()
 
 
-def test_config_includes_omniroute_combos_alongside_llm_server_models(tmp_path, monkeypatch):
+def test_config_lists_only_omniroute_combos_and_ignores_a_baked_model_list(tmp_path, monkeypatch):
     _FakeOmniRouteWithComboHandler.keys_created = 0
     fake_omniroute, fake_thread = _start_server(_FakeOmniRouteWithComboHandler)
     try:
@@ -1000,12 +1020,6 @@ def test_config_includes_omniroute_combos_alongside_llm_server_models(tmp_path, 
             payload = json.loads(response.read())
             assert response.status == 200
             assert payload["models"] == [
-                {
-                    "id": "llama-cpp/a",
-                    "label": "a",
-                    "ctx_size": 8192,
-                    "client_max_output_tokens": 4096,
-                },
                 {
                     "id": "my-planning",
                     "label": "my-planning (combo)",
@@ -1040,7 +1054,6 @@ def test_config_returns_503_when_combo_context_fails(tmp_path, monkeypatch):
         monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
         monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
         monkeypatch.setenv("OMNIROUTE_PORT", "20128")
-        monkeypatch.setenv("MODELS_JSON", "[]")
 
         server, thread = _start_server(RemoteSetupHandler)
         try:
@@ -1061,9 +1074,8 @@ def test_config_returns_503_when_combo_context_fails(tmp_path, monkeypatch):
 
 
 def test_config_returns_json_500_for_an_unexpected_error(tmp_path, monkeypatch):
-    # A malformed MODELS_JSON env var isn't an OmniRouteError -- it's a
-    # plain JSONDecodeError raised deep inside _handle_config, after
-    # ensure_api_key() has already succeeded. The handler must still
+    # A non-OmniRouteError bug inside the model listing (here a ValueError),
+    # raised after ensure_api_key() has already succeeded. The handler must still
     # produce a JSON 500, not crash the request thread / hang the socket.
     _FakeOmniRouteHandler.keys_created = 0
     fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
@@ -1075,7 +1087,10 @@ def test_config_returns_json_500_for_an_unexpected_error(tmp_path, monkeypatch):
         monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
         monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
         monkeypatch.setenv("OMNIROUTE_PORT", "20128")
-        monkeypatch.setenv("MODELS_JSON", "not valid json")
+        def _broken(*_args, **_kwargs):
+            raise ValueError("unexpected bug")
+
+        monkeypatch.setattr(remote_setup_module, "client_models", _broken)
 
         server, thread = _start_server(RemoteSetupHandler)
         try:
@@ -1094,6 +1109,198 @@ def test_config_returns_json_500_for_an_unexpected_error(tmp_path, monkeypatch):
     finally:
         fake_omniroute.shutdown()
         fake_thread.join()
+
+
+class _LiveOmniRouteHandler(_FakeOmniRouteHandler):
+    """An OmniRoute whose combos and connections a test changes between requests
+    (each test subclasses it with its own `combos` and `connections` lists)."""
+
+    combos: ClassVar[list]
+    connections: ClassVar[list]
+
+    def do_GET(self):
+        cls = type(self)
+        if self.path == "/v1/models":
+            self._reply({"object": "list", "data": [
+                {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
+                 "context_length": 500000, "max_output_tokens": 128000},
+            ]})
+        elif self.path == "/api/combos":
+            self._reply({"combos": cls.combos, "total": len(cls.combos)})
+        elif self.path == "/api/providers":
+            self._reply({"connections": cls.connections, "total": len(cls.connections)})
+        else:
+            super().do_GET()
+
+
+class _HealthHandler(http.server.BaseHTTPRequestHandler):
+    """llama.cpp's unauthenticated /health."""
+
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def _cloud_combo(name):
+    return {"name": name, "models": [{"kind": "model", "providerId": "grok-cli", "model": "grok-cli/grok-4.6"}]}
+
+
+def _local_combo(context_length):
+    return {
+        "name": "my-local-worker",
+        "context_length": context_length,
+        "models": [{"kind": "model", "providerId": "llama-cpp", "model": "llama-cpp/qwen3-5-4b", "connectionId": "c1"}],
+    }
+
+
+def _local_connection(base_url, active=True):
+    return {"id": "c1", "provider": "llama-cpp", "name": "llm-env-local", "isActive": active,
+            "apiKey": "sk-llama-secret", "providerSpecificData": {"baseUrl": base_url}}
+
+
+def _closed_port():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    port = server.server_address[1]
+    server.server_close()
+    return port
+
+
+@contextlib.contextmanager
+def _live_config(tmp_path, monkeypatch, handler):
+    """One remote-setup server for the whole test: every /config is a fresh read, never a restart."""
+    fake_omniroute, fake_thread = _start_server(handler)
+    monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_omniroute.server_address[1]}")
+    monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+    monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+    # What a pre-change render baked into the running container: must be ignored.
+    monkeypatch.setenv("MODELS_JSON", json.dumps(
+        [{"alias": "qwen3-5-4b", "ctx_size": 131072, "client_max_output_tokens": 8192}]))
+    server, thread = _start_server(RemoteSetupHandler)
+
+    def get_config():
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
+        response = conn.getresponse()
+        return response.status, json.loads(response.read())
+
+    try:
+        yield get_config
+    finally:
+        server.shutdown()
+        thread.join()
+        fake_omniroute.shutdown()
+        fake_thread.join()
+
+
+def test_config_follows_combo_changes_without_restart(tmp_path, monkeypatch):
+    handler = type("H", (_LiveOmniRouteHandler,), {"combos": [_cloud_combo("my-coding")], "connections": []})
+    with _live_config(tmp_path, monkeypatch, handler) as get_config:
+        status, payload = get_config()
+        assert status == 200
+        assert [m["id"] for m in payload["models"]] == ["my-coding"]
+
+        handler.combos = [_cloud_combo("my-coding-renamed"), _cloud_combo("my-referee-one")]
+        assert [m["id"] for m in get_config()[1]["models"]] == ["my-coding-renamed", "my-referee-one"]
+
+        handler.combos = []
+        assert get_config()[1]["models"] == []
+
+
+def test_config_lists_the_local_combo_with_its_live_window_and_no_direct_llama_cpp_model(tmp_path, monkeypatch):
+    health, health_thread = _start_server(_HealthHandler)
+    try:
+        backend = f"http://127.0.0.1:{health.server_address[1]}/v1"
+        handler = type("H", (_LiveOmniRouteHandler,), {
+            "combos": [_local_combo(197120), _cloud_combo("my-coding")],
+            "connections": [_local_connection(backend)],
+        })
+        with _live_config(tmp_path, monkeypatch, handler) as get_config:
+            status, payload = get_config()
+            assert status == 200
+            assert payload["models"][0] == {
+                "id": "my-local-worker",
+                "label": "my-local-worker (combo)",
+                "ctx_size": 197120,
+                "client_max_output_tokens": 128000,
+                "limiting_model": "llama-cpp/qwen3-5-4b",
+            }
+            assert [m["id"] for m in payload["models"]] == ["my-local-worker", "my-coding"]
+            assert "sk-llama-secret" not in json.dumps(payload)
+
+            handler.combos[0]["context_length"] = 204800  # make local-combo after a new card
+            assert get_config()[1]["models"][0]["ctx_size"] == 204800
+    finally:
+        health.shutdown()
+        health_thread.join()
+
+
+@pytest.mark.parametrize("state", ["backend-down", "connection-disabled", "no-connection"])
+def test_config_drops_the_local_combo_while_llm_server_is_unusable(tmp_path, monkeypatch, state):
+    health, health_thread = _start_server(_HealthHandler)
+    try:
+        port = _closed_port() if state == "backend-down" else health.server_address[1]
+        connections = {
+            "backend-down": [_local_connection(f"http://127.0.0.1:{port}/v1")],
+            "connection-disabled": [_local_connection(f"http://127.0.0.1:{port}/v1", active=False)],
+            "no-connection": [],
+        }[state]
+        handler = type("H", (_LiveOmniRouteHandler,), {
+            "combos": [_local_combo(197120), _cloud_combo("my-coding")], "connections": connections})
+        with _live_config(tmp_path, monkeypatch, handler) as get_config:
+            assert [m["id"] for m in get_config()[1]["models"]] == ["my-coding"]
+    finally:
+        health.shutdown()
+        health_thread.join()
+
+
+def test_config_fails_closed_without_secrets_when_omniroute_is_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+    monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{_closed_port()}")
+    monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
+    monkeypatch.setenv("OMNIROUTE_PORT", "20128")
+    server, thread = _start_server(RemoteSetupHandler)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        conn.request("GET", "/config", headers={"Authorization": "Bearer test-key"})
+        response = conn.getresponse()
+        body = response.read().decode()
+        assert response.status == 503
+        assert "could not reach OmniRoute" in json.loads(body)["error"]
+        assert "dashboard-pw" not in body and "test-key" not in body
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_client_models_on_the_host_probes_the_published_health_url_and_prefers_the_card(tmp_path):
+    health, health_thread = _start_server(_HealthHandler)
+    handler = type("H", (_LiveOmniRouteHandler,), {
+        "combos": [_local_combo(197120)],
+        # The connection names a compose-network host the host cannot resolve.
+        "connections": [_local_connection("http://llm-server.invalid:8000/v1")],
+    })
+    fake_omniroute, fake_thread = _start_server(handler)
+    try:
+        base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
+        assert client_models(base_url, "dashboard-pw") == []
+        (model,) = client_models(
+            base_url, "dashboard-pw",
+            local_limits={"qwen3-5-4b": (190000, 8192)},
+            local_health_url=f"http://127.0.0.1:{health.server_address[1]}/health",
+        )
+        assert (model["id"], model["ctx_size"], model["client_max_output_tokens"]) == ("my-local-worker", 190000, 8192)
+    finally:
+        fake_omniroute.shutdown()
+        fake_thread.join()
+        health.shutdown()
+        health_thread.join()
 
 
 def test_ensure_api_key_concurrent_calls_create_only_one_key(tmp_path, monkeypatch):
@@ -1290,7 +1497,7 @@ def _run_generated_setup_sh(
             pytest.skip(f"{cmd} not available on this host")
 
     _FakeOmniRouteHandler.keys_created = 0
-    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteHandler)
+    fake_omniroute, fake_thread = _start_server(_FakeOmniRouteWithComboHandler)
     try:
         fake_port = fake_omniroute.server_address[1]
         monkeypatch.setattr(remote_setup_module, "CACHE_PATH", tmp_path / "api-key.json")
@@ -1300,10 +1507,6 @@ def _run_generated_setup_sh(
         monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
         monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
         monkeypatch.setenv("OMNIROUTE_PORT", "20128")
-        monkeypatch.setenv(
-            "MODELS_JSON",
-            json.dumps([{"alias": "a", "ctx_size": 8192, "client_max_output_tokens": 4096}]),
-        )
 
         server, thread = _start_server(RemoteSetupHandler)
         try:
@@ -1398,21 +1601,21 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     assert exit_code == 0, output
 
     pi_models = json.loads((home_dir / ".pi" / "agent" / "models.json").read_text())
-    assert pi_models["providers"]["router-env"]["models"][0]["id"] == "llama-cpp/a"
+    assert pi_models["providers"]["router-env"]["models"][0]["id"] == "my-planning"
     pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
-    assert pi_settings["enabledModels"] == ["router-env/llama-cpp/a"]
+    assert pi_settings["enabledModels"] == ["router-env/my-planning"]
 
     opencode_config = json.loads(
         (home_dir / ".config" / "opencode" / "opencode.jsonc").read_text()
     )
-    assert "llama-cpp/a" in opencode_config["provider"]["router-env"]["models"]
+    assert "my-planning" in opencode_config["provider"]["router-env"]["models"]
 
     pi_models_path = home_dir / ".pi" / "agent" / "models.json"
     assert (pi_models_path.stat().st_mode & 0o777) == 0o600
 
     assert "OmniRoute dashboard: http://127.0.0.1:20128" in output
     assert "dashboard-pw" in output
-    assert "enabled model: llama-cpp/a (context" in output
+    assert "enabled model: my-planning (context" in output
     assert "Installer version: " in output
 
 
@@ -1536,7 +1739,7 @@ def test_setup_sh_merges_into_a_well_formed_existing_pi_configuration(
     assert "router-env" in pi_models["providers"]
     pi_settings = json.loads((home_dir / ".pi" / "agent" / "settings.json").read_text())
     assert pi_settings["theme"] == "dark"
-    assert pi_settings["enabledModels"] == ["router-env/llama-cpp/a"]
+    assert pi_settings["enabledModels"] == ["router-env/my-planning"]
 
 
 @pytest.mark.parametrize("target", ["models.json", "settings.json"])
@@ -1655,7 +1858,7 @@ def test_setup_sh_updates_an_existing_opencode_favorites_state(tmp_path, monkeyp
     state = json.loads(
         (home_dir / ".local" / "state" / "opencode" / "model.json").read_text()
     )
-    assert {"providerID": "router-env", "modelID": "llama-cpp/a"} in state["favorite"]
+    assert {"providerID": "router-env", "modelID": "my-planning"} in state["favorite"]
     assert {"providerID": "other", "modelID": "some-model"} in state["favorite"]
 
 
@@ -1902,7 +2105,6 @@ def _config_server(monkeypatch, tmp_path, fake_port=1):
     monkeypatch.setenv("OMNIROUTE_INTERNAL_URL", f"http://127.0.0.1:{fake_port}")
     monkeypatch.setenv("OMNIROUTE_DASHBOARD_PASSWORD", "dashboard-pw")
     monkeypatch.setenv("OMNIROUTE_PORT", "20128")
-    monkeypatch.setenv("MODELS_JSON", "[]")
     server, thread = _start_server(RemoteSetupHandler)
     try:
         yield server.server_address[1]
@@ -1938,7 +2140,7 @@ def test_config_returns_503_with_retry_after_when_omniroute_unreachable(tmp_path
 def test_config_blocked_backend_answers_503_within_deadline(tmp_path, monkeypatch):
     release = threading.Event()
     monkeypatch.setattr(remote_setup_module, "ensure_api_key", lambda *a, **k: release.wait(30) or "key")
-    monkeypatch.setattr(remote_setup_module, "compute_combo_context", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: [])
     monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 0.5)
     with _config_server(monkeypatch, tmp_path) as port:
         start = time.monotonic()
@@ -1955,7 +2157,7 @@ def test_config_is_single_flight(tmp_path, monkeypatch):
         release.wait(30)
         return "key"
     monkeypatch.setattr(remote_setup_module, "ensure_api_key", slow)
-    monkeypatch.setattr(remote_setup_module, "compute_combo_context", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: [])
     monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 5.0)
     with _config_server(monkeypatch, tmp_path) as port:
         first = threading.Thread(target=_get_config, args=(port,))
