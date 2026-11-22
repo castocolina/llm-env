@@ -89,8 +89,14 @@ def test_observer_build_removes_stale_derivatives_but_not_the_current_or_one_in_
     fake = Path(env["FAKE_DIR"])
     fake.joinpath("images").write_text(f"{SINK}:aaaaaaaaaaaa\n{current}\n{SINK}:bbbbbbbbbbbb\n")
     fake.joinpath("in-use").write_text(f"{SINK}:bbbbbbbbbbbb\n")  # a running container still uses this one
-    result = subprocess.run(["bash", str(ROOT / "scripts/system-one-observer-build.sh")], env=env, capture_output=True,
-                            text=True, check=False, cwd=tmp_path)
+    build_log = ROOT / "tmp" / f"system-one-observer-build-{_observer_key('sha256:base')}.log"  # the script writes it into the repo tmp/
+    log_existed = build_log.exists()
+    try:
+        result = subprocess.run(["bash", str(ROOT / "scripts/system-one-observer-build.sh")], env=env, capture_output=True,
+                                text=True, check=False, cwd=tmp_path)
+    finally:
+        if not log_existed:
+            build_log.unlink(missing_ok=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().splitlines()[-1] == current
     removals = [line for line in _calls(env) if line.startswith("rmi ")]
