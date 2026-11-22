@@ -378,7 +378,7 @@ def test_restore_combos_clears_and_reports_unresolved_connection_id(tmp_path, mo
 LOCAL_PROVIDERS = {"connections": [{"provider": "llama-cpp", "name": "llm-env-local", "id": "conn-1"}]}
 
 
-def _local_combo_server(monkeypatch, *, providers=LOCAL_PROVIDERS, combos=()):
+def _local_combo_server(monkeypatch, *, providers=LOCAL_PROVIDERS, combos=(), outputs=()):
     """Fake OmniRoute; returns the list of (method, path, body) combo writes and the combo-URL call log."""
     login = _fake_login_ok()
     calls = []
@@ -391,6 +391,8 @@ def _local_combo_server(monkeypatch, *, providers=LOCAL_PROVIDERS, combos=()):
         calls.append((request.get_method(), path, body))
         if path == "/api/providers":
             return FakeResponse(providers)
+        if path == "/api/provider-models?provider=llama-cpp":
+            return FakeResponse({"models": [], "modelOutputOverrides": list(outputs)})
         if request.get_method() == "GET":
             return FakeResponse({"combos": list(combos), "total": len(combos)})
         return FakeResponse({"name": "my-local-worker"})
@@ -471,6 +473,24 @@ def test_ensure_local_combo_updates_drifted_context_or_members(monkeypatch):
     assert _writes(calls) == [
         ("PUT", "/api/combos/id-my-local-worker", local_combo_payload("qwen", "conn-1", 131072))
     ]
+
+
+OUTPUT_OVERRIDE_PUT = (
+    "PUT", "/api/provider-models", {"provider": "llama-cpp", "modelId": "qwen", "maxOutputTokenOverride": 8192}
+)
+
+
+def test_ensure_local_combo_stores_the_card_output_limit_in_omniroute(monkeypatch):
+    desired = local_combo_payload("qwen", "conn-1", 131072)
+    for outputs, expected in (
+        ((), "updated"),
+        ([{"modelId": "qwen", "maxOutputTokenOverride": 4096}], "updated"),
+        ([{"modelId": "qwen", "maxOutputTokenOverride": 8192}], "unchanged"),
+    ):
+        calls = _local_combo_server(monkeypatch, combos=[_local_combo(desired)], outputs=outputs)
+        result = ensure_local_combo("http://127.0.0.1:20128", "dashboard-pw", "qwen", 131072, max_output_tokens=8192)
+        assert (result["action"], result["output_action"], result["max_output_tokens"]) == ("unchanged", expected, 8192)
+        assert _writes(calls) == ([OUTPUT_OVERRIDE_PUT] if expected == "updated" else [])
 
 
 def test_ensure_local_combo_skips_without_the_llm_env_local_connection(monkeypatch):

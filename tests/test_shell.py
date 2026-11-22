@@ -6512,6 +6512,22 @@ def test_setup_local_llm_agents_summary_shows_the_combo_limiting_model(
     )
 
 
+def test_setup_local_llm_agents_prints_the_client_models_warnings(
+    tmp_path: pathlib.Path,
+) -> None:
+    result, *_ = run_setup_local_llm_agents(
+        tmp_path,
+        client_models_case=(
+            'printf \'{"models":[{"id":"my-coding","label":"my-coding (combo)","ctx_size":200000,'
+            '"client_max_output_tokens":128000}],'
+            '"warnings":["my-local-worker skipped: no output limit; run make local-combo"]}\\n\''
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "my-local-worker skipped: no output limit; run make local-combo" in result.stderr
+
+
 def test_setup_local_llm_agents_dies_clearly_when_client_models_fails(
     tmp_path: pathlib.Path,
 ) -> None:

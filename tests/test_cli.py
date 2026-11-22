@@ -2020,6 +2020,7 @@ def test_omniroute_combo_context_reports_the_true_minimum(tmp_path):
 
 class _MutableCombosHandler(http.server.BaseHTTPRequestHandler):
     combos: ClassVar[list] = []
+    outputs: ClassVar[dict] = {}
 
     def _reply(self, payload, set_cookie=None):
         body = json.dumps(payload).encode("utf-8")
@@ -2039,6 +2040,12 @@ class _MutableCombosHandler(http.server.BaseHTTPRequestHandler):
             self._reply({"object": "list", "data": [
                 {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
                  "context_length": 500000, "max_output_tokens": 128000}]})
+        elif self.path == "/api/providers":
+            self._reply({"connections": [{"id": "c1", "provider": "llama-cpp", "name": "llm-env-local",
+                                          "isActive": True, "providerSpecificData": {"baseUrl": "http://llm-server:8000/v1"}}]})
+        elif self.path == "/api/provider-models?provider=llama-cpp":
+            self._reply({"modelOutputOverrides": [
+                {"modelId": k, "maxOutputTokenOverride": v} for k, v in type(self).outputs.items()]})
         else:
             self._reply({"combos": type(self).combos})
 
@@ -2078,6 +2085,51 @@ def test_omniroute_client_models_reads_the_live_combos_on_every_run(tmp_path):
     assert result.returncode != 0
     assert "login failed" in json.loads(result.stdout)["error"]
     assert "dashboard-pw" not in result.stdout + result.stderr
+
+
+class _OkHealthHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format_string, *args):
+        pass
+
+
+def test_omniroute_client_models_reads_the_stored_local_output_limit_on_every_run(tmp_path):
+    _MutableCombosHandler.combos = [{"name": "my-local-worker", "context_length": 197120, "models": [
+        {"kind": "model", "providerId": "llama-cpp", "model": "llama-cpp/a", "connectionId": "c1"}]}]
+    _MutableCombosHandler.outputs = {"a": 8192}
+    servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 0), h) for h in (_MutableCombosHandler, _OkHealthHandler)]
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
+    for thread in threads:
+        thread.start()
+    try:
+        config = _write_omniroute_test_config(
+            tmp_path, omniroute_port=servers[0].server_address[1], initial_password="dashboard-pw"
+        )
+        # The host probes llm-server on its published server.port: point it at the fake /health. No card exists.
+        config.write_text(config.read_text().replace("port: 8000,", f"port: {servers[1].server_address[1]},"))
+
+        def listing():
+            result = run("--config", str(config), "omniroute", "client-models")
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout)
+
+        (model,) = listing()["models"]
+        assert (model["id"], model["ctx_size"], model["client_max_output_tokens"]) == ("my-local-worker", 197120, 8192)
+        _MutableCombosHandler.outputs = {"a": 4096}
+        assert listing()["models"][0]["client_max_output_tokens"] == 4096
+        _MutableCombosHandler.outputs = {}
+        out = listing()
+        assert out["models"] == [] and "make local-combo" in out["warnings"][0]
+    finally:
+        _MutableCombosHandler.outputs = {}
+        for server, thread in zip(servers, threads, strict=True):
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
 
 def test_omniroute_combo_context_dies_clearly_for_unknown_combo(tmp_path):
@@ -2928,8 +2980,8 @@ def _ensure_local_combo_cli(config: Path, monkeypatch, capsys) -> tuple[int, dic
 
     calls: list = []
 
-    def fake(*args):
-        calls.append(args[2:])
+    def fake(*args, **kwargs):
+        calls.append((*args[2:], kwargs))
         return {"combo": "my-local-worker", "action": "created"}
 
     monkeypatch.setattr(llmenv, "ensure_local_combo", fake)
@@ -3013,12 +3065,12 @@ def test_ensure_local_combo_cli_skips_an_alias_that_cannot_name_a_card(tmp_path,
     assert "cannot name a capacity card" in out["reason"]
 
 
-def test_ensure_local_combo_cli_uses_the_card_usable_context(tmp_path, monkeypatch, capsys):
+def test_ensure_local_combo_cli_uses_the_card_usable_context_and_output(tmp_path, monkeypatch, capsys):
     config = _lite_config(tmp_path)
     _write_lite_card(config)
     code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
     assert code == 0 and out["action"] == "created"
-    assert calls == [("qwen", 131072)]
+    assert calls == [("qwen", 131072, {"max_output_tokens": 8192})]
 
 
 def test_combo_context_cli_passes_card_limits(tmp_path, monkeypatch, capsys):
@@ -3045,14 +3097,14 @@ def test_client_models_cli_passes_card_limits_and_the_published_health_url(tmp_p
 
     def fake(*args, **kwargs):
         seen.append(kwargs)
-        return [{"id": "my-local-worker"}]
+        return {"models": [{"id": "my-local-worker"}], "warnings": []}
 
     monkeypatch.setattr(llmenv, "client_models", fake)
     config = _lite_config(tmp_path)
     _write_lite_card(config)
     port = yaml.safe_load(config.read_text())["server"]["port"]
     assert llmenv.main(["--config", str(config), "omniroute", "client-models"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"models": [{"id": "my-local-worker"}]}
+    assert json.loads(capsys.readouterr().out) == {"models": [{"id": "my-local-worker"}], "warnings": []}
     assert seen == [
         {"local_limits": {"qwen": (131072, 8192)}, "local_health_url": f"http://127.0.0.1:{port}/health"}
     ]

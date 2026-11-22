@@ -301,6 +301,7 @@ base_url="${omniroute_dashboard_url}/v1"
 api_key="$(printf '%s' "$config_json" | jq -r '.api_key')"
 omniroute_dashboard_password="$(printf '%s' "$config_json" | jq -r '.omniroute_dashboard_password')"
 models_json="$(printf '%s' "$config_json" | jq -c '.models')"
+printf '%s' "$config_json" | jq -r '.warnings[]? | "remote-setup: warning: \(.)"' >&2
 
 api_key_file="${workdir}/api-key"
 printf '%s' "$api_key" >"$api_key_file"
@@ -338,7 +339,7 @@ def _fetch_config_inputs(base_url: str, password: str, box: dict[str, Any]) -> N
             return
         try:
             # Read live on every /config: a combo change needs no re-render or restart.
-            box["models"] = client_models(base_url, password)
+            box["listing"] = client_models(base_url, password)
         except OmniRouteError as exc:
             box["error"] = f"could not fetch OmniRoute combos: {exc}"
     except Exception as exc:  # noqa: BLE001 # surfaced to the request thread, which re-raises it as the existing JSON 500
@@ -709,7 +710,7 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
         if "error" in box:
             self._write_unavailable(box["error"])
             return
-        api_key, models = box["api_key"], box["models"]
+        api_key, listing = box["api_key"], box["listing"]
 
         host = host_without_port(host_header)
         omniroute_port = os.environ.get("OMNIROUTE_PORT", "")
@@ -718,8 +719,9 @@ class RemoteSetupHandler(http.server.BaseHTTPRequestHandler):
             omniroute_port=omniroute_port,
             api_key=api_key,
             omniroute_dashboard_password=dashboard_password,
-            models=models,
+            models=listing["models"],
         )
+        response["warnings"] = listing["warnings"]  # printed by /setup.sh, e.g. a skipped local combo
         self._write_json(200, response)
 
     def log_message(self, format, *args):

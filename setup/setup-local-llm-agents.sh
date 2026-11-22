@@ -25,6 +25,9 @@ api_key="$(jq -r '.api_key // ""' <<<"$key_response")"
 client_models_response="$(llmenv omniroute client-models --config "$CONFIG_PATH")" \
     || die "$(jq -r '.error // "could not fetch OmniRoute combos"' <<<"$client_models_response")"
 models_json="$(jq -c '.models' <<<"$client_models_response")"
+while IFS= read -r warning; do
+    log_warn "$warning"
+done < <(jq -r '.warnings[]?' <<<"$client_models_response")
 
 jq -ne --arg port "$omniroute_port" '$port | test("^[1-9][0-9]{0,4}$") and (tonumber <= 65535)' >/dev/null \
     || die "omniroute port must be an integer from 1 to 65535"

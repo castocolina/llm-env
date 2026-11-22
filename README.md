@@ -250,7 +250,8 @@ unless `LLM_ENV_SCOUT_OUT` names another root.
 
 **my-local-worker (`make local-combo`).** An OmniRoute combo with one member,
 `llama-cpp/<alias>` on the `llm-env-local` connection, strategy `priority`, and
-`context_length` set to the usable context. It has no cloud fallbacks, so the
+`context_length` set to the usable context; the card's usable output goes to OmniRoute's
+per-model output override for `llama-cpp/<alias>` (the combo schema has no output field). It has no cloud fallbacks, so the
 local floor is never lowered. The tool owns the combo: drift is overwritten, as
 for `llm-env-local`. The combo is created or updated only when `llm_server.enabled`
 is true, llm-server is running, the `llm-env-local` connection exists, and the
@@ -263,8 +264,9 @@ when `llm_server.enabled` is true and OmniRoute provisioning succeeded. `make ba
 
 Observed on the pinned OmniRoute image with a throwaway instance, `/v1/models` did not list
 `llama-cpp/<model>`, so the card is the first source of a `llama-cpp` member's
-limits; without it, the combo's own `context_length` stored in OmniRoute (written by
-`make local-combo`) is used. A combo whose member carries `id` and `context_length` (no `config`) was
+limits; without it, the combo's `context_length` and the `llama-cpp/<alias>` output override
+stored in OmniRoute by `make local-combo` are used, and with no output limit anywhere the local
+combo is skipped with a warning. A combo whose member carries `id` and `context_length` (no `config`) was
 accepted and persisted, and the combo itself is listed in `/v1/models` with its
 `context_length`. A chat to the combo routed to the local upstream, and a PUT of
 a new `context_length` persisted. With llm-server down, a chat to the combo
@@ -280,7 +282,8 @@ direct llama.cpp is also an option.
 combos, read from its API on every run (adding, removing or renaming a combo needs no
 change and no restart), and never a direct `llama-cpp/<model>` entry. `router-env/my-local-worker`
 is listed while its OmniRoute connection is active and llama.cpp answers `/health`; its window
-comes from the card, else from the combo's `context_length`. The router
+and output limit come from the card, else from what `make local-combo` stored in OmniRoute;
+without an output limit it is skipped and both installers print a warning. The router
 key is written to `~/.config/router-env/api-key` (0600) and referenced from the
 client configs (pi `!cat`, opencode `{file:...}`), never written into them.
 When the legacy Pi profile `~/.config/llm-env/pi/models.json` (provider `llm-env`, used by

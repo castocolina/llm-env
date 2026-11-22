@@ -191,7 +191,7 @@ LOCAL_ONLY_COMBO = {
     "combo": "my-local-worker",
     "members": [{"provider": "llama-cpp", "model": "qwen3-5-4b"}],
     "min_context_window": 197120,
-    "min_max_output_tokens": None,
+    "min_max_output_tokens": 8192,
     "limiting_member": "llama-cpp/qwen3-5-4b",
 }
 MIXED_COMBO = {
@@ -216,9 +216,17 @@ def test_combo_client_models_keeps_the_limiting_member_provenance():
         "id": "my-local-worker",
         "label": "my-local-worker (combo)",
         "ctx_size": 197120,
-        "client_max_output_tokens": 128000,
+        "client_max_output_tokens": 8192,
         "limiting_model": "llama-cpp/qwen3-5-4b",
     }
+
+
+def test_combo_client_models_skips_a_local_only_combo_with_an_unknown_output_limit_and_says_so():
+    warnings: list[str] = []
+    unknown = {**LOCAL_ONLY_COMBO, "min_max_output_tokens": None}
+    assert combo_client_models([unknown, MIXED_COMBO], True, warnings) == combo_client_models([MIXED_COMBO], True)
+    assert len(warnings) == 1
+    assert warnings[0].startswith("my-local-worker skipped: no output limit") and "make local-combo" in warnings[0]
 
 
 def test_combo_client_models_includes_combos_with_known_context():
@@ -1112,15 +1120,20 @@ def test_config_returns_json_500_for_an_unexpected_error(tmp_path, monkeypatch):
 
 
 class _LiveOmniRouteHandler(_FakeOmniRouteHandler):
-    """An OmniRoute whose combos and connections a test changes between requests
-    (each test subclasses it with its own `combos` and `connections` lists)."""
+    """An OmniRoute whose combos, connections and llama-cpp output overrides a
+    test changes between requests (each test subclasses it with its own
+    `combos` and `connections` lists and, optionally, an `outputs` dict)."""
 
     combos: ClassVar[list]
     connections: ClassVar[list]
+    outputs: ClassVar[dict] = {}
 
     def do_GET(self):
         cls = type(self)
-        if self.path == "/v1/models":
+        if self.path == "/api/provider-models?provider=llama-cpp":
+            self._reply({"models": [], "modelOutputOverrides": [
+                {"modelId": model, "maxOutputTokenOverride": value} for model, value in cls.outputs.items()]})
+        elif self.path == "/v1/models":
             self._reply({"object": "list", "data": [
                 {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
                  "context_length": 500000, "max_output_tokens": 128000},
@@ -1219,6 +1232,7 @@ def test_config_lists_the_local_combo_with_its_live_window_and_no_direct_llama_c
         handler = type("H", (_LiveOmniRouteHandler,), {
             "combos": [_local_combo(197120), _cloud_combo("my-coding")],
             "connections": [_local_connection(backend)],
+            "outputs": {"qwen3-5-4b": 8192},
         })
         with _live_config(tmp_path, monkeypatch, handler) as get_config:
             status, payload = get_config()
@@ -1227,14 +1241,22 @@ def test_config_lists_the_local_combo_with_its_live_window_and_no_direct_llama_c
                 "id": "my-local-worker",
                 "label": "my-local-worker (combo)",
                 "ctx_size": 197120,
-                "client_max_output_tokens": 128000,
+                "client_max_output_tokens": 8192,
                 "limiting_model": "llama-cpp/qwen3-5-4b",
             }
             assert [m["id"] for m in payload["models"]] == ["my-local-worker", "my-coding"]
+            assert payload["warnings"] == []
             assert "sk-llama-secret" not in json.dumps(payload)
 
             handler.combos[0]["context_length"] = 204800  # make local-combo after a new card
-            assert get_config()[1]["models"][0]["ctx_size"] == 204800
+            handler.outputs = {"qwen3-5-4b": 4096}
+            local = get_config()[1]["models"][0]
+            assert (local["ctx_size"], local["client_max_output_tokens"]) == (204800, 4096)
+
+            handler.outputs = {}  # stored output limit gone: skipped, and the reason is reported
+            status, payload = get_config()
+            assert [m["id"] for m in payload["models"]] == ["my-coding"]
+            assert len(payload["warnings"]) == 1 and "make local-combo" in payload["warnings"][0]
     finally:
         health.shutdown()
         health_thread.join()
@@ -1289,12 +1311,13 @@ def test_client_models_on_the_host_probes_the_published_health_url_and_prefers_t
     fake_omniroute, fake_thread = _start_server(handler)
     try:
         base_url = f"http://127.0.0.1:{fake_omniroute.server_address[1]}"
-        assert client_models(base_url, "dashboard-pw") == []
+        assert client_models(base_url, "dashboard-pw")["models"] == []
+        handler.outputs = {"qwen3-5-4b": 4096}  # OmniRoute's stored value loses to the host's card
         (model,) = client_models(
             base_url, "dashboard-pw",
             local_limits={"qwen3-5-4b": (190000, 8192)},
             local_health_url=f"http://127.0.0.1:{health.server_address[1]}/health",
-        )
+        )["models"]
         assert (model["id"], model["ctx_size"], model["client_max_output_tokens"]) == ("my-local-worker", 190000, 8192)
     finally:
         fake_omniroute.shutdown()
@@ -1617,6 +1640,15 @@ def test_setup_sh_executed_end_to_end_configures_pi_and_opencode(tmp_path, monke
     assert "dashboard-pw" in output
     assert "enabled model: my-planning (context" in output
     assert "Installer version: " in output
+
+
+def test_setup_sh_prints_the_config_warnings(tmp_path, monkeypatch):
+    model = {"id": "my-planning", "label": "my-planning (combo)", "ctx_size": 500000, "client_max_output_tokens": 128000}
+    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: {
+        "models": [model], "warnings": ["my-local-worker skipped: no output limit; run make local-combo"]})
+    exit_code, output, _ = _run_generated_setup_sh(tmp_path, monkeypatch)
+    assert exit_code == 0, output
+    assert "remote-setup: warning: my-local-worker skipped: no output limit; run make local-combo" in output
 
 
 def test_setup_sh_does_not_leak_the_staged_install_lib_temp_file(tmp_path, monkeypatch):
@@ -2140,7 +2172,7 @@ def test_config_returns_503_with_retry_after_when_omniroute_unreachable(tmp_path
 def test_config_blocked_backend_answers_503_within_deadline(tmp_path, monkeypatch):
     release = threading.Event()
     monkeypatch.setattr(remote_setup_module, "ensure_api_key", lambda *a, **k: release.wait(30) or "key")
-    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: {"models": [], "warnings": []})
     monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 0.5)
     with _config_server(monkeypatch, tmp_path) as port:
         start = time.monotonic()
@@ -2157,7 +2189,7 @@ def test_config_is_single_flight(tmp_path, monkeypatch):
         release.wait(30)
         return "key"
     monkeypatch.setattr(remote_setup_module, "ensure_api_key", slow)
-    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: [])
+    monkeypatch.setattr(remote_setup_module, "client_models", lambda *a, **k: {"models": [], "warnings": []})
     monkeypatch.setattr(remote_setup_module, "CONFIG_DEADLINE_SECONDS", 5.0)
     with _config_server(monkeypatch, tmp_path) as port:
         first = threading.Thread(target=_get_config, args=(port,))

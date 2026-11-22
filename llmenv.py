@@ -699,7 +699,9 @@ def _ensure_local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, p
         return _local_combo_skip(f"{now['basis']}; {hint}")
     if card is None or capacity.interference_passed(card) is not True:
         return _local_combo_skip("interference gate not passed; run make model-interference")
-    return emit(ensure_local_combo(base_url, password, alias, now["context_tokens"]))
+    return emit(ensure_local_combo(
+        base_url, password, alias, now["context_tokens"], max_output_tokens=now["max_output_tokens"]
+    ))
 
 
 def cmd_omniroute(args: argparse.Namespace) -> int:
@@ -741,14 +743,13 @@ def cmd_omniroute(args: argparse.Namespace) -> int:
         from pylib import capacity
 
         server_port = (cfg.get("server") or {}).get("port")
-        models = client_models(
+        return emit(client_models(
             base_url,
             initial_password,
             local_limits=capacity.local_limits(Path(args.config), cfg),
             # llm-server's published port: the connection's own baseUrl names a compose-network host
             local_health_url=f"http://127.0.0.1:{server_port}/health" if server_port else None,
-        )
-        return emit({"models": models})
+        ))
     if args.action == "backup-combos":
         if not args.output:
             return fail("--output is required for backup-combos")

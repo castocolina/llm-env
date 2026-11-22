@@ -31,4 +31,5 @@ wait_for_tcp_port "$omniroute_port" \
 result="$(llmenv --config "$CONFIG_PATH" omniroute ensure-local-combo)" \
     || die "$(jq -r '.error // "ensure-local-combo failed"' <<<"$result")"
 
-jq -r '"my-local-worker: \(.action)" + (if .reason then " (\(.reason))" else "" end)' <<<"$result"
+jq -r '"my-local-worker: \(.action)" + (if .reason then " (\(.reason))" else "" end)
+    + (if .output_action then "; output limit \(.max_output_tokens): \(.output_action)" else "" end)' <<<"$result"

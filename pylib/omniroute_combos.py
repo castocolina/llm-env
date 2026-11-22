@@ -30,6 +30,7 @@ from pylib.omniroute import (
     _login,
     _request,
     find_connection,
+    llama_cpp_output_overrides,
 )
 
 # Fields accepted by POST /api/combos and PUT /api/combos/{id} (see
@@ -253,10 +254,30 @@ def _matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
     return scalars and _members(existing) == _members(desired)
 
 
+def _sync_local_output_limit(base_url: str, session_token: str, alias: str, max_output_tokens: int) -> str:
+    # The combo schema has no output field (context_length is its only limit), so the card's output limit goes to
+    # OmniRoute's per-model output override for llama-cpp/<alias>, which client_models reads back on both hosts.
+    if llama_cpp_output_overrides(base_url, session_token).get(alias) == max_output_tokens:
+        return "unchanged"
+    _request(
+        "PUT",
+        f"{base_url}/api/provider-models",
+        session_token,
+        {"provider": "llama-cpp", "modelId": alias, "maxOutputTokenOverride": max_output_tokens},
+    )
+    return "updated"
+
+
 def ensure_local_combo(
-    base_url: str, dashboard_password: str, alias: str, context_length: int
+    base_url: str,
+    dashboard_password: str,
+    alias: str,
+    context_length: int,
+    *,
+    max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Create or update the local-only my-local-worker combo; the tool owns it, so drift is overwritten."""
+    """Create or update the local-only my-local-worker combo; the tool owns it, so drift is overwritten.
+    With max_output_tokens, also keep llama-cpp/<alias>'s output override in OmniRoute equal to it."""
     result: dict[str, Any] = {
         "combo": LOCAL_COMBO_NAME,
         "model": f"llama-cpp/{alias}",
@@ -277,8 +298,13 @@ def ensure_local_combo(
     existing = next((c for c in combos if isinstance(c, dict) and c.get("name") == LOCAL_COMBO_NAME), None)
     if existing is None:
         _request("POST", f"{base_url}/api/combos", session_token, desired)
-        return {**result, "action": "created"}
-    if _matches(existing, desired):
-        return {**result, "action": "unchanged"}
-    _request("PUT", f"{base_url}/api/combos/{existing['id']}", session_token, desired)
-    return {**result, "action": "updated"}
+        result["action"] = "created"
+    elif _matches(existing, desired):
+        result["action"] = "unchanged"
+    else:
+        _request("PUT", f"{base_url}/api/combos/{existing['id']}", session_token, desired)
+        result["action"] = "updated"
+    if max_output_tokens is not None:
+        result["max_output_tokens"] = max_output_tokens
+        result["output_action"] = _sync_local_output_limit(base_url, session_token, alias, max_output_tokens)
+    return result

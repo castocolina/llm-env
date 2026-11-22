@@ -536,10 +536,13 @@ def _combo_member(provider_id, model):
     return {"kind": "model", "providerId": provider_id, "model": f"{provider_id}/{model}"}
 
 
-def _combo_context_urlopen(login, catalog, combos_payload):
+def _combo_context_urlopen(login, catalog, combos_payload, output_overrides=None):
     def fake_urlopen(request, timeout):
         if request.full_url == LOGIN_URL:
             return login(request, timeout)
+        if request.full_url == "http://127.0.0.1:20128/api/provider-models?provider=llama-cpp":
+            assert request.get_method() == "GET"
+            return FakeResponse({"modelOutputOverrides": output_overrides or []})
         if request.full_url == "http://127.0.0.1:20128/v1/models":
             assert request.get_method() == "GET"
             return FakeResponse(catalog)
@@ -659,6 +662,20 @@ def test_compute_combo_context_without_local_limits_leaves_llama_cpp_unresolved(
 
     assert combo["min_context_window"] is None
     assert combo["limiting_member"] is None
+
+
+def test_compute_combo_context_reads_omniroute_stored_local_limits_when_the_card_is_absent(monkeypatch):
+    combos_payload = {"combos": [
+        {"name": "my-local-worker", "context_length": 197120, "models": [_combo_member("llama-cpp", "qwen")]}
+    ]}
+    overrides = [{"modelId": "qwen", "maxOutputTokenOverride": 8192}, {"modelId": "other", "maxOutputTokenOverride": 1}]
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", _combo_context_urlopen(
+        _fake_login_ok(), {"object": "list", "data": []}, combos_payload, overrides))
+    (combo,) = compute_combo_context("http://127.0.0.1:20128", "dashboard-pw")
+    assert (combo["min_context_window"], combo["min_max_output_tokens"]) == (197120, 8192)
+    (combo,) = compute_combo_context(
+        "http://127.0.0.1:20128", "dashboard-pw", local_limits={"qwen": (131072, 4096)})
+    assert (combo["min_context_window"], combo["min_max_output_tokens"]) == (131072, 4096)  # the card wins
 
 
 def test_compute_combo_context_ignores_the_catalog_for_llama_cpp_members(monkeypatch):
