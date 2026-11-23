@@ -18,6 +18,7 @@ from pylib.omniroute_combos import (
     backup_connections,
     ensure_local_combo,
     local_combo_payload,
+    register_local_models,
     restore_combos,
 )
 
@@ -498,6 +499,75 @@ def test_ensure_local_combo_skips_without_the_llm_env_local_connection(monkeypat
     result = _ensure()
     assert result["action"] == "skipped" and "make start-llama" in result["reason"]
     assert not [c for c in calls if c[1].startswith("/api/combos")]
+
+
+def _provider_models_server(monkeypatch, rows, *, providers=LOCAL_PROVIDERS):
+    """Stateful fake of OmniRoute's llama-cpp custom models: POST stores max_*_tokens as *TokenLimit and never
+    updates an existing row (addCustomModel), DELETE removes one. Returns the (method, path, body) write log."""
+    login = _fake_login_ok()
+    writes = []
+
+    def fake_urlopen(request, timeout):
+        if request.full_url == LOGIN_URL:
+            return login(request, timeout)
+        method, path = request.get_method(), request.full_url.removeprefix("http://127.0.0.1:20128")
+        body = json.loads(request.data) if request.data else {}
+        if method == "GET" and path == "/api/providers":
+            return FakeResponse(providers)
+        if method == "GET" and path == "/api/provider-models?provider=llama-cpp":
+            return FakeResponse({"models": list(rows), "modelOutputOverrides": []})
+        writes.append((method, path, body))
+        if method == "POST" and path == "/api/provider-models":
+            assert body["provider"] == "llama-cpp"
+            if not any(row["id"] == body["modelId"] for row in rows):
+                rows.append({"id": body["modelId"], "name": body["modelName"], "source": "manual",
+                             "inputTokenLimit": body["max_input_tokens"], "outputTokenLimit": body["max_output_tokens"]})
+            return FakeResponse({"model": rows[-1]})
+        if method == "DELETE" and path.startswith("/api/provider-models?provider=llama-cpp&model="):
+            model = path.rsplit("=", 1)[1]
+            rows[:] = [row for row in rows if row["id"] != model]
+            return FakeResponse({"removed": True})
+        raise AssertionError(f"unexpected {method} {path}")
+
+    monkeypatch.setattr(omniroute_module.urllib.request, "urlopen", fake_urlopen)
+    return writes
+
+
+def _register(limits):
+    return register_local_models("http://127.0.0.1:20128", "dashboard-pw", limits)
+
+
+def _limits(rows):
+    return {row["id"]: (row["inputTokenLimit"], row["outputTokenLimit"]) for row in rows}
+
+
+def test_register_local_models_lists_each_alias_with_the_card_limits_and_a_second_run_writes_nothing(monkeypatch):
+    rows = []
+    writes = _provider_models_server(monkeypatch, rows)
+    limits = {"qwen3-5-4b": (197120, 8192), "other": (65536, 4096)}
+    assert _register(limits) == {"qwen3-5-4b": "created", "other": "created"}
+    assert _limits(rows) == limits and [w[0] for w in writes] == ["POST", "POST"]
+    writes.clear()
+    assert _register(limits) == {"qwen3-5-4b": "unchanged", "other": "unchanged"}
+    assert writes == []
+
+
+def test_register_local_models_replaces_a_row_with_stale_limits_and_leaves_other_rows_alone(monkeypatch):
+    rows = [{"id": "qwen3-5-4b", "inputTokenLimit": 128000, "outputTokenLimit": 8192},
+            {"id": "disabled-model", "inputTokenLimit": 32768, "outputTokenLimit": 2048}]
+    writes = _provider_models_server(monkeypatch, rows)
+    assert _register({"qwen3-5-4b": (197120, 8192)}) == {"qwen3-5-4b": "updated"}
+    assert _limits(rows) == {"disabled-model": (32768, 2048), "qwen3-5-4b": (197120, 8192)}
+    assert [(w[0], w[1]) for w in writes] == [
+        ("DELETE", "/api/provider-models?provider=llama-cpp&model=qwen3-5-4b"), ("POST", "/api/provider-models")]
+
+
+def test_register_local_models_creates_nothing_without_the_llm_env_local_connection(monkeypatch):
+    rows = []
+    writes = _provider_models_server(monkeypatch, rows, providers={"connections": []})
+    assert _register({"qwen3-5-4b": (197120, 8192)}) == {"qwen3-5-4b": "skipped: no llm-env-local connection"}
+    assert writes == [] and rows == []
+    assert _register({}) == {}  # no enabled model with card limits: not even a login
 
 
 def test_local_combo_payload_survives_backup_and_restore_remap():

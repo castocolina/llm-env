@@ -13296,6 +13296,20 @@ def test_local_combo_prints_the_action(tmp_path: pathlib.Path) -> None:
     assert "my-coding-lite" not in result.stdout
 
 
+def test_local_combo_prints_the_provider_page_registrations(tmp_path: pathlib.Path) -> None:
+    listed, empty = tmp_path / "listed", tmp_path / "empty"  # one stub tree per run, never a rewritten stub
+    listed.mkdir()
+    empty.mkdir()
+    result, _calls = _local_combo_run(
+        listed,
+        ensure_case='printf \'{"action":"unchanged","provider_models":{"qwen3-5-4b":"created"}}\\n\'',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "my-local-worker: unchanged; llama-cpp provider models: qwen3-5-4b created" in result.stdout
+    result, _calls = _local_combo_run(empty, ensure_case='printf \'{"action":"unchanged","provider_models":{}}\\n\'')
+    assert result.returncode == 0 and result.stdout.strip() == "my-local-worker: unchanged"
+
+
 def test_local_combo_prints_the_skip_reason(tmp_path: pathlib.Path) -> None:
     result, _calls = _local_combo_run(
         tmp_path, ensure_case='printf \'{"action":"skipped","reason":"no capacity card"}\\n\''

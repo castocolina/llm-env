@@ -78,6 +78,7 @@ from pylib.omniroute_combos import (
     backup_combos,
     backup_connections,
     ensure_local_combo,
+    register_local_models,
     restore_combos,
 )
 from pylib.presets import write_presets
@@ -675,20 +676,14 @@ def cmd_resource_override(args: argparse.Namespace) -> int:
     return emit({**result, "apply": _APPLY_HINT})
 
 
-def _local_combo_skip(reason: str) -> int:
-    return emit({"combo": LOCAL_COMBO_NAME, "action": "skipped", "reason": reason})
+def _local_combo_skip(reason: str) -> dict[str, Any]:
+    return {"combo": LOCAL_COMBO_NAME, "action": "skipped", "reason": reason}
 
 
-def _ensure_local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, password: str) -> int:
+def _local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, password: str, alias: str) -> dict[str, Any]:
     """Decision 4: only a current depth sweep plus a passed interference gate may feed the combo."""
     from pylib import capacity
 
-    if not (cfg.get("llm_server") or {}).get("enabled"):
-        return _local_combo_skip("llm_server disabled")
-    models = enabled_models(cfg)
-    if not models:
-        return _local_combo_skip("no enabled model")
-    alias = models[0]["alias"]
     try:
         card = capacity.read_card(config_path, cfg, alias)
     except capacity.CapacityError as exc:
@@ -699,9 +694,23 @@ def _ensure_local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, p
         return _local_combo_skip(f"{now['basis']}; {hint}")
     if card is None or capacity.interference_passed(card) is not True:
         return _local_combo_skip("interference gate not passed; run make model-interference")
-    return emit(ensure_local_combo(
+    return ensure_local_combo(
         base_url, password, alias, now["context_tokens"], max_output_tokens=now["max_output_tokens"]
-    ))
+    )
+
+
+def _ensure_local_combo(config_path: Path, cfg: dict[str, Any], base_url: str, password: str) -> int:
+    """Every enabled model whose card has usable limits is listed on the llama-cpp provider page first,
+    whatever the combo decides; that listing routes nothing for clients."""
+    from pylib import capacity
+
+    if not (cfg.get("llm_server") or {}).get("enabled"):
+        return emit(_local_combo_skip("llm_server disabled"))
+    models = enabled_models(cfg)
+    if not models:
+        return emit(_local_combo_skip("no enabled model"))
+    listed = register_local_models(base_url, password, capacity.local_limits(config_path, cfg))
+    return emit({**_local_combo(config_path, cfg, base_url, password, models[0]["alias"]), "provider_models": listed})
 
 
 def cmd_omniroute(args: argparse.Namespace) -> int:

@@ -44,7 +44,7 @@ make key-reset                 # Rotate the server API key
 make model-report MODEL=<alias>  # One-page plain-text account of the model from its card (also saved as capacity/<alias>.report.md)
 make model-capacity MODEL=<alias> [DEPTH=<bench.json>] [SCORE=<score.json>] [PROFILE=<latency.json>]  # Write/show the measured capacity card (~/.config/llm-env/capacity/<alias>.json)
 make model-interference  # Gate: does the local model slow System One or raise container memory events
-make local-combo         # Create/update the local-only OmniRoute combo my-local-worker from the card (also stores its output limit in OmniRoute)
+make local-combo         # Create/update the local-only OmniRoute combo my-local-worker from the card (also stores its output limit in OmniRoute and registers the local models on the llama-cpp provider page)
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
 make prune-stale-images [DRY_RUN=1] [STALE_DAYS=90]  # Remove this stack's stale images plus other projects' unused images created >= STALE_DAYS days ago (creation date stands in for last use; 0 = stack only), one plain podman rmi at a time; DRY_RUN=1 only lists (other projects' images untouched)

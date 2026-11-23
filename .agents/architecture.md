@@ -48,7 +48,7 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/model-capacity.sh` | `make model-capacity`: takes only `--depth` (bench-fit JSON), `--score` (score JSON) and `--profile` (latency-profile JSON), writes the depth, ladder and profile sections, then shows the card. Quants are written by `quant-headroom.sh check` (via `llmenv capacity headroom`); interference and ram by `model-interference.sh` |
 | `scripts/model-interference.sh` | `make model-interference`: load test of the local model against System One, OmniRoute and container memory counters; run dirs under `LLM_ENV_SCOUT_OUT` (default `tmp/`) |
 | `scripts/model-report.sh` | `make model-report`: prints the card report and saves it as `<config dir>/capacity/<alias>.report.md` (0600) |
-| `scripts/omniroute-local-combo.sh` | `make local-combo`: creates or updates the local-only OmniRoute combo `my-local-worker` from the card; skips unless llm-server is enabled and running |
+| `scripts/omniroute-local-combo.sh` | `make local-combo`: creates or updates the local-only OmniRoute combo `my-local-worker` from the card and registers the enabled local models on the llama-cpp provider (dashboard list and test); skips unless llm-server is enabled and running |
 
 ## Container Lifecycle
 

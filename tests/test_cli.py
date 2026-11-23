@@ -2984,7 +2984,11 @@ def _ensure_local_combo_cli(config: Path, monkeypatch, capsys) -> tuple[int, dic
         calls.append((*args[2:], kwargs))
         return {"combo": "my-local-worker", "action": "created"}
 
+    def fake_register(base_url, password, limits):  # its result shows in the output as provider_models
+        return {alias: f"created {context}/{output}" for alias, (context, output) in limits.items()}
+
     monkeypatch.setattr(llmenv, "ensure_local_combo", fake)
+    monkeypatch.setattr(llmenv, "register_local_models", fake_register)
     code = llmenv.main(["--config", str(config), "omniroute", "ensure-local-combo"])
     return code, json.loads(capsys.readouterr().out), calls
 
@@ -3071,6 +3075,16 @@ def test_ensure_local_combo_cli_uses_the_card_usable_context_and_output(tmp_path
     code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
     assert code == 0 and out["action"] == "created"
     assert calls == [("qwen", 131072, {"max_output_tokens": 8192})]
+    assert out["provider_models"] == {"qwen": "created 131072/8192"}
+
+
+def test_ensure_local_combo_cli_registers_no_guessed_limits_without_a_usable_card(tmp_path, monkeypatch, capsys):
+    config = _lite_config(tmp_path)
+    for interference in (None, False):  # no card; a card whose usable limits wait for the interference run
+        if interference is not None:
+            _write_lite_card(config, interference=interference)
+        code, out, calls = _ensure_local_combo_cli(config, monkeypatch, capsys)
+        assert code == 0 and out["action"] == "skipped" and calls == [] and out["provider_models"] == {}
 
 
 def test_combo_context_cli_passes_card_limits(tmp_path, monkeypatch, capsys):

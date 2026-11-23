@@ -1127,16 +1127,22 @@ class _LiveOmniRouteHandler(_FakeOmniRouteHandler):
     combos: ClassVar[list]
     connections: ClassVar[list]
     outputs: ClassVar[dict] = {}
+    registered: ClassVar[list] = []  # llama-cpp custom rows, as register_local_models leaves them
 
     def do_GET(self):
         cls = type(self)
         if self.path == "/api/provider-models?provider=llama-cpp":
-            self._reply({"models": [], "modelOutputOverrides": [
+            self._reply({"models": cls.registered, "modelOutputOverrides": [
                 {"modelId": model, "maxOutputTokenOverride": value} for model, value in cls.outputs.items()]})
         elif self.path == "/v1/models":
+            # A registered row shows up in OmniRoute's catalog under both provider prefixes.
             self._reply({"object": "list", "data": [
                 {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
                  "context_length": 500000, "max_output_tokens": 128000},
+            ] + [
+                {"id": f"{prefix}/{row['id']}", "root": row["id"], "owned_by": "llama-cpp", "custom": True,
+                 "context_length": row["inputTokenLimit"], "max_output_tokens": row["outputTokenLimit"]}
+                for row in cls.registered for prefix in ("llamacpp", "llama-cpp")
             ]})
         elif self.path == "/api/combos":
             self._reply({"combos": cls.combos, "total": len(cls.combos)})
@@ -1233,6 +1239,8 @@ def test_config_lists_the_local_combo_with_its_live_window_and_no_direct_llama_c
             "combos": [_local_combo(197120), _cloud_combo("my-coding")],
             "connections": [_local_connection(backend)],
             "outputs": {"qwen3-5-4b": 8192},
+            # Listed on the provider page (and so in the catalog), still never a client model.
+            "registered": [{"id": "qwen3-5-4b", "inputTokenLimit": 197120, "outputTokenLimit": 8192}],
         })
         with _live_config(tmp_path, monkeypatch, handler) as get_config:
             status, payload = get_config()

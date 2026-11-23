@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # omniroute-local-combo.sh — create or update the local-only OmniRoute combo
-# my-local-worker from the capacity card. Skips (exit 0) unless llm-server is
+# my-local-worker from the capacity card, and list every enabled model with a
+# card on Dashboard > Providers > llama.cpp. Skips (exit 0) unless llm-server is
 # enabled and running; llmenv skips again when the card or interference gate is
 # not current. Never stops, restarts or recreates a container.
 #
@@ -32,4 +33,6 @@ result="$(llmenv --config "$CONFIG_PATH" omniroute ensure-local-combo)" \
     || die "$(jq -r '.error // "ensure-local-combo failed"' <<<"$result")"
 
 jq -r '"my-local-worker: \(.action)" + (if .reason then " (\(.reason))" else "" end)
-    + (if .output_action then "; output limit \(.max_output_tokens): \(.output_action)" else "" end)' <<<"$result"
+    + (if .output_action then "; output limit \(.max_output_tokens): \(.output_action)" else "" end)
+    + (if (.provider_models // {}) != {} then "; llama-cpp provider models: "
+        + (.provider_models | to_entries | map("\(.key) \(.value)") | join(", ")) else "" end)' <<<"$result"

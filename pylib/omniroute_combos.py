@@ -20,6 +20,8 @@ connections with new ids.
 from __future__ import annotations
 
 import json
+import urllib.parse
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -266,6 +268,47 @@ def _sync_local_output_limit(base_url: str, session_token: str, alias: str, max_
         {"provider": "llama-cpp", "modelId": alias, "maxOutputTokenOverride": max_output_tokens},
     )
     return "updated"
+
+
+def register_local_models(
+    base_url: str, dashboard_password: str, limits: Mapping[str, tuple[int, int]]
+) -> dict[str, str]:
+    """List each enabled local model on Dashboard > Providers > llama.cpp, with the card's limits.
+
+    llama-cpp is a passthrough provider: its page lists only synced (dashboard "Import from /models"), registry
+    (none for llama-cpp) or custom rows, and nothing here syncs, so each alias gets a custom row. The tool owns the
+    rows of the aliases it is given: POST never updates an existing row and PUT cannot set limits, so a row with
+    stale limits is deleted and re-created. Rows of disabled or removed aliases are left alone (no ownership mark).
+    limits is alias -> (context, max output), as capacity.local_limits() returns it."""
+    if not limits:
+        return {}
+    session_token = _login(base_url, dashboard_password)
+    if find_connection(_extract_providers(_request("GET", f"{base_url}/api/providers", session_token))) is None:
+        return dict.fromkeys(limits, "skipped: no llm-env-local connection")
+    listing = _request("GET", f"{base_url}/api/provider-models?provider=llama-cpp", session_token)
+    rows = {
+        row["id"]: row
+        for row in (listing.get("models") if isinstance(listing, dict) else None) or []
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    }
+    results: dict[str, str] = {}
+    for alias, (context, output) in limits.items():
+        row = rows.get(alias)
+        if row is not None and (row.get("inputTokenLimit"), row.get("outputTokenLimit")) == (context, output):
+            results[alias] = "unchanged"
+            continue
+        if row is not None:
+            query = urllib.parse.urlencode({"provider": "llama-cpp", "model": alias})
+            _request("DELETE", f"{base_url}/api/provider-models?{query}", session_token)
+        _request(
+            "POST",
+            f"{base_url}/api/provider-models",
+            session_token,
+            {"provider": "llama-cpp", "modelId": alias, "modelName": alias,
+             "max_input_tokens": context, "max_output_tokens": output},
+        )
+        results[alias] = "updated" if row is not None else "created"
+    return results
 
 
 def ensure_local_combo(

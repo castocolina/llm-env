@@ -253,7 +253,7 @@ unless `LLM_ENV_SCOUT_OUT` names another root.
 **my-local-worker (`make local-combo`).** An OmniRoute combo with one member,
 `llama-cpp/<alias>` on the `llm-env-local` connection, strategy `priority`, and
 `context_length` set to the usable context; the card's usable output goes to OmniRoute's
-per-model output override for `llama-cpp/<alias>` (the combo schema has no output field). It has no cloud fallbacks, so the
+per-model output override for `llama-cpp/<alias>` (the combo schema has no output field). The same command registers each enabled local model as a custom model on the llama-cpp provider (card context and output), so Dashboard > Providers > llama-cpp lists it and its test action works; entries are never deleted automatically. It has no cloud fallbacks, so the
 local floor is never lowered. The tool owns the combo: drift is overwritten, as
 for `llm-env-local`. The combo is created or updated only when `llm_server.enabled`
 is true, llm-server is running, the `llm-env-local` connection exists, and the
@@ -282,7 +282,7 @@ direct llama.cpp is also an option.
 
 **Clients.** `make setup-local-llm-agents` and the remote `/setup.sh` list OmniRoute's current
 combos, read from its API on every run (adding, removing or renaming a combo needs no
-change and no restart), and never a direct `llama-cpp/<model>` entry. `router-env/my-local-worker`
+change and no restart), and never a direct `llama-cpp/<model>` entry (the model itself is visible and testable on the provider page). `router-env/my-local-worker`
 is listed while its OmniRoute connection is active and llama.cpp answers `/health`; its window
 and output limit come from the card, else from what `make local-combo` stored in OmniRoute;
 without an output limit it is skipped and both installers print a warning. The router
