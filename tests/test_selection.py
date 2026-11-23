@@ -45,6 +45,16 @@ def test_an_owned_file_never_falls_back_so_reach_beyond_push_depth_is_missed(): 
     assert not sel.full and sel.tests == ("tests/test_a.py", "tests/test_d.py", NP)
 
 
+def test_ownership_is_measured_at_commit_depth_at_both_stages():                    # spec G1: the push is never weaker
+    chain = {"x/a.sh": "", "x/b.sh": "a.sh\n", "x/c.sh": "b.sh\n", "tests/test_d.py": "'c.sh'\n", NP: ""}
+    assert select(chain, ["x/a.sh"], [], "push", {}).full
+
+
+def test_an_opt_in_test_is_no_referrer_either():
+    tree = TREE | {"tests/test_x.py": "'tests/test_omniroute_update_proof.py'\n"}
+    assert select(tree, ["scripts/orphan.sh"], [], "push", {}).full
+
+
 def test_imports_markdown_and_changed_tests():
     assert "tests/test_n.py" in S(["pylib/m.py"], "commit").tests
     assert S(["docs/guide.md"], "push").tests == ("tests/test_guide.py", NP)

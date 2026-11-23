@@ -98,10 +98,12 @@ def _runnable(tree: dict[str, str], tests) -> set[str]:
 
 
 def _reach(tree: dict[str, str], path: str, depth: int) -> set[str]:
-    """`path` plus `depth` hops of non-hub, non-markdown files naming a reached file; markdown reaches only itself."""
+    """`path` plus `depth` hops of non-hub, non-markdown, non-opt-in files naming a reached file; markdown reaches only
+    itself. Opt-in tests never own (G1), so they are no referrer either."""
     reached = frontier = {path}
     for _ in range(0 if path.endswith(".md") else depth):
-        frontier = {f for f, text in tree.items() if f not in reached and f not in HUBS and not f.endswith(".md")
+        frontier = {f for f, text in tree.items() if f not in reached and f not in HUBS and f not in OPT_IN
+                    and not f.endswith(".md")
                     and any(names(text, r) for r in frontier)}
         reached = reached | frontier
     return reached
@@ -133,11 +135,10 @@ def select(tree: dict[str, str], changed, deleted, stage: str, exempt: dict[str,
         elif path.rsplit("/", 1)[-1] == "conftest.py":
             tests |= _runnable(tree, (t for t in tree if t.startswith(path.removesuffix("conftest.py"))))
             reasons[path] = "conftest: the tests under its directory"
-        elif found := owners(tree, path, depth):
+        elif matches or is_test_file(path) or owners(tree, path, 1):  # owned means a commit-depth owner (G1)
+            found = owners(tree, path, depth)
             tests |= found
-            reasons[path] = f"{len(found)} owner(s)"
-        elif matches or is_test_file(path):
-            reasons[path] = f"exempt: {matches[0][0]}" if matches else "test file"
+            reasons[path] = f"{len(found)} owner(s)" if found else f"exempt: {matches[0][0]}" if matches else "test file"
         else:
             full, reasons[path] = True, "no owner"
     return Selection(full, () if full else tuple(sorted(tests | set(ALWAYS))), reasons, sum(map(is_test_file, tree)))
