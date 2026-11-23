@@ -1,5 +1,6 @@
 """pylib/selection.py: which test files a change selects (spec D1, D3, G1)."""
 import gzip
+import re
 import sys
 from pathlib import Path
 
@@ -107,6 +108,20 @@ def test_cli_edges_trace_every_llmenv_import_form():    # top-level, function-lo
 def test_cli_edge_selects_script_tests_through_the_subcommand():
     assert select(CLI, ["pylib/m.py"], [], "commit", {}).tests == tuple(sorted((NP, "tests/test_pre.py", "tests/test_start.py")))
     assert select(CLI, ["pylib/q.py"], [], "push", {}).full
+
+
+def test_cli_edge_follows_a_backslash_continued_call():                             # scripts/observe-publish.sh:13-14
+    tree = CLI | {"scripts/cont.sh": 'uv run "$R/llmenv.py" \\\n  budget --models-dir "$d"\n', "tests/test_cont.py": "'cont.sh'\n"}
+    assert "tests/test_cont.py" in select(tree, ["pylib/m.py"], [], "commit", {}).tests
+
+
+def test_real_llmenv_has_no_hub_module_and_parser_names_match_handlers():
+    tree = load_tree(ROOT)
+    hubs = sorted(p for p, words in cli_edges(tree).items() if words == {"*"})
+    assert not hubs, f"{hubs}: implement spec D2's '*' hub rule in select() before a module traces to no subcommand"
+    parsers = set(re.findall(r'add_parser\(\s*"([^"]+)"', tree["llmenv.py"]))
+    handlers = {h.replace("_", "-") for h in re.findall(r"^def cmd_(\w+)", tree["llmenv.py"], re.MULTILINE)}
+    assert parsers == handlers   # cli_edges derives each word from its cmd_ handler name
 
 
 def test_load_tree_reads_binary_files_as_empty(tmp_path):

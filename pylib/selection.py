@@ -139,13 +139,13 @@ def _reach(tree: dict[str, str], path: str, depth: int) -> set[str]:
     edges = cli_edges(tree)
     reached = frontier = {path}
     for _ in range(0 if path.endswith(".md") else depth):
-        # shortcut: a "*" module adds no caller, so it is only a hub when unowned; honour it in select() if one appears
+        # shortcut: a "*" module adds no caller, so it is only a hub when unowned; a real-tree test trips if one appears
         words = sorted({w for r in frontier for w in edges.get(r, ()) if w != "*"})
         call = re.compile(r"(?<![A-Za-z0-9-])(?:" + "|".join(map(re.escape, words)) + r")(?![A-Za-z0-9-])") if words else None
         frontier = {f for f, text in tree.items() if f not in reached and f not in HUBS and f not in OPT_IN
                     and not f.endswith(".md")
                     and (any(names(text, r) for r in frontier)
-                         or (call is not None and any("llmenv" in line and call.search(line) for line in text.splitlines())))}
+                         or (call is not None and any("llmenv" in line and call.search(line) for line in text.replace("\\\n", " ").splitlines())))}
         reached = reached | frontier
     return reached
 
