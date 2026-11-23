@@ -119,7 +119,8 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   (`/tmp/pytest-of-$USER/llm-env-run.XXXXXX`, so `pylib/observe_fs.py`'s `pytest_roots` still sees it), printed as
   `run dir: <path>` on stderr and removed by a trap; `PYTEST_DEBUG_TEMPROOT` (which pytest prefers to `TMPDIR`) is
   `<run dir>/pytest`, which the runner creates (pytest makes only `pytest-of-<user>` inside it, without parents).
-  Any other entry left in the run dir fails the run (no name-prefix exemption), as do new entries
+  Any other entry left in the run dir fails the run (no name-prefix exemption; the one exception is an empty file named
+  `uv-<16 hex>.lock`, which uv 0.11 leaves in `TMPDIR` on every `uv run`), as do new entries
   anywhere under repo `tmp/` (a recursive before-and-after list of exact relative paths) and new Podman objects: a
   read-only before-and-after diff of container
   (`ps -a -q --no-trunc`), volume (`volume ls -q`) and image (`images -q --no-trunc`) IDs. An incomplete inventory

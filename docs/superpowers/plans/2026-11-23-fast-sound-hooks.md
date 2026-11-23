@@ -265,7 +265,7 @@ def test_a_signal_to_the_runner_reaps_every_descendant(tmp_path, sig, rc):
   a sibling inventory dir, print the run dir, EXIT trap removing both, then the signal traps. Before and after pytest,
   snapshot `find tmp -mindepth 1` (when `tmp/` exists) and the three Podman ID sets into the inventory dir; new
   entries are `LC_ALL=C comm -13` of the sorted snapshots; every top-level entry of the run dir except exactly
-  `pytest` gives `leak: TMPDIR/<name>`. (`shortcut: a diff cannot tell another agent's or the live stack's new object
+  `pytest` (and an empty file named `uv-<16 hex>.lock`, which uv leaves on every run; a directory of that name still leaks) gives `leak: TMPDIR/<name>`. (`shortcut: a diff cannot tell another agent's or the live stack's new object
   from a leak; the line names it for a person to judge; switch to label-based attribution if false alarms recur`)
 - [ ] **Step 3: Green.** `bash tools/test.sh tests/test_test_runner.py && make validate && make test`. Expected: pass,
   no `leak:` line from the real suite. Fix any leaking test at its root.
