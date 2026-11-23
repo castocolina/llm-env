@@ -19,10 +19,9 @@ require_cmd yq
 printf 'llm-server API key:           %s\n' "$(yq -r '.server.api_key // "(not set)"' "$CONFIG_PATH")"
 printf 'OmniRoute dashboard password: %s\n' "$(yq -r '.omniroute.initial_password // "(not set)"' "$CONFIG_PATH")"
 
-env_file="${LLM_ENV_ENV_FILE:-${REPO_DIR}/.env}"
 master_key="(not set)"
-if [ -f "$env_file" ]; then
-    line="$(grep -m1 '^OMNI_ROUTER_MASTER_KEY=' "$env_file" || true)"
+if [ -f "$ENV_FILE" ]; then
+    line="$(grep -m1 '^OMNI_ROUTER_MASTER_KEY=' "$ENV_FILE" || true)"
     [ -n "$line" ] && master_key="${line#OMNI_ROUTER_MASTER_KEY=}"
 fi
 printf 'OMNI_ROUTER_MASTER_KEY:        %s\n' "$master_key"

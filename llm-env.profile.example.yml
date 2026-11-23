@@ -1,0 +1,84 @@
+# llm-env host profile, annotated example. Copy to llm-env.profile.yml (tracked) or create that file
+# from a running host with `uv run llmenv.py profile export`, then review it.
+#
+# What it is: the non-secret desired state of a deployment. `make setup` merges it onto the
+# generated, host-local ~/.config/llm-env/models.yml (no prompt for any key it names);
+# `make profile-apply` re-applies it (timestamped backup, no-op when nothing differs);
+# `make profile-check` and `make check-setup` report drift.
+# Rules: every key is optional except `version`; unknown keys are an error; a key that is left
+# out keeps whatever models.yml has. Never put secrets here: the API key, the OmniRoute dashboard
+# password and the remote-setup master key (.env) are generated per host and are not in the schema.
+# Precedence in `make setup`: profile > LLM_ENV_* seed > value already in models.yml > default.
+version: 1                       # schema version; must be 1
+
+server:
+  port: 8000                     # llm-server (llama.cpp) port, published on all interfaces
+  mdns_name: llm                 # mDNS name: <mdns_name>.local
+  sleep_idle_seconds: 300        # llama.cpp unloads models after this many idle seconds (0 = never)
+
+omniroute:
+  image: docker.io/diegosouzapw/omniroute:latest   # gateway image (tags float; digest pinning is a follow-up)
+  port: 20128                    # gateway port, published on all interfaces
+
+remote_setup:
+  image: docker.io/library/python:3.13-alpine      # stock image that serves the LAN installer
+  port: 20130                    # installer port, published on all interfaces
+
+runtime:                         # llama.cpp router settings
+  models_max: 1                  # models loaded at once (clamped to the number of enabled models)
+  ubatch_size: 512               # physical batch size
+  flash_attn: true               # flash attention
+  cache_type_k: q5_1             # KV cache quantization for K (f16, q8_0, q5_1, q4_0, ...)
+  cache_type_v: q5_1             # KV cache quantization for V
+
+system_one:                      # Laya on ROCm (needs an AMD GPU with /dev/kfd)
+  enabled: false                 # run the system-one container
+  listen: loopback               # loopback = 127.0.0.1 only; lan = 0.0.0.0 (no authentication)
+  port: 8010                     # Laya port
+  models: english,multilingual   # LAYA_MODELS (english | multilingual | typed-decisions)
+  vram_reserve_mib: 5120         # VRAM subtracted from llm-server's budget while System One is on
+  idle_unload_seconds: 600       # Laya drops checkpoints after this many idle seconds (0 = never)
+
+llm_server:
+  enabled: true                  # run the local llama.cpp server (false = OmniRoute gateway only)
+  models:                        # enabled model aliases, in order; each must be in `models` below,
+    - gemma4                     # in models.yml, or in models.yml.example
+
+models:                          # full definitions of the enabled models (owner-tuned, non-secret);
+  - alias: gemma4                # upserted by alias, `enabled` comes from llm_server.models
+    label: Gemma 4 12B Agentic v2
+    parameters: 12B
+    quantization: Q4_K_M
+    file: gemma4-v2-Q4_K_M.gguf  # file name under the models directory
+    url: https://huggingface.co/yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF/resolve/190a31365a6b80a692349be34ccdac730cad4fe4/gemma4-v2-Q4_K_M.gguf
+    size_bytes: 7381381664       # expected download size
+    vram_budget: 55%             # '55%', '7.5GB' or '512MiB'
+    ctx_size: 131072             # context window
+    client_max_output_tokens: 8192  # max output tokens advertised to clients (<= ctx_size)
+    n_gpu_layers: 99             # layers offloaded to the GPU
+    # optional: n_cpu_moe (MoE experts kept on CPU), check_ctx_size, check_timeout_seconds,
+    # sampling: {temperature, top_p, top_k, repeat_penalty}
+
+resources:
+  overrides: {}                  # per-service CPU/RAM overrides (omniroute, remote_setup, system_one),
+                                 # e.g. {omniroute: {memory_max_mib: 2048}}; replaced as a whole; {} = none
+  llm_server:                    # llm-server ceilings; the computed cpus/memory_mib stay generated
+    memory_ceiling_pct: 60       # max share of host RAM
+    memory_ceiling_floor_pct: 30
+    cpu_ceiling_pct: 60          # max share of host CPUs
+    cpu_ceiling_floor_pct: 20
+
+boot:
+  enable: false                  # true: llm-server.service starts the stack at boot (linger + enabled
+                                 # unit); `make start` / `make enable-boot` install it
+
+observe:                         # profile-only (not copied into models.yml)
+  enabled: false                 # true: `make start` brings up Grafana + VictoriaMetrics and
+                                 # `make enable-boot` / `make start` enable llm-env-observe-stack.service
+
+network:                         # profile-only (not copied into models.yml)
+  firewall:
+    manage: false                # true: `make firewall` (and make start, warn-only) opens the LAN ports
+                                 # of enabled services in firewalld; false: nothing is touched
+    allowed_cidrs: []            # empty: open the ports to the zone; e.g. [192.168.1.0/24]: rich rules
+                                 # limited to these sources (an existing open rule is never removed)

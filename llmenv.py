@@ -16,9 +16,11 @@ import argparse
 import copy
 import json
 import math
+import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +84,14 @@ from pylib.omniroute_combos import (
     restore_combos,
 )
 from pylib.presets import write_presets
+from pylib.profile import (
+    DEFAULT_PROFILE_PATH,
+    apply_profile,
+    differences,
+    export_profile,
+    load_profile,
+    write_profile,
+)
 from pylib.remote_setup import ensure_api_key
 from pylib.resources import (
     DEFAULT_POLICY,
@@ -881,6 +891,29 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     return emit({"written": written, "path": str(path)})
 
 
+def cmd_profile(args: argparse.Namespace) -> int:
+    config_path, profile_path = Path(args.config), Path(args.profile)
+    cfg = load_config(config_path)
+    if args.action == "export":
+        existing = load_profile(profile_path) if profile_path.exists() else None
+        extra = list(read_env_file(Path(args.env_file)).values()) if args.env_file else []
+        write_profile(export_profile(cfg, existing, extra), profile_path)
+        return emit({"written": str(profile_path)})
+    new = apply_profile(cfg, load_profile(profile_path))
+    diffs = differences(cfg, new)
+    if args.action == "check":
+        return emit({"drift": bool(diffs), "differences": diffs, "profile": str(profile_path)}, 1 if diffs else 0)
+    if not diffs:
+        return emit({"changed": False, "backup": None, "differences": []})
+    backup = config_path.with_name(f"{config_path.name}.profile-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    # O_EXCL: never replace an earlier backup; 0600 like the config itself.
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(config_path.read_bytes())
+    save_config(new, config_path)
+    return emit({"changed": True, "backup": str(backup), "differences": diffs})
+
+
 def cmd_agent_runtime_cap(args: argparse.Namespace) -> int:
     return emit({"runtime_seconds": int(DEFAULT_RUNTIME_SECONDS)})
 
@@ -1102,6 +1135,14 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = sub.add_parser("migrate-config")
     migrate.add_argument("--config", default=argparse.SUPPRESS)
     migrate.set_defaults(func=cmd_migrate_config)
+
+    profile_parser = sub.add_parser("profile")
+    profile_parser.add_argument("--config", default=argparse.SUPPRESS)
+    profile_parser.add_argument("action", choices=["export", "apply", "check"])
+    profile_parser.add_argument("--profile", default=str(DEFAULT_PROFILE_PATH))
+    profile_parser.add_argument("--env-file", default=str(DEFAULT_PROFILE_PATH.parent / ".env"),
+                                help="export: values in this file must never appear in the profile")
+    profile_parser.set_defaults(func=cmd_profile)
 
     sub.add_parser("agent-runtime-cap").set_defaults(func=cmd_agent_runtime_cap)
 

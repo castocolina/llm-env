@@ -67,6 +67,19 @@ def _isolate_observe_state(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _no_tracked_profile_or_repo_env(tmp_path_factory) -> None:
+    """Keep script tests off the committed llm-env.profile.yml and the checkout's .env.
+
+    Scripts run from ROOT would otherwise apply the owner's real profile (setup, check-setup,
+    network, enable-boot, start) and create or read the real <repo>/.env master key. Tests that
+    exercise the profile or .env set LLM_ENV_PROFILE / LLM_ENV_ENV_FILE themselves.
+    """
+    scratch = tmp_path_factory.mktemp("no-profile")
+    os.environ.setdefault("LLM_ENV_PROFILE", str(scratch / "absent.profile.yml"))
+    os.environ.setdefault("LLM_ENV_ENV_FILE", str(scratch / "env"))
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _shared_uv_cache() -> None:
     """Point every child `uv run` at one shared cache.
 

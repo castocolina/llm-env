@@ -12,13 +12,17 @@ SYSTEM_ONE_CHECK_UNIT_NAME="llm-env-system-one-check"
 COMPOSE_FILE="${HOME}/.config/llm-env/docker-compose.yml"
 COMPOSE_INSPECT_DIR="${LLM_ENV_COMPOSE_INSPECT_DIR:-${REPO_DIR}/tmp}"
 WRAPPER_UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}.service"
+# Tracked, non-secret desired state (docs/superpowers/plans/2026-11-23-tracked-host-profile.md).
+PROFILE_PATH="${LLM_ENV_PROFILE:-${REPO_DIR}/llm-env.profile.yml}"
+# Untracked, per-host secrets for the compose render (OMNI_ROUTER_MASTER_KEY).
+ENV_FILE="${LLM_ENV_ENV_FILE:-${REPO_DIR}/.env}"
 VULKAN_IMAGE="ghcr.io/ggml-org/llama.cpp:server-vulkan"
 CPU_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 LLM_ENV_HEALTH_TIMEOUT_SECONDS="${LLM_ENV_HEALTH_TIMEOUT_SECONDS:-60}"
 
 # Exported so scripts that source this file expose them to child processes, and so
 # the linter does not flag them as unused (SC2034) in this library.
-export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME OMNIROUTE_HEAL_UNIT_NAME SYSTEM_ONE_CHECK_UNIT_NAME COMPOSE_FILE COMPOSE_INSPECT_DIR WRAPPER_UNIT_PATH VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
+export REPO_DIR CONFIG_PATH MODELS_DIR UNIT_NAME OMNIROUTE_HEAL_UNIT_NAME SYSTEM_ONE_CHECK_UNIT_NAME COMPOSE_FILE COMPOSE_INSPECT_DIR WRAPPER_UNIT_PATH PROFILE_PATH ENV_FILE VULKAN_IMAGE CPU_IMAGE LLM_ENV_HEALTH_TIMEOUT_SECONDS
 
 GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'
 RED=$'\033[0;31m'; NC=$'\033[0m'
@@ -394,6 +398,24 @@ ensure_api_key() {
         log_info "generated an API key"
     fi
     chmod 600 "$CONFIG_PATH"
+}
+
+# ensure_master_key: remote-setup's /config needs OMNI_ROUTER_MASTER_KEY in ENV_FILE. Generates it only when the
+# key is missing or empty; a non-empty key is never replaced and never printed; other lines are kept; ends 0600.
+ensure_master_key() {
+    local key tmp
+    if [ -f "$ENV_FILE" ] && grep -Eq '^OMNI_ROUTER_MASTER_KEY=.+' "$ENV_FILE"; then
+        chmod 600 "$ENV_FILE"
+        return 0
+    fi
+    key="$(openssl rand -hex 32)" && [[ "$key" =~ ^[0-9a-f]{64}$ ]] || die "could not generate OMNI_ROUTER_MASTER_KEY"
+    tmp="$(mktemp "$(dirname "$ENV_FILE")/.env.XXXXXX")" || die "could not create a temporary file beside ${ENV_FILE}"
+    if ! { if [ -f "$ENV_FILE" ]; then grep -v '^OMNI_ROUTER_MASTER_KEY=' "$ENV_FILE" || true; fi
+           printf 'OMNI_ROUTER_MASTER_KEY=%s\n' "$key"; } >"$tmp" || ! mv -f "$tmp" "$ENV_FILE"; then
+        rm -f "$tmp"
+        die "could not write ${ENV_FILE}"
+    fi
+    log_info "generated OMNI_ROUTER_MASTER_KEY in ${ENV_FILE} (show it with make show-secrets)"
 }
 
 ensure_omniroute_secrets() {

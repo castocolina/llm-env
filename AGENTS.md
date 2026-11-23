@@ -24,8 +24,11 @@ make start-llama            # Start llm-server only; needs the stack running (un
 make stop-llama             # Stop llm-server only; the container is kept (never removed)
 make llama-enable MODEL=<alias>  # Config only: enable local llm-server with one model, backing up models.yml first
 make llama-disable          # Config only: disable local llm-server, backing up models.yml first (apply with make restart)
-make check-setup             # Offline validation
+make check-setup             # Offline validation (includes the profile drift check)
 make check-server            # Online API contract validation
+make profile-apply           # Merge the tracked llm-env.profile.yml onto models.yml (backup; no-op when equal)
+make profile-check           # Read-only drift report between models.yml and the profile (exit 1 on drift)
+make firewall [DRY_RUN=1]    # Open the LAN ports of enabled services per profile network.firewall (needs sudo; adds only, never removes)
 make check-with-agents       # Live Pi/OpenCode weather and USD-to-CLP checks
 make benchmark                # Measure Vulkan throughput; CPU fallback exits nonzero; run only after make stop-llama (see below)
 make gpu-status                # Show which process (if any) holds the GPU
@@ -63,6 +66,11 @@ and afterwards verify that
 backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening.
 
 ### Environment variables
+
+`llm-env.profile.yml` (tracked, non-secret; see `llm-env.profile.example.yml` and
+`docs/new-host.md`) wins over the `LLM_ENV_*` seeds below for every key it names; `make setup`
+does not prompt for those keys. `LLM_ENV_PROFILE` and `LLM_ENV_ENV_FILE` relocate the profile and
+`<repo>/.env` (tests point them away from the checkout).
 
 - `LLM_ENV_ASSUME_YES=1` — run `make setup` / `make clean` unattended,
   accepting defaults instead of prompting. `make gpu-status` is the

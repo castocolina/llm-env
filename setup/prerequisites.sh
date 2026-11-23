@@ -5,7 +5,9 @@ set -euo pipefail
 # shellcheck source=../tools/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/lib.sh"
 
-RUNTIME=("jq:jq" "yq:yq" "podman:podman" "podman-compose:podman-compose" "curl:curl" "ip:iproute")
+RUNTIME=("jq:jq" "yq:yq" "podman:podman" "podman-compose:podman-compose" "curl:curl" "ip:iproute" "openssl:openssl" "skopeo:skopeo")
+# Image-based Fedora (Bazzite, Silverblue) layers packages with rpm-ostree; package-based Fedora uses dnf.
+OSTREE_MARKER="${LLM_ENV_OSTREE_BOOTED:-/run/ostree-booted}"
 DEVELOPMENT=("git:git" "shellcheck:ShellCheck" "node:nodejs")
 OPTIONAL_LAN=("firewall-cmd:firewalld" "avahi-publish:avahi")
 
@@ -43,6 +45,8 @@ command_purpose() {
         podman-compose) printf '%s\n' "compose provider for 'podman compose'" ;;
         curl) printf '%s\n' "HTTP client for downloads and health checks" ;;
         ip) printf '%s\n' "network address inspection" ;;
+        openssl) printf '%s\n' "random secrets (.env master key, Grafana admin)" ;;
+        skopeo) printf '%s\n' "registry digests for make update-omniroute" ;;
         git) printf '%s\n' "source control for updates" ;;
         shellcheck) printf '%s\n' "shell script validation" ;;
         node) printf '%s\n' "JSONC editor for OpenCode client configuration" ;;
@@ -131,14 +135,17 @@ apply_live_if_possible() {
 install_packages() {
     local prompt="$1"
     shift
-    local reply
-    printf 'sudo rpm-ostree install'
+    local reply installer=(rpm-ostree install)
+    [ -e "$OSTREE_MARKER" ] || installer=(dnf install -y)
+    printf 'sudo %s' "${installer[*]}"
     printf ' %s' "$@"
     printf '\n'
     read -rp "$prompt" reply
     if [ "$reply" = "yes" ]; then
-        sudo rpm-ostree install "$@" || return 1
-        apply_live_if_possible || true
+        sudo "${installer[@]}" "$@" || return 1
+        if [ -e "$OSTREE_MARKER" ]; then
+            apply_live_if_possible || true
+        fi
         return 0
     fi
     return 1

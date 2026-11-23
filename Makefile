@@ -1,6 +1,7 @@
 .PHONY: help prerequisites dev-setup setup setup-local-llm-agents start stop restart start-llama stop-llama llama-enable llama-disable check-setup check-server check-with-agents benchmark system-one-build system-one-benchmark resources-snapshot resources-benchmark model-interference model-capacity model-report \
         key-reset show-secrets enable-boot disable-boot status gpu-status codex-provision provider-provision fix-codex-context combo-context local-combo backup \
-        combo-backup combo-restore connections-backup update-omniroute update-system-one migrate-remote-setup logs validate test clean prune prune-stale-images
+        combo-backup combo-restore connections-backup update-omniroute update-system-one migrate-remote-setup logs validate test clean prune prune-stale-images \
+        profile-apply profile-check firewall
 
 help:
 	@bash tools/run-target.sh help -- bash scripts/help.sh
@@ -44,6 +45,15 @@ check-setup:
 
 check-server:
 	@bash tools/run-target.sh check-server -- bash scripts/check-server.sh
+
+profile-apply:
+	@bash tools/run-target.sh profile-apply -- bash scripts/profile.sh apply
+
+profile-check:
+	@bash tools/run-target.sh profile-check -- bash scripts/profile.sh check
+
+firewall:
+	@bash tools/run-target.sh firewall -- bash scripts/firewall.sh $(if $(filter 1,$(DRY_RUN)),--dry-run)
 
 check-with-agents:
 	@bash tools/run-target.sh check-with-agents -- bash scripts/check-with-agents.sh

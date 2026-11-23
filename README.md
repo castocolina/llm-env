@@ -14,6 +14,19 @@ make start       # start whatever is not running (never stops a running containe
 make check-server
 ```
 
+### Host profile (configuration as code)
+
+`llm-env.profile.yml` (tracked, non-secret; every key explained in `llm-env.profile.example.yml`)
+holds the owner's choices: ports, enabled models and their definitions, System One, resource
+overrides, start at boot, the observe stack and the firewall policy. `make setup` merges it onto the
+generated `~/.config/llm-env/models.yml` and never prompts for a key it names (precedence: profile >
+`LLM_ENV_*` seed > value already in `models.yml` > default). `make profile-apply` re-applies it
+(timestamped backup, no-op when nothing differs), `make profile-check` reports drift (also part of
+`make check-setup`), and `uv run llmenv.py profile export` writes it from a running host. Secrets
+(API key, dashboard password, `.env` master key) are generated per host and never in the profile.
+`make firewall` opens the LAN ports per `network.firewall` (needs sudo). Fresh host and migration
+steps: [docs/new-host.md](docs/new-host.md).
+
 ## What it does
 
 - Serves multiple models from one endpoint using llama.cpp router mode.
@@ -584,9 +597,12 @@ collects host container and OmniRoute metrics with `llmenv.py observe-metrics --
 the backend is down, so no failing unit is recorded and no flush is forced. Missing measurements
 render as gaps, never zero (`last_over_time(...[90s])` with `spanNulls: false`).
 
-Rootless containers do not auto-start after a reboot because `podman-restart.service` is not
-enabled. After a reboot, run `bash scripts/observe-stack.sh up` again if the dashboard is needed;
-the timer is re-enabled by the same command.
+`podman-restart.service` is not enabled, so container restart policies do not start anything at
+boot. `up` and `install-units` write and enable the generated user unit
+`llm-env-observe-stack.service` (`WantedBy=default.target`, linger on), whose
+`observe-stack.sh start` runs `compose up -d --no-recreate` at boot; installing it never starts or
+recreates a container. With `observe.enabled: true` in `llm-env.profile.yml`, `make start` runs
+`start` + `install-units` and `make enable-boot` runs `install-units`. `down` disables the unit.
 
 ## System One updates
 
@@ -653,8 +669,9 @@ response, validation facts, and result for each check.
 ## Requirements
 
 Bazzite or Fedora. Run `make prerequisites` to detect and, after explicit
-confirmation, install uv, jq, Mike Farah yq v4, podman, curl, iproute, git,
-Node.js, and ShellCheck. No compiler needed — the llama.cpp server comes from a
+confirmation, install uv, jq, Mike Farah yq v4, podman, curl, iproute, openssl,
+skopeo, git, Node.js, and ShellCheck (with `rpm-ostree` when `/run/ostree-booted`
+exists, otherwise `dnf`). No compiler needed — the llama.cpp server comes from a
 prebuilt image.
 
 ## Commands

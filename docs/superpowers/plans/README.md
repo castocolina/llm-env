@@ -66,3 +66,4 @@ Statuses: **DONE** (shipped), **DONE, partly superseded**, **SUPERSEDED** (repla
 | 2026-11-20-recovery-and-usage-observability | DONE | OmniRoute restored, limits decided, container/OmniRoute/Laya/llama.cpp/filesystem telemetry live; T10a and T10d left out by owner decision |
 | 2026-11-21-phoenix-retirement | DONE | Phoenix removed from repo, Podman and the collector; history exported |
 | 2026-11-21-http-inventory-and-laya-request-table | DONE | inventory, per-request Laya table, remote-setup counters and Grafana/VictoriaMetrics native counters shipped; T10a and T10d out by owner decision |
+| 2026-11-23-tracked-host-profile | DONE | committed non-secret `llm-env.profile.yml` merged onto `models.yml` by `make setup` / `make profile-apply` (`profile-check` in `make check-setup`); observe stack boot unit; `make firewall`; `.env` master key, check-setup and dnf prerequisites fixes; runbook `docs/new-host.md`; image digest pinning left as a follow-up |

@@ -31,7 +31,11 @@ offer_firewall_port() {
     fi
 }
 
-if command -v firewall-cmd >/dev/null 2>&1; then
+if command -v firewall-cmd >/dev/null 2>&1 && [ -f "$PROFILE_PATH" ] \
+        && [ "$(yq -r '.network.firewall.manage // false' "$PROFILE_PATH")" = "true" ]; then
+    # Firewall as code (profile network.firewall); runs at every start and boot, so it only warns.
+    bash "${REPO_DIR}/scripts/firewall.sh" || log_warn "firewall rules not applied; run 'make firewall' in a terminal (needs sudo)"
+elif command -v firewall-cmd >/dev/null 2>&1; then
     if [ "$llm_server_enabled" = "true" ]; then
         offer_firewall_port "$port"
     fi

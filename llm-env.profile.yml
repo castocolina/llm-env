@@ -1,0 +1,62 @@
+# llm-env host profile (tracked, non-secret). Written by `uv run llmenv.py profile export`;
+# merged onto ~/.config/llm-env/models.yml by `make setup` and `make profile-apply`.
+# Every key is documented in llm-env.profile.example.yml. Never add secrets here.
+version: 1
+server:
+  port: 8000
+  mdns_name: llm
+  sleep_idle_seconds: 300
+omniroute:
+  image: docker.io/diegosouzapw/omniroute:next
+  port: 20128
+remote_setup:
+  image: docker.io/library/python:3.13-alpine
+  port: 20130
+runtime:
+  models_max: 1
+  ubatch_size: 512
+  flash_attn: true
+  cache_type_k: q5_1
+  cache_type_v: q5_1
+system_one:
+  enabled: true
+  listen: lan
+  port: 8010
+  models: english,multilingual
+  vram_reserve_mib: 4480
+  idle_unload_seconds: 600
+llm_server:
+  enabled: true
+  models:
+    - qwen3-5-4b
+models:
+  - alias: qwen3-5-4b
+    label: Qwen3.5-4B Q4_K_M
+    parameters: 4.2B
+    quantization: Q4_K_M
+    file: Qwen3.5-4B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf
+    size_bytes: 2740937888
+    vram_budget: 8693MiB
+    ctx_size: 204800
+    client_max_output_tokens: 8192
+    n_gpu_layers: 99
+    sampling:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+resources:
+  overrides: {}
+  llm_server:
+    memory_ceiling_pct: 60
+    memory_ceiling_floor_pct: 30
+    cpu_ceiling_pct: 60
+    cpu_ceiling_floor_pct: 20
+boot:
+  enable: true
+observe:
+  enabled: true
+network:
+  firewall:
+    manage: true
+    allowed_cidrs: []

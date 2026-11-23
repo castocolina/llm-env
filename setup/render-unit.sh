@@ -79,7 +79,7 @@ if [ "$system_one_enabled" = "true" ]; then
 fi
 render_output="$(llmenv --config "$CONFIG_PATH" render-compose \
     --models-dir "$MODELS_DIR" --presets-path "$presets_path" \
-    --repo-root "$REPO_DIR" --env-file "${REPO_DIR}/.env" \
+    --repo-root "$REPO_DIR" --env-file "$ENV_FILE" \
     --system-one-rocr-index "$system_one_rocr_index" \
     --output "$COMPOSE_FILE")" \
     || die "render-compose failed: $(jq -r '.error // "unknown error"' <<<"$render_output" 2>/dev/null || printf '%s' "$render_output")"

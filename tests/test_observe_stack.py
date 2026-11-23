@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -1213,3 +1214,60 @@ def test_publish_runs_bounded_collector_when_backend_is_up(tmp_path: Path) -> No
     assert "timeout <--kill-after=5s> <45s>" in calls
     assert (f"uv <run> <--project> <{ROOT}> <{ROOT / 'llmenv.py'}> "
             f"<--config> <{tmp_path / 'models.yml'}> <observe-metrics> <--push>") in calls
+
+
+# ---- Boot unit (docs/superpowers/plans/2026-11-23-tracked-host-profile.md) ----
+
+BOOT_UNIT = "llm-env-observe-stack.service"
+
+
+def _boot_unit(w: SimpleNamespace) -> str:
+    path = w.home / ".config" / "systemd" / "user" / BOOT_UNIT
+    return path.read_text() if path.exists() else ""
+
+
+def test_install_units_enables_a_generated_boot_unit_without_starting_anything(tmp_path: Path) -> None:
+    w = _world(tmp_path)
+    r = _run(w, "observe-stack.sh", "install-units")
+    assert r.returncode == 0, r.stdout + r.stderr
+    unit = _boot_unit(w)
+    assert f'ExecStart=/usr/bin/bash "{ROOT / "scripts/observe-stack.sh"}" start' in unit
+    for line in ("Type=oneshot", "RemainAfterExit=yes", "[Install]", "WantedBy=default.target",
+                 "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"):
+        assert line in unit
+    unit_path = w.home / ".config" / "systemd" / "user" / BOOT_UNIT
+    assert stat.S_IMODE(unit_path.stat().st_mode) == 0o600
+    calls = _calls(w)
+    assert f"systemctl <--user> <enable> <{BOOT_UNIT}>" in calls  # enabled for boot, never --now
+    assert f"<--now> <{BOOT_UNIT}>" not in calls
+    assert "podman" not in calls and "podman-restart.service" not in calls  # no container is touched
+    assert "<enable> <--now> <llm-env-observe.timer>" in calls
+
+
+def test_boot_unit_parses_with_systemd_analyze(tmp_path: Path) -> None:
+    analyze = shutil.which("systemd-analyze")
+    if analyze is None:
+        pytest.skip("systemd-analyze not installed")
+    w = _world(tmp_path)
+    assert _run(w, "observe-stack.sh", "install-units").returncode == 0
+    unit = w.home / ".config" / "systemd" / "user" / BOOT_UNIT
+    r = subprocess.run([analyze, "verify", str(unit)], capture_output=True, text=True, timeout=60, check=False,
+                       env={**os.environ, "SYSTEMD_LOG_LEVEL": "warning"})
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_start_brings_existing_containers_up_without_recreating(tmp_path: Path) -> None:
+    w = _world(tmp_path, pw=VALID_PW, secret=True)
+    r = _run(w, "observe-stack.sh", "start")
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(w)
+    assert "<up> <-d> <--no-recreate>" in calls
+    assert "systemctl" not in calls  # the boot entry never writes or enables units
+
+
+def test_up_installs_the_boot_unit_and_down_disables_it(tmp_path: Path) -> None:
+    w = _world(tmp_path, pw=VALID_PW, secret=True)
+    assert _run(w, "observe-stack.sh", "up").returncode == 0
+    assert "WantedBy=default.target" in _boot_unit(w)
+    assert _run(w, "observe-stack.sh", "down").returncode == 0
+    assert f"systemctl <--user> <disable> <{BOOT_UNIT}>" in _calls(w)

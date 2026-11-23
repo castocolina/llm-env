@@ -30,7 +30,8 @@ def span_check(tmp_path: pathlib.Path, mode: str) -> subprocess.CompletedProcess
     rendered.write_text(yaml.safe_dump({"services": {"system-one": {
         "image": f"localhost/llm-env-system-one-span-sink:{'stale' if mode == 'stale-image' else key}",
         "environment": {"LAYA_SPAN_SINK": "/var/log/laya/laya-spans.jsonl"},
-        "volumes": [] if mode == "missing-sink-bind" else ["${HOME}/.local/state/llm-env/laya-spans:/var/log/laya:Z"],
+        # The renderer writes the expanded home (pylib/compose.py), never a literal ${HOME}.
+        "volumes": [] if mode == "missing-sink-bind" else [f"{tmp_path / 'home'}/.local/state/llm-env/laya-spans:/var/log/laya:Z"],
         "networks": ["default"]}}}))
     commands = tmp_path / "bin"
     commands.mkdir()
@@ -46,7 +47,7 @@ esac
 """)
     podman.chmod(0o700)
     result = subprocess.run(["bash", "-c", 'llmenv() { echo \'{"cpus_min":0.25,"cpus_max":2,"memory_min_mib":256,"memory_max_mib":1024}\'; }\n' + definition + "\nlaya_span_observer_check\n"],
-        env=os.environ | {"PATH": f"{commands}:{os.environ['PATH']}", "REPO_DIR": str(ROOT),
+        env=os.environ | {"PATH": f"{commands}:{os.environ['PATH']}", "REPO_DIR": str(ROOT), "HOME": str(tmp_path / "home"),
                           "CONFIG_PATH": str(config), "COMPOSE_FILE": str(rendered),
                           "BASE": "sha256:" + "a" * 64, "KEY": key, "MODE": mode},
         text=True, capture_output=True, timeout=20, check=False)

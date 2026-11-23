@@ -177,6 +177,16 @@ record_command "configuration validation" \
     "exit status: 0" "" 0 "Command stdout" "Command stderr" \
     uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" models list || true
 
+log_step "Profile"
+if [ -f "$PROFILE_PATH" ]; then
+    record_command "profile drift" \
+        "uv run ${REPO_DIR}/llmenv.py --config ${CONFIG_PATH} profile check --profile ${PROFILE_PATH}" "" \
+        "exit status: 0 (models.yml matches the profile; fix drift with make profile-apply)" "" 0 "Command stdout" "Command stderr" \
+        uv run "${REPO_DIR}/llmenv.py" --config "$CONFIG_PATH" profile check --profile "$PROFILE_PATH" || true
+else
+    log_warn "Verdict: SKIP identity=profile drift reason=no profile at ${PROFILE_PATH}"
+fi
+
 llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH" 2>/dev/null)"
 
 if [ "$llm_server_enabled" != "false" ]; then
@@ -243,7 +253,7 @@ laya_span_observer_check() {
     observer_image="$(yq -r '.services["system-one"].image // ""' "$COMPOSE_FILE" 2>/dev/null)"
     [[ "$observer_image" == *llm-env-system-one-span-sink:* ]] || { printf 'System One span observer image declaration is missing\n' >&2; return 1; }
     [[ "$(yq -r '.services["system-one"].environment.LAYA_SPAN_SINK // ""' "$COMPOSE_FILE")" == /var/log/laya/laya-spans.jsonl ]] || { printf 'System One observer sink path is missing\n' >&2; return 1; }
-    yq -e ".services[\"system-one\"].volumes | contains([\"\${HOME}/.local/state/llm-env/laya-spans:/var/log/laya:Z\"])" "$COMPOSE_FILE" >/dev/null || { printf 'System One observer sink bind is missing\n' >&2; return 1; }
+    yq -e ".services[\"system-one\"].volumes | contains([\"${HOME}/.local/state/llm-env/laya-spans:/var/log/laya:Z\"])" "$COMPOSE_FILE" >/dev/null || { printf 'System One observer sink bind is missing\n' >&2; return 1; }
     source_hash="$(cat "$REPO_DIR/docker/system-one/observer.Dockerfile" "$REPO_DIR/docker/system-one/laya_span_observer.py" | sha256sum | awk '{print $1}')"
     base_image="$(yq -r '.system_one.image' "$CONFIG_PATH")"
     base_id="$(podman image inspect "$base_image" --format '{{.Id}}' 2>/dev/null)" || { printf 'System One observer check: cannot inspect configured base image\n' >&2; return 1; }
@@ -300,10 +310,16 @@ else
 fi
 
 log_step "Compose file"
-record_command "compose file syntax" \
-    "podman compose -f ${COMPOSE_FILE} config" "" \
-    "exit status: 0" "" 0 "Command stdout" "Command stderr" \
-    podman compose -f "$COMPOSE_FILE" config || true
+if [ -f "$COMPOSE_FILE" ]; then
+    record_command "compose file syntax" \
+        "podman compose -f ${COMPOSE_FILE} config" "" \
+        "exit status: 0" "" 0 "Command stdout" "Command stderr" \
+        podman compose -f "$COMPOSE_FILE" config || true
+else
+    # A fresh host after make setup: nothing is rendered until make start (or bash setup/render-unit.sh).
+    record_section_skip "compose file syntax" "compose not rendered yet (run make start or bash setup/render-unit.sh)" \
+        "not run: ${COMPOSE_FILE} not rendered yet"
+fi
 
 log_step "Model files"
 if [ "$llm_server_enabled" != "false" ]; then

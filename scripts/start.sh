@@ -30,6 +30,7 @@ require_cmd uv jq yq systemctl curl podman
 migrate_config_file || die "configuration migration failed"
 ensure_api_key
 ensure_omniroute_secrets
+ensure_master_key
 
 # migrate_config_file (above) always normalizes llm_server.enabled to a
 # concrete boolean, so this reads it directly -- `// true` would be wrong
@@ -193,6 +194,20 @@ if [ "$scope" = "all" ]; then
         log_step "Ensuring the weekly System One upstream check is installed"
         bash "${REPO_DIR}/setup/enable-system-one-check.sh" \
             || log_warn "could not enable the System One check timer; run 'bash setup/enable-system-one-check.sh' manually"
+    fi
+
+    # Boot comes back from config alone: the wrapper unit (server.start_at_boot) and the observe stack (profile).
+    if [ "$boot_unit" != "1" ]; then
+        if [ "$(yq -r '.server.start_at_boot' "$CONFIG_PATH")" = "true" ] \
+                && ! systemctl --user is-enabled --quiet "${UNIT_NAME}.service"; then
+            bash "${REPO_DIR}/setup/enable-boot.sh" || log_warn "could not enable start at boot; run 'make enable-boot'"
+        fi
+        if [ -f "$PROFILE_PATH" ] && [ "$(yq -r '.observe.enabled // false' "$PROFILE_PATH")" = "true" ]; then
+            log_step "Ensuring the observe stack is up and starts at boot"
+            # start = compose up --no-recreate: running observe containers are never recreated here.
+            { bash "${REPO_DIR}/scripts/observe-stack.sh" start && bash "${REPO_DIR}/scripts/observe-stack.sh" install-units; } \
+                || log_warn "could not start the observe stack; run 'bash scripts/observe-stack.sh up'"
+        fi
     fi
 fi
 

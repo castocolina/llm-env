@@ -267,7 +267,7 @@ def run_prerequisites_with_stubs(
     calls = tmp_path / "calls"
 
     _mock_dirname(commands)
-    names = ["uv", "jq", "podman", "curl", "ip", "sudo"]
+    names = ["uv", "jq", "podman", "curl", "ip", "sudo", "openssl", "skopeo"]
     if development_available:
         names.extend(("git", "shellcheck"))
     for name in names:
@@ -287,9 +287,12 @@ def run_prerequisites_with_stubs(
     )
     rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
 
+    ostree_marker = tmp_path / "ostree-booted"
+    ostree_marker.touch()
     environment = os.environ | {
         "PATH": str(commands),
         "CALLS": str(calls),
+        "LLM_ENV_OSTREE_BOOTED": str(ostree_marker),
     }
     result = subprocess.run(
         ["/usr/bin/bash", "setup/prerequisites.sh", *arguments],
@@ -374,7 +377,7 @@ def test_prerequisites_applies_live_when_purely_additive(tmp_path: pathlib.Path)
     commands = tmp_path / "bin"
     commands.mkdir()
     _mock_dirname(commands)
-    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck"):
+    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck", "openssl", "skopeo"):
         _mock_command(commands, name)
     yq = commands / "yq"
     yq.write_text(
@@ -393,7 +396,8 @@ def test_prerequisites_applies_live_when_purely_additive(tmp_path: pathlib.Path)
     )
     rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
 
-    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls)}
+    # Any existing path marks an ostree (rpm-ostree) host.
+    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls), "LLM_ENV_OSTREE_BOOTED": str(tmp_path)}
     result = subprocess.run(
         ["/usr/bin/bash", "setup/prerequisites.sh"],
         cwd=ROOT,
@@ -418,7 +422,7 @@ def test_prerequisites_falls_back_to_reboot_when_apply_live_declined(
     commands = tmp_path / "bin"
     commands.mkdir()
     _mock_dirname(commands)
-    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck"):
+    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck", "openssl", "skopeo"):
         _mock_command(commands, name)
     yq = commands / "yq"
     yq.write_text(
@@ -439,7 +443,8 @@ def test_prerequisites_falls_back_to_reboot_when_apply_live_declined(
     )
     rpm_ostree.chmod(rpm_ostree.stat().st_mode | stat.S_IXUSR)
 
-    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls)}
+    # Any existing path marks an ostree (rpm-ostree) host.
+    environment = os.environ | {"PATH": str(commands), "CALLS": str(calls), "LLM_ENV_OSTREE_BOOTED": str(tmp_path)}
     result = subprocess.run(
         ["/usr/bin/bash", "setup/prerequisites.sh"],
         cwd=ROOT,
@@ -486,7 +491,7 @@ def test_prerequisites_installs_uv_via_official_installer_not_rpm_ostree(
     commands = tmp_path / "bin"
     commands.mkdir()
     _mock_dirname(commands)
-    for name in ("jq", "podman", "curl", "ip", "git", "shellcheck"):
+    for name in ("jq", "podman", "curl", "ip", "git", "shellcheck", "openssl", "skopeo"):
         _mock_command(commands, name)
     yq = commands / "yq"
     yq.write_text(
@@ -568,7 +573,7 @@ def test_prerequisites_accepts_a_working_podman_compose_provider(tmp_path):
     commands = tmp_path / "bin"
     commands.mkdir()
     _mock_dirname(commands)
-    for name in ("uv", "jq", "curl", "ip", "sudo"):
+    for name in ("uv", "jq", "curl", "ip", "sudo", "openssl", "skopeo"):
         _mock_command(commands, name)
     yq = commands / "yq"
     yq.write_text(
@@ -604,7 +609,7 @@ def test_setup_stops_for_missing_prerequisites_before_mutating_config(
     """Setup must direct users to install prerequisites before configuration work."""
     commands = tmp_path / "bin"
     commands.mkdir()
-    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck"):
+    for name in ("uv", "jq", "podman", "curl", "ip", "git", "shellcheck", "openssl", "skopeo"):
         _mock_command(commands, name)
     yq = commands / "yq"
     yq.write_text("#!/usr/bin/env bash\nprintf '%s\\n' 'yq 3.4.1'\n")
@@ -4556,8 +4561,14 @@ def run_check_setup_with_stubs(
     rocr_index: str = "0",
     system_one_service_in_compose: bool = True,
     stale_span_observer: bool = False,
+    compose_rendered: bool = True,
+    profile_drift: bool | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
-    """Run offline setup validation with controlled command output."""
+    """Run offline setup validation with controlled command output.
+
+    profile_drift None: no profile file; True/False: a profile exists and the stubbed
+    `llmenv profile check` reports drift (exit 1) or none (exit 0).
+    """
     real_yq = shutil.which("yq")
     real_uv = shutil.which("uv")
     assert real_yq is not None
@@ -4599,6 +4610,7 @@ def run_check_setup_with_stubs(
         "#!/usr/bin/bash\n"
         "printf 'uv %s\\n' \"$*\" >> \"$CALLS\"\n"
         "case \"$*\" in\n"
+        "  *' profile check '*) printf '{\"drift\": %s}\\n' \"$PROFILE_DRIFT\"; [ \"$PROFILE_DRIFT\" = false ] ;;\n"
         "  *' models list'*) printf '%s\\n' '{\"models\":[]}' ;;\n"
         "  *' rocr-index '*) printf '%s\\n' \"$ROCR_INDEX\" ;;\n"
         "  *' detect'*) printf '%s\\n' \"$DETECTED_GPU\" ;;\n"
@@ -4711,10 +4723,22 @@ def run_check_setup_with_stubs(
                 "      - /dev/dri:/dev/dri\n"
                 "    environment:\n"
                 '      ROCR_VISIBLE_DEVICES: "0"\n'
-                + ("      LAYA_SPAN_SINK: /var/log/laya/laya-spans.jsonl\n    volumes:\n      - ${HOME}/.local/state/llm-env/laya-spans:/var/log/laya:Z\n" if stale_span_observer else "")
+                # The renderer writes the expanded home (pylib/compose.py), never a literal ${HOME}.
+                + (f"      LAYA_SPAN_SINK: /var/log/laya/laya-spans.jsonl\n    volumes:\n      - {tmp_path / 'home'}/.local/state/llm-env/laya-spans:/var/log/laya:Z\n" if stale_span_observer else "")
             )
         else:
             compose_file.write_text("services:\n  omniroute: {}\n")
+    rendered = tmp_path / "home" / ".config" / "llm-env" / "docker-compose.yml"
+    if not compose_rendered:
+        rendered.unlink(missing_ok=True)
+    elif not rendered.exists():  # check-setup skips the compose syntax check until the file is rendered
+        rendered.parent.mkdir(parents=True, exist_ok=True)
+        rendered.write_text("services:\n  omniroute: {}\n")
+    profile_env: dict[str, str] = {}
+    if profile_drift is not None:
+        profile = tmp_path / "llm-env.profile.yml"
+        profile.write_text("version: 1\n")
+        profile_env = {"LLM_ENV_PROFILE": str(profile), "PROFILE_DRIFT": "true" if profile_drift else "false"}
     models_dir = tmp_path / "models"
     environment = os.environ | {
         "CALLS": str(calls),
@@ -4738,7 +4762,7 @@ def run_check_setup_with_stubs(
         "ROCR_INDEX": rocr_index,
     } | ({"LLM_ENV_CHECK_VERBOSE": "1"} if verbose else {}) | (
         {"LLM_ENV_KFD_PATH": str(tmp_path / "kfd")} if system_one_enabled else {}
-    )
+    ) | profile_env
     result = subprocess.run(
         ["/usr/bin/bash", "scripts/check-setup.sh"],
         cwd=ROOT,
@@ -5688,7 +5712,9 @@ def test_print_endpoints_shows_laya_lan_urls_and_the_no_auth_warning_only_with_l
     assert "has no authentication" not in loop_text
 
 
-def _network_sh_with_system_one(tmp_path: pathlib.Path, listen: str) -> tuple[subprocess.CompletedProcess[str], str]:
+def _network_sh_with_system_one(
+    tmp_path: pathlib.Path, listen: str, *, firewall_exit: str = "exit 1", extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], str]:
     commands = tmp_path / "bin"
     commands.mkdir(parents=True)
     for name in ("yq", "jq", "ip"):
@@ -5699,7 +5725,7 @@ def _network_sh_with_system_one(tmp_path: pathlib.Path, listen: str) -> tuple[su
     assert real_uv is not None
     (commands / "uv").write_text(f"#!/usr/bin/bash\ncase \"$*\" in *\" migrate-config\"*) exec {real_uv} \"$@\" ;; esac\n")
     calls = tmp_path / "firewall_calls.txt"
-    (commands / "firewall-cmd").write_text(f"#!/usr/bin/bash\necho \"$@\" >> {calls}\nexit 1\n")
+    (commands / "firewall-cmd").write_text(f"#!/usr/bin/bash\necho \"$@\" >> {calls}\n{firewall_exit}\n")
     for stub in commands.iterdir():
         stub.chmod(0o755)
     config = tmp_path / "home/.config/llm-env/models.yml"
@@ -5719,10 +5745,31 @@ def _network_sh_with_system_one(tmp_path: pathlib.Path, listen: str) -> tuple[su
     )
     result = subprocess.run(
         ["/usr/bin/bash", "setup/network.sh"], cwd=ROOT,
-        env=os.environ | {"HOME": str(tmp_path / "home"), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"},
+        env=os.environ | {"HOME": str(tmp_path / "home"), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"}
+        | (extra_env or {}),
         stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False,
     )
     return result, calls.read_text() if calls.exists() else ""
+
+
+def test_network_sh_runs_the_managed_firewall_and_only_warns_without_sudo(tmp_path: pathlib.Path) -> None:
+    """Boot runs network.sh: a profile-managed firewall that cannot get sudo must not fail it."""
+    profile = tmp_path / "llm-env.profile.yml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    profile.write_text("version: 1\nnetwork:\n  firewall:\n    manage: true\n    allowed_cidrs: []\n")
+    sudo_dir = tmp_path / "sudo-bin"
+    sudo_dir.mkdir()
+    (sudo_dir / "sudo").write_text("#!/usr/bin/bash\nexit 1\n")
+    (sudo_dir / "sudo").chmod(0o755)
+    # --state succeeds, every query says the rule is missing.
+    result, fw_calls = _network_sh_with_system_one(
+        tmp_path / "net", "lan", firewall_exit='[ "$1" = --state ]',
+        extra_env={"LLM_ENV_PROFILE": str(profile), "PATH": f"{tmp_path / 'net' / 'bin'}:{sudo_dir}:/usr/bin:/bin"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--query-port=8010/tcp" in fw_calls and "--add-port" not in fw_calls
+    assert "needs: sudo -n firewall-cmd --add-port=20128/tcp" in result.stdout
+    assert "firewall rules not applied; run 'make firewall'" in result.stderr
+    assert "Open firewall port" not in result.stdout + result.stderr  # the interactive prompt is replaced
 
 
 def test_network_sh_offers_the_laya_firewall_port_only_with_listen_lan(tmp_path: pathlib.Path) -> None:

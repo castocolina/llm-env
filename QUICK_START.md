@@ -2,6 +2,10 @@
 
 ## First run
 
+On a new host with the tracked `llm-env.profile.yml`, follow [docs/new-host.md](docs/new-host.md)
+instead: `make prerequisites`, `LLM_ENV_ASSUME_YES=1 make setup`, `make start`, `make firewall`
+(sudo), then authenticate providers in OmniRoute.
+
 ```bash
 make setup       # 1. pick GPU + models (or opt out of local GPU inference), download, write config
 make benchmark   # 2. measure Vulkan throughput (see the note below); CPU fallback exits nonzero; skipped if GPU inference is disabled
@@ -53,7 +57,7 @@ Earlier history is not backfilled.
 ## Start at boot
 
 ```bash
-make enable-boot     # enable lingering and render the wrapper unit's [Install] section
+make enable-boot     # enable lingering, render the wrapper unit's [Install] section, and the observe unit when the profile enables it
 make disable-boot
 ```
 

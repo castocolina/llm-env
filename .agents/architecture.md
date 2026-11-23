@@ -31,7 +31,11 @@ computes (`uv run llmenv.py`). The two communicate over JSON via `jq`.
 | `scripts/system-one-benchmark.sh` | Load profile of the running System One server (idle, sequential, concurrent, 2× admission). Writes a timestamped table under `$TMPDIR`, prints that path, and keeps the file. Each phase reports the laya-serve process's VRAM beside whole-dGPU VRAM |
 | `scripts/system-one-cache-check.py` | Prefetch and verify Laya weights in the `llm-env-system-one-cache` volume |
 | `docker/system-one/Dockerfile` | System One image: `torch==2.14.1` from the rocm7.2 index and `laya[serve]==0.4.2` |
-| `scripts/check-setup.sh` | Offline validation |
+| `scripts/check-setup.sh` | Offline validation (skips the compose check until rendered; runs the profile drift check) |
+| `pylib/profile.py` | Tracked host profile `llm-env.profile.yml`: allowlisted schema, export (no secrets), merge onto `models.yml`, drift diff (`llmenv profile export\|apply\|check`) |
+| `scripts/profile.sh` | `make profile-apply` / `make profile-check` |
+| `scripts/firewall.sh` | `make firewall`: firewalld ports of enabled LAN services per profile `network.firewall`; queries first, adds only, prints each command, `--dry-run`; `setup/network.sh` calls it warn-only |
+| `scripts/observe-stack.sh` | Observe stack lifecycle; `up`/`install-units` also write and enable the boot unit `llm-env-observe-stack.service` (`start` = `compose up -d --no-recreate`) |
 | `scripts/check-server.sh` | Online API contract validation |
 | `llmenv.py` | CLI dispatcher, JSON out |
 | `pylib/agent_runner.py` | Bounded live-agent scopes, stream capture, and cleanup proof |

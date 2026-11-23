@@ -20,6 +20,7 @@ if [ -f "$unit" ]; then
     sed -i '/^\[Install\]$/,$d' "$unit"
     log_info "removed [Install] from the unit"
 fi
+systemctl --user disable llm-env-observe-stack.service 2>/dev/null || true
 systemctl --user daemon-reload
 log_info "the server will no longer start at boot. Lingering is unchanged; run"
 log_info "  loginctl disable-linger ${USER}   to also stop user services at logout."

@@ -34,7 +34,21 @@ else
     log_info "created ${CONFIG_PATH} from template"
 fi
 migrate_config_file || die "configuration migration failed"
+ensure_master_key
 
+# The tracked profile wins for every key it names; those keys are never prompted for. Keys it does not name keep the
+# prompts and the LLM_ENV_* seeds below (precedence: profile > seed > persisted value > default).
+profile_names() { [ -f "$PROFILE_PATH" ] && [ "$(yq -r "$1" "$PROFILE_PATH")" != "null" ]; }
+if [ -f "$PROFILE_PATH" ]; then
+    profile_result="$(llmenv --config "$CONFIG_PATH" profile apply --profile "$PROFILE_PATH")" \
+        || die "profile apply failed: $(jq -r '.error // empty' <<<"$profile_result" 2>/dev/null)"
+    log_info "applied profile ${PROFILE_PATH} ($(jq -r 'if .changed then "backup: \(.backup)" else "no change" end' <<<"$profile_result"))"
+fi
+
+if profile_names '.llm_server.enabled'; then
+    llm_server_enabled="$(yq -r '.llm_server.enabled' "$CONFIG_PATH")"
+    log_info "llm-server (local GPU inference) from the profile: ${llm_server_enabled}"
+else
 # Seed the prompt's default from the config's own persisted state (set by a
 # prior run of this script), not just LLM_ENV_NO_GPU -- otherwise a routine
 # re-run of `make setup` on a host that already disabled llm-server silently
@@ -55,10 +69,15 @@ case "$gpu_answer" in
     [nN]*) llm_server_enabled=false ;;
     *) llm_server_enabled=true ;;
 esac
+fi
 LLM_SERVER_ENABLED="$llm_server_enabled" yq -i \
     '.llm_server.enabled = (strenv(LLM_SERVER_ENABLED) == "true")' "$CONFIG_PATH"
 log_info "llm-server (local GPU inference): ${llm_server_enabled}"
 
+if profile_names '.system_one.enabled'; then
+    system_one_enabled="$(yq -r '.system_one.enabled' "$CONFIG_PATH")"
+    log_info "system-one from the profile: ${system_one_enabled}"
+else
 # Same persisted-default rule as the llm-server prompt above.
 system_one_default="n"
 [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH" 2>/dev/null)" = "true" ] && system_one_default="y"
@@ -69,6 +88,7 @@ case "$system_one_answer" in
     [yY]*) system_one_enabled=true ;;
     *) system_one_enabled=false ;;
 esac
+fi
 DRI_PATH="${LLM_ENV_DRI_PATH:-/dev/dri}"
 if [ "$system_one_enabled" != "true" ]; then
     SYSTEM_ONE_ENABLED=false yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
@@ -168,6 +188,10 @@ if [ -f "$CONFIG_PATH" ] && [ -z "$(yq -r '.models[] | select(.alias == "ornith-
       "$CONFIG_PATH"
     log_info "added ornith-35b to the existing config from the shipped template"
 fi
+if profile_names '.llm_server.models'; then
+    mapfile -t aliases < <(yq -r '.llm_server.models[]' "$PROFILE_PATH")
+    log_info "models from the profile: ${aliases[*]}"
+else
 models="$(llmenv --config "$CONFIG_PATH" models list)"
 model_count="$(echo "$models" | jq '.models | length')"
 [ "$model_count" -gt 0 ] || die "no models are configured"
@@ -177,6 +201,7 @@ model_choice="$(ask "  Model number [${default_models}]: " "$default_models")"
 [[ "$model_choice" =~ ^[1-9][0-9]*$ ]] || die "model selection must be a single positive integer"
 [ "$model_choice" -le "$model_count" ] || die "model selection is out of range"
 aliases=("$(echo "$models" | jq -r --argjson index "$model_choice" '.models[$index - 1].alias')")
+fi
 llmenv --config "$CONFIG_PATH" models select "${aliases[@]}" >/dev/null
 log_info "selected ${aliases[*]}"
 

@@ -20,4 +20,9 @@ log_info "enabled ${UNIT_NAME}.service to start at boot"
 
 loginctl enable-linger "$USER"
 log_info "lingering enabled for ${USER}"
+
+# The observe stack is a separate compose project: its own generated unit brings it up at boot.
+if [ -f "$PROFILE_PATH" ] && [ "$(yq -r '.observe.enabled // false' "$PROFILE_PATH")" = "true" ]; then
+    bash "${REPO_DIR}/scripts/observe-stack.sh" install-units
+fi
 log_info "the server will now start at boot. Verify with: make status"
