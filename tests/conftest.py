@@ -28,6 +28,23 @@ def _no_stale_pwd() -> None:
     os.environ.pop("PWD", None)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _no_git_hook_environment() -> None:
+    """Drop the repository-local GIT_* variables git exports to its hooks.
+
+    The pre-push hook runs this suite with GIT_DIR (and friends) pointing at
+    this repository. Tests that `git init` a scratch directory, or scripts
+    that ask git whether a directory is a work tree, then talk to THIS
+    repository instead of the scratch one, and fail only when the suite is
+    started by `git push`. Every test starts from a clean git environment.
+    """
+    for name in ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                 "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+                 "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+                 "GIT_COMMON_DIR"):
+        os.environ.pop(name, None)
+
+
 
 @pytest.fixture(autouse=True)
 def _isolate_observe_state(request, tmp_path, monkeypatch):
