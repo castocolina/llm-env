@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from pylib.selection import (
     ALWAYS,
+    cli_edges,
     executables,
     is_test_file,
     load_tree,
@@ -82,6 +83,30 @@ def test_unowned_exempt_and_opt_in():
 def test_deleted_paths_select_like_changed_ones():
     tree = {k: v for k, v in TREE.items() if k != "scripts/b.sh"}
     assert select(tree, [], ["scripts/b.sh"], "commit", {}).tests == ("tests/test_a.py", "tests/test_b.py", NP)
+
+
+CLI = {"llmenv.py": "from pylib.m import compute\nfrom pylib.q import other\nfrom pylib.r import register as reg_r\n\n"
+                    "def _helper():\n    return compute()\n\ndef cmd_budget(args):\n    return _helper()\n\n"
+                    "def cmd_render_compose(args):\n    return 0\n\n"
+                    "def cmd_capacity(args):\n    from pylib import cap, cap_report as cr\n    return cap.save(cr.page())\n\n"
+                    "def cmd_interference(args):\n    from pylib.inter import run\n    return run()\n",
+       "pylib/m.py": "def compute(): ...\n", "pylib/q.py": "def other(): ...\n", "pylib/cap.py": "", "pylib/cap_report.py": "",
+       "pylib/inter.py": "", "pylib/r.py": 'def register(sub):\n    sub.add_parser("omniroute-update")\n',
+       "scripts/start.sh": 'out="$(llmenv --config "$c" budget --models-dir "$d")"\n',
+       "scripts/pre.sh": 'llmenv_budget_json "$cfg" "$dir"\n', "scripts/other.sh": "llmenv render-compose\n",
+       "tests/test_start.py": "'start.sh'\n", "tests/test_pre.py": "'pre.sh'\n", "tests/test_other.py": "'other.sh'\n",
+       NP: ""}
+
+
+def test_cli_edges_trace_every_llmenv_import_form():    # top-level, function-local, `from pylib import a, b as c`, aliases
+    assert cli_edges(CLI) == {"pylib/m.py": frozenset({"budget"}), "pylib/q.py": frozenset({"*"}),
+                              "pylib/r.py": frozenset({"omniroute-update"}), "pylib/cap.py": frozenset({"capacity"}),
+                              "pylib/cap_report.py": frozenset({"capacity"}), "pylib/inter.py": frozenset({"interference"})}
+
+
+def test_cli_edge_selects_script_tests_through_the_subcommand():
+    assert select(CLI, ["pylib/m.py"], [], "commit", {}).tests == tuple(sorted((NP, "tests/test_pre.py", "tests/test_start.py")))
+    assert select(CLI, ["pylib/q.py"], [], "push", {}).full
 
 
 def test_load_tree_reads_binary_files_as_empty(tmp_path):

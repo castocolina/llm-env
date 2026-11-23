@@ -1,6 +1,7 @@
 """Which test files a change selects (spec D1, D3, G1): pure logic over a {path: text} tree of tracked files."""
 from __future__ import annotations
 
+import ast
 import fnmatch
 import functools
 import os
@@ -93,18 +94,58 @@ def read_exempt(path) -> dict[str, tuple[str, bool]]:
     return exempt
 
 
+def cli_edges(tree: dict[str, str]) -> dict[str, frozenset[str]]:
+    """Spec D2: pylib path -> the `llmenv` subcommand words whose handler uses it; {"*"} (a hub) when none traces."""
+    try:
+        parsed = ast.parse(tree.get("llmenv.py", ""))
+    except SyntaxError:
+        return {}
+    bound: dict[str, set[str]] = {}  # name bound by a pylib import -> module paths
+    for node in ast.walk(parsed):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                base = node.module.replace(".", "/")
+                path = next((p for p in (f"{base}/{alias.name}.py", f"{base}.py") if p in tree), None)
+                if path and path.startswith("pylib/"):
+                    bound.setdefault(alias.asname or alias.name, set()).add(path)
+    funcs = {f.name: {n.id for n in ast.walk(f) if isinstance(n, ast.Name)}
+             for f in parsed.body if isinstance(f, ast.FunctionDef | ast.AsyncFunctionDef)}
+    changed = True
+    while changed:  # close each function over the llmenv.py functions it names
+        changed = False
+        for used in funcs.values():
+            more = set().union(*(funcs[n] for n in used & funcs.keys())) - used
+            changed |= bool(more)
+            used |= more
+    words: dict[str, set[str]] = {p: set() for paths in bound.values() for p in paths}
+    for name, used in funcs.items():
+        if name.startswith("cmd_"):
+            for n in used & bound.keys():
+                for p in bound[n]:
+                    words[p].add(name.removeprefix("cmd_").replace("_", "-"))
+    for p, ws in words.items():
+        ws.update(re.findall(r"""add_parser\(\s*["']([^"']+)["']""", tree[p]))
+    return {p: frozenset(ws or {"*"}) for p, ws in words.items()}
+
+
 def _runnable(tree: dict[str, str], tests) -> set[str]:
     return {t for t in tests if t in tree and is_test_file(t) and t not in ALWAYS and t not in OPT_IN}
 
 
 def _reach(tree: dict[str, str], path: str, depth: int) -> set[str]:
     """`path` plus `depth` hops of non-hub, non-markdown, non-opt-in files naming a reached file; markdown reaches only
-    itself. Opt-in tests never own (G1), so they are no referrer either."""
+    itself. Opt-in tests never own (G1), so they are no referrer either. A pylib module also reaches the files that run
+    one of its `llmenv` subcommands (spec D2)."""
+    edges = cli_edges(tree)
     reached = frontier = {path}
     for _ in range(0 if path.endswith(".md") else depth):
+        # shortcut: a "*" module adds no caller, so it is only a hub when unowned; honour it in select() if one appears
+        words = sorted({w for r in frontier for w in edges.get(r, ()) if w != "*"})
+        call = re.compile(r"(?<![A-Za-z0-9-])(?:" + "|".join(map(re.escape, words)) + r")(?![A-Za-z0-9-])") if words else None
         frontier = {f for f, text in tree.items() if f not in reached and f not in HUBS and f not in OPT_IN
                     and not f.endswith(".md")
-                    and any(names(text, r) for r in frontier)}
+                    and (any(names(text, r) for r in frontier)
+                         or (call is not None and any("llmenv" in line and call.search(line) for line in text.splitlines())))}
         reached = reached | frontier
     return reached
 
