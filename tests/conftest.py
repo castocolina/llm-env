@@ -41,11 +41,13 @@ def _no_git_hook_environment() -> None:
     that ask git whether a directory is a work tree, then talk to THIS
     repository instead of the scratch one, and fail only when the suite is
     started by `git push`. Every test starts from a clean git environment.
+    The selector switches go too: the pre-push hook sets PUSH_FROM/PUSH_TO and
+    an owner bypass sets SELECT_ALL; select-tests tests pass them explicitly.
     """
     for name in ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
                  "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
                  "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
-                 "GIT_COMMON_DIR"):
+                 "GIT_COMMON_DIR", "PUSH_FROM", "PUSH_TO", "SELECT_ALL"):
         os.environ.pop(name, None)
 
 

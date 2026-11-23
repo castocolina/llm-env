@@ -15,3 +15,9 @@ def test_repository_local_git_variables_are_scrubbed(name: str) -> None:
     # With them set, a scratch `git init` + `git commit` in a test's tmp dir writes into THIS repository: a run started
     # with GIT_DIR exported once added dozens of "baseline" commits to main. Canary for tests/conftest.py.
     assert name not in os.environ
+
+
+@pytest.mark.parametrize("name", ("PUSH_FROM", "PUSH_TO", "SELECT_ALL"))
+def test_selector_switches_are_scrubbed(name: str) -> None:
+    # The pre-push hook and an owner bypass run the suite with these set; select-tests tests pass them explicitly.
+    assert name not in os.environ
