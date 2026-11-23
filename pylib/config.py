@@ -136,6 +136,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         system_one.setdefault("vram_reserve_mib", 5120)
         # 0 disables unload. Laya 0.4.2 drops checkpoints after this many idle seconds.
         system_one.setdefault("idle_unload_seconds", 600)
+        # loopback publishes 127.0.0.1 only; lan publishes 0.0.0.0 (Laya has no auth).
+        system_one.setdefault("listen", "loopback")
 
     gpu = cfg.get("gpu")
     if not isinstance(gpu, dict):
@@ -375,6 +377,8 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 errors.append(
                     "system_one.idle_unload_seconds must be a non-negative integer"
                 )
+            if system_one.get("listen", "loopback") not in ("loopback", "lan"):
+                errors.append("system_one.listen must be loopback or lan")
             models_raw = system_one.get("models", "english")
             if isinstance(models_raw, str):
                 parts = [p.strip() for p in models_raw.split(",")]

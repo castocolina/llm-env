@@ -1015,7 +1015,24 @@ def test_migrate_config_adds_disabled_system_one_defaults():
         "models": "english,multilingual",
         "vram_reserve_mib": 5120,
         "idle_unload_seconds": 600,
+        "listen": "loopback",
     }
+
+
+def test_migrate_config_keeps_an_explicit_system_one_listen():
+    assert migrate_config({"system_one": {"listen": "lan"}})["system_one"]["listen"] == "lan"
+
+
+@pytest.mark.parametrize("value", ["public", "LAN", "0.0.0.0", "", True, None])
+def test_validate_config_rejects_a_bad_system_one_listen(valid_cfg, value):
+    valid_cfg["system_one"]["listen"] = value
+    assert "system_one.listen must be loopback or lan" in validate_config(valid_cfg)
+
+
+@pytest.mark.parametrize("value", ["loopback", "lan"])
+def test_validate_config_accepts_system_one_listen(valid_cfg, value):
+    valid_cfg["system_one"]["listen"] = value
+    assert validate_config(valid_cfg) == []
 
 
 def test_migrate_config_keeps_an_explicit_vram_reserve():

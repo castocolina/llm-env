@@ -34,6 +34,14 @@ make status
 make logs
 ```
 
+## Laya from other machines
+
+By default Laya (System One) answers on `127.0.0.1:8010` only. To reach it from the LAN
+(`http://llm.local:8010`), set `system_one.listen: lan` in `models.yml`, run
+`bash setup/render-unit.sh`, then `make update-system-one` (it recreates only
+`system-one`, once Laya is idle). **Laya has no authentication: with `lan`,
+anyone who can reach port 8010 can use it.** `listen: loopback` reverts it.
+
 ## Laya request telemetry
 
 Laya writes privacy-filtered request records (no question or answer text) to

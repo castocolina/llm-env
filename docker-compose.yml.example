@@ -148,6 +148,8 @@ services:
     # `make clean` keeps. The next `make setup` re-downloads the weights.
     - system-one-cache:/home/laya/.cache/huggingface
     ports:
+    # system_one.listen: loopback (default). With listen: lan this is
+    # 0.0.0.0:8010:8000 (LAN-reachable; Laya has no authentication).
     - 127.0.0.1:8010:8000
     environment:
       LAYA_MODELS: english,multilingual

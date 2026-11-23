@@ -204,7 +204,7 @@ LAN.
  (LLAMA_ARG_PORT) │  (llama.cpp)                        (router)                       (installer)   │
                  │      ▲                                    ▲                              ▲        │
  127.0.0.1:8010 ▶│  system-one (Laya; no depends_on; OmniRoute does not proxy /v1/systemone)│
- (loopback only) │      ▲                                                                   │
+ (lan: 0.0.0.0)  │      ▲                                                                   │
                  └──────┼────────────────────────────────────┼──────────────────────────────┼────────┘
                         │                                    │                              │
               bind mount (ro)                        named volume                    bind mount (ro):
@@ -220,8 +220,9 @@ LAN.
 
  omniroute is also published at host:0.0.0.0:20128 (dashboard + /v1/*), and
  remote-setup at host:0.0.0.0:20130 (/setup.sh, /config) -- both genuinely
- LAN-reachable now, not loopback-only. system-one is published only at
- 127.0.0.1:8010 and is not on those LAN arrows.
+ LAN-reachable now, not loopback-only. system-one is published at
+ 127.0.0.1:8010 by default (system_one.listen: loopback); with listen: lan
+ it is 0.0.0.0:8010, LAN-reachable and unauthenticated (Laya has no auth).
 ```
 
 See `docker-compose.yml.example` for the full annotated compose shape this

@@ -750,6 +750,7 @@ def run_setup_no_gpu(
     system_one_env: str | None = None,
     kfd_path: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    system_one_listen: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
     """Run setup with LLM_ENV_NO_GPU set.
 
@@ -827,7 +828,7 @@ def run_setup_no_gpu(
         "  image: localhost/llm-env-system-one:rocm\n"
         "  models: english\n"
         "  vram_reserve_mib: 4096\n"
-    )
+    ) + (f"  listen: {system_one_listen}\n" if system_one_listen else "")
     config.write_text(written)
     dri = tmp_path / "dri"
     dri.mkdir()
@@ -1098,6 +1099,15 @@ def test_setup_prefetches_system_one_weights_when_enabled(tmp_path: pathlib.Path
     assert "podman run" in recorded and "LAYA_MODELS=english" in recorded and "localhost/llm-env-system-one:rocm" in recorded
     assert "system-one-cache-check.py:ro,z" in recorded
     assert yq_value(_config, ".system_one.enabled") == "true"
+    assert "has no authentication" not in _result.stdout + _result.stderr
+
+
+def test_setup_warns_that_laya_has_no_auth_with_listen_lan(tmp_path: pathlib.Path) -> None:
+    kfd = tmp_path / "kfd"
+    kfd.touch()
+    result, _calls, config = run_setup_no_gpu(tmp_path, system_one_env="1", kfd_path=str(kfd), system_one_listen="lan")
+    assert yq_value(config, ".system_one.enabled") == "true"
+    assert "System One listens on the LAN (system_one.listen: lan) and has no authentication" in result.stdout + result.stderr
 
 
 def test_setup_skips_system_one_build_and_prefetch_when_disabled(tmp_path: pathlib.Path) -> None:
@@ -5662,6 +5672,70 @@ def test_print_endpoints_system_one_follows_the_flag(tmp_path: pathlib.Path) -> 
     assert "v1/systemone" not in text
     assert "JEV_BACKEND=laya" not in text and "GSD_PATH_JEV" not in text
     assert "JEV_LAYA_URL" not in text
+
+
+def test_print_endpoints_shows_laya_lan_urls_and_the_no_auth_warning_only_with_listen_lan(tmp_path: pathlib.Path) -> None:
+    lan = _print_endpoints(tmp_path / "lan", "system_one:\n  enabled: true\n  port: 8010\n  listen: lan\n")
+    loop = _print_endpoints(tmp_path / "loop", "system_one:\n  enabled: true\n  port: 8010\n  listen: loopback\n")
+    assert lan.returncode == 0 and loop.returncode == 0, lan.stderr + loop.stderr
+    assert "http://127.0.0.1:8010/v1/systemone" in lan.stdout
+    assert "mDNS:    http://llm.local:8010/v1/systemone" in lan.stdout
+    assert re.search(r"Network: http://\S+:8010/v1/systemone", lan.stdout)
+    assert "has no authentication: anyone who can reach port 8010" in lan.stdout + lan.stderr
+    loop_text = loop.stdout + loop.stderr
+    assert "http://127.0.0.1:8010/v1/systemone  (loopback only, no auth)" in loop.stdout
+    assert ":8010/v1/systemone" not in loop_text.replace("http://127.0.0.1:8010/v1/systemone", "")
+    assert "has no authentication" not in loop_text
+
+
+def _network_sh_with_system_one(tmp_path: pathlib.Path, listen: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    commands = tmp_path / "bin"
+    commands.mkdir(parents=True)
+    for name in ("yq", "jq", "ip"):
+        real = shutil.which(name)
+        assert real is not None
+        (commands / name).write_text(f"#!/usr/bin/bash\nexec {real} \"$@\"\n")
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    (commands / "uv").write_text(f"#!/usr/bin/bash\ncase \"$*\" in *\" migrate-config\"*) exec {real_uv} \"$@\" ;; esac\n")
+    calls = tmp_path / "firewall_calls.txt"
+    (commands / "firewall-cmd").write_text(f"#!/usr/bin/bash\necho \"$@\" >> {calls}\nexit 1\n")
+    for stub in commands.iterdir():
+        stub.chmod(0o755)
+    config = tmp_path / "home/.config/llm-env/models.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "version: 1\nserver:\n  port: 8000\n  mdns_name: llm\n  api_key: fixture-api-key\n  host: 0.0.0.0\n"
+        "  sleep_idle_seconds: 300\n  start_at_boot: false\nllm_server:\n  enabled: false\n"
+        "gpu:\n  backend: cpu\n  image: example.invalid/llama:latest\n  device_name: ''\n  vram_total_mib: 0\n"
+        "  reserve_mode: auto\n  reserve_floor_mib: 1024\nomniroute:\n  port: 20128\n"
+        "  initial_password: fixture-omniroute-password\nremote_setup:\n  port: 20130\n"
+        "runtime:\n  models_max: 1\n  parallel_slots: 1\n  ubatch_size: 512\n  flash_attn: true\n"
+        "  cache_type_k: q8_0\n  cache_type_v: q8_0\n"
+        "models:\n  - alias: a\n    label: Test\n    parameters: 1B\n    quantization: Q4_K_M\n    enabled: true\n"
+        "    file: test.gguf\n    url: https://example.invalid/test.gguf\n    size_bytes: 1\n    vram_budget: 10%\n"
+        "    ctx_size: 8192\n    client_max_output_tokens: 8192\n    n_gpu_layers: 99\n"
+        f"system_one:\n  enabled: true\n  port: 8010\n  listen: {listen}\n"
+    )
+    result = subprocess.run(
+        ["/usr/bin/bash", "setup/network.sh"], cwd=ROOT,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "LLM_ENV_CONFIG": str(config), "PATH": f"{commands}:/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False,
+    )
+    return result, calls.read_text() if calls.exists() else ""
+
+
+def test_network_sh_offers_the_laya_firewall_port_only_with_listen_lan(tmp_path: pathlib.Path) -> None:
+    lan, lan_calls = _network_sh_with_system_one(tmp_path / "lan", "lan")
+    loop, loop_calls = _network_sh_with_system_one(tmp_path / "loop", "loopback")
+    assert lan.returncode == 0, lan.stderr
+    assert "--query-port=8010/tcp" in lan_calls
+    assert "firewall port 8010/tcp remains closed; LAN access is disabled" in lan.stdout + lan.stderr
+    assert loop.returncode == 0, loop.stderr
+    assert "8010" not in loop_calls
+    assert "firewall port 8010/tcp" not in loop.stdout + loop.stderr
+    for result in (lan, loop):
+        assert "firewalld rules for OmniRoute (port 20128/tcp) and the remote-setup" in result.stdout + result.stderr
 
 
 def run_opencode_config_editor(

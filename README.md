@@ -42,6 +42,13 @@ make check-server
   10 idle minutes (`system_one.idle_unload_seconds`, default 600; `0` never
   unloads) Laya drops its checkpoints and frees about 3.7 GB of VRAM. The
   next request reloads them in about 0.4 s.
+- `system_one.listen` picks where Laya is published: `loopback` (default,
+  `127.0.0.1:8010` only) or `lan` (`0.0.0.0:8010`, like OmniRoute and
+  remote-setup, so other machines reach `http://llm.local:8010`). **Laya has
+  no authentication: with `lan`, anyone who can reach the port can use it.**
+  OmniRoute cannot front it (it does not proxy `/v1/systemone`). Apply a
+  change with `bash setup/render-unit.sh`, then `make update-system-one`
+  (a listen change is `drift: ports`, applied once Laya is idle).
 
 ### Laya request telemetry
 

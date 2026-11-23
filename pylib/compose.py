@@ -256,7 +256,10 @@ def render_compose(
                 "system-one-cache:/home/laya/.cache/huggingface",
                 f"{os.path.expanduser('~')}/.local/state/llm-env/laya-spans:/var/log/laya:Z",
             ],
-            "ports": [f"127.0.0.1:{system_one['port']}:8000"],
+            # system_one.listen: lan publishes on all interfaces like OmniRoute; Laya itself has no auth.
+            "ports": [
+                f"{'0.0.0.0' if system_one.get('listen') == 'lan' else '127.0.0.1'}:{system_one['port']}:8000"
+            ],
             "networks": ["default"],
             "environment": {
                 "LAYA_MODELS": _dollar_escape(system_one["models"]),

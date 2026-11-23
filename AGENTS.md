@@ -81,7 +81,10 @@ backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening
   validation), then `make restart`.
 - `LLM_ENV_SYSTEM_ONE=1|0` — seed `make setup`'s System One prompt for
   unattended runs. Persisted as `system_one.enabled` in `models.yml`.
-  Requires `/dev/kfd` (AMD ROCm).
+  Requires `/dev/kfd` (AMD ROCm). `system_one.listen` (`loopback` default,
+  or `lan`) publishes Laya on `127.0.0.1:<port>` or `0.0.0.0:<port>`; Laya
+  has no authentication, so `lan` exposes it to the whole network. Apply with
+  `bash setup/render-unit.sh`, then `make update-system-one` (idle-gated drift).
 - `OMNIROUTE_HEAL_MEMORY_MIB` (default: 60 % of the running container's
   `memory.max`, 1228 MiB at the 2048 MiB default; an absolute MiB value
   overrides it; `0` disables),

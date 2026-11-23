@@ -48,7 +48,14 @@ if [ "$(yq -r '.system_one.enabled' "$CONFIG_PATH")" = "true" ]; then
     system_one_port="$(yq -r '.system_one.port' "$CONFIG_PATH")"
     echo
     echo "  ${BOLD}System One (Laya)${NC}"
-    echo "  Local:   http://127.0.0.1:${system_one_port}/v1/systemone  (loopback only, no auth)"
+    if [ "$(yq -r '.system_one.listen' "$CONFIG_PATH")" = "lan" ]; then
+        echo "  Local:   http://127.0.0.1:${system_one_port}/v1/systemone"
+        echo "  Network: http://${ip}:${system_one_port}/v1/systemone"
+        echo "  mDNS:    http://${mdns}.local:${system_one_port}/v1/systemone"
+        log_warn "System One listens on the LAN (system_one.listen: lan) and has no authentication: anyone who can reach port ${system_one_port} can use it"
+    else
+        echo "  Local:   http://127.0.0.1:${system_one_port}/v1/systemone  (loopback only, no auth)"
+    fi
     echo "  Skill:   GSD_PATH_JEV=1 JEV_BACKEND=laya JEV_LAYA_URL=http://127.0.0.1:${system_one_port} GSD_PATH_JEV_TIMEOUT_SECONDS=20"
     echo "  Request telemetry: ${HOME}/.local/state/llm-env/laya-spans/laya-spans.jsonl (host collector to Grafana)"
 fi

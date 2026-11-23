@@ -152,6 +152,9 @@ if [ "$system_one_enabled" = "true" ]; then
     log_step "Prefetching Laya weights (${system_one_models}) into llm-env-system-one-cache"
     system_one_cache_check "$system_one_image" prefetch || system_one_off "System One weight prefetch failed"
     SYSTEM_ONE_ENABLED=true yq -i '.system_one.enabled = (strenv(SYSTEM_ONE_ENABLED) == "true")' "$CONFIG_PATH"
+    if [ "$(yq -r '.system_one.listen' "$CONFIG_PATH")" = "lan" ]; then
+        log_warn "System One listens on the LAN (system_one.listen: lan) and has no authentication: anyone who can reach port $(yq -r '.system_one.port' "$CONFIG_PATH") can use it"
+    fi
 fi
 if [ "$llm_server_enabled" = "true" ]; then
 

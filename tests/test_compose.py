@@ -603,6 +603,31 @@ def test_system_one_service_rendered_when_enabled():
     assert service["healthcheck"]["start_period"] == "120s"
 
 
+def test_system_one_listen_lan_publishes_on_all_interfaces():
+    document = system_one_document({**CFG, "system_one": {**SYSTEM_ONE, "listen": "lan"}})
+    assert document["services"]["system-one"]["ports"] == ["0.0.0.0:8010:8000"]
+
+
+def test_system_one_listen_defaults_to_loopback():
+    for system_one in (SYSTEM_ONE, {**SYSTEM_ONE, "listen": "loopback"}):
+        document = system_one_document({**CFG, "system_one": system_one})
+        assert document["services"]["system-one"]["ports"] == ["127.0.0.1:8010:8000"]
+
+
+def test_a_system_one_listen_change_is_ports_drift_for_update_system_one():
+    from pylib.omniroute_update import config_drift
+
+    def running(host_ip):
+        return {"HostConfig": {"PortBindings": {"8000/tcp": [{"HostIp": host_ip, "HostPort": "8010"}]}}}
+
+    lan = system_one_document({**CFG, "system_one": {**SYSTEM_ONE, "listen": "lan"}})["services"]["system-one"]
+    loop = system_one_document({**CFG, "system_one": SYSTEM_ONE})["services"]["system-one"]
+    assert "ports" in config_drift(lan, running("127.0.0.1"))
+    assert "ports" not in config_drift(lan, running("0.0.0.0"))
+    assert "ports" in config_drift(loop, running("0.0.0.0"))
+    assert "ports" not in config_drift(loop, running("127.0.0.1"))
+
+
 def test_system_one_max_loaded_matches_the_configured_model_count():
     cfg = {**CFG, "system_one": {**SYSTEM_ONE, "models": "english,multilingual"}}
     env = system_one_document(cfg)["services"]["system-one"]["environment"]
