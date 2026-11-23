@@ -14,6 +14,18 @@ SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin")
 STUB_NPROC = "#!/bin/sh\necho 24\n"
 STUB_UV = f"""#!/usr/bin/env bash
 if [ "$1 $2" = "run pytest" ]; then
+  mkdir "$PYTEST_DEBUG_TEMPROOT/pytest-of-$USER"
+  echo "addopts=${{PYTEST_ADDOPTS-unset}}" >>"$CALLS"
+  echo "temproot=$PYTEST_DEBUG_TEMPROOT" >>"$CALLS"
+  [ -z "${{STUB_TOUCH:-}}" ] || {{ mkdir -p "$(dirname "$STUB_TOUCH")" && touch "$STUB_TOUCH"; }}
+  [ -z "${{STUB_MKDIR_TMPDIR:-}}" ] || mkdir "$TMPDIR/$STUB_MKDIR_TMPDIR"
+  [ -z "${{STUB_NEW_PODMAN:-}}" ] || echo "$STUB_NEW_PODMAN" >>"$PODMAN_STATE"
+  if [ -n "${{STUB_SLEEP:-}}" ]; then
+    trap 'sleep 1; echo term >>"$CALLS"; exit 143' TERM  # before the sleeper: the test signals once it sees it
+    setsid sleep 300 &
+    echo "pid=$$" >>"$CALLS"
+    sleep 300 & wait
+  fi
   echo "niceness=$(nice)" >>"$CALLS"
   set_=(); for v in {" ".join(OPT_IN_SWITCHES)}; do [[ -v $v ]] && set_+=("$v"); done
   echo "optin=${{set_[*]}}" >>"$CALLS"
@@ -35,13 +47,14 @@ STUB_UNSHARE = """#!/usr/bin/env bash
 exec /usr/bin/unshare "$@"
 """
 STUB_PODMAN = """#!/usr/bin/env bash
+[ -n "${STUB_PODMAN_FAIL:-}" ] && exit 125
 case "$*" in
   "ps -a -q --no-trunc") class=container ;;
   "volume ls -q") class=volume ;;
   "images -q --no-trunc") class=image ;;
   *) exit 0 ;;
 esac
-while read -r c id; do [ "$c" = "$class" ] && echo "$id"; done <"${PODMAN_STATE:-$PWD/podman-state}"
+while read -r c id; do [ "$c" = "$class" ] && echo "$id"; done <"$PODMAN_STATE"
 exit 0
 """
 
@@ -77,7 +90,8 @@ def _env(repo: Path, env, podman: bool) -> dict:
     # the default CPU case means unset; UV_OFFLINE must come from the runner, not from conftest
     base = {k: v for k, v in os.environ.items() if k not in ("LLM_ENV_TEST_CPU_PCT", "UV_OFFLINE")}
     path = f"{repo / 'stub'}:{':'.join(SYSTEM_PATH)}" if podman else _path_without_podman(repo)
-    return base | (env or {}) | {"PATH": path, "CALLS": str(repo / "calls"), "REAL_UV": shutil.which("uv") or "",
+    return base | (env or {}) | {"PATH": path, "CALLS": str(repo / "calls"),
+                                 "PODMAN_STATE": str(repo / "podman-state"), "REAL_UV": shutil.which("uv") or "",
                                  "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
@@ -99,6 +113,11 @@ def wait_until(pred, timeout=10) -> None:
         time.sleep(0.05)
 
 
+def run_dir(stderr: str) -> Path:
+    """The run's own TMPDIR, from the runner's `run dir: <path>` line."""
+    return Path(next(line for line in stderr.splitlines() if line.startswith("run dir: "))[len("run dir: "):])
+
+
 def calls(repo: Path) -> list[str]:
     path = repo / "calls"
     return path.read_text().splitlines() if path.exists() else []
@@ -108,7 +127,7 @@ def descendants(pid: int) -> dict[int, bytes]:
     children: dict[int, list[int]] = {}
     for stat in Path("/proc").glob("[0-9]*/stat"):
         try:
-            ppid = int(stat.read_text().rsplit(")", 1)[1].split()[1])
+            ppid = int(stat.read_bytes().rsplit(b")", 1)[1].split()[1])  # bytes: comm need not be UTF-8
         except (OSError, IndexError, ValueError):
             continue  # vanished
         children.setdefault(ppid, []).append(int(stat.parent.name))

@@ -257,11 +257,9 @@ an unsuccessful Vulkan benchmark configures CPU fallback and exits nonzero.
 - Checked-in product test fixtures are durable code/test assets, not
   ephemeral. They stay in their proper tests/docker paths and must not be
   moved into `./tmp/`.
-- pytest's own temp dir (`tmp_path`) is the exception: leave it at its
-  default, outside the repo. Never pass `--basetemp` under `./tmp/`, and
-  keep `TMPDIR` outside `./tmp/` when running pytest: some tests use paths
-  under `tmp_path` as their "outside the repo tmp" and "not a git tree"
-  cases.
+- pytest's own temp dir (`tmp_path`) is the exception: `tools/test.sh` gives
+  each run its own `TMPDIR` under `/tmp/pytest-of-$USER/` (outside the repo).
+  Never pass `--basetemp` under `./tmp/`, and keep `TMPDIR` outside `./tmp/`.
 
 ## Detailed Instructions
 

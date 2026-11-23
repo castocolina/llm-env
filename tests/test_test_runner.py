@@ -1,9 +1,21 @@
 """tools/test.sh: capped workers, niced, quiet, offline in its own namespaces, and no opt-in lane leaks into the default suite."""
 import os
 import re
+import signal
+from pathlib import Path
 
 import pytest
-from runner_helpers import OPT_IN_SWITCHES, ROOT, calls, run_runner, runner_repo
+from runner_helpers import (
+    OPT_IN_SWITCHES,
+    ROOT,
+    calls,
+    descendants,
+    run_dir,
+    run_runner,
+    runner_repo,
+    start_runner,
+    wait_until,
+)
 
 
 def test_runner_caps_workers_at_the_cpu_percentage(tmp_path):
@@ -59,3 +71,48 @@ def test_runner_exits_4_with_the_hint_when_uv_cannot_resolve_offline(tmp_path): 
     (repo / "calls").unlink()
     result = run_runner(repo, env={"STUB_REAL_OFFLINE": "1", "UV_CACHE_DIR": str(cold)})
     assert result.returncode == 4 and "run make dev-setup once with network" in result.stderr and calls(repo) == []
+
+
+@pytest.mark.parametrize(("env", "rc", "line"), [
+    ({}, 0, None),                                                                   # pytest's temp root and tmp/keep/old.log are not leaks
+    ({"STUB_TOUCH": "tmp/left.log"}, 1, "leak: tmp/left.log"),
+    ({"STUB_TOUCH": "tmp/keep/new.log"}, 1, "leak: tmp/keep/new.log"),               # nested, under an existing dir
+    ({"STUB_MKDIR_TMPDIR": "scratch"}, 1, "leak: TMPDIR/scratch"),
+    ({"STUB_MKDIR_TMPDIR": "pytest-of-x"}, 1, "leak: TMPDIR/pytest-of-x"),           # no name-prefix exemption
+    ({"STUB_MKDIR_TMPDIR": "uv-0123456789abcdef.lock"}, 1, "leak: TMPDIR/uv-0123456789abcdef.lock"),  # only uv's empty file is exempt
+    ({"STUB_NEW_PODMAN": "image abc"}, 1, "leak: podman image abc"),                 # same ID as the container, other class
+    ({"STUB_RC": "5", "STUB_TOUCH": "tmp/x"}, 1, "leak: tmp/x"),
+    ({"STUB_RC": "3", "STUB_TOUCH": "tmp/x"}, 3, "leak: tmp/x"),                     # other statuses are kept
+    ({"STUB_PODMAN_FAIL": "1"}, 1, "inventory: podman unavailable"),
+    ({"LOCKED": "1"}, 1, "inventory: repo tmp/ unreadable")])                        # the test makes tmp/locked mode 000
+def test_a_leak_turns_0_or_5_into_1_and_keeps_other_statuses(tmp_path, env, rc, line):
+    (repo := runner_repo(tmp_path)).joinpath("podman-state").write_text("container abc\n")
+    (locked := repo / "tmp/locked").mkdir(mode=0 if env.get("LOCKED") else 0o700)
+    try:
+        result = run_runner(repo, env=env)
+    finally:
+        locked.chmod(0o700)                                                         # so pytest can clean tmp_path
+    assert result.returncode == rc and "leak: podman container" not in result.stderr
+    assert line in result.stderr if line else "leak:" not in result.stderr
+    assert not run_dir(result.stderr).exists()                                       # this run's own TMPDIR is gone
+
+
+def test_runner_drops_inherited_pytest_settings(tmp_path):                           # spec R10
+    result = run_runner(repo := runner_repo(tmp_path), env={"PYTEST_ADDOPTS": "-k nothing", "PYTEST_DEBUG_TEMPROOT": str(tmp_path)})
+    assert "addopts=unset" in calls(repo) and f"temproot={run_dir(result.stderr)}/pytest" in calls(repo)
+
+
+def test_runner_skips_the_podman_diff_when_podman_is_absent(tmp_path):
+    result = run_runner(runner_repo(tmp_path), podman=False)
+    assert result.returncode == 0 and (result.stdout + result.stderr).count("podman not found") == 1
+
+
+@pytest.mark.parametrize(("sig", "rc"), [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+def test_a_signal_to_the_runner_reaps_every_descendant(tmp_path, sig, rc):
+    proc = start_runner(repo := runner_repo(tmp_path), env={"STUB_SLEEP": "1"})
+    wait_until(lambda: b"sleep\x00300\x00" in descendants(proc.pid).values())         # the stub's new-session child
+    tree = descendants(proc.pid)
+    proc.send_signal(sig)                                                           # the runner's PID only
+    assert proc.wait(timeout=10) == rc and "term" in calls(repo)                     # forwarded, and waited for
+    wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in tree), timeout=5)
+    assert not run_dir(proc.communicate()[1].decode()).exists()
