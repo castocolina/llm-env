@@ -11,7 +11,6 @@ import gzip
 import hashlib
 import json
 import pathlib
-import shutil
 import sys
 
 import pytest
@@ -530,18 +529,3 @@ def test_a_failed_or_overlong_characterization_stores_nothing(tmp_path, capsys):
         assert rc == 1 and message in err and "nothing was stored" in err
     assert not (tmp_path / "store").exists()
 
-
-@pytest.mark.skipif(not shutil.which("podman"), reason="needs podman (an empty isolated store is created and removed)")
-def test_the_sweep_reaps_only_backend_roots_whose_owner_is_gone(tmp_path):
-    from pylib.omniroute_characterize import IsolatedBackend
-    live = IsolatedBackend(tmp_path)                  # this process holds its lease
-    dead = IsolatedBackend(tmp_path)
-    (dead.root / "lease").write_text("999999999 1\n")  # a SIGKILLed owner
-    unrelated = tmp_path / "characterize-run.log"     # shares the prefix, is not a backend root
-    unrelated.write_text("keep")
-    half = tmp_path / "characterize-half"             # no storage.conf: never handed to podman
-    half.mkdir()
-    IsolatedBackend.sweep(tmp_path)
-    assert live.root.is_dir() and not dead.root.exists() and unrelated.read_text() == "keep" and half.is_dir()
-    live.close()
-    assert not live.root.exists()

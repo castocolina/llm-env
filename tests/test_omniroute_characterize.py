@@ -17,9 +17,13 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
+import sys
 import time
 
 import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from pylib.omniroute_characterize import (
     BackendUnavailable,
@@ -66,3 +70,19 @@ def test_characterize_and_derive_candidate():
     print(json.dumps({"evidence": str(ev_path), "candidate": str(cand_path), "profile_entry": str(promoted),
                       "incomplete": candidate["incomplete"], "scenarios": evidence["scenarios"]}, indent=2))
     assert len(evidence["scenarios"]) == 10
+
+
+@pytest.mark.skipif(not shutil.which("podman"), reason="needs podman (an empty isolated store is created and removed)")
+def test_the_sweep_reaps_only_backend_roots_whose_owner_is_gone(tmp_path):
+    from pylib.omniroute_characterize import IsolatedBackend
+    live = IsolatedBackend(tmp_path)                  # this process holds its lease
+    dead = IsolatedBackend(tmp_path)
+    (dead.root / "lease").write_text("999999999 1\n")  # a SIGKILLed owner
+    unrelated = tmp_path / "characterize-run.log"     # shares the prefix, is not a backend root
+    unrelated.write_text("keep")
+    half = tmp_path / "characterize-half"             # no storage.conf: never handed to podman
+    half.mkdir()
+    IsolatedBackend.sweep(tmp_path)
+    assert live.root.is_dir() and not dead.root.exists() and unrelated.read_text() == "keep" and half.is_dir()
+    live.close()
+    assert not live.root.exists()
