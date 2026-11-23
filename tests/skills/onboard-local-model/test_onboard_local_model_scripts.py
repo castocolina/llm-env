@@ -1778,6 +1778,8 @@ QH_URL = f"https://huggingface.co/o/r/resolve/{QH_SHA}/m-Q4_K_M.gguf"
 QH_TOTAL = 9197093888
 MIB = 1048576
 QH_FILES = {"m-Q4_K_M.gguf": 5512 * MIB, "m-Q5_K_M.gguf": 6334 * MIB, "m-Q6_K.gguf": 7208 * MIB}
+# mimics `df --output=avail -B1 <dir>` (fetch-gguf.sh) so the free-disk check never depends on the host; 1 TiB by default
+DF_STUB = 'printf "Avail\\n%s\\n" "${STUB_DF_FREE:-1099511627776}"\n'
 QH_UV = r"""echo "$*" >>"$CALLS"
 case "$*" in
 *" migrate-config"*) exec "$REAL_UV" "$@" ;;
@@ -1868,7 +1870,7 @@ def _qh_env(tmp_path: Path, *, podman: str = "", config: Mapping[str, object] | 
             sha: str = QH_SHA, curl: bool = False) -> dict[str, str]:
     stub = tmp_path / "bin"
     stub.mkdir(exist_ok=True)
-    bodies = {"uv": QH_UV, "podman": podman, **({"curl": QH_CURL} if curl else {})}
+    bodies = {"uv": QH_UV, "podman": podman, "df": DF_STUB, **({"curl": QH_CURL} if curl else {})}
     for name, body in bodies.items():
         (stub / name).write_text(f"#!/usr/bin/env bash\n{body}")
         (stub / name).chmod(0o755)
@@ -2121,7 +2123,7 @@ def _fetch(tmp_path: Path, *, size: int = len(KNOWN), sha: str | None = hashlib.
            mode: str = "full", url: str = FETCH_URL, env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], Path]:
     stub = tmp_path / "bin"
     stub.mkdir(exist_ok=True)
-    for name, body in (("curl", FETCH_CURL), ("sleep", 'echo "sleep $*" >>"$CALLS.sleep"\n')):
+    for name, body in (("curl", FETCH_CURL), ("sleep", 'echo "sleep $*" >>"$CALLS.sleep"\n'), ("df", DF_STUB)):
         (stub / name).write_text(f"#!/usr/bin/env bash\n{body}")
         (stub / name).chmod(0o755)
     dest = tmp_path / "models" / "m.gguf"
@@ -2198,7 +2200,11 @@ def test_fetch_gguf_copies_a_local_file_and_resumes_it(tmp_path: Path) -> None: 
     dest = tmp_path / "models" / "Bar-7B-Q4_K_M.gguf"
     dest.parent.mkdir()
     dest.with_name(dest.name + ".part").write_bytes(data[:100_000])  # an interrupted earlier copy
-    path = f"/usr/bin:/bin:{Path(shutil.which('jq') or '/usr/bin/jq').parent}"  # --from encodes the path with jq
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "df").write_text(f"#!/usr/bin/env bash\n{DF_STUB}")
+    (stub / "df").chmod(0o755)
+    path = f"{stub}:/usr/bin:/bin:{Path(shutil.which('jq') or '/usr/bin/jq').parent}"  # --from encodes the path with jq
     result = _run("bash", SCRIPTS / "fetch-gguf.sh", "--from", src, "--dest", dest, "--size", str(len(data)), env={"PATH": path})
     assert result.returncode == 0, result.stderr
     assert dest.read_bytes() == data and src.read_bytes() == data and not dest.with_name(dest.name + ".part").exists()
@@ -2220,14 +2226,24 @@ def test_fetch_gguf_from_needs_one_regular_file(tmp_path: Path) -> None:
 
 def test_fetch_gguf_needs_free_disk_only_for_what_the_part_lacks(tmp_path: Path) -> None:
     (tmp_path / "models").mkdir()
-    result, _ = _fetch(tmp_path, size=1 << 60)
+    free = 4 * 1024 * MIB
+    result, _ = _fetch(tmp_path, size=1 << 60, env={"STUB_DF_FREE": str(free)})
     assert result.returncode == 1 and "free disk" in result.stderr and _calls(tmp_path) == []
-    size = shutil.disk_usage(tmp_path / "models").free + 512 * MIB  # size + 1024 MiB never fits; the remainder does
+    size = free + 512 * MIB  # size + 1024 MiB never fits; the remainder does
     with (tmp_path / "models" / "m.gguf.part").open("wb") as handle:
         handle.truncate(size - 1)  # sparse: no disk used
-    result, _ = _fetch(tmp_path, size=size)
+    result, _ = _fetch(tmp_path, size=size, env={"STUB_DF_FREE": str(free)})
     assert "free disk" not in result.stderr and len(_calls(tmp_path)) == 1
     assert result.returncode == 1 and "size mismatch" in result.stderr  # the stub has nothing to append
+
+
+def test_fetch_gguf_needs_exactly_size_minus_part_plus_1024_mib(tmp_path: Path) -> None:
+    need = len(KNOWN) + 1024 * MIB
+    for free, ok in ((need - 1, False), (need, True)):
+        (sub := tmp_path / str(free)).mkdir()
+        result, dest = _fetch(sub, env={"STUB_DF_FREE": str(free)})
+        assert (result.returncode == 0) is ok and ("free disk" in result.stderr) is not ok, result.stderr
+        assert not ok or dest.read_bytes() == KNOWN
 
 
 def test_fetch_gguf_rejects_a_non_integer_size() -> None:
