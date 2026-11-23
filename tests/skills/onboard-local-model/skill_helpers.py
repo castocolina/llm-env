@@ -33,7 +33,13 @@ def node_env(**extra: str) -> dict[str, str]:
 
 
 def run(*args: str | Path, timeout: float | None = None, **kwargs: object) -> subprocess.CompletedProcess[str]:
-    """subprocess.run in its own session: on a timeout the whole process group dies, not only the direct child."""
+    """subprocess.run in its own session: on a timeout the whole process group dies, not only the direct child.
+
+    An explicit env (often HOME=tmp_path) gets the shared uv cache and UV_OFFLINE unless it sets them itself,
+    so `uv run` in the child resolves pyyaml from the warm cache instead of starting cold.
+    """
+    if (env := kwargs.get("env")) is not None:
+        kwargs["env"] = {k: os.environ[k] for k in ("UV_CACHE_DIR", "UV_OFFLINE") if k in os.environ} | dict(env)  # pyright: ignore[reportCallIssue, reportArgumentType]
     proc = subprocess.Popen(  # pyright: ignore[reportCallIssue]
         [str(a) for a in args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, **kwargs  # pyright: ignore[reportArgumentType]
     )

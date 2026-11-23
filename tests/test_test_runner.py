@@ -1,7 +1,8 @@
-"""tools/test.sh: capped workers, niced, quiet, and no opt-in lane leaks into the default suite."""
+"""tools/test.sh: capped workers, niced, quiet, offline in its own namespaces, and no opt-in lane leaks into the default suite."""
 import os
 import re
 
+import pytest
 from runner_helpers import OPT_IN_SWITCHES, ROOT, calls, run_runner, runner_repo
 
 
@@ -33,3 +34,26 @@ def test_runner_unsets_every_opt_in_switch(tmp_path):
 def test_every_env_gate_in_tests_is_an_opt_in_switch_the_runner_unsets():
     gate = re.compile(r'skipif\(os\.environ\.get\("(\w+)"\)')
     assert {m for p in (ROOT / "tests").rglob("test_*.py") for m in gate.findall(p.read_text())} == set(OPT_IN_SWITCHES)
+
+
+def test_runner_has_only_loopback_keeps_the_uid_and_is_offline(tmp_path):
+    assert run_runner(repo := runner_repo(tmp_path)).returncode == 0
+    assert {"net=lo", f"uid={os.getuid()}", "uv_offline=1"} <= set(calls(repo))
+
+
+def test_runner_exits_69_when_the_namespace_probe_fails(tmp_path):
+    result = run_runner(repo := runner_repo(tmp_path), env={"STUB_UNSHARE_FAIL": "1"})
+    assert result.returncode == 69 and "network namespace unavailable" in result.stderr and calls(repo) == []
+
+
+@pytest.mark.parametrize("rc", [3, 5])
+def test_runner_passes_the_pytest_status_through_after_a_good_probe(tmp_path, rc):
+    result = run_runner(runner_repo(tmp_path), env={"STUB_RC": str(rc)})
+    assert result.returncode == rc
+
+
+def test_runner_exits_4_with_the_hint_when_uv_cannot_resolve_offline(tmp_path):  # real uv, cold cache
+    (cold := tmp_path / "cold").mkdir()
+    repo = runner_repo(tmp_path, extra=("llmenv.py",))
+    result = run_runner(repo, env={"STUB_REAL_OFFLINE": "1", "UV_CACHE_DIR": str(cold)})
+    assert result.returncode == 4 and "run make dev-setup once with network" in result.stderr and calls(repo) == []

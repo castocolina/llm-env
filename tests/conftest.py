@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 from observe_state_guard import REAL_LLM_ENV_STATE
 
+# No test downloads anything: uv resolves from its cache, Hugging Face clients stay offline; children inherit both.
+os.environ["UV_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _no_stale_pwd() -> None:

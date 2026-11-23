@@ -54,7 +54,7 @@ make prune-stale-images [DRY_RUN=1] [STALE_DAYS=90]  # Remove this stack's stale
 make dev-setup                 # Install dev-only tooling
 uv tool install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push  # one-time: enable the git hooks below
 make validate                  # shellcheck + ruff + pyright
-make test                      # Python test suite
+make test                      # The only command whose purpose is the full suite (capped, offline, leak-checked)
 make clean                     # Remove everything
 ```
 
@@ -111,6 +111,9 @@ does not prompt for those keys. `LLM_ENV_PROFILE` and `LLM_ENV_ENV_FILE` relocat
 - `LLM_ENV_SYSTEM_ONE_HEALTH_TIMEOUT_SECONDS` — seconds `make start` waits
   for System One to become healthy (default 120; positive integer). Weights
   are on disk after `make setup`; this bounds load-to-GPU only.
+- `LLM_ENV_TEST_CPU_PCT` — share of the CPUs `make test` / `tools/test.sh` gives pytest
+  workers (`max(1, floor(nproc * pct / 100))`, default 40; an integer 1-100 without leading
+  zeros, else exit 2).
 - `LLM_ENV_SCOUT_OUT` — output root for the run directories that
   `scripts/model-interference.sh` (`model-interference/<stamp>-<pid>`) and the
   skill's `quant-headroom.sh check` (`model-tune/quant-<stamp>-<pid>`) write.

@@ -9,4 +9,6 @@ require_cmd uv
 
 log_step "Syncing the Python dev environment"
 uv sync
+# Warm the llmenv.py script environment (pyyaml) in the uv cache: tools/test.sh runs offline.
+uv run llmenv.py --help >/dev/null
 log_info "dev environment ready (.venv, pytest, ruff, pyright, pytest-xdist)"

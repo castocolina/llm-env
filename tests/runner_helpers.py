@@ -1,4 +1,4 @@
-"""Harness for tests of tools/test.sh: a scratch repo with stub nproc, uv and podman on PATH."""
+"""Harness for tests of tools/test.sh: a scratch repo with stub nproc, uv, unshare and podman on PATH."""
 from __future__ import annotations
 
 import os
@@ -17,10 +17,22 @@ if [ "$1 $2" = "run pytest" ]; then
   echo "niceness=$(nice)" >>"$CALLS"
   set_=(); for v in {" ".join(OPT_IN_SWITCHES)}; do [[ -v $v ]] && set_+=("$v"); done
   echo "optin=${{set_[*]}}" >>"$CALLS"
+  echo "net=$(ip -o link show | awk -F': ' '{{printf "%s%s", s, $2; s=","}}')" >>"$CALLS"
+  echo "uid=$(id -u)" >>"$CALLS"
+  echo "uv_offline=$UV_OFFLINE" >>"$CALLS"
   echo "$*" >>"$CALLS"
   exit "${{STUB_RC:-0}}"
 fi
+if [ "$1 $2" = "run --offline" ]; then
+  [ -n "${{STUB_REAL_OFFLINE:-}}" ] && exec "$REAL_UV" "$@"
+  echo "offline-check" >>"$CALLS"
+  exit "${{STUB_OFFLINE_RC:-0}}"
+fi
 echo "$*" >>"$CALLS"
+"""
+STUB_UNSHARE = """#!/usr/bin/env bash
+[ -n "${STUB_UNSHARE_FAIL:-}" ] && exit 1
+exec /usr/bin/unshare "$@"
 """
 STUB_PODMAN = """#!/usr/bin/env bash
 case "$*" in
@@ -43,7 +55,7 @@ def runner_repo(tmp_path: Path, extra=()) -> Path:
     (repo / "tmp/keep/old.log").write_text("old\n")
     (repo / "podman-state").write_text("")
     (stub := repo / "stub").mkdir(mode=0o755)
-    for name, body in (("nproc", STUB_NPROC), ("uv", STUB_UV), ("podman", STUB_PODMAN)):
+    for name, body in (("nproc", STUB_NPROC), ("uv", STUB_UV), ("unshare", STUB_UNSHARE), ("podman", STUB_PODMAN)):
         (stub / name).write_text(body)
         (stub / name).chmod(0o755)
     return repo
