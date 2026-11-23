@@ -106,6 +106,7 @@ from pylib.resources import (
     summarize_policy,
     validate_overrides,
 )
+from pylib.selection import git_changes, load_tree, read_exempt, select
 from pylib.transcript import classify_transcript
 
 DEVICE_LINE_RE = re.compile(
@@ -938,6 +939,30 @@ def cmd_run_agent_bounded(args: argparse.Namespace) -> int:
     return emit(result.to_dict())
 
 
+def cmd_select_tests(args: argparse.Namespace) -> int:
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True,
+                          text=True).stdout.removesuffix("\n")
+    try:
+        changed, deleted = git_changes(root, args.stage, os.environ)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    exempt_path = Path(root) / "tests/selection-exempt.txt"
+    exempt = read_exempt(exempt_path) if exempt_path.exists() else {}
+    sel = select(load_tree(root), changed, deleted, args.stage, exempt)
+    forced = os.environ.get("SELECT_ALL") == "1"
+    full = forced or sel.full
+    if full:
+        why = "SELECT_ALL=1" if forced else next((f"{p}: {r}" for p, r in sel.reasons.items()
+                                                  if r in ("hub", "no owner") or r.startswith("full:")), "see reasons")
+        print(f"selected all {sel.total} test files ({why})", file=sys.stderr)
+    else:
+        print(f"selected {len(sel.tests)} of {sel.total} test files", file=sys.stderr)
+    for path, reason in sel.reasons.items():
+        print(f"  {path}: {reason}", file=sys.stderr)
+    return emit({"full": full, "tests": [] if full else list(sel.tests), "total": sel.total, "reasons": sel.reasons})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llmenv")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
@@ -1166,6 +1191,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_agent.add_argument("agent_command", nargs=argparse.REMAINDER)
     run_agent.set_defaults(func=cmd_run_agent_bounded, command_parser=run_agent)
+
+    select_parser = sub.add_parser("select-tests")
+    select_parser.add_argument("--stage", required=True, choices=["commit", "push"])
+    select_parser.set_defaults(func=cmd_select_tests)
 
     register_omniroute_update(sub)
 

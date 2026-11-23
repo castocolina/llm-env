@@ -1,11 +1,14 @@
 """pylib/selection.py: which test files a change selects (spec D1, D3, G1)."""
 import gzip
+import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from git_helpers import git_repo
+from git_helpers import git, git_out, git_repo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -143,3 +146,54 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
     (tmp_path / "y").write_text("docs/b.md\n")
     with pytest.raises(ValueError, match="docs/b.md"):
         read_exempt(tmp_path / "y")
+
+
+def _cli(repo, *args, env=None):
+    env = os.environ | {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"} | (env or {})
+    return subprocess.run(["uv", "run", str(ROOT / "llmenv.py"), *args], cwd=repo, env=env, capture_output=True, text=True,
+                          check=False)
+
+
+def select_tests(repo, *args, env=None):
+    result = _cli(repo, "select-tests", *args, env=env)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout), result.stderr
+
+
+ODD = "scripts/my file ñ.sh"                                                         # git quotes it without -z
+BASE = {"scripts/c.sh": b"", ODD: b"", "tests/test_c.py": b"'c.sh'\n", "tests/test_d.py": b"'d.sh'\n",
+        "tests/test_odd.py": "'my file ñ.sh'\n".encode(), NP: b""}
+
+
+@pytest.mark.parametrize("change", ["edit", "rm", "mv", "rm odd"])
+def test_select_tests_commit_reads_every_staged_change_from_git(tmp_path, change):
+    repo = git_repo(tmp_path, BASE, commit=True)
+    if change == "edit":
+        (repo / "scripts/c.sh").write_text("x\n")
+        git(repo, "add", "scripts/c.sh")
+    else:
+        git(repo, *{"rm": ("rm", "-q", "scripts/c.sh"), "mv": ("mv", "scripts/c.sh", "scripts/d.sh"),
+                    "rm odd": ("rm", "-q", ODD)}[change])
+    want = {NP, "tests/test_odd.py"} if change == "rm odd" else {"tests/test_c.py", NP} | ({"tests/test_d.py"} if change == "mv" else set())
+    out, err = select_tests(repo, "--stage", "commit")
+    assert set(out["tests"]) == want and err.startswith(f"selected {len(want)} of 4 test files")
+
+
+def test_select_tests_push_diffs_the_range(tmp_path):
+    repo = git_repo(tmp_path, BASE, commit=True)
+    base = git_out(repo, "rev-parse", "HEAD")
+    git(repo, "rm", "-q", "scripts/c.sh")
+    git(repo, "commit", "-qm", "rm")
+    out, _ = select_tests(repo, "--stage", "push", env={"PUSH_FROM": base, "PUSH_TO": git_out(repo, "rev-parse", "HEAD")})
+    assert out["tests"] == ["tests/test_c.py", NP] and not out["full"]
+
+
+def test_select_tests_takes_no_paths_and_needs_the_push_range(tmp_path):
+    repo = git_repo(tmp_path, BASE, commit=True)
+    assert _cli(repo, "select-tests", "--stage", "commit", "scripts/c.sh").returncode == 2
+    result = _cli(repo, "select-tests", "--stage", "push")
+    assert result.returncode == 2 and "push stage needs PUSH_FROM and PUSH_TO" in result.stderr
+
+
+def test_select_all_forces_full(tmp_path):
+    assert select_tests(git_repo(tmp_path, BASE, commit=True), "--stage", "commit", env={"SELECT_ALL": "1"})[0]["full"]

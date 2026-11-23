@@ -55,6 +55,20 @@ def load_tree(root) -> dict[str, str]:
     return tree
 
 
+def git_changes(root, stage: str, env) -> tuple[list[str], list[str]]:
+    """(changed, deleted) paths: the index against HEAD at commit, PUSH_FROM..PUSH_TO at push. git inherits the
+    caller's environment, so a hook's GIT_INDEX_FILE (`git commit -a`) is the index read."""
+    if stage == "push":
+        if not env.get("PUSH_FROM") or not env.get("PUSH_TO"):
+            raise ValueError("push stage needs PUSH_FROM and PUSH_TO")
+        target = [env["PUSH_FROM"], env["PUSH_TO"]]
+    else:
+        target = ["--cached"]
+    fields = _git(root, "diff", "--name-status", "-z", "--no-renames", *target)
+    pairs = list(zip(fields[::2], fields[1::2]))
+    return [p for s, p in pairs if s != "D"], [p for s, p in pairs if s == "D"]
+
+
 def executables(root) -> set[str]:
     return {entry.split("\t", 1)[1] for entry in _git(root, "ls-files", "-s", "-z") if entry.startswith("100755 ")}
 
