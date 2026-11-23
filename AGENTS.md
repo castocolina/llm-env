@@ -52,7 +52,7 @@ make backup                    # Back up OmniRoute combos + provider connection 
 make prune                     # Delete downloaded model files (not removed by clean)
 make prune-stale-images [DRY_RUN=1] [STALE_DAYS=90]  # Remove this stack's stale images plus other projects' unused images created >= STALE_DAYS days ago (creation date stands in for last use; 0 = stack only), one plain podman rmi at a time; DRY_RUN=1 only lists (other projects' images untouched)
 make dev-setup                 # Install dev-only tooling
-uv tool install pre-commit && pre-commit install --hook-type pre-commit --hook-type pre-push  # one-time: enable the git hooks below
+uv tool install pre-commit && make dev-setup  # one-time: enable the git hooks below
 make validate                  # shellcheck + ruff + pyright
 make test                      # The only command whose purpose is the full suite (capped, offline, leak-checked)
 make clean                     # Remove everything
