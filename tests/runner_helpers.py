@@ -74,7 +74,8 @@ def _path_without_podman(repo: Path) -> str:
 
 
 def _env(repo: Path, env, podman: bool) -> dict:
-    base = {k: v for k, v in os.environ.items() if k != "LLM_ENV_TEST_CPU_PCT"}  # the default case means unset
+    # the default CPU case means unset; UV_OFFLINE must come from the runner, not from conftest
+    base = {k: v for k, v in os.environ.items() if k not in ("LLM_ENV_TEST_CPU_PCT", "UV_OFFLINE")}
     path = f"{repo / 'stub'}:{':'.join(SYSTEM_PATH)}" if podman else _path_without_podman(repo)
     return base | (env or {}) | {"PATH": path, "CALLS": str(repo / "calls"), "REAL_UV": shutil.which("uv") or "",
                                  "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}

@@ -54,6 +54,8 @@ def test_runner_passes_the_pytest_status_through_after_a_good_probe(tmp_path, rc
 
 def test_runner_exits_4_with_the_hint_when_uv_cannot_resolve_offline(tmp_path):  # real uv, cold cache
     (cold := tmp_path / "cold").mkdir()
-    repo = runner_repo(tmp_path, extra=("llmenv.py",))
+    repo = runner_repo(tmp_path, extra=("llmenv.py", *(p.relative_to(ROOT).as_posix() for p in (ROOT / "pylib").glob("*.py"))))
+    assert run_runner(repo, env={"STUB_REAL_OFFLINE": "1"}).returncode == 0  # warm cache: only a cold one fails
+    (repo / "calls").unlink()
     result = run_runner(repo, env={"STUB_REAL_OFFLINE": "1", "UV_CACHE_DIR": str(cold)})
     assert result.returncode == 4 and "run make dev-setup once with network" in result.stderr and calls(repo) == []

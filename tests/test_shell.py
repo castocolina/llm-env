@@ -5515,9 +5515,12 @@ def test_start_no_gpu_still_waits_for_omniroute_and_runs_network_sh(
 
 
 def test_start_no_gpu_skips_omniroute_provisioning(tmp_path: pathlib.Path) -> None:
-    result, _config, calls = run_lifecycle_script(
-        tmp_path, "scripts/start.sh", llm_server_enabled=False
-    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:  # our own OmniRoute port, not the host's
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        result, _config, calls = run_lifecycle_script(
+            tmp_path, "scripts/start.sh", llm_server_enabled=False, omniroute_port=listener.getsockname()[1]
+        )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "omniroute provision" not in calls.read_text()
     assert (
