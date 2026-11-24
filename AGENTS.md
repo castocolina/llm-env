@@ -51,7 +51,7 @@ make local-combo         # Create/update the local-only OmniRoute combo my-local
 make backup                    # Back up OmniRoute combos + provider connection metadata (before prune/clean)
 make prune                     # Delete downloaded model files (not removed by clean)
 make prune-stale-images [DRY_RUN=1] [STALE_DAYS=90]  # Remove this stack's stale images plus other projects' unused images created >= STALE_DAYS days ago (creation date stands in for last use; 0 = stack only), one plain podman rmi at a time; DRY_RUN=1 only lists (other projects' images untouched)
-make dev-setup                 # Install dev-only tooling
+make dev-setup                 # Install dev-only tooling, pre-commit's commit hook and the .git/hooks/pre-push link
 uv tool install pre-commit && make dev-setup  # one-time: enable the git hooks below
 make validate                  # shellcheck + ruff + pyright
 make test                      # The only command whose purpose is the full suite (capped, offline, leak-checked)
@@ -73,9 +73,11 @@ backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening
 file, `pyproject.toml` or `uv.lock`, then the tests selected from the staged diff without the slow ones
 (`tools/test-changed.sh --stage commit`); that last hook fails with "run make dev-setup" while the pre-push link is
 missing or not executable. At push: `tools/validate.sh`, then the tests selected from the pushed range for a
-fast-forward of the checked-out branch to itself, or `tools/test.sh` (the full suite) for a new branch. Any other
-push (several refs, a tag or other destination, a rewind, a dirty index or worktree) fails with "push shape not
-supported by the hook: run make test, then git push --no-verify". The only bypasses are `git commit|push
+fast-forward of the checked-out branch (by name or `HEAD`) to itself, or `tools/test.sh` (the full suite) for a new
+branch. A dirty index or worktree fails with "push refused: the index or worktree is dirty: commit or stash your
+changes, then push again" (`make test` would test the worktree, not the pushed commit). Any other push (several
+refs, a tag or other destination, a rewind) fails with "push shape not supported by the hook: run make test, then git
+push --no-verify". The only bypasses are `git commit|push
 --no-verify` and, at commit, `SKIP=<hook-id>`. `SELECT_ALL=1` makes either stage select every test file.
 
 ### Environment variables

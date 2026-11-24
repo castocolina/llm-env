@@ -17,6 +17,8 @@ from runner_helpers import (
     wait_until,
 )
 
+HINT = "leak check: if another process writes under tmp/, rerun"
+
 
 def test_runner_caps_workers_at_the_cpu_percentage(tmp_path):
     for pct, workers in ((None, "9"), ("10", "2"), ("1", "1"), ("100", "24")):
@@ -94,6 +96,7 @@ def test_a_leak_turns_0_or_5_into_1_and_keeps_other_statuses(tmp_path, env, rc, 
         locked.chmod(0o700)                                                         # so pytest can clean tmp_path
     assert result.returncode == rc and "leak: podman container" not in result.stderr
     assert line in result.stderr if line else "leak:" not in result.stderr
+    assert (HINT in result.stderr) == (line or "").startswith("leak: tmp/")      # a concurrent tmp/ writer looks like a leak
     assert not run_dir(result.stderr).exists()                                       # this run's own TMPDIR is gone
 
 

@@ -51,6 +51,8 @@ while [ $# -gt 0 ]; do
 done
 [ -z "$only" ] || [[ $only =~ ^([1-9]|10)$ ]] || { echo "--only takes 1 to ${#faults[@]}" >&2; exit 2; }
 unset SELECT_ALL PUSH_FROM PUSH_TO
+# an exported GIT_DIR or GIT_INDEX_FILE would aim the scratch copies' git commands at this repo
+while read -r v; do unset "$v"; done < <(git rev-parse --local-env-vars)
 
 cd "$(dirname "$0")/.."
 for d in . /tmp; do
@@ -91,10 +93,6 @@ targets() { if [ "$(jq -r .full <<<"$1")" = true ]; then echo tests/; else jq -r
 
 git checkout-index -a --prefix="$scratch/base/"
 mkdir "$scratch/base/tmp"
-# shortcut: this test fixture is ignored by .gitignore's models.yml (never tracked), yet 23 tests read it; drop the
-# copy once it is tracked. The copy's .gitignore keeps it out of the base commit, so selection never sees it.
-fixture=.claude/skills/onboard-local-model/evals/files/models.yml
-cp -p "$fixture" "$scratch/base/$fixture"
 g "$scratch/base" -c init.defaultBranch=main init -q
 g "$scratch/base" add -A
 g "$scratch/base" commit -q -m base

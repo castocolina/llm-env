@@ -458,10 +458,13 @@ def test_select_all_forces_full(tmp_path):
 - Produces `tools/pre-push.sh <remote> <url>`, reading git's ref lines (`<local ref> <local sha> <remote ref> <remote
   sha>`) on stdin. Root is `git rev-parse --show-toplevel` of the cwd. In order:
   1. No line, or one deletion line (local sha all zeros): exit 0.
-  2. Refuse unless there is exactly one line, its local ref is `b=$(git symbolic-ref -q HEAD)`, its remote ref is
-     also `$b`, its local sha is `git rev-parse HEAD`, `git diff --cached --quiet` and `git diff --quiet` both succeed,
-     and its remote sha is all zeros or `git merge-base --is-ancestor <remote sha> HEAD` succeeds. A refusal is exit 1
-     before any check, with exactly `push shape not supported by the hook: run make test, then git push --no-verify`.
+  2. Refuse unless there is exactly one line, its local ref is `b=$(git symbolic-ref -q HEAD)` or the word `HEAD`
+     (final review: `git push origin HEAD` sends it), its remote ref is also `$b`, its local sha is
+     `git rev-parse HEAD`, `git diff --cached --quiet` and `git diff --quiet` both succeed, and its remote sha is all
+     zeros or `git merge-base --is-ancestor <remote sha> HEAD` succeeds. A refusal is exit 1 before any check, with
+     exactly `push refused: the index or worktree is dirty: commit or stash your changes, then push again` when one of
+     the two `git diff` checks fails (final review: `make test` tests the worktree, not the pushed commit, so no
+     `--no-verify` advice), else `push shape not supported by the hook: run make test, then git push --no-verify`.
   3. `bash "$root/tools/validate.sh"`, then for a fast-forward `PUSH_FROM=<remote sha> PUSH_TO=<HEAD sha> bash
      "$root/tools/test-changed.sh" --stage push`, and for a new branch (remote sha all zeros) the full suite,
      `bash "$root/tools/test.sh"`; the first failure stops it.
@@ -495,6 +498,7 @@ def test_dev_setup_runs_uv_sync_in_a_scratch_repo(tmp_path):
   path>` with the lines on stdin. `_git_push(repo, *args)` runs a real `git push -q origin *args` likewise.
 ```python
 REFUSED = "push shape not supported by the hook: run make test, then git push --no-verify"
+DIRTY = "push refused: the index or worktree is dirty: commit or stash your changes, then push again"  # final review
 SHAPES = {"two refs": ["main H main B", "other O other Z"], "tag destination": ["main H tags/v1 Z"],
           "other destination": ["main H other Z"], "rewind": ["main H main D"], "other branch": ["other O other Z"],
           "tag": ["tags/v1 H tags/v1 Z"], "staged edit": ["main H main B"], "unstaged edit": ["main H main B"],
@@ -919,7 +923,8 @@ nan_quantiles_in_unused_families_are_skipped_like_real_grafana_output}`. `test_p
 `effort_run_flags_a_transcript_that_reads_the_{manifest, generator_library_by_a_relative_path}`.
 
 `tests/test_cli.py`'s six `_reply` methods (lines 1599, 1722, 1818, 1902, 2025, 2159) become one module-level
-`_reply(handler, payload, *, status=200, set_cookie=None) -> None` (`def _reply` count 6 → 1). `_fake_login_ok` stays:
+`_reply(handler, payload, *, status=200, set_cookie=None, content_length=True) -> None` (`def _reply` count 6 → 1;
+`content_length=False` keeps `_MutableCombosHandler` unchanged). `_fake_login_ok` stays:
 R8 asks for one copy per file, which each of its two files has; merging across files needs T19's shared module.
 - [ ] As T15 (plus `tests/test_capacity.py`, which imports from `test_cli.py`; `git add tests`), commit `test:
   parametrize the remaining shape duplicates; one _reply helper (N -> N cases)`.

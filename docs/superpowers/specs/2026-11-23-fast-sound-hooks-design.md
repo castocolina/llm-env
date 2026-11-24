@@ -111,10 +111,11 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   status is pytest's own (0-5), except as D6 says for a leak; tests pin 3 and 5 passing through and the cold-cache 4
   with real `uv`. `tests/conftest.py` exports `UV_OFFLINE=1` and `HF_HUB_OFFLINE=1` at import time.
   `skill_helpers.run` passes `UV_CACHE_DIR`/`UV_OFFLINE` into explicit envs; `make dev-setup` warms the script
-  environment once. The runner unsets the three opt-in switches
-  (`LLM_ENV_UPDATE_PROOF`, `LLM_ENV_UPDATE_CHARACTERIZE`, `LLM_ENV_LIVE_VM`, every `skipif(os.environ...)` gate in
-  `tests/` on 2026-11-23), so the default suite runs no real Podman (`ProofBackend`, `IsolatedBackend`) whatever the
-  caller exported; a test exports all three and expects the skips.
+  environment once. The runner unsets the four opt-in switches
+  (`LLM_ENV_UPDATE_PROOF`, `LLM_ENV_UPDATE_CHARACTERIZE`, `LLM_ENV_LIVE_VM`, and `LLM_ENV_MUTATION_CHECK` added by
+  plan T13: every `skipif(os.environ...)` gate in `tests/`), so the default suite runs no real Podman
+  (`ProofBackend`, `IsolatedBackend`) and no mutation run whatever the caller exported; a test exports all four and
+  expects the skips.
 - D6 Leak check in `tools/test.sh`, outside the namespace, once per run. Each run gets its own `TMPDIR`
   (`/tmp/pytest-of-$USER/llm-env-run.XXXXXX`, so `pylib/observe_fs.py`'s `pytest_roots` still sees it), printed as
   `run dir: <path>` on stderr and removed by a trap; `PYTEST_DEBUG_TEMPROOT` (which pytest prefers to `TMPDIR`) is
@@ -147,14 +148,17 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   set (unsupported; pre-commit refuses it too). Because a leftover pre-commit `pre-push` would pass every push, the
   commit-stage selection hook fails with "run make dev-setup" when `.git/hooks/pre-push` does not resolve to the
   script or is not executable; a real `git push` to a scratch bare remote proves git runs the linked script.
-  The script accepts exactly one ref line whose local ref is the checked-out branch, whose local sha is `HEAD`, whose
+  The script accepts exactly one ref line whose local ref is the checked-out branch (or the word `HEAD`, which
+  `git push origin HEAD` sends), whose local sha is `HEAD`, whose
   remote ref is that same `refs/heads/<branch>` (no tag or other destination), with a clean index and a clean
   worktree, each checked on its own (`git diff --cached --quiet`, `git diff --quiet`: a staged edit the worktree
   reverts passes `git diff HEAD`). A remote sha that is a local ancestor of `HEAD` (`git merge-base --is-ancestor`)
   is a fast-forward: FROM is that sha, which git took from the remote. An all-zero remote sha is a new branch: no
   base is trusted, so it runs the full suite (fail closed; 3 pushes in this repo's whole reflog). A lone deletion line
-  passes. Anything else (several refs, a tag or other destination, a rewind or force-push, another branch, a dirty
-  index or worktree) exits 1 before any check, with one line:
+  passes. A dirty index or worktree exits 1 before any check with "push refused: the index or worktree is dirty: commit
+  or stash your changes, then push again", without the `--no-verify` advice: `make test` tests the worktree, not the
+  commit being pushed. Anything else (several refs, a tag or other destination, a rewind or force-push, another
+  branch) exits 1 before any check, with one line:
   "push shape not supported by the hook: run make test, then git push --no-verify". Refusing beats running the full
   suite, because the full suite would still test only the checked-out tree and so could not vouch for a second ref, a
   rewound remote or another branch. An accepted push runs `tools/validate.sh`, then `tools/test-changed.sh --stage
@@ -214,7 +218,7 @@ The quant-headroom fetch test needs about 7.4 GB free in `/tmp` (fixed by R7). T
 (fixed by D5). These skip when a tool is missing: node (onboard-local-model skill tests, `test_challenges.py`,
 `test_podman_state_check.py`, two in `test_remote_setup.py`), curl (one skill test) and systemd-analyze
 (`test_observe_stack.py`). One shell test skips as root (mode-000 read), which is why the namespace keeps the uid.
-Real `yq`/`jq` are required with no skip. The opt-in live suites (D5's three switches) run only by direct
+Real `yq`/`jq` are required with no skip. The opt-in live suites (D5's four switches) run only by direct
 `uv run pytest <file> -q` with their switch set (README lists the two updater ones), outside R4-R5.
 
 The isolated-store sweep test (`test_the_sweep_reaps_only_backend_roots_whose_owner_is_gone`, now in
@@ -236,7 +240,9 @@ it is split, and so do edits to `AGENTS.md` or `QUICK_START.md`, which it names.
 (about 190 s at 9 workers), as does a new-branch push. Both hooks test the worktree, so an untracked file (for example
 a module the commit deletes, left in place) can make them pass, as with the current hooks. Dynamic file names that no test spells out are invisible: G1 forces a prefix owner or the
 full suite for them, and G4 is the backstop. Reach beyond push depth is not guaranteed (D1). A push of any shape but
-D8's needs a manual `make test` and `--no-verify`. A test that starts processes through `systemd-run --user` runs
+D8's needs a manual `make test` and `--no-verify` (a dirty tree is committed or stashed first instead). Deleting a
+file together with the last test mention of it leaves "no owner", so that commit runs the full suite (about 2
+minutes); selecting only the always-run test would be faster but less sound. A test that starts processes through `systemd-run --user` runs
 them outside the namespace, so it is outside the offline guarantee until it stubs `systemd-run`. Inside a run,
 `/proc` shows only the run's own processes. Checked 2026-11-23: tests and the scripts they run read `/proc` only for
 their own processes or for host-wide files such as `/proc/meminfo`, which stay readable; the first full run under

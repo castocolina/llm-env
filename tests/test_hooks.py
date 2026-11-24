@@ -23,6 +23,7 @@ from pylib.selection import ALWAYS, executables, load_tree
 NP = ALWAYS[0]
 Z = "0" * 40
 REFUSED = "push shape not supported by the hook: run make test, then git push --no-verify"
+DIRTY = "push refused: the index or worktree is dirty: commit or stash your changes, then push again"
 STUBS = {"tools/validate.sh": 'echo validate >>"$CALLS"; exit "${STUB_VALIDATE_RC:-0}"\n',
          "tools/test-changed.sh": 'echo "changed $* from=$PUSH_FROM to=$PUSH_TO" >>"$CALLS"\n',
          "tools/test.sh": 'echo full >>"$CALLS"\n',
@@ -92,18 +93,20 @@ def test_dev_setup_runs_uv_sync_in_a_scratch_repo(tmp_path):
 SHAPES = {"two refs": ["main H main B", "other O other Z"], "tag destination": ["main H tags/v1 Z"],
           "other destination": ["main H other Z"], "rewind": ["main H main D"], "other branch": ["other O other Z"],
           "tag": ["tags/v1 H tags/v1 Z"], "staged edit": ["main H main B"], "unstaged edit": ["main H main B"],
-          "cancelled edit": ["main H main B"]}
+          "cancelled edit": ["main H main B"], "HEAD to other": ["HEAD H other Z"]}
 
 
 @pytest.mark.parametrize("shape", SHAPES)
 def test_pre_push_refuses_every_other_shape_before_any_check(tmp_path, shape):
     result = _push(repo := _push_repo(tmp_path, shape=shape), *SHAPES[shape])
-    assert result.returncode == 1 and result.stderr.strip() == REFUSED and calls(repo) == []
+    message = DIRTY if shape.endswith(" edit") else REFUSED              # make test checks the worktree, not HEAD
+    assert result.returncode == 1 and result.stderr.strip() == message and calls(repo) == []
 
 
-def test_pre_push_selects_a_fast_forward_and_runs_everything_for_a_new_branch(tmp_path):
+@pytest.mark.parametrize("local", ["main", "HEAD"])                    # `git push origin HEAD` sends the word HEAD
+def test_pre_push_selects_a_fast_forward_and_runs_everything_for_a_new_branch(tmp_path, local):
     repo = _push_repo(tmp_path)
-    assert _push(repo, "main H main B").returncode == 0 and calls(repo) == ["validate", f"changed --stage push from={sha(repo, 'B')} to={sha(repo, 'H')}"]
+    assert _push(repo, f"{local} H main B").returncode == 0 and calls(repo) == ["validate", f"changed --stage push from={sha(repo, 'B')} to={sha(repo, 'H')}"]
     (repo / "calls").write_text("")
     assert _push(repo, "main H main Z").returncode == 0 and calls(repo) == ["validate", "full"]
 
@@ -114,13 +117,14 @@ def test_pre_push_passes_a_lone_deletion_and_stops_at_a_failed_validate(tmp_path
     assert _push(repo, "main H main B", env={"STUB_VALIDATE_RC": "1"}).returncode == 1 and calls(repo) == ["validate"]
 
 
-def test_git_runs_the_linked_hook_only_while_it_is_executable(tmp_path):             # a real push
+@pytest.mark.parametrize("ref", ["main", "HEAD"])
+def test_git_runs_the_linked_hook_only_while_it_is_executable(tmp_path, ref):        # a real push
     assert "tools/pre-push.sh" in executables(ROOT)                                  # tracked as 100755
     repo = _push_repo(tmp_path); (repo / ".git/hooks/pre-push").symlink_to(repo / "tools/pre-push.sh")
-    assert _git_push(repo, "main").returncode == 0 and calls(repo)[0] == "validate"
+    assert _git_push(repo, ref).returncode == 0 and calls(repo)[0] == "validate"
     (repo / "calls").write_text(""); (repo / "tools/pre-push.sh").chmod(0o644)
     git(repo, "commit", "-q", "--allow-empty", "-m", "N")
-    assert _git_push(repo, "main").returncode == 0 and calls(repo) == []              # git skips a non-executable hook
+    assert _git_push(repo, ref).returncode == 0 and calls(repo) == []                 # git skips a non-executable hook
 
 
 @pytest.mark.parametrize("hooks_path", [None, "elsewhere"])

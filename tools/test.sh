@@ -65,8 +65,9 @@ setsid "${chain[@]}" env --default-signal=INT UV_OFFLINE=1 TMPDIR="$run" PYTEST_
 child=$!
 rc=0; wait "$child" || rc=$?     # || : errexit would exit with the child's status
 
-# shortcut: a diff cannot tell another agent's or the live stack's new object from a leak; the line names it for a
-# person to judge; switch to label-based attribution if false alarms recur.
+# shortcut: a diff cannot tell another agent's or the live stack's new object (or a concurrent writer under repo tmp/,
+# such as a delegated run) from a leak; the line names it for a person to judge; switch to label-based attribution if
+# false alarms recur.
 snapshot after
 # shortcut: uv leaves an empty uv-<16 hex>.lock in TMPDIR on every `uv run` and has no setting to move it, so exactly
 # that file is not a leak; drop the exemption once uv cleans it up or can put it elsewhere.
@@ -77,6 +78,7 @@ leaks=$({
 } | sed 's/^/leak: /')
 if [ -n "$leaks" ]; then
   echo "$leaks" >&2
+  ! grep -q '^leak: tmp/' <<<"$leaks" || echo "leak check: if another process writes under tmp/, rerun" >&2
   ((rc != 0 && rc != 5)) || rc=1
 fi
 exit "$rc"
