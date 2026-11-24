@@ -937,7 +937,11 @@ R8 asks for one copy per file, which each of its two files has; merging across f
   `XDG_RUNTIME_DIR`, so the lane meets the AGENTS.md Podman rule only under a separate user (predates this plan).
 - O3: hubs at commit select their direct namers; push runs the full suite. O4: script commits take about 30 s until
   T18; missed R9 targets go here. O5: the nightly timer is opt-in, not installed by `make dev-setup`.
-- R9 measured (filled by T11 Step 5): README commit `_ s`, pylib commit `_ s`, push `_ s`.
+- R9 measured (filled by T11 Step 5, 2026-11-23, wall clock through the installed hooks): README commit `14.5 s`
+  (target < 5 s: missed, O4), pylib commit `13.5 s` (`pylib/observe_laya_requests.py` + its test, 6 test files; < 15 s
+  met), push `32.1 s` (fast-forward of both, 11 test files; < 60 s met). The README miss: `selection-lint` alone takes
+  6.5 s (one `owners(tree, p, 1)` per tracked file, each a scan of the whole tree; a one-pass index is the fix), and
+  `README.md` selects 3 test files by its basename, among them the 406-test onboard-local-model script tests.
 
 ## Self-Review
 
