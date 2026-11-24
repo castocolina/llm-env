@@ -372,7 +372,12 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
 **Files:** Modify `pylib/selection.py`; Test `tests/test_selection.py`.
 **Interfaces:**
 - Produces `cli_edges(tree: dict[str, str]) -> dict[str, frozenset[str]]`: pylib path → subcommand words that use it;
-  `frozenset({"*"})` (a hub) when `llmenv.py` imports the module but no subcommand traces to it.
+  `frozenset({"*"})` when `llmenv.py` imports the module but no subcommand traces to it. As delivered, `reach()`
+  drops `*` (it adds no caller) and `select()` gives such a module no hub treatment; the second assert below holds
+  because `pylib/q.py` is unowned ("no owner"), not because it is a hub. The spec D2 hub rule for `*` is deliberately
+  unbuilt (owner-visible decision): no real module is `*`, and the real-tree tripwire
+  `test_real_llmenv_has_no_hub_module_and_parser_names_match_handlers` (commit 128b0df) fails when any `cli_edges`
+  value is `{"*"}` or when `llmenv.py`'s `add_parser` names differ from the `cmd_`-derived words.
 - `reach()` calls `cli_edges(tree)` exactly once, through that literal (T13's selector-only copy replaces it). For a
   reached module it adds every file with a line containing `llmenv` and one of its words, bounded by
   `(?<![A-Za-z0-9-])`/`(?![A-Za-z0-9-])`.

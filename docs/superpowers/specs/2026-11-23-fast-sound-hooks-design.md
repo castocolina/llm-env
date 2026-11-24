@@ -89,10 +89,18 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   `test_d` naming `c` would be selected). `make test` and G4 cover what lies beyond, and G3 measures the gap.
 - D2 CLI edge: a `pylib` module reaches the files that call a `llmenv` subcommand whose handler in `llmenv.py` uses it
   (found from `llmenv.py`'s AST, plus the module's own `add_parser` names). A module that `llmenv.py` imports but no
-  subcommand can be traced to counts as `llmenv.py` itself (a hub).
+  subcommand can be traced to gets the word `*` in `cli_edges`. As delivered, `*` adds no caller in `_reach` and
+  `select()` does not treat such a module as a hub: it is selected by naming like any other file, and an unowned one
+  maps to the full suite as "no owner" (D3). The hub rule for it (count it as `llmenv.py` itself, so the full suite at
+  push) is deliberately unbuilt, by owner-visible decision rather than oversight: no module traces to `*` today, and
+  the real-tree tripwire `test_real_llmenv_has_no_hub_module_and_parser_names_match_handlers` in
+  `tests/test_selection.py` fails as soon as any `cli_edges` value is `{"*"}` (it also asserts that `llmenv.py`'s
+  `add_parser` names equal the `cmd_`-derived words), so the rule must be built in `select()` before such a module
+  can land.
 - D3 Hubs: `tests/conftest.py`, `pyproject.toml`, `uv.lock`, `tools/lib.sh`, `llmenv.py`, `pylib/config.py`,
   `Makefile`, `.pre-commit-config.yaml`, plus the selector's own inputs `pylib/selection.py`, `tools/test.sh`,
-  `tools/test-changed.sh`, `tools/pre-push.sh` and `tests/selection-exempt.txt`. A file with no owner and no
+  `tools/test-changed.sh`, `tools/pre-push.sh` and `tests/selection-exempt.txt`; a `*` module (D2) is not on this
+  list and gets no hub rule. A file with no owner and no
   exemption fails G1 (which runs beside selection); a direct `select-tests` call maps it to the full suite. Per changed path, first
   match wins: (1) `SELECT_ALL=1`, a `full:` exemption (even when the file also has owners) or a hub at push: the full
   suite; (2) a hub at commit, root `tests/conftest.py` included: its direct namers only (the push of that commit runs
@@ -265,9 +273,16 @@ them outside the namespace, so it is outside the offline guarantee until it stub
 their own processes or for host-wide files such as `/proc/meminfo`, which stay readable; the first full run under
 the namespaces (plan T3) confirms it.
 Direct `uv run pytest` gets the offline env but not the namespaces, the CPU cap or the leak check.
-File names containing a newline are not supported by the newline-delimited hand-offs after the git reads: the selected
-test paths (`jq -r` + `mapfile -t` in `tools/test-changed.sh`) and the repo-`tmp/` inventory in `tools/test.sh`; the
-repo has no such names and the owner triaged this case out.
+File names containing a newline are out of scope by the owner's decision. The git reads are NUL-delimited (D1) and
+the selector's JSON escapes a newline, but two later hand-offs are newline-delimited: the selected test paths
+(`jq -r '.tests[]'` read by `mapfile -t` in `tools/test-changed.sh`) and the repo-`tmp/` inventory in `tools/test.sh`
+(`find tmp -mindepth 1`, `LC_ALL=C sort -u`, then `comm -13` of the before and after lists). Of the characters a
+file name can hold, only the newline splits them: `mapfile -t`, `sort` and `comm` are line-based. The repo has no such tracked name: on 2026-11-24
+`git ls-files -z | tr -cd '\n' | wc -c` printed `0` (the newline bytes across all 527 NUL-delimited tracked paths;
+the same pipeline prints `1` for `printf 'a\nb\0c\0'`). If one appears: a selected test path splits into separate
+pytest arguments, none of which names the file; a name under repo `tmp/` becomes several inventory lines, so after
+`sort -u` a fragment equal to an existing line merges with it and the leak check may miss or garble a distinct
+entry. The hook scripts do not reject or warn on such names; the scope rests on this decision, not on enforcement.
 
 ## Non-goals
 
