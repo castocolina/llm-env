@@ -1,0 +1,20 @@
+# Ownership exemptions (spec G1), read by `uv run llmenv.py selection-lint` and `select-tests`.
+# `<glob>  # <reason>`: non-executable content no test reads; a change selects only the always-run test.
+# `full: <glob>  # <reason>`: code no pytest test can own; a change selects the full suite at both stages.
+# Globs are fnmatch patterns over repo paths (`*` crosses `/`). A line that matches nothing fails the lint.
+.claude/handoffs/*  # session handoffs for agents; no code reads them
+full: .claude/skills/onboard-local-model/scripts/context-ladder.mjs  # run only by the node --test files (plan O1)
+.env.example  # environment template for people; no code reads it
+docs/superpowers/*  # durable plans and specs
+docs/prds/*.md  # product research notes
+docs/handoff/*  # session handoffs for agents
+docs/new-host.md  # host setup guide for people
+docs/omniroute-context-window-notes.md  # upstream bug notes
+full: docs/prds/*.mjs  # research spike scripts; nothing runs them
+full: pylib/__init__.py  # package marker run by every pylib import
+rdna*.log  # empty GPU test logs; no code reads them
+tests/fixtures/llama-metrics-1.txt  # captured llama router response no test reads
+tests/fixtures/llama-models-sleeping.json  # captured llama router response no test reads
+tests/fixtures/llama-models-unloaded.json  # captured llama router response no test reads
+tests/fixtures/proof/Containerfile  # read only by the opt-in update-proof lane
+full: tests/skills/onboard-local-model/*.mjs  # node --test files and their fake server; no pytest test runs them (plan O1)

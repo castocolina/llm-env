@@ -40,6 +40,10 @@ if [ "$1 $2" = "run --offline" ]; then
   echo "offline-check" >>"$CALLS"
   exit "${{STUB_OFFLINE_RC:-0}}"
 fi
+if [ "$1 $2 $3" = "run llmenv.py selection-lint" ]; then
+  [ -n "${{STUB_REAL_LINT:-}}" ] && exec "$REAL_UV" run "$STUB_REAL_LINT" selection-lint
+  exit "${{STUB_LINT_RC:-0}}"
+fi
 if [ "$1 $2 $3" = "run llmenv.py select-tests" ]; then
   echo "$*" >>"$CALLS"
   default='{{"full": false, "tests": ["tests/test_a.py"], "total": 1, "reasons": {{}}}}'

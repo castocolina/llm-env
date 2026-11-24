@@ -88,8 +88,14 @@ def _pattern(path: str) -> re.Pattern[str]:
     return re.compile(pattern, re.MULTILINE)
 
 
+@functools.cache
+def _stem(path: str) -> str:
+    return Path(path).stem
+
+
 def names(text: str, path: str) -> bool:
-    return _pattern(path).search(text) is not None
+    # every spelling in _pattern contains the stem: the substring test only skips texts that cannot match (R9)
+    return _stem(path) in text and _pattern(path).search(text) is not None
 
 
 def read_exempt(path) -> dict[str, tuple[str, bool]]:
@@ -110,8 +116,15 @@ def read_exempt(path) -> dict[str, tuple[str, bool]]:
 
 def cli_edges(tree: dict[str, str]) -> dict[str, frozenset[str]]:
     """Spec D2: pylib path -> the `llmenv` subcommand words whose handler uses it; {"*"} (a hub) when none traces."""
+    # cached on its only inputs: owners() runs once per tracked file in lint (R9)
+    return dict(_cli_edges(tree.get("llmenv.py", ""), tuple(sorted((p, t) for p, t in tree.items() if p.startswith("pylib/")))))
+
+
+@functools.cache
+def _cli_edges(source: str, pylib: tuple[tuple[str, str], ...]) -> dict[str, frozenset[str]]:
+    tree = dict(pylib)
     try:
-        parsed = ast.parse(tree.get("llmenv.py", ""))
+        parsed = ast.parse(source)
     except SyntaxError:
         return {}
     bound: dict[str, set[str]] = {}  # name bound by a pylib import -> module paths
@@ -172,6 +185,22 @@ def owners(tree: dict[str, str], path: str, depth: int) -> set[str]:
             found |= {t for t in tree if t.startswith(r.removesuffix("conftest.py"))}
         found |= {t for prefix, tests in PREFIX_OWNERS.items() if r.startswith(prefix) for t in tests}
     return _runnable(tree, found)
+
+
+def lint(tree: dict[str, str], exempt: dict[str, tuple[str, bool]], execs) -> list[str]:
+    """Spec G1: every non-test file has a commit-depth owner, is a hub or is exempt; exemptions match something, and a
+    plain one matches no code."""
+    # shortcut: ownership is per test file, so a source named only by an opt-in test inside a mixed file counts as owned
+    problems = []
+    for glob, (_, full) in exempt.items():
+        hits = [p for p in tree if fnmatch.fnmatchcase(p, glob)]
+        problems += [] if hits else [f"stale exemption: {glob}"]
+        problems += [] if full else [f"plain exemption matches code: {glob} ({p})" for p in hits
+                                     if p.endswith((".sh", ".py", ".mjs", ".js")) or p in execs]
+    problems += [f"unowned: {p}" for p in tree
+                 if not is_test_file(p) and p not in HUBS and not any(fnmatch.fnmatchcase(p, g) for g in exempt)
+                 and not owners(tree, p, 1)]
+    return sorted(problems)
 
 
 def select(tree: dict[str, str], changed, deleted, stage: str, exempt: dict[str, tuple[str, bool]]) -> Selection:

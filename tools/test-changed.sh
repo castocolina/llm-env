@@ -13,6 +13,7 @@ if [ "$stage" = commit ]; then
     exit 1
   fi
 fi
+uv run llmenv.py selection-lint || exit 1  # spec G1, over the whole tree, before selection
 json=$(uv run llmenv.py select-tests --stage "$stage")
 marker=()
 [ "$stage" = commit ] && marker=(-m "not slow")

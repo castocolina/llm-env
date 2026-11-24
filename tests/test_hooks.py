@@ -16,8 +16,9 @@ from runner_helpers import calls, run_runner, runner_repo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pylib.selection import executables, load_tree
+from pylib.selection import ALWAYS, executables, load_tree
 
+NP = ALWAYS[0]
 Z = "0" * 40
 REFUSED = "push shape not supported by the hook: run make test, then git push --no-verify"
 STUBS = {"tools/validate.sh": 'echo validate >>"$CALLS"; exit "${STUB_VALIDATE_RC:-0}"\n',
@@ -199,6 +200,24 @@ def test_test_changed_deselects_slow_only_at_commit(tmp_path):
 
 def test_test_changed_fails_when_nothing_is_collected(tmp_path):                    # spec R10
     assert _run_changed(_hook_repo(tmp_path, {}), "commit", env={"STUB_RC": "5"}).returncode == 5
+
+
+@pytest.mark.parametrize("stage", ["commit", "push"])
+@pytest.mark.parametrize(("removed", "problem"), [("docs/a.md", "stale exemption: docs/a.md"),
+                                                  ("tests/test_x.py", "unowned: scripts/x.sh")])
+def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_owner(tmp_path, stage, removed, problem):
+    repo = _hook_repo(tmp_path, {"docs/a.md": b"", "scripts/x.sh": b"", "tests/test_x.py": b"'x.sh'\n", NP: b"",
+                                 "tests/test_tools.py": b"'pyright-staged.sh'\n",          # owns the copied tool
+                                 "tests/selection-exempt.txt": b"docs/a.md  # why\n"})
+    real = {"STUB_REAL_LINT": str(ROOT / "llmenv.py")}
+    assert _run_changed(repo, "commit", env=real).returncode == 0                  # control: clean fixture ...
+    assert any(" pytest " in c for c in calls(repo))                               # ... that reached pytest
+    (repo / "calls").write_text("")                                                # measure only the rejected run
+    git(repo, "rm", "-q", removed)
+    if stage == "push":
+        git(repo, "commit", "-qm", "rm")
+    result = _run_changed(repo, stage, env={**real, **(_refs(repo) if stage == "push" else {})})
+    assert result.returncode == 1 and problem in result.stderr and not any(" pytest " in c for c in calls(repo))
 
 
 @pytest.mark.parametrize("broken", ["missing", "not executable", "foreign"])

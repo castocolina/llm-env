@@ -106,7 +106,14 @@ from pylib.resources import (
     summarize_policy,
     validate_overrides,
 )
-from pylib.selection import git_changes, load_tree, read_exempt, select
+from pylib.selection import (
+    executables,
+    git_changes,
+    lint,
+    load_tree,
+    read_exempt,
+    select,
+)
 from pylib.transcript import classify_transcript
 
 DEVICE_LINE_RE = re.compile(
@@ -939,16 +946,36 @@ def cmd_run_agent_bounded(args: argparse.Namespace) -> int:
     return emit(result.to_dict())
 
 
-def cmd_select_tests(args: argparse.Namespace) -> int:
+def _selection_inputs() -> tuple[str, dict[str, tuple[str, bool]]]:
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True,
                           text=True).stdout.removesuffix("\n")
+    exempt_path = Path(root) / "tests/selection-exempt.txt"
+    return root, read_exempt(exempt_path) if exempt_path.exists() else {}
+
+
+def cmd_selection_lint(args: argparse.Namespace) -> int:
+    try:
+        root, exempt = _selection_inputs()
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    tree = load_tree(root)
+    problems = lint(tree, exempt, executables(root))
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        return 1
+    print(f"ownership lint: ok ({len(tree)} files)")
+    return 0
+
+
+def cmd_select_tests(args: argparse.Namespace) -> int:
+    root, exempt = _selection_inputs()
     try:
         changed, deleted = git_changes(root, args.stage, os.environ)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    exempt_path = Path(root) / "tests/selection-exempt.txt"
-    exempt = read_exempt(exempt_path) if exempt_path.exists() else {}
     sel = select(load_tree(root), changed, deleted, args.stage, exempt)
     forced = os.environ.get("SELECT_ALL") == "1"
     full = forced or sel.full
@@ -1195,6 +1222,7 @@ def build_parser() -> argparse.ArgumentParser:
     select_parser = sub.add_parser("select-tests")
     select_parser.add_argument("--stage", required=True, choices=["commit", "push"])
     select_parser.set_defaults(func=cmd_select_tests)
+    sub.add_parser("selection-lint").set_defaults(func=cmd_selection_lint)
 
     register_omniroute_update(sub)
 

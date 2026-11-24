@@ -18,6 +18,7 @@ from pylib.selection import (
     cli_edges,
     executables,
     is_test_file,
+    lint,
     load_tree,
     read_exempt,
     select,
@@ -146,6 +147,21 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
     (tmp_path / "y").write_text("docs/b.md\n")
     with pytest.raises(ValueError, match="docs/b.md"):
         read_exempt(tmp_path / "y")
+
+
+def test_every_tracked_file_has_an_owner_a_hub_or_an_exemption():
+    assert lint(load_tree(ROOT), read_exempt(ROOT / "tests/selection-exempt.txt"), executables(ROOT)) == []
+
+
+def test_lint_flags_a_lost_last_match_a_lost_last_owner_and_code_under_a_plain_line():
+    tree = {"docs/a.md": "", "scripts/x.sh": "", "tests/test_x.py": "'x.sh'\n", "x/t.mjs": "", NP: ""}
+    ex = {"docs/a.md": ("why", False), "x/*.mjs": ("no runner", True)}
+    assert lint(tree, ex, set()) == []
+    assert lint({k: v for k, v in tree.items() if k != "docs/a.md"}, ex, set()) == ["stale exemption: docs/a.md"]
+    assert lint({k: v for k, v in tree.items() if k != "tests/test_x.py"}, ex, set()) == ["unowned: scripts/x.sh"]
+    assert lint(tree, {**ex, "x/*.mjs": ("no runner", False)}, set()) == ["plain exemption matches code: x/*.mjs (x/t.mjs)"]
+    chain = {"s/far.sh": "", "s/mid.sh": "far.sh\n", "s/top.sh": "mid.sh\n", "tests/test_top.py": "'top.sh'\n", NP: ""}
+    assert lint(chain, {}, set()) == ["unowned: s/far.sh"]                          # an owner only at push depth is not enough
 
 
 def _cli(repo, *args, env=None):
