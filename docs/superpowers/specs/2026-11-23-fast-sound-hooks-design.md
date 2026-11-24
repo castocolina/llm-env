@@ -25,7 +25,9 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   unlinted, as today); pyright (whole project) when a `.py`, `pyproject.toml` or `uv.lock` is
   added, modified, deleted or renamed in the index (D7); and the tests selected from the staged diff (depth 1).
 - R3 Push stage: the full `tools/validate.sh`, then for a fast-forward of the checked-out branch the tests selected
-  from the FROM..TO diff (depth 2), for a new branch the full suite (D8). Every other shape is refused.
+  from the FROM..TO diff (depth 2), for a new branch the full suite (D8). Two no-op inputs pass without any check,
+  even with a dirty index or worktree: no ref line, and a lone deletion line (all-zero local sha). Every other shape
+  is refused.
 - R4 CPU cap on every pytest run of the default suite (`make test` and both hooks):
   `workers = max(1, floor(nproc * pct / 100))`. `pct` comes from `LLM_ENV_TEST_CPU_PCT` (default 40) and must match
   `^[1-9][0-9]{0,2}$` with a value of 100 or less (no sign, no leading zero, so `010` is rejected, not read as octal);
@@ -108,7 +110,7 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   Then, inside the chain and before pytest starts, it runs `uv run --offline llmenv.py --help`; on failure (a cold
   cache: uv exits 1, "pyyaml was not found in the cache", verified) it exits 4 with "uv cannot resolve llmenv.py
   offline: run make dev-setup once with network", so the check never depends on collection or xdist. Otherwise its
-  status is pytest's own (0-5), except as D6 says for a leak; tests pin 3 and 5 passing through and the cold-cache 4
+  status is pytest's own (0-5), except as D6 says for a leak or the timeout (124); tests pin 3 and 5 passing through and the cold-cache 4
   with real `uv`. `tests/conftest.py` exports `UV_OFFLINE=1` and `HF_HUB_OFFLINE=1` at import time.
   `skill_helpers.run` passes `UV_CACHE_DIR`/`UV_OFFLINE` into explicit envs; `make dev-setup` warms the script
   environment once. The runner unsets the four opt-in switches
@@ -133,6 +135,12 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   kills every process left in its PID namespace (D5), including ones in another session such as
   `skill_helpers.run`'s; a test signals only the runner's PID while its stub has a `setsid` child, then finds no
   descendant alive and its printed run dir gone.
+  Timeout (14d0e21, 6898907): `LLM_ENV_TEST_TIMEOUT_SECONDS` (default 1800; a positive integer without leading zeros,
+  else exit 2 before the probe) bounds the chain from its launch, offline uv check included. On expiry the runner
+  prints `timeout: test run exceeded <N> s`, stops the chain through the same stop path (TERM to the group, KILL after
+  5 s, so `setsid` descendants are reaped), skips the post-run inventory and leak check, removes its run and inventory
+  dirs, and exits 124. The probe, the Podman inventory snapshots, pyright and `validate.sh` are outside the bound. G2
+  classifies the `timeout:` marker as a harness error.
 - D7 Validate split: shellcheck (without `-x`) and ruff check each file on its own, so per-file runs at commit catch
   what the full run catches for those files. The pyright hook is `always_run` and reads the index itself
   (`git diff --staged --name-only -z --no-renames`, all statuses), because a filename-filtered hook never sees a
@@ -140,7 +148,7 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   `uv.lock`, and tests pin a deletion-only and a rename-away commit of each (the `.py` one spaced and non-ASCII).
   The ruff hook's file pattern is R2's scope; a test pins that it accepts `pylib/x.py` and skips
   `scripts/system-one-cache-check.py`.
-- D8 Two push shapes; every other shape fails closed. Pre-push is a tracked script, `tools/pre-push.sh`, that
+- D8 Two push shapes and two no-op inputs (no ref line, a lone deletion line); every other shape fails closed. Pre-push is a tracked script, `tools/pre-push.sh`, that
   `make dev-setup` links as `.git/hooks/pre-push`; pre-commit keeps only the commit stage (`pre-commit install
   --hook-type pre-commit`; the `test` pre-push entry leaves `.pre-commit-config.yaml`). Design call, not an owner
   decision: only that seat sees every ref line. The script is tracked with mode 100755 (git silently skips a
@@ -154,8 +162,9 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   worktree, each checked on its own (`git diff --cached --quiet`, `git diff --quiet`: a staged edit the worktree
   reverts passes `git diff HEAD`). A remote sha that is a local ancestor of `HEAD` (`git merge-base --is-ancestor`)
   is a fast-forward: FROM is that sha, which git took from the remote. An all-zero remote sha is a new branch: no
-  base is trusted, so it runs the full suite (fail closed; 3 pushes in this repo's whole reflog). A lone deletion line
-  passes. A dirty index or worktree exits 1 before any check with "push refused: the index or worktree is dirty: commit
+  base is trusted, so it runs the full suite (fail closed; 3 pushes in this repo's whole reflog). Empty ref input and
+  a lone deletion line (all-zero local sha) exit 0 first, without any check, even with a dirty index or worktree (a
+  test pins the dirty deletion). A dirty index or worktree exits 1 before any check with "push refused: the index or worktree is dirty: commit
   or stash your changes, then push again", without the `--no-verify` advice: `make test` tests the worktree, not the
   commit being pushed. Anything else (several refs, a tag or other destination, a rewind or force-push, another
   branch) exits 1 before any check, with one line:
@@ -181,14 +190,17 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
 - G1 Ownership lint: every tracked file outside `tests/` (and every test helper) has an owner at commit depth (1), is
   a hub, or matches `tests/selection-exempt.txt`. This is the one definition of "owned": a file whose only owner is
   two hops away fails the lint (a test pins it) until it gains a depth-1 owner or a `full:` line, so at commit it
-  selects the always-run test plus its direct namers, and push depth 2 is the backstop. A plain line (`<glob>  # <reason>`) selects nothing beyond the always-run
-  test and may only match non-executable content (not `.sh`/`.py`/`.mjs`/`.js`, no exec bit). A `full: <glob>  #
-  <reason>` line accepts an executable file that no test can own (the `.test.mjs` files, plan O1); a change to it
-  selects the full suite at both stages (D3). Stale or reasonless lines fail. Opt-in files
+  selects the always-run test plus its direct namers, and push depth 2 is the backstop. A plain line (`<glob>  #
+  <reason>`) waives the ownership requirement and nothing else: it does not suppress owners the file already has (a
+  change still selects them at the stage's depth, so an unowned exempt file selects only the always-run test), and it
+  may never match code (`.sh`/`.py`/`.mjs`/`.js` or an exec bit). A `full: <glob>  # <reason>` line accepts an
+  executable file that no test can own (the `.test.mjs` files, plan O1); a change to it selects the full suite at
+  both stages even when the file has owners (D3). Stale or reasonless lines fail. Opt-in files
   (`test_omniroute_update_proof.py`, `test_omniroute_characterize.py`) never count as owners. The lint runs in
-  `tools/test-changed.sh` at both stages on every invocation, over the whole tree, in parallel with the selection and
-  the selected tests (never gated or skipped; its output is printed after theirs), and a lint failure fails the hook
-  (exit 1, or the tests' own failing status). Tests pin that removing the last match of an exemption and removing a
+  `tools/test-changed.sh` on every invocation, so on every commit and every fast-forward (range) push, over the whole
+  tree: it starts in the background, select-tests and pytest run meanwhile, and the script then waits for it and prints
+  its output after theirs (never gated or skipped). A lint failure fails the hook: the tests' status when that is
+  nonzero, else 1. A new-branch push runs `tools/test.sh` directly, without the lint (D8). Tests pin that removing the last match of an exemption and removing a
   source's last owner each fail the commit and push hooks whether the tests pass or fail, and that a failed lint does
   not stop the tests. Its cost against R9 is measured by the plan; in parallel it adds only what it outlasts the tests
   by (a docs-only commit: about 7.5 s serial, 6.5-7 s parallel, 2026-11-24).
@@ -199,7 +211,7 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   sentence, Makefile, `tools/lib.sh`, `tests/conftest.py`, a skill script, a pylib render), each committed in a fresh
   copy with the integrity test deselected. A fault is caught only when the push-selected subset exits 1 with at least
   one failed test, no setup or teardown error and no harness marker: one rule, any runner marker on stderr (`leak:`,
-  `inventory:`, a namespace or offline-check failure; a failed post-run inventory exits 1 beside `1 failed`) or an
+  `inventory:`, `timeout:`, a namespace or offline-check failure; a failed post-run inventory exits 1 beside `1 failed`) or an
   xdist crash marker on stdout (`node down:`, `crashed while running`, ...; xdist reports the crashed worker's test as
   failed) makes it a harness error, pinned by one table-driven test. Any other outcome (2-5, or a failure mixed with
   any of these) is a harness error too: exit 2. If the subset passes, the full
@@ -253,6 +265,9 @@ them outside the namespace, so it is outside the offline guarantee until it stub
 their own processes or for host-wide files such as `/proc/meminfo`, which stay readable; the first full run under
 the namespaces (plan T3) confirms it.
 Direct `uv run pytest` gets the offline env but not the namespaces, the CPU cap or the leak check.
+File names containing a newline are not supported by the newline-delimited hand-offs after the git reads: the selected
+test paths (`jq -r` + `mapfile -t` in `tools/test-changed.sh`) and the repo-`tmp/` inventory in `tools/test.sh`; the
+repo has no such names and the owner triaged this case out.
 
 ## Non-goals
 

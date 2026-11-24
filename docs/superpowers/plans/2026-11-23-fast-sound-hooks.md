@@ -24,7 +24,11 @@ the tracked `tools/pre-push.sh`, linked by `make dev-setup`.
   `LLM_ENV_MUTATION_CHECK`) and, from T4, `PYTEST_ADDOPTS`; it sets `PYTEST_DEBUG_TEMPROOT=<run dir>/pytest`.
 - Runner status: probe failure 69; offline uv check failure 4 ("uv cannot resolve llmenv.py offline: run make
   dev-setup once with network"); else pytest's own (0-5); a leak turns 0 or 5 into 1; an incomplete inventory prints
-  `inventory: <what>` and exits 1; INT/TERM exit 130/143 (TERM to the chain, KILL after a 5 s grace).
+  `inventory: <what>` and exits 1; INT/TERM exit 130/143 (TERM to the chain, KILL after a 5 s grace). Added after T13
+  (14d0e21, 6898907): `LLM_ENV_TEST_TIMEOUT_SECONDS` (default 1800; a positive integer without leading zeros, else
+  exit 2) bounds the chain; on expiry `timeout: test run exceeded <N> s`, the same stop path, no post-run inventory or
+  leak check, run dir removed, exit 124. The probe, the Podman inventory snapshots, pyright and `validate.sh` are outside
+  the bound.
 - Selection depth: 1 at commit, 2 at push; ownership (G1) is measured at depth 1. Slow = call phase >= 5 s, deselected
   at commit only. Always selected: `tests/test_no_phoenix.py`. Never owners: the two opt-in updater test files. The
   push range travels as `PUSH_FROM`/`PUSH_TO` (two-point diff).
@@ -70,12 +74,12 @@ Create `tests/runner_helpers.py`, `tests/test_test_runner.py`.
   and exits 0. `podman` prints the `<class> <id>` lines of `$PODMAN_STATE` (default `<repo>/podman-state`) for
   `ps -a -q --no-trunc`, `volume ls -q` and `images -q --no-trunc`.
 
-- [ ] **Step 1: Move the real-Podman sweep test into the opt-in lane (before any full-suite run).** Move
+- [x] **Step 1: Move the real-Podman sweep test into the opt-in lane (before any full-suite run).** Move
   `test_the_sweep_reaps_only_backend_roots_whose_owner_is_gone` unchanged (with its podman `skipif`) from
   `tests/test_omniroute_derive_candidate.py` into `tests/test_omniroute_characterize.py`, gated by
   `LLM_ENV_UPDATE_CHARACTERIZE=1`; fix imports. Verify: `env -u LLM_ENV_UPDATE_CHARACTERIZE uv run pytest
   tests/test_omniroute_characterize.py -q -rs` skips every case. Never run it with the switch set here (O2).
-- [ ] **Step 2: Harness, then failing tests** (`tests/test_test_runner.py`):
+- [x] **Step 2: Harness, then failing tests** (`tests/test_test_runner.py`):
 ```python
 def test_runner_caps_workers_at_the_cpu_percentage(tmp_path):
     for pct, workers in ((None, "9"), ("10", "2"), ("1", "1"), ("100", "24")):
@@ -102,12 +106,12 @@ def test_every_env_gate_in_tests_is_an_opt_in_switch_the_runner_unsets():
     gate = re.compile(r'skipif\(os\.environ\.get\("(\w+)"\)')
     assert {m for p in (ROOT / "tests").rglob("test_*.py") for m in gate.findall(p.read_text())} == set(OPT_IN_SWITCHES)
 ```
-- [ ] **Step 3: Red.** `uv run pytest tests/test_test_runner.py -q`. Expected: 4 failed (today: `-n auto -v`, no
+- [x] **Step 3: Red.** `uv run pytest tests/test_test_runner.py -q`. Expected: 4 failed (today: `-n auto -v`, no
   unset); the gate test passes and guards later switches.
-- [ ] **Step 4: Implement in `tools/test.sh`.** `unset` the switches; validate with
+- [x] **Step 4: Implement in `tools/test.sh`.** `unset` the switches; validate with
   `[[ $pct =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$pct <= 100))`; `workers` floored at 1; `[ $# -gt 0 ] || set -- tests/`;
   `nice -n 10 uv run pytest -n "$workers" -q "$@"`.
-- [ ] **Step 5: Green.** `bash tools/test.sh tests/test_test_runner.py && make validate` (no `make test` before T3).
+- [x] **Step 5: Green.** `bash tools/test.sh tests/test_test_runner.py && make validate` (no `make test` before T3).
 
 ### Task 2: Host-independent free-disk checks in every fetch fixture
 
@@ -116,7 +120,7 @@ def test_every_env_gate_in_tests_is_an_opt_in_switch_the_runner_unsets():
 **Interfaces:** module constant `DF_STUB = 'printf "Avail\\n%s\\n" "${STUB_DF_FREE:-1099511627776}"\n'`, mimicking
 `df --output=avail -B1 <dir>` (`fetch-gguf.sh:64`), 1 TiB free by default.
 
-- [ ] **Step 1: Failing test (R7's boundary)** Red: `bash tools/test.sh tests/skills/onboard-local-model/test_onboard_local_model_scripts.py -k fetch_gguf_needs_exactly`. Fails at `need - 1` (real `df`).
+- [x] **Step 1: Failing test (R7's boundary)** Red: `bash tools/test.sh tests/skills/onboard-local-model/test_onboard_local_model_scripts.py -k fetch_gguf_needs_exactly`. Fails at `need - 1` (real `df`).
 ```python
 def test_fetch_gguf_needs_exactly_size_minus_part_plus_1024_mib(tmp_path: Path) -> None:
     need = len(KNOWN) + 1024 * MIB
@@ -126,10 +130,10 @@ def test_fetch_gguf_needs_exactly_size_minus_part_plus_1024_mib(tmp_path: Path) 
         assert (result.returncode == 0) is ok and ("free disk" in result.stderr) is not ok, result.stderr
         assert not ok or dest.read_bytes() == KNOWN
 ```
-- [ ] **Step 2: Implement.** Install `DF_STUB` as `df` in the stub dirs of `_qh_env` and `_fetch` and in a stub dir
+- [x] **Step 2: Implement.** Install `DF_STUB` as `df` in the stub dirs of `_qh_env` and `_fetch` and in a stub dir
   prepended to the local-file test's PATH. In the part test replace `shutil.disk_usage(...).free` with
   `free = 4 * 1024 * MIB`, passed as `STUB_DF_FREE` (sizes keep `size = free + 512 * MIB`). `QH_FILES` stays.
-- [ ] **Step 3: Green** with `-k fetch_gguf` and no `make test`; the `quant_headroom` cases also need pyyaml and first run in T3.
+- [x] **Step 3: Green** with `-k fetch_gguf` and no `make test`; the `quant_headroom` cases also need pyyaml and first run in T3.
 
 ### Task 3: Offline enforcement and pyyaml from the cache
 
@@ -148,7 +152,7 @@ def test_fetch_gguf_needs_exactly_size_minus_part_plus_1024_mib(tmp_path: Path) 
   `offline-check` and exits `${STUB_OFFLINE_RC:-0}`, or with `STUB_REAL_OFFLINE=1` execs `"$REAL_UV" "$@"`. Stub
   `unshare` exits 1 when `STUB_UNSHARE_FAIL` is set, else execs `/usr/bin/unshare`.
 
-- [ ] **Step 1: Failing tests** Red: `bash tools/test.sh tests/test_test_runner.py tests/test_offline_environment.py`. 5 fail.
+- [x] **Step 1: Failing tests** Red: `bash tools/test.sh tests/test_test_runner.py tests/test_offline_environment.py`. 5 fail.
 ```python
 def test_runner_has_only_loopback_keeps_the_uid_and_is_offline(tmp_path):
     assert run_runner(repo := runner_repo(tmp_path)).returncode == 0
@@ -173,12 +177,12 @@ def test_runner_exits_4_with_the_hint_when_uv_cannot_resolve_offline(tmp_path): 
 def test_children_inherit_offline_switches(name):
     assert os.environ[name] == "1"
 ```
-- [ ] **Step 2: Implement** the probe, check and wrapper (`shortcut: needs unprivileged user namespaces, which Bazzite
+- [x] **Step 2: Implement** the probe, check and wrapper (`shortcut: needs unprivileged user namespaces, which Bazzite
   has; add an opt-out only for a host without them`); both offline variables at conftest import time; the
   `skill_helpers.run` fill-in (the root cause: `_qh_env` and siblings set `HOME=tmp_path`, so `uv` started cold);
   `uv run llmenv.py --help >/dev/null` after `uv sync` in `setup/dev-setup.sh`; in `AGENTS.md`, `make test` is "the
   only command whose purpose is the full suite (capped, offline, leak-checked)" and `LLM_ENV_TEST_CPU_PCT` is listed.
-- [ ] **Step 3: Green**, first with `-k "runner or offline or quant_headroom"` over the two runner test files and the
+- [x] **Step 3: Green**, first with `-k "runner or offline or quant_headroom"` over the two runner test files and the
   onboard-local-model scripts test (5 `add-entry` cases failed in the namespace on 2026-11-23). First `make test`.
 
 ### Task 4: Leak check, per-run TMPDIR, signal forwarding
@@ -218,8 +222,12 @@ child=; trap 'stop 130' INT; trap 'stop 143' TERM
 setsid "${chain[@]}" & child=$!
 rc=0; wait "$child" || rc=$?     # || : errexit would exit with the child's status
 ```
+  Delivered later (14d0e21, 6898907): a `sleep "$LLM_ENV_TEST_TIMEOUT_SECONDS"` timer (default 1800, validated like
+  the CPU percentage, exit 2) starts beside the chain and `wait -n` takes whichever ends first; a timer that wins prints
+  `timeout: test run exceeded <N> s` and calls `stop 124`, so the post-run inventory and leak check are skipped and the
+  EXIT trap still removes the run and inventory dirs. The `before` snapshot precedes the bound.
 
-- [ ] **Step 1: Failing tests** Red: the new cases fail, earlier ones pass.
+- [x] **Step 1: Failing tests** Red: the new cases fail, earlier ones pass.
 ```python
 @pytest.mark.parametrize(("env", "rc", "line"), [
     ({}, 0, None),                                                                   # pytest's temp root and tmp/keep/old.log are not leaks
@@ -261,13 +269,13 @@ def test_a_signal_to_the_runner_reaps_every_descendant(tmp_path, sig, rc):
     wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in tree), timeout=5)
     assert not run_dir(proc.stderr.read().decode()).exists()
 ```
-- [ ] **Step 2: Implement in `tools/test.sh`.** `mkdir -p -m 700 "/tmp/pytest-of-$USER"`, `mktemp -d` the run dir and
+- [x] **Step 2: Implement in `tools/test.sh`.** `mkdir -p -m 700 "/tmp/pytest-of-$USER"`, `mktemp -d` the run dir and
   a sibling inventory dir, print the run dir, EXIT trap removing both, then the signal traps. Before and after pytest,
   snapshot `find tmp -mindepth 1` (when `tmp/` exists) and the three Podman ID sets into the inventory dir; new
   entries are `LC_ALL=C comm -13` of the sorted snapshots; every top-level entry of the run dir except exactly
   `pytest` (and an empty file named `uv-<16 hex>.lock`, which uv leaves on every run; a directory of that name still leaks) gives `leak: TMPDIR/<name>`. (`shortcut: a diff cannot tell another agent's or the live stack's new object
   from a leak; the line names it for a person to judge; switch to label-based attribution if false alarms recur`)
-- [ ] **Step 3: Green.** `bash tools/test.sh tests/test_test_runner.py && make validate && make test`. Expected: pass,
+- [x] **Step 3: Green.** `bash tools/test.sh tests/test_test_runner.py && make validate && make test`. Expected: pass,
   no `leak:` line from the real suite. Fix any leaking test at its root.
 
 ## Phase 2: selector and hooks
@@ -296,7 +304,7 @@ def test_a_signal_to_the_runner_reaps_every_descendant(tmp_path, sig, rc):
   local user, files, `git add -A`, optional commit), `git(repo, *args)`, `git_out(repo, *args) -> str` (`check=True`,
   trailing newline stripped), all with the scrubbed environment plus the two git-config isolation variables.
 
-- [ ] **Step 1: Failing tests** (write `tests/git_helpers.py` first, as in Interfaces) Red: `ModuleNotFoundError: pylib.selection`.
+- [x] **Step 1: Failing tests** (write `tests/git_helpers.py` first, as in Interfaces) Red: `ModuleNotFoundError: pylib.selection`.
 ```python
 NP = ALWAYS[0]
 TREE = {"scripts/a.sh": 'bash "$R/scripts/b.sh"\n', "scripts/b.sh": "", "scripts/c.sh": "bash scripts/a.sh\n",
@@ -354,7 +362,7 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
     with pytest.raises(ValueError, match="docs/b.md"):
         read_exempt(tmp_path / "y")
 ```
-- [ ] **Step 2: Implement.** `reach()` walks breadth-first up to `depth` hops over non-hub, non-markdown files (test
+- [x] **Step 2: Implement.** `reach()` walks breadth-first up to `depth` hops over non-hub, non-markdown files (test
   helpers included) that name a reached file; a changed markdown file reaches only itself. Each path takes its first
   matching precedence rule; only rule 4 uses naming (tests naming anything reached, changed test files, tests under a
   reached non-root `conftest.py`, `PREFIX_OWNERS`). `ALWAYS` once, results unioned, globs via `fnmatch.fnmatchcase`.
@@ -369,7 +377,7 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
   reached module it adds every file with a line containing `llmenv` and one of its words, bounded by
   `(?<![A-Za-z0-9-])`/`(?![A-Za-z0-9-])`.
 
-- [ ] **Step 1: Failing tests** Red: 2 failed.
+- [x] **Step 1: Failing tests** Red: 2 failed.
 ```python
 CLI = {"llmenv.py": "from pylib.m import compute\nfrom pylib.q import other\nfrom pylib.r import register as reg_r\n\n"
                     "def _helper():\n    return compute()\n\ndef cmd_budget(args):\n    return _helper()\n\n"
@@ -392,7 +400,7 @@ def test_cli_edge_selects_script_tests_through_the_subcommand():
     assert select(CLI, ["pylib/m.py"], [], "commit", {}).tests == tuple(sorted((NP, "tests/test_pre.py", "tests/test_start.py")))
     assert select(CLI, ["pylib/q.py"], [], "push", {}).full
 ```
-- [ ] **Step 2: Implement `cli_edges`.** Parse `llmenv.py` with `ast`; map each name bound by an `ImportFrom` (top
+- [x] **Step 2: Implement `cli_edges`.** Parse `llmenv.py` with `ast`; map each name bound by an `ImportFrom` (top
   level or function-local, honouring `as`) to its module; collect `Name` ids per top-level function, closed over calls
   to other `llmenv.py` functions to a fixpoint; `cmd_<x>` gives `x.replace("_", "-")`; add each module's
   `add_parser("<w>")` literals.
@@ -411,7 +419,7 @@ def test_cli_edge_selects_script_tests_through_the_subcommand():
   (<reason>)`), then `  <path>: <reason>` per changed path; a push without its range exits 2 with "push stage needs
   PUSH_FROM and PUSH_TO".
 
-- [ ] **Step 1: Failing tests** (`_cli(repo, *args, env=None)` runs `uv run <ROOT>/llmenv.py *args` in `repo`;
+- [x] **Step 1: Failing tests** (`_cli(repo, *args, env=None)` runs `uv run <ROOT>/llmenv.py *args` in `repo`;
   `select_tests(repo, *args, env=None) -> (json, stderr)` wraps it). Red: 7 failed (`invalid choice: 'select-tests'`).
 ```python
 ODD = "scripts/my file ñ.sh"                                                         # git quotes it without -z
@@ -445,7 +453,7 @@ def test_select_tests_takes_no_paths_and_needs_the_push_range(tmp_path):
 def test_select_all_forces_full(tmp_path):
     assert select_tests(git_repo(tmp_path, BASE, commit=True), "--stage", "commit", env={"SELECT_ALL": "1"})[0]["full"]
 ```
-- [ ] **Step 2: Implement** both as in Interfaces: an argparse subparser (an extra argument exits 2) calling
+- [x] **Step 2: Implement** both as in Interfaces: an argparse subparser (an extra argument exits 2) calling
   `select(load_tree(root), *git_changes(root, stage, os.environ), stage, exempt)`; the range `ValueError` exits 2.
 
 ### Task 8: `tools/pre-push.sh`, linked by `make dev-setup`
@@ -457,7 +465,8 @@ def test_select_all_forces_full(tmp_path):
 **Interfaces:**
 - Produces `tools/pre-push.sh <remote> <url>`, reading git's ref lines (`<local ref> <local sha> <remote ref> <remote
   sha>`) on stdin. Root is `git rev-parse --show-toplevel` of the cwd. In order:
-  1. No line, or one deletion line (local sha all zeros): exit 0.
+  1. No line, or one deletion line (local sha all zeros): exit 0, before the dirty-tree check, so these two no-op
+     inputs pass even with a dirty index or worktree (a test pins the dirty deletion).
   2. Refuse unless there is exactly one line, its local ref is `b=$(git symbolic-ref -q HEAD)` or the word `HEAD`
      (final review: `git push origin HEAD` sends it), its remote ref is also `$b`, its local sha is
      `git rev-parse HEAD`, `git diff --cached --quiet` and `git diff --quiet` both succeed, and its remote sha is all
@@ -475,7 +484,7 @@ def test_select_all_forces_full(tmp_path):
   --hook-type pre-commit` when `pre-commit` is on PATH, else logs "install pre-commit: uv tool install pre-commit".
   `AGENTS.md`'s one-time line becomes `uv tool install pre-commit && make dev-setup`.
 
-- [ ] **Step 1: Move the dev-setup test into a scratch repo, before the script learns to link hooks.**
+- [x] **Step 1: Move the dev-setup test into a scratch repo, before the script learns to link hooks.**
   `test_dev_setup_runs_uv_sync` runs the script with `cwd=ROOT`, so a linking script would rewrite the real
   `.git/hooks/pre-push` during `make test`. Delete it from the big shell test file and add to `tests/test_hooks.py`
   `_run_tool(repo, script, env=None)` (`bash <script>` in `repo` with `run_runner`'s environment) and:
@@ -485,7 +494,7 @@ def test_dev_setup_runs_uv_sync_in_a_scratch_repo(tmp_path):
     assert _run_tool(repo, "setup/dev-setup.sh").returncode == 0 and "sync" in calls(repo)
 ```
   `bash tools/test.sh tests -k dev_setup`. Expected: pass (the script is unchanged); no test runs it at `ROOT` again.
-- [ ] **Step 2: Failing tests.** Fixture `_push_repo(tmp_path, shape=None)`: `runner_repo(extra=("tools/pre-push.sh",
+- [x] **Step 2: Failing tests.** Fixture `_push_repo(tmp_path, shape=None)`: `runner_repo(extra=("tools/pre-push.sh",
   "setup/dev-setup.sh", "tools/lib.sh"))` (modes kept) made a repo the way `git_repo` does (`stub/`, `podman-state`,
   `calls`, `tmp/` in `.git/info/exclude`), with stub `tools/validate.sh` / `tools/test-changed.sh` / `tools/test.sh`
   that append `validate` / `changed <args> from=$PUSH_FROM to=$PUSH_TO` / `full` to `calls` (validate exits
@@ -542,10 +551,10 @@ def test_dev_setup_links_pre_push_unless_core_hooks_path_is_set(tmp_path, hooks_
         assert result.returncode == 0 and hook.resolve() == (repo / "tools/pre-push.sh").resolve()
         assert "install --hook-type pre-commit" in calls(repo)
 ```
-- [ ] **Step 3: Red.** `bash tools/test.sh tests/test_hooks.py`. Expected: every new test fails; the moved test passes.
-- [ ] **Step 4: Implement** `tools/pre-push.sh` as in Interfaces, then `chmod 755 tools/pre-push.sh && git add
+- [x] **Step 3: Red.** `bash tools/test.sh tests/test_hooks.py`. Expected: every new test fails; the moved test passes.
+- [x] **Step 4: Implement** `tools/pre-push.sh` as in Interfaces, then `chmod 755 tools/pre-push.sh && git add
   --chmod=+x tools/pre-push.sh`; the `setup/dev-setup.sh` refusal and link, the config deletion and the `AGENTS.md` line.
-- [ ] **Step 5: Green.** `bash tools/test.sh tests/test_hooks.py && make validate && make test`, then `make dev-setup`
+- [x] **Step 5: Green.** `bash tools/test.sh tests/test_hooks.py && make validate && make test`, then `make dev-setup`
   and `readlink -f .git/hooks/pre-push`. Expected: the path of `tools/pre-push.sh`.
 
 ### Task 9: Commit hooks: staged checks, index-reading pyright, selected tests
@@ -573,7 +582,7 @@ def test_dev_setup_links_pre_push_unless_core_hooks_path_is_set(tmp_path, hooks_
   files in `.git/info/exclude`; `_refs(repo)` = `{"PUSH_FROM": <HEAD~1>, "PUSH_TO": <HEAD>}`; `_run_changed(repo,
   stage, select=None, env=None)` runs `tools/test-changed.sh --stage <stage>` like `_run_tool`, `STUB_SELECT` = `select`.
 
-- [ ] **Step 1: Failing tests** (first add the stub case and the three helpers above) Red: `bash tools/test.sh tests/test_hooks.py -k "not pre_push and not dev_setup and not linked_hook"`. All fail.
+- [x] **Step 1: Failing tests** (first add the stub case and the three helpers above) Red: `bash tools/test.sh tests/test_hooks.py -k "not pre_push and not dev_setup and not linked_hook"`. All fail.
 ```python
 CFG = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text())["repos"][0]["hooks"]
 
@@ -618,7 +627,7 @@ def test_commit_hook_requires_the_pre_push_link(tmp_path, broken):
     result = _run_changed(repo, "commit")
     assert result.returncode == 1 and "run make dev-setup" in result.stderr and calls(repo) == []
 ```
-- [ ] **Step 2: Write the exact config** (`.pre-commit-config.yaml`)
+- [x] **Step 2: Write the exact config** (`.pre-commit-config.yaml`)
 ```yaml
 repos:
   - repo: local
@@ -636,13 +645,13 @@ repos:
   hooks run selected tests; `make test` runs the whole suite". `AGENTS.md` Hooks paragraph: what each stage runs, the
   push shapes and the refusal line, the bypasses and `SELECT_ALL=1`. (`shortcut: a staged pyproject.toml reruns
   pyright but not ruff at commit; the push-stage validate.sh reruns ruff over everything`)
-- [ ] **Step 3: Green** after `pre-commit validate-config .pre-commit-config.yaml`; the commit runs the new hooks.
+- [x] **Step 3: Green** after `pre-commit validate-config .pre-commit-config.yaml`; the commit runs the new hooks.
 
 ### Task 10: `slow` marker
 
 **Files:** Modify `pyproject.toml` (`markers`) and the test files the measurement names; Test `tests/test_hooks.py`.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 ```python
 def test_slow_marker_is_registered_and_the_known_32s_test_carries_it():
     assert any(m.startswith("slow:") for m in tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["markers"])
@@ -650,8 +659,8 @@ def test_slow_marker_is_registered_and_the_known_32s_test_carries_it():
               if isinstance(n, ast.FunctionDef) and n.name == "test_large_string_array_is_summarized_not_materialized")
     assert "pytest.mark.slow" in {ast.unparse(d) for d in fn.decorator_list}
 ```
-- [ ] **Step 2: Red** (`-k slow`), then `bash tools/test.sh --durations=0 tests/ > tmp/durations.txt`.
-- [ ] **Step 3: Implement.** Mark every function with a `call` line of 5.00 s or more (the whole function if any case
+- [x] **Step 2: Red** (`-k slow`), then `bash tools/test.sh --durations=0 tests/ > tmp/durations.txt`.
+- [x] **Step 3: Implement.** Mark every function with a `call` line of 5.00 s or more (the whole function if any case
   qualifies); register `slow: call phase >= 5 s at the capped worker count; deselected at commit only`. Green, `rm
   tmp/durations.txt`; the commit body lists the marked tests and seconds.
 
@@ -669,10 +678,13 @@ def test_slow_marker_is_registered_and_the_known_32s_test_carries_it():
   matches code: <glob> (<path>)` (a non-`full:` glob matching a `.sh`/`.py`/`.mjs`/`.js` file or a path in `execs`).
 - `uv run llmenv.py selection-lint`: `select-tests`' root, tree and exemptions; problems on stderr and exit 1 (a
   `read_exempt` `ValueError` is one); else `ownership lint: ok (<n> files)`.
-- `tools/test-changed.sh` runs it after the link check and before `select-tests`, at both stages; a failure exits 1.
+- `tools/test-changed.sh` runs it after the link check, at both stages, so on every commit and every range push (a
+  new-branch push runs `tools/test.sh` directly, without it). Delivered in 5c9565a: the lint starts in the background,
+  `select-tests` and pytest run meanwhile, the script waits for it and prints its output after the test output, and
+  exits with the tests' status when nonzero, else 1 when the lint failed (a failed lint never stops the tests).
   Stub uv answers it with `exit ${STUB_LINT_RC:-0}`, or `exec "$REAL_UV" run "$STUB_REAL_LINT" selection-lint` when set.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 ```python
 def test_every_tracked_file_has_an_owner_a_hub_or_an_exemption():                  # tests/test_selection.py
     assert lint(load_tree(ROOT), read_exempt(ROOT / "tests/selection-exempt.txt"), executables(ROOT)) == []
@@ -687,10 +699,17 @@ def test_lint_flags_a_lost_last_match_a_lost_last_owner_and_code_under_a_plain_l
     chain = {"s/far.sh": "", "s/mid.sh": "far.sh\n", "s/top.sh": "mid.sh\n", "tests/test_top.py": "'top.sh'\n", NP: ""}
     assert lint(chain, {}, set()) == ["unowned: s/far.sh"]                          # an owner only at push depth is not enough
 
-@pytest.mark.parametrize("stage", ["commit", "push"])                                # tests/test_hooks.py
+@pytest.mark.parametrize(("tests_rc", "rc"), [("0", 1), ("5", 5)])                 # tests/test_hooks.py (5c9565a)
+def test_a_failed_lint_fails_the_hook_without_gating_the_tests(tmp_path, tests_rc, rc):
+    repo = _hook_repo(tmp_path, {})
+    assert _run_changed(repo, "commit", env={"STUB_LINT_RC": "1", "STUB_RC": tests_rc}).returncode == rc
+    assert any(" pytest " in c for c in calls(repo))                               # the lint runs beside the tests
+
+@pytest.mark.parametrize("stage", ["commit", "push"])
 @pytest.mark.parametrize(("removed", "problem"), [("docs/a.md", "stale exemption: docs/a.md"),
                                                   ("tests/test_x.py", "unowned: scripts/x.sh")])
-def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_owner(tmp_path, stage, removed, problem):
+@pytest.mark.parametrize("tests_rc", ["0", "1"])                                   # the lint is reported either way
+def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_owner(tmp_path, stage, removed, problem, tests_rc):
     repo = _hook_repo(tmp_path, {"docs/a.md": b"", "scripts/x.sh": b"", "tests/test_x.py": b"'x.sh'\n", NP: b"",
                                  "tests/test_tools.py": b"'pyright-staged.sh'\n",          # owns the copied tool
                                  "tests/selection-exempt.txt": b"docs/a.md  # why\n"})
@@ -701,19 +720,19 @@ def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_
     git(repo, "rm", "-q", removed)
     if stage == "push":
         git(repo, "commit", "-qm", "rm")
-    result = _run_changed(repo, stage, env={**real, **(_refs(repo) if stage == "push" else {})})
-    assert result.returncode == 1 and problem in result.stderr and not any(" pytest " in c for c in calls(repo))
+    result = _run_changed(repo, stage, env={**real, "STUB_RC": tests_rc, **(_refs(repo) if stage == "push" else {})})
+    assert result.returncode == 1 and problem in result.stderr
 ```
-- [ ] **Step 2: Red.** `bash tools/test.sh tests/test_selection.py tests/test_hooks.py -k "owner or lint or exemption"`.
+- [x] **Step 2: Red.** `bash tools/test.sh tests/test_selection.py tests/test_hooks.py -k "owner or lint or exemption"`.
   `lint` undefined. Then the real-tree test lists the unowned files (2026-11-23: the challenge and eval trees, test
   helpers, `tests/fixtures/llama-models-*.json`, the `.test.mjs` files, `docs/prds/**`, `docs/superpowers/**`,
   `.claude/handoffs/**`, `rdna*.log`, plus whatever is owned only two hops away).
-- [ ] **Step 3: Implement, then give each an owner:** a glob or f-string reader gets a `PREFIX_OWNERS` entry citing
+- [x] **Step 3: Implement, then give each an owner:** a glob or f-string reader gets a `PREFIX_OWNERS` entry citing
   its line, or a direct test; non-executable content read by no test a plain line (`docs/superpowers/*  # durable
   plans and specs`); code no pytest test runs a `full:` line (the `.test.mjs`-covered `context-ladder.mjs`, O1).
   (`shortcut: ownership is per test file, so a source named only by an opt-in test inside a mixed file counts as owned`)
-- [ ] **Step 4: Green**, then `time uv run llmenv.py selection-lint` into the commit body (paid on every hook run).
-- [ ] **Step 5: Time R9 through the installed hooks.** One bash script under `tmp/` (deleted afterwards) holds setup,
+- [x] **Step 4: Green**, then `time uv run llmenv.py selection-lint` into the commit body (paid on every hook run).
+- [x] **Step 5: Time R9 through the installed hooks.** One bash script under `tmp/` (deleted afterwards) holds setup,
   the three timed commands and teardown, so the trap fires when it ends:
 ```bash
 set -euo pipefail
@@ -738,14 +757,14 @@ git push -q --no-verify "$name" "$name"                         # untimed: the t
   test file (target < 15 s); (3) `time git push -q "$name" "$name"` (target < 60 s). Expected: no `$name` remains in
   `git worktree list`, `git remote` or `git branch`, and `ls -A tmp` lists only the three owner files. A missed
   target is recorded as such and goes to O4.
-- [ ] **Step 6: Record and commit.** Fill in "R9 measured" under Open decisions, then
+- [x] **Step 6: Record and commit.** Fill in "R9 measured" under Open decisions, then
   `git add docs/superpowers/plans/2026-11-23-fast-sound-hooks.md && git commit -m "docs(plan): record R9 hook timings"`
 
 ### Task 12: Replay check (G3)
 
 **Files:** Test `tests/test_selection.py`.
 
-- [ ] **Step 1: Test, whose oracle uses `git grep` and spec D3's rule 3, not selector code**
+- [x] **Step 1: Test, whose oracle uses `git grep` and spec D3's rule 3, not selector code**
 ```python
 TEST_FILE = re.compile(r"tests/(.*/)?test_[^/]*\.py")                               # the oracle's own copy
 
@@ -775,8 +794,8 @@ def test_replayed_commits_select_every_test_the_oracle_requires():
         beyond |= {t for p in paths if p in tree for t in owners(tree, p, 3)} - set(sel.tests)
     print(f"depth 3 would add {len(beyond)} test files: {sorted(beyond)}")         # measurement only (D1 gap)
 ```
-- [ ] **Step 2: Run it** (`-k replayed -rP`): PASS plus the depth-3 line (into the commit body); on a failure fix the selector, never the oracle.
-- [ ] **Step 3: Green and commit.**
+- [x] **Step 2: Run it** (`-k replayed -rP`): PASS plus the depth-3 line (into the commit body); on a failure fix the selector, never the oracle.
+- [x] **Step 3: Green and commit.**
 
 ### Task 13: Mutation spot-check (G2)
 
@@ -790,9 +809,12 @@ def test_replayed_commits_select_every_test_the_oracle_requires():
   last stdout line has `[0-9]+ failed` and no `[0-9]+ error`, stdout has no xdist crash marker (`node down:`,
   `crashed while running`, `replacing crashed worker`, `maximum crashed workers`: xdist reports a crashed worker's
   test as failed; verified 2026-11-23), and stderr has no runner marker (`leak:`, `inventory:`, `network namespace
-  unavailable`, `uv cannot resolve`); `passed` for rc 0 with no marker; otherwise `HARNESS`.
+  unavailable`, `uv cannot resolve`, and since 14d0e21 the runner's `timeout: test run exceeded`); `passed` for rc 0
+  with no marker; otherwise `HARNESS`.
 - Setup: exit 2 when the repo or `/tmp` is above 70 % full (`df --output=pcent`) or `git diff --quiet -- tools pylib
-  tests llmenv.py` fails. Scratch `tmp/selection-mutation.XXXXXX` (trap-removed); a base copy of the index
+  tests llmenv.py` fails. Scratch on host `/tmp` (`mktemp -d /tmp/selection-mutation.XXXXXX`, removed by an EXIT
+  trap). Recorded ruling: the 70 % disk guard applies to `/tmp`, and AGENTS.md's external-temp exception covers only
+  pytest's own temp dir, which is acceptable here because the script's scratch is removed on every exit path; a base copy of the index
   (`git checkout-index -a --prefix=<scratch>/base/`, `mkdir tmp`, `git init`, one commit); each fault runs in a fresh
   `cp -a` of it. A second copy `<scratch>/sel/` has the single `cli_edges(tree)` literal replaced by `{}` (another
   count exits 2) and answers fault 1's direct-namer selection and, under `--break-cli-edge`, every selection.
@@ -827,7 +849,7 @@ Evidence, 2026-11-23, in an index copy under `tmp/` with `uv run pytest -q`:
   namers passed on the mutated copy (456 passed; `test_omniroute_derive_candidate.py`, read, does not touch the line).
 - The heal and updater test worlds point `uv` at `<copy>/.venv`, so each copy needs its own environment.
 
-- [ ] **Step 1: Failing tests** (`_classify(tmp_path, rc, out, err)` writes `out`/`err` to two files under `tmp_path`,
+- [x] **Step 1: Failing tests** (`_classify(tmp_path, rc, out, err)` writes `out`/`err` to two files under `tmp_path`,
   runs `bash tools/selection-mutation-check.sh --classify <rc> <files>` in `ROOT` and returns its stripped stdout)
 ```python
 def test_every_mutation_fault_matches_exactly_one_line():
@@ -851,14 +873,14 @@ def test_mutation_check_finds_a_hole_without_the_cli_edge():
                             cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 1 and "HOLE 1 pylib-cli" in result.stdout
 ```
-- [ ] **Step 2: Red** (`-k "mutation or env_gate"` over both test files: no script yet, the opt-in test skipped, the
+- [x] **Step 2: Red** (`-k "mutation or env_gate"` over both test files: no script yet, the opt-in test skipped, the
   env-gate test failing until the fourth switch is unset), then write the script and the two one-line edits.
-- [ ] **Step 3: Run against the staged state** (`df -h . /tmp` below 70 %, `git add` the task's files): the two test
+- [x] **Step 3: Run against the staged state** (`df -h . /tmp` below 70 %, `git add` the task's files): the two test
   files, then `bash tools/selection-mutation-check.sh` (10 `caught`, exit 0, about 15 min), then
   `LLM_ENV_MUTATION_CHECK=1 uv run pytest tests/test_hooks.py -k cli_edge -q` (1 passed), `make validate`, `ls -A tmp`.
   A `HOLE` is fixed in T5/T6 code with a new test; an `INVALID` or a fault-caused `HARNESS` by another literal; any
   other `HARNESS` in the script. The classifier is never loosened.
-- [ ] **Step 4: Commit** with the ten result lines and the regression result in the body (rerun Step 3 after any change).
+- [x] **Step 4: Commit** with the ten result lines and the regression result in the body (rerun Step 3 after any change).
 
 ### Task 14 (deferrable): nightly full run (G4)
 
@@ -892,7 +914,7 @@ floor_pct}`; `migrate_config_preserves_existing_memory_ceiling_{pct, floor_pct}`
 zero_sentinel_resources}`. Compose: `{service_publishes_configured_port, service_passes_the_dri_device}`;
 `{sleep_idle_seconds_becomes_a_command_flag, remote_setup_service_command_runs_the_module}`;
 `{omniroute_depends_on_llm_server_omitted_when_disabled, remote_setup_has_no_dependency_regardless_of_llm_server_state}`.
-- [ ] Merge, prove, `make validate && make test`, commit `test: parametrize shape-duplicate config and compose tests (N -> N cases)`.
+- [x] Merge, prove, `make validate && make test`, commit `test: parametrize shape-duplicate config and compose tests (N -> N cases)`.
 
 ### Task 16: the big shell test file (8 groups, 17 tests, 9 fewer definitions; by keyword)
 
@@ -904,7 +926,7 @@ system_one_disabled_by_default}`; `setup_rebuilds_system_one_image_when_gpu_arch
 `setup_rejects_{invalid_numbered_model_selection_before_download, comma_separated_model_selection}`;
 `start_no_gpu_still_{waits_for_omniroute_and_runs_network_sh, starts_the_compose_stack}`;
 `{stop_llama, start}_rejects_an_unknown_scope`.
-- [ ] As T15 (`bash tools/test.sh tests -k "<group keywords>"`, `git add tests`), commit `test: parametrize shape-duplicate shell tests (N -> N cases)`.
+- [x] As T15 (`bash tools/test.sh tests -k "<group keywords>"`, `git add tests`), commit `test: parametrize shape-duplicate shell tests (N -> N cases)`.
 
 ### Task 17: the other 14 groups (28 tests, 14 fewer definitions) and one `_reply`
 
@@ -928,7 +950,7 @@ nan_quantiles_in_unused_families_are_skipped_like_real_grafana_output}`. `test_p
 `_reply(handler, payload, *, status=200, set_cookie=None, content_length=True) -> None` (`def _reply` count 6 → 1;
 `content_length=False` keeps `_MutableCombosHandler` unchanged). `_fake_login_ok` stays:
 R8 asks for one copy per file, which each of its two files has; merging across files needs T19's shared module.
-- [ ] As T15 (plus `tests/test_capacity.py`, which imports from `test_cli.py`; `git add tests`), commit `test:
+- [x] As T15 (plus `tests/test_capacity.py`, which imports from `test_cli.py`; `git add tests`), commit `test:
   parametrize the remaining shape duplicates; one _reply helper (N -> N cases)`.
 
 ## Phase 5 (deferrable, owner's call)
