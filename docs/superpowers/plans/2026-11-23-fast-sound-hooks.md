@@ -954,3 +954,62 @@ R8 asks for one copy per file, which each of its two files has; merging across f
   R8 → T15-T17. R9 → T10, T11 Step 5, T18. R10 → T4, T8, T9. D1 → T5, T7. D2 → T6. D3 → T5, T11. D4 → T10.
   D5 → T1, T3. D6 → T4. D7 → T9. D8 → T8, T9. G1 → T11. G2 → T13. G3 → T12. G4 → T14. Sweep move → T1 Step 1.
 - **Plan-added names:** `PUSH_FROM`/`PUSH_TO`, `LLM_ENV_MUTATION_CHECK`, the offline check's status 4, `run dir:`.
+
+## Follow-ups (from the final review)
+
+The final review's fixes landed in one commit after T13 (`git push origin HEAD` accepted; a dirty-tree push refused
+without `--no-verify` advice; the eval `models.yml` fixture tracked; the mutation script unsets git's local env vars;
+a hint line after a `tmp/` leak; spec and plan wording). What remains:
+
+**Deferrable tasks not done (owner's call):**
+- T14: nightly full run (G4 backstop; O5 scheduler decision).
+- T18: split of the big shell test file (script commits about 30 s until then, O4).
+- T19: shared `tests/fakes/` (one fake podman, one `_fake_login_ok`).
+
+**Open owner decisions (not implemented):**
+- (i) Push wall time: 17 of the last 20 pushes touch a hub file, so the push runs the full suite at 40 % of cores,
+  about 2 minutes, not the 32 s measured on a non-hub push. Options: accept; let the full run at push use a higher
+  core share; narrow the hub list.
+- (ii) The 6.5 s ownership lint on every commit (docs-only commit 14.5 s vs the < 5 s R9 target). Options: gate it to
+  commits whose staged change adds, deletes or renames files, changes a file mode, or touches
+  `tests/selection-exempt.txt` or `pylib/selection.py` (a spec G1 amendment; a proposed trigger list was found
+  incomplete once); run it in parallel with the tests on every commit and push (keeps G1, saves about 6 s); leave it.
+- (iii) Reach beyond depth 2 at non-hub pushes is covered only by `make test` and by hub pushes; T14 would close it.
+- (iv) The replay test's opt-in oracle list imports `OPT_IN` from the selector (G3 says it shares no code); a
+  one-line local copy fixes it.
+
+**Deferred minors (from the SDD ledger; T1-T3 recorded counts only: 6, 3 and 5 parked, details not kept; T1's two
+named ones were closed in T4):**
+- T4: clear `child=` after the main wait in `tools/test.sh`; a `find $run` error has no marker; no uv-lock exemption
+  stub test; inventory-dir removal untested.
+- T5: `PREFIX_OWNERS` loop, hub exclusion in `_reach` and the reached-conftest branch in `owners` unpinned by tests.
+- T5: conftest-directory expression duplicated in `owners` and `select`.
+- T5: bare-basename over-selection through a reached `conftest.py`; per-path reach cost scales with the range.
+- T5: `read_exempt` accepts an empty or duplicate glob silently.
+- T5: `owners()` walks twice at push; the reasons line chains two conditionals.
+- T6: lib.sh-wrapped subcommands (process-vram, migrate-config, presets) get no script edge.
+- T6: `cli_edges` re-parses `llmenv.py` per `_reach` call.
+- T7: `SELECT_ALL` reasons text, its `<reason>` and `tests == []` unpinned; unused env param docstring.
+- T7: no `--` separator in the push diff (`git_changes`); a bad revision gives a traceback, exit 1 (fails closed).
+- T8: no test removes the `local_sha == HEAD` check; the real-push test pins only `calls[0] == "validate"`.
+- T8: no real push of a refused shape (tag, `main:other`).
+- T9: `pyright-staged.sh` process substitution hides a `git diff` failure (use `wait $!`).
+- T9: `test-changed.sh` empty or unparsable selection fails open to the full suite (its comment says fails).
+- T9: `stage=${2:-}` does not check `$1`; no test that `--stage` reaches select-tests or that the link check is
+  skipped at push.
+- T9: the shellcheck glob list is copied in the test; optional `verbose: true` on tests-changed; no `fail_fast`.
+- T10: the slow-marker guard test is thin; its name says 32 s (measured 21.37 s); three tests at 4.8-4.94 s unmarked.
+- T11: selection-lint exits 1 for a reasonless exemption and `STUB_LINT_RC` is unused.
+- T11: select-tests reads exemptions before `git_changes` (a traceback precedes exit 2).
+- T11: the O4 bullet is not updated (a docs-only commit that selects nothing took 8.7 s).
+- T11: the onboard-local-model `PREFIX_OWNERS` entry is broader than its reader (narrow it); `_stem` is redundant.
+- T12: no count of commits reaching the assertion (about 8 of 25 are non-full today); basename after `-F` without
+  `-e`; grep filtered by pathspec, not `TEST_FILE`; `_z` takes `repo` but `_required` hardcodes `ROOT`; runtime may
+  approach 5 s as the window fills.
+- T13: classifier rows for rc 3 and 69 test only the status; the "uv cannot resolve", "crashed while running" and
+  "replacing crashed worker" markers lack rc-1 rows; `--only` hardcodes 10.
+- T15: `INVALID_PCTS`/`cases()` defined mid-file in `test_config.py`; `cases()` name and field default; group 6
+  four-parameter readability.
+- T16: case ids drop the `test_` prefix (`-k` on the old name no longer matches); the merged start/stop unknown-scope
+  test sits far from its start neighbours; docstrings became comments.
+- T17: remote-setup `contains_two`/`contains_three` names describe counts (could be one).
