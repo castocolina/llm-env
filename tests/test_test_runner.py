@@ -141,5 +141,14 @@ def test_a_run_past_the_timeout_exits_124_and_reaps_every_descendant(tmp_path): 
     finally:
         stop_runner(proc, seen)
     assert proc.returncode == 124 and "timeout: test run exceeded 2 s" in err.splitlines()
+    assert b"sleep\x00300\x00" in seen.values()                                      # the stub's sleeper existed to be reaped
     wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in seen), timeout=5)
     assert not run_dir(err).exists()
+
+
+@pytest.mark.parametrize("rc", [0, 5])
+def test_a_timer_expiring_after_the_chain_keeps_the_pytest_status(tmp_path, rc):
+    podman = (repo := runner_repo(tmp_path)) / "stub/podman"                         # the second `ps` (snapshot after) outlasts the 2 s bound
+    podman.write_text(podman.read_text().replace("bash\n", 'bash\nif [ "$1" = ps ]; then [ ! -e "$PODMAN_STATE.ps" ] || sleep 3; touch "$PODMAN_STATE.ps"; fi\n', 1))
+    result = run_runner(repo, env={"STUB_RC": str(rc), "LLM_ENV_TEST_TIMEOUT_SECONDS": "2"})
+    assert result.returncode == rc and "timeout:" not in result.stderr and "leak:" not in result.stderr

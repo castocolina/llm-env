@@ -13,7 +13,7 @@ unset LLM_ENV_UPDATE_PROOF LLM_ENV_UPDATE_CHARACTERIZE LLM_ENV_LIVE_VM LLM_ENV_M
 
 runs=/tmp/pytest-of-${USER:-$(id -un)}  # under pylib/observe_fs.py's pytest_roots
 run='' inv='' timer=''
-trap 'rm -rf -- "$run" "$inv"; [ -z "$timer" ] || kill "$timer" 2>/dev/null' EXIT
+trap 'rm -rf -- "$run" "$inv"; [ -z "$timer" ] || kill "$timer" 2>/dev/null || :' EXIT  # || : the timer may be gone; a failure would replace the status
 # shellcheck disable=SC2174 # only $runs is created: /tmp exists
 mkdir -p -m 700 "$runs"
 run=$(mktemp -d "$runs/llm-env-run.XXXXXX")
