@@ -36,8 +36,8 @@ def _no_stale_pwd() -> None:
 def _no_git_hook_environment() -> None:
     """Drop the repository-local GIT_* variables git exports to its hooks.
 
-    The pre-push hook runs this suite with GIT_DIR (and friends) pointing at
-    this repository. Tests that `git init` a scratch directory, or scripts
+    The hooks run selected tests; `make test` runs the whole suite. A hook runs
+    pytest with GIT_DIR (and friends) pointing at this repository. Tests that `git init` a scratch directory, or scripts
     that ask git whether a directory is a work tree, then talk to THIS
     repository instead of the scratch one, and fail only when the suite is
     started by `git push`. Every test starts from a clean git environment.

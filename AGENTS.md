@@ -65,6 +65,19 @@ and afterwards verify that
 `yq '.gpu.backend, .gpu.image' ~/.config/llm-env/models.yml` is unchanged (restore from the
 backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening.
 
+### Hooks
+
+`make dev-setup` installs pre-commit's commit hook and links `.git/hooks/pre-push` to `tools/pre-push.sh`
+(it exits 1 when `core.hooksPath` is set). At commit: shellcheck and ruff on the staged files in
+`tools/validate.sh`'s scope, pyright on the whole project when the index adds, changes, deletes or renames a `.py`
+file, `pyproject.toml` or `uv.lock`, then the tests selected from the staged diff without the slow ones
+(`tools/test-changed.sh --stage commit`); that last hook fails with "run make dev-setup" while the pre-push link is
+missing or not executable. At push: `tools/validate.sh`, then the tests selected from the pushed range for a
+fast-forward of the checked-out branch to itself, or `tools/test.sh` (the full suite) for a new branch. Any other
+push (several refs, a tag or other destination, a rewind, a dirty index or worktree) fails with "push shape not
+supported by the hook: run make test, then git push --no-verify". The only bypasses are `git commit|push
+--no-verify` and, at commit, `SKIP=<hook-id>`. `SELECT_ALL=1` makes either stage select every test file.
+
 ### Environment variables
 
 `llm-env.profile.yml` (tracked, non-secret; see `llm-env.profile.example.yml` and

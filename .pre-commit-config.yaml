@@ -1,10 +1,11 @@
 repos:
   - repo: local
     hooks:
-      - id: validate
-        name: shellcheck + ruff + pyright
-        entry: bash tools/validate.sh
-        language: system
-        pass_filenames: false
-        always_run: true
-
+      - {id: shellcheck, name: "shellcheck (staged)", entry: shellcheck -s bash, language: system, stages: [pre-commit],
+         files: '^(tools|setup|setup/lib|scripts|\.claude/skills/[^/]+/scripts)/[^/]+\.sh$'}
+      - {id: ruff, name: "ruff (staged)", entry: uv run ruff check, language: system, stages: [pre-commit],
+         files: '^(llmenv\.py|pylib/.*\.py|tests/.*\.py)$'}
+      - {id: pyright, name: "pyright (project, when the index touches Python inputs)", entry: bash tools/pyright-staged.sh,
+         language: system, pass_filenames: false, always_run: true, stages: [pre-commit]}
+      - {id: tests-changed, name: "pytest (selected, commit)", entry: bash tools/test-changed.sh --stage commit,
+         language: system, pass_filenames: false, always_run: true, require_serial: true, stages: [pre-commit]}

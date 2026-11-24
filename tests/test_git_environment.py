@@ -1,4 +1,4 @@
-"""The suite never inherits the GIT_* variables git exports to its hooks (the pre-push hook runs the whole suite)."""
+"""The suite never inherits the GIT_* variables git exports to its hooks (the hooks run selected tests; `make test` runs the whole suite)."""
 
 import os
 

@@ -1,15 +1,20 @@
-"""The pre-push hook (tools/pre-push.sh) and its link by make dev-setup (spec R3, D8); scratch repos only."""
+"""The git hooks: commit-stage checks and selected tests (spec R2, D7), the pre-push hook (tools/pre-push.sh) and its
+link by make dev-setup (spec R3, D8); scratch repos only."""
+import fnmatch
+import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from git_helpers import git, git_out, git_repo
 from runner_helpers import calls, run_runner, runner_repo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pylib.selection import executables
+from pylib.selection import executables, load_tree
 
 Z = "0" * 40
 REFUSED = "push shape not supported by the hook: run make test, then git push --no-verify"
@@ -124,3 +129,79 @@ def test_dev_setup_links_pre_push_unless_core_hooks_path_is_set(tmp_path, hooks_
     else:
         assert result.returncode == 0 and hook.resolve() == (repo / "tools/pre-push.sh").resolve()
         assert "install --hook-type pre-commit" in calls(repo)
+
+
+def _hook_repo(tmp_path, files):
+    repo = runner_repo(tmp_path, extra=("tools/test-changed.sh", "tools/pyright-staged.sh", "tools/pre-push.sh"))
+    (repo / ".git/info").mkdir(parents=True)
+    (repo / ".git/info/exclude").write_text("stub/\npodman-state\ncalls\ntmp/\n")
+    git_repo(repo, {})
+    git(repo, "read-tree", "--empty")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "E")
+    for rel, data in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(data)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "F")
+    (repo / ".git/hooks/pre-push").symlink_to(repo / "tools/pre-push.sh")
+    return repo
+
+
+def _refs(repo):
+    return {"PUSH_FROM": git_out(repo, "rev-parse", "HEAD~1"), "PUSH_TO": git_out(repo, "rev-parse", "HEAD")}
+
+
+def _run_changed(repo, stage, select=None, env=None):
+    env = (env or {}) | ({"STUB_SELECT": json.dumps(select)} if select else {})
+    return run_runner(repo, "--stage", stage, env=env, script="tools/test-changed.sh")
+
+
+CFG = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text())["repos"][0]["hooks"]
+
+
+def test_pre_commit_holds_only_commit_stage_hooks_and_the_index_readers_always_run():
+    assert [h["id"] for h in CFG] == ["shellcheck", "ruff", "pyright", "tests-changed"]
+    assert all(h["stages"] == ["pre-commit"] for h in CFG) and not any("tools/test.sh" in h["entry"] for h in CFG)
+    assert all(h["always_run"] and h["pass_filenames"] is False for h in CFG[2:])
+
+
+def test_shellcheck_and_ruff_cover_exactly_what_validate_covers():
+    globs = ("tools/*.sh", "setup/*.sh", "setup/lib/*.sh", "scripts/*.sh", ".claude/skills/*/scripts/*.sh")
+    sc, rf = (re.compile(next(h["files"] for h in CFG if h["id"] == i)) for i in ("shellcheck", "ruff"))
+    assert rf.search("pylib/x.py") and not rf.search("scripts/system-one-cache-check.py")   # D7
+    for p in load_tree(ROOT):
+        assert bool(sc.search(p)) == any(fnmatch.fnmatchcase(p, g) and p.count("/") == g.count("/") for g in globs), p
+        assert bool(rf.search(p)) == (p == "llmenv.py" or p.startswith(("pylib/", "tests/")) and p.endswith(".py")), p
+
+
+@pytest.mark.parametrize("path", ["pylib/a ñ b.py", "pyproject.toml", "uv.lock"])        # git quotes the first without -z
+@pytest.mark.parametrize("how", ["rm", "mv"])
+def test_pyright_runs_on_a_staged_deletion_or_rename_away(tmp_path, path, how):     # D7
+    repo = _hook_repo(tmp_path, {path: b"x\n", "README.md": b"r\n"})
+    git(repo, *(("rm", "-q", path) if how == "rm" else ("mv", path, path + ".moved")))
+    assert _run_tool(repo, "tools/pyright-staged.sh").returncode == 0 and calls(repo)[-1] == "run pyright"
+
+
+def test_pyright_skips_a_commit_without_python_inputs(tmp_path):
+    git(repo := _hook_repo(tmp_path, {"pylib/a.py": b"x\n", "README.md": b"r\n"}), "rm", "-q", "README.md")
+    assert _run_tool(repo, "tools/pyright-staged.sh").returncode == 0 and calls(repo) == []
+
+
+def test_test_changed_deselects_slow_only_at_commit(tmp_path):
+    repo, full = _hook_repo(tmp_path, {}), {"full": True, "tests": [], "total": 2, "reasons": {}}
+    _run_changed(repo, "commit"); _run_changed(repo, "commit", select=full); _run_changed(repo, "push", select=full, env=_refs(repo))
+    runs = [c for c in calls(repo) if " pytest " in c]
+    assert runs[0].endswith("-m not slow tests/test_a.py") and runs[1].endswith("-m not slow tests/")
+    assert runs[2].endswith("-q tests/") and "not slow" not in runs[2]
+
+
+def test_test_changed_fails_when_nothing_is_collected(tmp_path):                    # spec R10
+    assert _run_changed(_hook_repo(tmp_path, {}), "commit", env={"STUB_RC": "5"}).returncode == 5
+
+
+@pytest.mark.parametrize("broken", ["missing", "not executable"])
+def test_commit_hook_requires_the_pre_push_link(tmp_path, broken):
+    repo = _hook_repo(tmp_path, {})
+    (repo / ".git/hooks/pre-push").unlink() if broken == "missing" else (repo / "tools/pre-push.sh").chmod(0o644)
+    result = _run_changed(repo, "commit")
+    assert result.returncode == 1 and "run make dev-setup" in result.stderr and calls(repo) == []

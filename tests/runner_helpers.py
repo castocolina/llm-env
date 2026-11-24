@@ -40,6 +40,12 @@ if [ "$1 $2" = "run --offline" ]; then
   echo "offline-check" >>"$CALLS"
   exit "${{STUB_OFFLINE_RC:-0}}"
 fi
+if [ "$1 $2 $3" = "run llmenv.py select-tests" ]; then
+  echo "$*" >>"$CALLS"
+  default='{{"full": false, "tests": ["tests/test_a.py"], "total": 1, "reasons": {{}}}}'
+  echo "${{STUB_SELECT:-$default}}"
+  exit 0
+fi
 echo "$*" >>"$CALLS"
 """
 STUB_UNSHARE = """#!/usr/bin/env bash
