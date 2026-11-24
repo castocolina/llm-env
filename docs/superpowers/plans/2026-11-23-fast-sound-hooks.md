@@ -1015,3 +1015,7 @@ named ones were closed in T4):**
 - T16: case ids drop the `test_` prefix (`-k` on the old name no longer matches); the merged start/stop unknown-scope
   test sits far from its start neighbours; docstrings became comments.
 - T17: remote-setup `contains_two`/`contains_three` names describe counts (could be one).
+- Parallel lint (5c9565a): `tools/test-changed.sh` no longer `exec`s `test.sh`, so a TERM sent only to the hook process
+  (not Ctrl-C, which reaches the whole process group) does not reach `test.sh` and pytest can outlive the hook; an
+  interrupted hook also waits up to about 6 s for the lint. No test covers this; forwarding needs a background job and a
+  trap, which is more machinery than the case seems to justify.
