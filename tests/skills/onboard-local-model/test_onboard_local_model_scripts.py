@@ -582,6 +582,7 @@ def _rows(tmp_path: Path, out_name: str = "out") -> list[dict[str, object]]:
 
 
 @NEEDS_NODE
+@pytest.mark.slow
 def test_effort_run_scores_a_hanging_solution_as_failed(tmp_path: Path) -> None:
     seeds = _seeds_file(tmp_path, {"1": [7]})
     result = _effort_run(

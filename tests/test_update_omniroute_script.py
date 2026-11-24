@@ -139,6 +139,7 @@ def test_staged_image_identity_mismatch_is_an_error_after_pull_only(world):
     assert w.mutations() == [("podman", "pull", w.immutable_ref)]
 
 
+@pytest.mark.slow
 def test_dependent_appearing_after_the_observer_defers_the_commit(world):
     w = world(drift_after_observer=True)
     r = w.run(LLM_ENV_UPDATE_IDLE_SECONDS="1", LLM_ENV_UPDATE_MAX_WAIT_SECONDS="60")
@@ -170,6 +171,7 @@ def test_make_wrapper_reports_a_deferral_as_deferred_not_failed():
     assert r.returncode == 75 and "deferred, exit 75" in r.stdout and "failed" not in r.stdout
 
 
+@pytest.mark.slow
 def test_client_activity_at_the_workers_last_look_defers_before_any_mutation(world):
     """The observer saw idle; activity that starts in the gap before `podman stop` is caught by the last look."""
     w = world(busy_at_last_look=True)
@@ -178,6 +180,7 @@ def test_client_activity_at_the_workers_last_look_defers_before_any_mutation(wor
     assert w.mutations() == [("podman", "pull", w.immutable_ref)]
 
 
+@pytest.mark.slow
 def test_commit_order_no_collateral_and_lock_hygiene(world):
     w = world()
     r = w.run(LLM_ENV_UPDATE_IDLE_SECONDS="1", LLM_ENV_UPDATE_MAX_WAIT_SECONDS="60")
@@ -203,6 +206,7 @@ def test_commit_order_no_collateral_and_lock_hygiene(world):
             assert not fd.endswith(".lock"), f"stub inherited the lock fd: {c}"
 
 
+@pytest.mark.slow
 def test_outer_sigkill_while_waiting_leaves_only_the_pull(world):
     w = world(busy=True, env={"LLM_ENV_UPDATE_MAX_WAIT_SECONDS": "3600",
                               "LLM_ENV_UPDATE_IDLE_SECONDS": "1"})
@@ -312,6 +316,7 @@ def test_an_unprofiled_running_image_is_characterized_first_and_a_failed_run_sto
     assert not any(m[1] in ("tag", "stop", "rm") for m in w.mutations())
 
 
+@pytest.mark.slow
 def test_a_locally_stored_profile_lets_the_update_observe_and_finish(world):
     """The running image's profile lives only in the user-local store (bound to its evidence): no characterization
     runs, the update observes and completes."""
@@ -329,6 +334,7 @@ def test_a_locally_stored_profile_lets_the_update_observe_and_finish(world):
     assert r.stdout.strip().splitlines()[-1].startswith("updated ")
 
 
+@pytest.mark.slow
 def test_failed_up_reports_stages_without_rollback_or_retag(world):
     w = world(up_rc=1)
     r = w.run(LLM_ENV_UPDATE_IDLE_SECONDS="1", LLM_ENV_UPDATE_MAX_WAIT_SECONDS="60")
@@ -344,6 +350,7 @@ def test_failed_up_reports_stages_without_rollback_or_retag(world):
 
 
 @pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM, signal.SIGHUP], ids=["KILL", "TERM", "HUP"])
+@pytest.mark.slow
 def test_worker_owns_the_lock_through_the_mutation_sequence(world, sig):
     """The updater shell dies at the hand-off (a closed terminal sends HUP, a supervisor TERM): the detached worker
     still owns the work folder and completes. Before `trap - EXIT`, TERM/HUP ran the shell's cleanup trap and deleted
@@ -376,6 +383,7 @@ def test_worker_owns_the_lock_through_the_mutation_sequence(world, sig):
             proc.wait()
 
 
+@pytest.mark.slow
 def test_every_podman_child_sees_only_the_allowlisted_backend_environment(world, tmp_path):
     storage = tmp_path / "storage.conf"
     storage.write_text("")
@@ -389,6 +397,7 @@ def test_every_podman_child_sees_only_the_allowlisted_backend_environment(world,
             assert set(c["env"]) <= allow
 
 
+@pytest.mark.slow
 def test_deadline_crossing_never_mutates_after_the_budget(world):
     w = world(prior_tag_sleep=5)
     r = w.run(LLM_ENV_UPDATE_IDLE_SECONDS="1", LLM_ENV_UPDATE_MAX_WAIT_SECONDS="12")
@@ -441,6 +450,7 @@ def test_missing_container_is_created_from_the_deployed_compose_without_observat
     assert up[-8:] == ("up", "-d", "--no-deps", "--no-recreate", "--no-build", "--pull", "never", "omniroute")
 
 
+@pytest.mark.slow
 def test_running_unhealthy_target_whose_api_answers_goes_through_the_idle_gate(world):
     w = world(old_health="unhealthy")
     r = w.run(LLM_ENV_UPDATE_IDLE_SECONDS="1", LLM_ENV_UPDATE_MAX_WAIT_SECONDS="60")
@@ -604,6 +614,7 @@ def _observed(w):
     return any(c["tool"] == "journalctl" and "--follow" in c["argv"] for c in w.journal())
 
 
+@pytest.mark.slow
 def test_config_drift_after_a_rerender_recreates_with_the_same_image_once_idle(world):
     """First run after `make setup`/render-unit re-rendered the compose file with a new variable: same image, so the
     only reason to act is the drift; it goes through the idle gate, the target-only recreate and the verification."""
@@ -620,6 +631,7 @@ def test_config_drift_after_a_rerender_recreates_with_the_same_image_once_idle(w
     assert any(str(a).endswith("projection.yml") for a in muts[4])
 
 
+@pytest.mark.slow
 def test_secret_only_drift_names_the_variable_never_a_value_and_observes_with_the_running_password(world):
     """INITIAL_PASSWORD changed: the fake API accepts only the running container's password, so the observer and the
     last look must use it; the replacement is verified on Podman health. No value reaches stdout or stderr."""
@@ -642,6 +654,7 @@ def test_env_list_form_and_order_are_not_drift(world):
     assert w.mutations() == []
 
 
+@pytest.mark.slow
 def test_drift_and_a_new_image_in_one_run_apply_together(world):
     """A new image plus a changed port and memory cap: one drift line, one observation (on the running container's
     own port), one recreate with the new image."""
@@ -658,6 +671,7 @@ def test_drift_and_a_new_image_in_one_run_apply_together(world):
     assert w.mutations()[1] == ("podman", "tag", STAGED.removeprefix("sha256:"), REF)
 
 
+@pytest.mark.slow
 def test_a_drift_that_leaves_the_replacement_unhealthy_fails_verification_without_rollback(world):
     w = world(staged="sha256:" + IMG, omniroute_cfg={"initial_password": "rotated-secret"},
               svc_patch={"environment": {"INITIAL_PASSWORD": "rotated-secret"}}, server_password=PASSWORD,
@@ -669,6 +683,7 @@ def test_a_drift_that_leaves_the_replacement_unhealthy_fails_verification_withou
     assert "rotated-secret" not in r.stdout + r.stderr and PASSWORD not in r.stdout + r.stderr
 
 
+@pytest.mark.slow
 def test_a_healer_restart_during_a_drift_wait_defers_before_any_mutation(world):
     """Healer interplay: its memory recycle waits for the update lock (test_heal_omniroute), but its lease restart
     takes no lock; a restart while the drift waits for quiet changes the inventory, so the worker's recheck defers
@@ -700,6 +715,7 @@ apply_when_idle "$2" "$3"
 
 
 @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+@pytest.mark.slow
 def test_apply_when_idle_alone_gates_recreates_and_verifies(world, busy):
     """The shared piece without the updater around it (no resolve, no pull): given an image and the preflight
     artifacts it observes, hands off to the worker and reports the result line; busy defers with nothing changed."""
@@ -729,6 +745,7 @@ SIBLING = inspect_doc(SIB, name="system-one")
 DEPENDENT = inspect_doc(RS, name="remote-setup", deps=[OMNI])
 
 
+@pytest.mark.slow
 def test_unrelated_containers_appearing_and_disappearing_mid_wait_are_ignored(world):
     w = world(inventory={"start": ["target", UNRELATED_1], "observing": ["target", UNRELATED_2],
                          "post-observer": ["target"]})
@@ -739,6 +756,7 @@ def test_unrelated_containers_appearing_and_disappearing_mid_wait_are_ignored(wo
     assert "ignored unrelated inventory change: 0 added, 1 removed" in r.stderr
 
 
+@pytest.mark.slow
 def test_a_sibling_restarted_mid_wait_is_re_baselined_once_and_the_update_applies(world):
     s2 = _restarted(SIBLING, "2026-10-24T02:00:00Z")
     w = world(inventory={"start": ["target", SIBLING], "observing": ["target", s2], "post-observer": ["target", s2],
@@ -749,6 +767,7 @@ def test_a_sibling_restarted_mid_wait_is_re_baselined_once_and_the_update_applie
     assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
 
 
+@pytest.mark.slow
 def test_a_relevant_change_that_repeats_in_the_same_run_defers_naming_the_container(world):
     w = world(inventory={"start": ["target", SIBLING],
                          "observing": ["target", _restarted(SIBLING, "2026-10-24T02:00:00Z")],
@@ -760,6 +779,7 @@ def test_a_relevant_change_that_repeats_in_the_same_run_defers_naming_the_contai
     assert w.mutations() == [("podman", "pull", w.immutable_ref)] * 2  # the re-baseline re-stages (no transfer)
 
 
+@pytest.mark.slow
 def test_a_dependent_appearing_mid_wait_re_baselines_and_preflight_then_refuses_it(world):
     w = world(inventory={"observing": ["target", DEPENDENT], "post-observer": ["target", DEPENDENT]})
     r = w.run(**IDLE)
@@ -769,6 +789,7 @@ def test_a_dependent_appearing_mid_wait_re_baselines_and_preflight_then_refuses_
     assert w.mutations() == [("podman", "pull", w.immutable_ref)]
 
 
+@pytest.mark.slow
 def test_the_target_restarted_mid_wait_by_the_healer_is_re_baselined_and_observed_again(world):
     w = world(inventory={"observing": ["target-restarted"], "post-observer": ["target-restarted"]})
     r = w.run(**IDLE)
@@ -777,6 +798,7 @@ def test_the_target_restarted_mid_wait_by_the_healer_is_re_baselined_and_observe
     assert r.stdout.splitlines()[-1] == f"updated {OMNI[:12]} -> {NEW[:12]}"
 
 
+@pytest.mark.slow
 def test_the_target_replaced_externally_mid_wait_defers_without_a_re_baseline(world):
     other = inspect_doc("5" * 64, name="omniroute")
     w = world(inventory={"observing": [other], "post-observer": [other]})

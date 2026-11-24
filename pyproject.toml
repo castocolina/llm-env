@@ -16,3 +16,4 @@ typeCheckingMode = "basic"
 # AGENTS.md "Test Processes and Containers": every test temp dir is removed by the same run, pass or fail (the
 # default keeps the last three runs on the /tmp tmpfs, ~1.6 GB each, and filled the quota).
 tmp_path_retention_policy = "none"
+markers = ["slow: call phase >= 5 s at the capped worker count; deselected at commit only"]

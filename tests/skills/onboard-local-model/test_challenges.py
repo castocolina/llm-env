@@ -387,6 +387,7 @@ def test_library_check_reports_a_surviving_mutant(tmp_path: Path) -> None:
     assert len(rows) == 1 and rows[0]["valid"] is False and "no test fails" in rows[0]["reason"], rows
 
 
+@pytest.mark.slow
 def test_library_check_reports_a_hanging_mutant(tmp_path: Path) -> None:
     copy = _library_copy(tmp_path)
     project = copy / "projects" / "paginate"
@@ -606,6 +607,7 @@ def test_library_check_rejects_a_feature_prompt_that_leaks_the_solution(appended
     assert all(r["valid"] for r in report["rows"] if r["site"] != "discount"), report["rows"]
 
 
+@pytest.mark.slow
 def test_l5_challenge_is_repo_scale_with_decoys(tmp_path: Path) -> None:
     projects, twins = set(), 0
     for seed in range(1, 7):

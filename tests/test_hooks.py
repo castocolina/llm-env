@@ -1,9 +1,11 @@
 """The git hooks: commit-stage checks and selected tests (spec R2, D7), the pre-push hook (tools/pre-push.sh) and its
 link by make dev-setup (spec R3, D8); scratch repos only."""
+import ast
 import fnmatch
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -210,3 +212,10 @@ def test_commit_hook_requires_the_pre_push_link(tmp_path, broken):
         hook.write_text("#!/bin/sh\nexit 0\n"); hook.chmod(0o755)
     result = _run_changed(repo, "commit")
     assert result.returncode == 1 and "run make dev-setup" in result.stderr and calls(repo) == []
+
+
+def test_slow_marker_is_registered_and_the_known_32s_test_carries_it():
+    assert any(m.startswith("slow:") for m in tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["markers"])
+    fn = next(n for n in ast.walk(ast.parse((ROOT / "tests/test_gguf.py").read_text()))
+              if isinstance(n, ast.FunctionDef) and n.name == "test_large_string_array_is_summarized_not_materialized")
+    assert "pytest.mark.slow" in {ast.unparse(d) for d in fn.decorator_list}

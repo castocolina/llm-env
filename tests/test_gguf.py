@@ -191,6 +191,7 @@ def test_kv_geometry_raises_when_architecture_missing():
         kv_geometry({"llama.block_count": 40})
 
 
+@pytest.mark.slow
 def test_large_string_array_is_summarized_not_materialized(tmp_path):
     vocab = [f"tok{i}" for i in range(200_000)]
     kvs = [

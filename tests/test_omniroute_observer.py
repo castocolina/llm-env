@@ -301,6 +301,7 @@ def test_missing_profile_publishes_a_defer_unknown_capability_verdict(tmp_path):
         _kill_group_quietly(sup.pid)
 
 
+@pytest.mark.slow
 def test_latest_json_is_never_half_written(tmp_path):
     stubs = make_stub_path(tmp_path, podman="exit 1", journalctl="exit 1")
     parent = subprocess.Popen(["sleep", "300"])
