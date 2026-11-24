@@ -1019,3 +1019,6 @@ named ones were closed in T4):**
   (not Ctrl-C, which reaches the whole process group) does not reach `test.sh` and pytest can outlive the hook; an
   interrupted hook also waits up to about 6 s for the lint. No test covers this; forwarding needs a background job and a
   trap, which is more machinery than the case seems to justify.
+  Resolved in 14d0e21 after a hung node held a hook for 78 min: `pre-push.sh` `exec`s its last step, `test-changed.sh`
+  forwards INT/TERM to a background `test.sh` and drops the lint, and `test.sh` stops any run past
+  `LLM_ENV_TEST_TIMEOUT_SECONDS` with 124; tests in `tests/test_hooks.py` and `tests/test_test_runner.py` cover it.
