@@ -57,7 +57,7 @@ def _push_repo(tmp_path, shape=None):
         git(repo, "commit", "-q", "--allow-empty", "-m", letter)
     git(repo, "checkout", "-q", "main")
     git(repo, "tag", "-a", "-m", "v1", "v1", "main")
-    if shape in ("staged edit", "unstaged edit", "cancelled edit"):
+    if shape and shape.endswith(" edit"):
         (repo / "README.md").write_text("edit\n")
         if shape != "unstaged edit":
             git(repo, "add", "README.md")
@@ -93,7 +93,8 @@ def test_dev_setup_runs_uv_sync_in_a_scratch_repo(tmp_path):
 SHAPES = {"two refs": ["main H main B", "other O other Z"], "tag destination": ["main H tags/v1 Z"],
           "other destination": ["main H other Z"], "rewind": ["main H main D"], "other branch": ["other O other Z"],
           "tag": ["tags/v1 H tags/v1 Z"], "staged edit": ["main H main B"], "unstaged edit": ["main H main B"],
-          "cancelled edit": ["main H main B"], "HEAD to other": ["HEAD H other Z"]}
+          "cancelled edit": ["main H main B"], "HEAD to other": ["HEAD H other Z"],
+          "tag destination edit": ["main H tags/v1 Z"]}                # dirty wins over any shape
 
 
 @pytest.mark.parametrize("shape", SHAPES)

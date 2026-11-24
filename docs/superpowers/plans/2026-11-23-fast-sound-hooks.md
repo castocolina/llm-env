@@ -502,12 +502,14 @@ DIRTY = "push refused: the index or worktree is dirty: commit or stash your chan
 SHAPES = {"two refs": ["main H main B", "other O other Z"], "tag destination": ["main H tags/v1 Z"],
           "other destination": ["main H other Z"], "rewind": ["main H main D"], "other branch": ["other O other Z"],
           "tag": ["tags/v1 H tags/v1 Z"], "staged edit": ["main H main B"], "unstaged edit": ["main H main B"],
-          "cancelled edit": ["main H main B"]}
+          "cancelled edit": ["main H main B"], "HEAD to other": ["HEAD H other Z"],
+          "tag destination edit": ["main H tags/v1 Z"]}                # dirty wins over any shape
 
 @pytest.mark.parametrize("shape", SHAPES)
 def test_pre_push_refuses_every_other_shape_before_any_check(tmp_path, shape):
     result = _push(repo := _push_repo(tmp_path, shape=shape), *SHAPES[shape])
-    assert result.returncode == 1 and result.stderr.strip() == REFUSED and calls(repo) == []
+    message = DIRTY if shape.endswith(" edit") else REFUSED              # make test checks the worktree, not HEAD
+    assert result.returncode == 1 and result.stderr.strip() == message and calls(repo) == []
 
 def test_pre_push_selects_a_fast_forward_and_runs_everything_for_a_new_branch(tmp_path):
     repo = _push_repo(tmp_path)

@@ -10,14 +10,14 @@ dirty() { echo "push refused: the index or worktree is dirty: commit or stash yo
 
 mapfile -t lines
 [ "${#lines[@]}" -eq 0 ] && exit 0
-[ "${#lines[@]}" -eq 1 ] || refuse
 read -r local_ref local_sha remote_ref remote_sha <<<"${lines[0]}"
-[[ $local_sha =~ ^0+$ ]] && exit 0
+[ "${#lines[@]}" -eq 1 ] && [[ $local_sha =~ ^0+$ ]] && exit 0
+git diff --cached --quiet || dirty
+git diff --quiet || dirty
+[ "${#lines[@]}" -eq 1 ] || refuse
 b=$(git symbolic-ref -q HEAD) || refuse
 head=$(git rev-parse HEAD)
 { [ "$local_ref" = "$b" ] || [ "$local_ref" = HEAD ]; } && [ "$remote_ref" = "$b" ] && [ "$local_sha" = "$head" ] || refuse
-git diff --cached --quiet || dirty
-git diff --quiet || dirty
 [[ $remote_sha =~ ^0+$ ]] || git merge-base --is-ancestor "$remote_sha" HEAD 2>/dev/null || refuse
 
 bash "$root/tools/validate.sh"

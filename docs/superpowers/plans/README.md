@@ -3,7 +3,7 @@
 Status of every plan in this folder, audited 2026-10-24 against the repository and `git log`. Superseded plans 2026-07-21-llm-env-separate-scripts, 2026-07-22-script-restructuring-plan and
 2026-08-12-omniroute-profiles were deleted on 2026-10-24 (git history keeps them). Plans stay in place
 (other documents and code comments link to them by path); this index is the single place that says what is done.
-Statuses: **DONE** (shipped), **DONE, partly superseded**, **SUPERSEDED** (replaced, kept for history),
+Statuses: **DONE** (shipped), **DONE, partly superseded**, **DONE, partly deferred**, **SUPERSEDED** (replaced, kept for history),
 **PARTIAL** (some tasks shipped, rest abandoned), **PENDING** (not started).
 
 | Plan | Status | Note |
