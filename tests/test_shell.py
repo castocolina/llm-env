@@ -872,10 +872,17 @@ def run_setup_no_gpu(
     return result, calls, config
 
 
-def test_setup_persists_llm_server_disabled_via_env_var(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param(".llm_server.enabled", id="setup_persists_llm_server_disabled_via_env_var"),
+        pytest.param(".system_one.enabled", id="setup_persists_system_one_disabled_by_default"),
+    ],
+)
+def test_setup_no_gpu_persists_disabled(tmp_path: pathlib.Path, key: str) -> None:
     result, _calls, config = run_setup_no_gpu(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert yq_value(config, ".llm_server.enabled") == "false"
+    assert yq_value(config, key) == "false"
 
 
 def test_setup_no_gpu_skips_gpu_model_and_vulkan_steps(tmp_path: pathlib.Path) -> None:
@@ -974,12 +981,6 @@ def test_setup_rerun_keeps_llm_server_disabled_without_no_gpu_override(
     assert "detect" not in recorded
 
 
-def test_setup_persists_system_one_disabled_by_default(tmp_path: pathlib.Path) -> None:
-    result, _calls, config = run_setup_no_gpu(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert yq_value(config, ".system_one.enabled") == "false"
-
-
 def test_setup_refuses_system_one_without_kfd(tmp_path: pathlib.Path) -> None:
     result, _calls, config = run_setup_no_gpu(
         tmp_path, system_one_env="1", kfd_path=str(tmp_path / "no-kfd")
@@ -1044,27 +1045,23 @@ def test_setup_skips_system_one_build_when_image_present(tmp_path: pathlib.Path)
     assert "scripts/system-one-build.sh" not in calls.read_text()
 
 
-def test_setup_rebuilds_system_one_image_when_gpu_arch_label_differs(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    "image_gpu_arch",
+    [
+        pytest.param("gfx1100", id="setup_rebuilds_system_one_image_when_gpu_arch_label_differs"),
+        pytest.param("", id="setup_rebuilds_system_one_image_when_gpu_arch_label_missing"),
+    ],
+)
+def test_setup_rebuilds_system_one_image_on_gpu_arch_label(
+    tmp_path: pathlib.Path, image_gpu_arch: str
+) -> None:
     kfd = tmp_path / "kfd"
     kfd.touch()
     result, calls, _config = run_setup_no_gpu(
         tmp_path,
         system_one_env="1",
         kfd_path=str(kfd),
-        env_overrides={"IMAGE_GPU_ARCH": "gfx1100"},
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "scripts/system-one-build.sh" in calls.read_text()
-
-
-def test_setup_rebuilds_system_one_image_when_gpu_arch_label_missing(tmp_path: pathlib.Path) -> None:
-    kfd = tmp_path / "kfd"
-    kfd.touch()
-    result, calls, _config = run_setup_no_gpu(
-        tmp_path,
-        system_one_env="1",
-        kfd_path=str(kfd),
-        env_overrides={"IMAGE_GPU_ARCH": ""},
+        env_overrides={"IMAGE_GPU_ARCH": image_gpu_arch},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "scripts/system-one-build.sh" in calls.read_text()
@@ -1325,15 +1322,54 @@ def test_setup_vram_ceiling_does_not_double_count_live_vram_usage(
     assert yq_value(config_high, ".gpu.vram_budget_ceiling_mib") == "15565"
 
 
-def test_setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize(
+    ("gpu_text", "expected"),
+    [
+        # Regression guard: a hardcoded 95 instead of reading
+        # gpu.vram_budget_ceiling_pct would still pass every other ceiling test in
+        # this plan, since they all use the default 95%.
+        # fixture GPU: vram_total_mib=16384, pct 80 (not the default 95)
+        # 16384 * 80 / 100 = 13107.2 -> round to 13107
+        pytest.param(
+            "  vram_budget_ceiling_pct: 80\n",
+            "13107",
+            id="setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default",
+        ),
+        # A tiny configured pct must not leave llm-server planning against a
+        # near-zero VRAM ceiling — floored at the configured floor (30% of total
+        # here, matching migrate_config's real default). Unlike the old fixed-MiB
+        # floor, a percentage-of-total floor can never exceed vram_total_mib.
+        # fixture GPU: vram_total_mib=16384, pct 1
+        # 16384 * 1 / 100 = 163.84 -> round 164, floored up to
+        # 16384 * 30 / 100 = 4915.2 -> round 4915, which is <= vram_total_mib
+        # by construction.
+        pytest.param(
+            "  vram_budget_ceiling_pct: 1\n  vram_budget_ceiling_floor_pct: 30\n",
+            "4915",
+            id="setup_floors_the_vram_ceiling_at_the_configured_floor",
+        ),
+        # Without an explicit vram_budget_ceiling_floor_pct in config (this
+        # fixture's config_text never sets it, and the uv stub used by
+        # run_setup_with_numbered_selection doesn't run real migration to
+        # backfill the 30% default either), setup.sh's `// 20` fallback is the
+        # only thing preventing a near-zero VRAM ceiling.
+        # fixture GPU: vram_total_mib=16384, pct 1
+        # 16384 * 1 / 100 = 163.84 -> round 164, floored up to the code-level
+        # default 16384 * 20 / 100 = 3276.8 -> round 3277 (no
+        # vram_budget_ceiling_floor_pct in config)
+        pytest.param(
+            "  vram_budget_ceiling_pct: 1\n",
+            "3277",
+            id="setup_floors_the_vram_ceiling_at_the_code_default_when_unconfigured",
+        ),
+    ],
+)
+def test_setup_persists_the_vram_ceiling_from_config(
+    tmp_path: pathlib.Path, gpu_text: str, expected: str
 ) -> None:
-    """Regression guard: a hardcoded 95 instead of reading
-    gpu.vram_budget_ceiling_pct would still pass every other ceiling test in
-    this plan, since they all use the default 95%."""
     config_text = (
         "gpu:\n"
-        "  vram_budget_ceiling_pct: 80\n"
+        f"{gpu_text}"
         "runtime:\n"
         "  models_max: 0\n"
         "models:\n"
@@ -1359,95 +1395,7 @@ def test_setup_persists_a_vram_ceiling_using_the_configured_pct_not_the_default(
     )
 
     assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, pct 80 (not the default 95)
-    # 16384 * 80 / 100 = 13107.2 -> round to 13107
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "13107"
-
-
-def test_setup_floors_the_vram_ceiling_at_the_configured_floor(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A tiny configured pct must not leave llm-server planning against a
-    near-zero VRAM ceiling — floored at the configured floor (30% of total
-    here, matching migrate_config's real default). Unlike the old fixed-MiB
-    floor, a percentage-of-total floor can never exceed vram_total_mib."""
-    config_text = (
-        "gpu:\n"
-        "  vram_budget_ceiling_pct: 1\n"
-        "  vram_budget_ceiling_floor_pct: 30\n"
-        "runtime:\n"
-        "  models_max: 0\n"
-        "models:\n"
-        "  - alias: gemma4\n"
-        "    label: Gemma 4\n"
-        "    parameters: 12B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 7660000000\n"
-        "    enabled: true\n"
-        "    file: gemma4.gguf\n"
-        "    url: https://example.invalid/gemma4.gguf\n"
-        "  - alias: ornith\n"
-        "    label: Ornith\n"
-        "    parameters: 9B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 5600000000\n"
-        "    enabled: false\n"
-        "    file: ornith.gguf\n"
-        "    url: https://example.invalid/ornith.gguf\n"
-    )
-    result, _, config = run_setup_with_numbered_selection(
-        tmp_path, "1\n1\n2\n", config_text=config_text
-    )
-
-    assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, pct 1
-    # 16384 * 1 / 100 = 163.84 -> round 164, floored up to
-    # 16384 * 30 / 100 = 4915.2 -> round 4915, which is <= vram_total_mib
-    # by construction.
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "4915"
-
-
-def test_setup_floors_the_vram_ceiling_at_the_code_default_when_unconfigured(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Without an explicit vram_budget_ceiling_floor_pct in config (this
-    fixture's config_text never sets it, and the uv stub used by
-    run_setup_with_numbered_selection doesn't run real migration to
-    backfill the 30% default either), setup.sh's `// 20` fallback is the
-    only thing preventing a near-zero VRAM ceiling."""
-    config_text = (
-        "gpu:\n"
-        "  vram_budget_ceiling_pct: 1\n"
-        "runtime:\n"
-        "  models_max: 0\n"
-        "models:\n"
-        "  - alias: gemma4\n"
-        "    label: Gemma 4\n"
-        "    parameters: 12B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 7660000000\n"
-        "    enabled: true\n"
-        "    file: gemma4.gguf\n"
-        "    url: https://example.invalid/gemma4.gguf\n"
-        "  - alias: ornith\n"
-        "    label: Ornith\n"
-        "    parameters: 9B\n"
-        "    quantization: Q4_K_M\n"
-        "    size_bytes: 5600000000\n"
-        "    enabled: false\n"
-        "    file: ornith.gguf\n"
-        "    url: https://example.invalid/ornith.gguf\n"
-    )
-    result, _, config = run_setup_with_numbered_selection(
-        tmp_path, "1\n1\n2\n", config_text=config_text
-    )
-
-    assert result.returncode == 0, result.stderr
-    # fixture GPU: vram_total_mib=16384, pct 1
-    # 16384 * 1 / 100 = 163.84 -> round 164, floored up to the code-level
-    # default 16384 * 20 / 100 = 3276.8 -> round 3277 (no
-    # vram_budget_ceiling_floor_pct in config)
-    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == "3277"
+    assert yq_value(config, ".gpu.vram_budget_ceiling_mib") == expected
 
 
 def test_setup_selects_zero_match_vulkan_device_and_persists_config(
@@ -1516,22 +1464,20 @@ def test_setup_fails_instead_of_leaving_resources_uncapped(
     assert yq_value(config, ".resources.llm_server.cpus // \"\"") in ("", "null")
 
 
-def test_setup_rejects_invalid_numbered_model_selection_before_download(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize(
+    "selection",
+    [
+        # Out-of-range model indexes must stop setup before any download starts.
+        pytest.param("1\n3\n", id="setup_rejects_invalid_numbered_model_selection_before_download"),
+        # Only one model may be enabled by the guided setup flow — VRAM for two
+        # models at once was never guaranteed to fit.
+        pytest.param("1\n1,2\n2\n", id="setup_rejects_comma_separated_model_selection"),
+    ],
+)
+def test_setup_rejects_model_selection_before_download(
+    tmp_path: pathlib.Path, selection: str
 ) -> None:
-    """Out-of-range model indexes must stop setup before any download starts."""
-    result, calls, _ = run_setup_with_numbered_selection(tmp_path, "1\n3\n")
-
-    assert result.returncode != 0
-    assert "curl " not in calls.read_text()
-
-
-def test_setup_rejects_comma_separated_model_selection(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Only one model may be enabled by the guided setup flow — VRAM for two
-    models at once was never guaranteed to fit."""
-    result, calls, _ = run_setup_with_numbered_selection(tmp_path, "1\n1,2\n2\n")
+    result, calls, _ = run_setup_with_numbered_selection(tmp_path, selection)
 
     assert result.returncode != 0
     assert "curl " not in calls.read_text()
@@ -5369,13 +5315,28 @@ def test_stop_llama_does_not_need_llm_server_in_the_compose_file(tmp_path: pathl
     assert "podman stop llm-server\n" in recorded and "compose" not in recorded
 
 
-def test_stop_llama_rejects_an_unknown_scope(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    ("script", "usage", "absent"),
+    [
+        pytest.param(
+            "scripts/stop.sh", "usage: stop.sh [llm-server]", "systemctl --user stop",
+            id="stop_llama_rejects_an_unknown_scope",
+        ),
+        pytest.param(
+            "scripts/start.sh", "usage: start.sh [llm-server]", "migrate-config",
+            id="start_rejects_an_unknown_scope",
+        ),
+    ],
+)
+def test_lifecycle_script_rejects_an_unknown_scope(
+    tmp_path: pathlib.Path, script: str, usage: str, absent: str
+) -> None:
     result, _config, calls = run_lifecycle_script(
-        tmp_path, "scripts/stop.sh", args=("omniroute",), active=True
+        tmp_path, script, args=("omniroute",), active=True
     )
     assert result.returncode == 2
-    assert "usage: stop.sh [llm-server]" in result.stderr
-    assert "systemctl --user stop" not in calls.read_text()
+    assert usage in result.stderr
+    assert absent not in calls.read_text()
 
 
 def test_clean_removes_the_system_one_image(tmp_path: pathlib.Path) -> None:
@@ -5504,14 +5465,19 @@ def test_start_no_gpu_skips_budget_check_and_llm_server_wait(tmp_path: pathlib.P
     assert "server is ready" not in result.stdout
 
 
-def test_start_no_gpu_still_waits_for_omniroute_and_runs_network_sh(
-    tmp_path: pathlib.Path,
-) -> None:
+@pytest.mark.parametrize(
+    "expected",
+    [
+        pytest.param("network.sh", id="start_no_gpu_still_waits_for_omniroute_and_runs_network_sh"),
+        pytest.param("systemctl --user start", id="start_no_gpu_still_starts_the_compose_stack"),
+    ],
+)
+def test_start_no_gpu_still_runs(tmp_path: pathlib.Path, expected: str) -> None:
     result, _config, calls = run_lifecycle_script(
         tmp_path, "scripts/start.sh", llm_server_enabled=False
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "network.sh" in calls.read_text()
+    assert expected in calls.read_text()
 
 
 def test_start_no_gpu_skips_omniroute_provisioning(tmp_path: pathlib.Path) -> None:
@@ -5527,14 +5493,6 @@ def test_start_no_gpu_skips_omniroute_provisioning(tmp_path: pathlib.Path) -> No
         "llm-server disabled -- skipping local OmniRoute provider provisioning"
         in result.stdout
     )
-
-
-def test_start_no_gpu_still_starts_the_compose_stack(tmp_path: pathlib.Path) -> None:
-    result, _config, calls = run_lifecycle_script(
-        tmp_path, "scripts/start.sh", llm_server_enabled=False
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "systemctl --user start" in calls.read_text()
 
 
 def test_start_enabled_still_waits_for_health_and_provisions(
@@ -6766,26 +6724,22 @@ def test_setup_local_llm_agents_adds_provider_to_preferred_existing_global_file(
             assert path.read_text() == original
 
 
-def test_setup_local_llm_agents_rejects_concatenated_pi_json_without_replacement(
-    tmp_path: pathlib.Path,
+@pytest.mark.parametrize(
+    "original_pi",
+    [
+        pytest.param(
+            '{"providers":{}}\n{}\n',
+            id="setup_local_llm_agents_rejects_concatenated_pi_json_without_replacement",
+        ),
+        pytest.param(
+            '{"providers":[]}\n',
+            id="setup_local_llm_agents_rejects_non_object_pi_providers_before_creating_opencode_directory",
+        ),
+    ],
+)
+def test_setup_local_llm_agents_rejects_invalid_pi_json(
+    tmp_path: pathlib.Path, original_pi: str
 ) -> None:
-    original_pi = '{"providers":{}}\n{}\n'
-    result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
-        tmp_path,
-        pi_text=original_pi,
-    )
-
-    assert result.returncode != 0
-    assert pi_path.read_text() == original_pi
-    assert not opencode_paths[0].parent.exists()
-    assert "mv " not in calls.read_text()
-    assert "fixture-omniroute-api-key" not in result.stdout + result.stderr
-
-
-def test_setup_local_llm_agents_rejects_non_object_pi_providers_before_creating_opencode_directory(
-    tmp_path: pathlib.Path,
-) -> None:
-    original_pi = '{"providers":[]}\n'
     result, calls, pi_path, _, opencode_paths, _ = run_setup_local_llm_agents(
         tmp_path,
         pi_text=original_pi,
@@ -7977,15 +7931,6 @@ def test_start_llama_leaves_an_unhealthy_server_running(tmp_path: pathlib.Path) 
     recorded = calls.read_text().splitlines()
     assert f"podman compose -f {config.parent / 'docker-compose.yml'} up -d --no-recreate --no-deps --pull=never llm-server" in recorded
     assert _no_container_touch(recorded)
-
-
-def test_start_rejects_an_unknown_scope(tmp_path: pathlib.Path) -> None:
-    result, _config, calls = run_lifecycle_script(
-        tmp_path, "scripts/start.sh", args=("omniroute",), active=True
-    )
-    assert result.returncode == 2
-    assert "usage: start.sh [llm-server]" in result.stderr
-    assert "migrate-config" not in calls.read_text()
 
 
 def test_key_reset_restarts_an_active_server(tmp_path: pathlib.Path) -> None:
@@ -12017,7 +11962,14 @@ def test_wait_for_health_times_out_when_curl_never_succeeds(tmp_path: pathlib.Pa
     assert result.returncode != 0
 
 
-def test_lib_rejects_a_non_numeric_health_timeout(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        pytest.param("60; rm -rf /", id="lib_rejects_a_non_numeric_health_timeout"),
+        pytest.param("0", id="lib_rejects_a_zero_health_timeout"),
+    ],
+)
+def test_lib_rejects_an_invalid_health_timeout(tmp_path: pathlib.Path, timeout: str) -> None:
     script = tmp_path / "probe.sh"
     script.write_text(
         "#!/usr/bin/bash\nset -uo pipefail\n"
@@ -12027,26 +11979,7 @@ def test_lib_rejects_a_non_numeric_health_timeout(tmp_path: pathlib.Path) -> Non
 
     result = subprocess.run(
         ["/usr/bin/bash", str(script)],
-        env=os.environ | {"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "60; rm -rf /"},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "LLM_ENV_HEALTH_TIMEOUT_SECONDS must be a positive integer" in result.stderr
-
-
-def test_lib_rejects_a_zero_health_timeout(tmp_path: pathlib.Path) -> None:
-    script = tmp_path / "probe.sh"
-    script.write_text(
-        "#!/usr/bin/bash\nset -uo pipefail\n"
-        f"source {ROOT / 'tools/lib.sh'}\n"
-    )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-
-    result = subprocess.run(
-        ["/usr/bin/bash", str(script)],
-        env=os.environ | {"LLM_ENV_HEALTH_TIMEOUT_SECONDS": "0"},
+        env=os.environ | {"LLM_ENV_HEALTH_TIMEOUT_SECONDS": timeout},
         text=True,
         capture_output=True,
         check=False,
