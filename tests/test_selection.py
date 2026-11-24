@@ -149,6 +149,7 @@ def test_read_exempt_parses_full_lines_and_requires_a_reason(tmp_path):
         read_exempt(tmp_path / "y")
 
 
+@pytest.mark.slow
 def test_every_tracked_file_has_an_owner_a_hub_or_an_exemption():
     assert lint(load_tree(ROOT), read_exempt(ROOT / "tests/selection-exempt.txt"), executables(ROOT)) == []
 
