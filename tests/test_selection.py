@@ -15,11 +15,13 @@ sys.path.insert(0, str(ROOT))
 
 from pylib.selection import (
     ALWAYS,
+    OPT_IN,
     cli_edges,
     executables,
     is_test_file,
     lint,
     load_tree,
+    owners,
     read_exempt,
     select,
 )
@@ -163,6 +165,39 @@ def test_lint_flags_a_lost_last_match_a_lost_last_owner_and_code_under_a_plain_l
     assert lint(tree, {**ex, "x/*.mjs": ("no runner", False)}, set()) == ["plain exemption matches code: x/*.mjs (x/t.mjs)"]
     chain = {"s/far.sh": "", "s/mid.sh": "far.sh\n", "s/top.sh": "mid.sh\n", "tests/test_top.py": "'top.sh'\n", NP: ""}
     assert lint(chain, {}, set()) == ["unowned: s/far.sh"]                          # an owner only at push depth is not enough
+
+
+TEST_FILE = re.compile(r"tests/(.*/)?test_[^/]*\.py")                               # the oracle's own copy
+
+
+def _z(repo, *args, ok=(0,)):                                                       # NUL-delimited git output
+    run = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)
+    assert run.returncode in ok, run.stderr
+    return [p for p in run.stdout.split("\0") if p]
+
+
+def _commit_paths(repo, sha):
+    return _z(repo, "diff-tree", "-z", "--no-commit-id", "--name-only", "-r", "--no-renames", sha)
+
+
+def _required(p, tracked):                    # rule 3: a non-root conftest.py requires the tests under its directory
+    if p.endswith("/conftest.py") and p != "tests/conftest.py":
+        return {t for t in tracked if TEST_FILE.fullmatch(t) and t.startswith(p.removesuffix("conftest.py"))}
+    return set(_z(ROOT, "grep", "-z", "-l", "-w", "-F", Path(p).name, "--", "tests/*test_*.py", ok=(0, 1)))  # 1: none
+
+
+def test_replayed_commits_select_every_test_the_oracle_requires():                 # spec G3
+    tree, exempt, beyond = load_tree(ROOT), read_exempt(ROOT / "tests/selection-exempt.txt"), set()
+    tracked = _z(ROOT, "ls-files", "-z")
+    for sha in git_out(ROOT, "log", "-25", "--no-merges", "--format=%H").split():
+        paths = _commit_paths(ROOT, sha)
+        sel = select(tree, [p for p in paths if p in tree], [p for p in paths if p not in tree], "push", exempt)
+        if sel.full:                                                                # hubs and full: lines (rule 1)
+            continue
+        oracle = {t for p in paths for t in _required(p, tracked)} - OPT_IN
+        assert oracle <= set(sel.tests), (sha, sorted(oracle - set(sel.tests)))
+        beyond |= {t for p in paths if p in tree for t in owners(tree, p, 3)} - set(sel.tests)
+    print(f"depth 3 would add {len(beyond)} test files: {sorted(beyond)}")         # measurement only (D1 gap)
 
 
 def _cli(repo, *args, env=None):
