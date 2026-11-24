@@ -747,17 +747,16 @@ def test_effort_run_requires_a_git_guard_root(tmp_path: Path) -> None:
 
 
 @NEEDS_NODE
-def test_effort_run_flags_a_transcript_that_reads_the_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "peek_var",
+    [
+        pytest.param("PEEK", id="effort_run_flags_a_transcript_that_reads_the_manifest"),
+        pytest.param("PEEK_LIB", id="effort_run_flags_a_transcript_that_reads_the_generator_library_by_a_relative_path"),
+    ],
+)
+def test_effort_run_flags_a_peeking_transcript(tmp_path: Path, peek_var: str) -> None:
     seeds = _seeds_file(tmp_path, {"1": [7]})
-    result = _effort_run(tmp_path, "--layers", "1", "--seeds", str(seeds), env={"PEEK": "1"})
-    assert result.returncode == 0, result.stderr
-    assert [r["leak_suspect"] for r in _rows(tmp_path)] == [True]
-
-
-@NEEDS_NODE
-def test_effort_run_flags_a_transcript_that_reads_the_generator_library_by_a_relative_path(tmp_path: Path) -> None:
-    seeds = _seeds_file(tmp_path, {"1": [7]})
-    result = _effort_run(tmp_path, "--layers", "1", "--seeds", str(seeds), env={"PEEK_LIB": "1"})
+    result = _effort_run(tmp_path, "--layers", "1", "--seeds", str(seeds), env={peek_var: "1"})
     assert result.returncode == 0, result.stderr
     assert [r["leak_suspect"] for r in _rows(tmp_path)] == [True]
 

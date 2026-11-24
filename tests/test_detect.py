@@ -152,29 +152,30 @@ def test_processes_on_render_node_replaces_non_utf8_cmdline_bytes(tmp_path):
     assert result[0]["cmdline"] == "firefox \ufffd\ufffd"
 
 
-def test_process_vram_mib_sums_kib_on_the_matching_pci_address(tmp_path):
+@pytest.mark.parametrize(
+    ("vram_kib", "second_fdinfo", "expected"),
+    [
+        pytest.param(
+            512, "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t2\ndrm-memory-vram:\t512 KiB\n", 1,
+            id="process_vram_mib_sums_kib_on_the_matching_pci_address",
+        ),
+        pytest.param(
+            524288, "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t1\ndrm-memory-vram:\t524288 KiB\n", 512,
+            id="process_vram_mib_counts_one_drm_client_once",
+        ),
+    ],
+)
+def test_process_vram_mib_two_fdinfos(tmp_path, vram_kib, second_fdinfo, expected):
     proc = build_proc_with_fd(
-        tmp_path, "3021", "python", "renderD128", fd_name="7", vram_kib=512, client_id="1"
+        tmp_path, "3021", "python", "renderD128", fd_name="7", vram_kib=vram_kib, client_id="1"
     )
-    (proc / "3021" / "fdinfo" / "8").write_text(
-        "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t2\ndrm-memory-vram:\t512 KiB\n"
-    )
-    assert process_vram_mib(3021, "0000:03:00.0", proc) == 1
+    (proc / "3021" / "fdinfo" / "8").write_text(second_fdinfo)
+    assert process_vram_mib(3021, "0000:03:00.0", proc) == expected
 
 
 def test_process_vram_mib_ignores_a_different_pci_address(tmp_path):
     proc = build_proc_with_fd(tmp_path, "3021", "python", "renderD128", vram_kib=524288)
     assert process_vram_mib(3021, "0000:0e:00.0", proc) == 0
-
-
-def test_process_vram_mib_counts_one_drm_client_once(tmp_path):
-    proc = build_proc_with_fd(
-        tmp_path, "3021", "python", "renderD128", fd_name="7", vram_kib=524288, client_id="1"
-    )
-    (proc / "3021" / "fdinfo" / "8").write_text(
-        "drm-pdev:\t0000:03:00.0\ndrm-client-id:\t1\ndrm-memory-vram:\t524288 KiB\n"
-    )
-    assert process_vram_mib(3021, "0000:03:00.0", proc) == 512
 
 
 def test_process_vram_mib_is_none_when_the_pid_is_missing(tmp_path):
@@ -196,10 +197,17 @@ def test_process_vram_mib_is_zero_when_fdinfo_has_no_matching_fds(tmp_path):
     assert process_vram_mib(9, "0000:03:00.0", proc) == 0
 
 
-def test_processes_on_render_node_finds_a_matching_pid(tmp_path):
-    proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=524288)
+@pytest.mark.parametrize(
+    ("vram_kib", "vram_mib"),
+    [
+        pytest.param(524288, 512, id="processes_on_render_node_finds_a_matching_pid"),
+        pytest.param(None, 0, id="processes_on_render_node_treats_missing_fdinfo_as_zero"),
+    ],
+)
+def test_processes_on_render_node_one_fd(tmp_path, vram_kib, vram_mib):
+    proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=vram_kib)
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 512}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": vram_mib}]
 
 
 def test_processes_on_render_node_ignores_other_render_nodes(tmp_path):
@@ -207,39 +215,38 @@ def test_processes_on_render_node_ignores_other_render_nodes(tmp_path):
     assert processes_on_render_node("renderD128", proc) == []
 
 
-def test_processes_on_render_node_sums_multiple_fds_for_one_pid(tmp_path):
-    """Two fds for one PID with genuinely *distinct* drm-client-id values
-    (unlike a dup()'d fd, which shares one) must still sum in full -- this
-    is the "not a dedup false positive" counterpart to the dedup test
-    below."""
+@pytest.mark.parametrize(
+    ("client_id", "second_fdinfo", "vram_mib"),
+    [
+        # Two fds for one PID with genuinely *distinct* drm-client-id values
+        # (unlike a dup()'d fd, which shares one) must still sum in full -- this
+        # is the "not a dedup false positive" counterpart to the dedup case
+        # below.
+        pytest.param(
+            "1", "drm-driver:\tamdgpu\ndrm-client-id:\t2\ndrm-memory-vram:\t262144 KiB\n", 768,
+            id="processes_on_render_node_sums_multiple_fds_for_one_pid",
+        ),
+        # Two fds for one PID sharing the same drm-client-id (e.g. via dup(),
+        # or certain driver/threading patterns) refer to the same logical DRM
+        # client. The kernel's fdinfo docs
+        # (https://origin.kernel.org/doc/html/latest/gpu/drm-usage-stats.html)
+        # define drm-client-id specifically so consumers can recognize this and
+        # count each client once, not once per fd -- summing both fds' VRAM here
+        # would double the real total.
+        pytest.param(
+            "9", "drm-driver:\tamdgpu\ndrm-client-id:\t9\ndrm-memory-vram:\t524288 KiB\n", 512,
+            id="processes_on_render_node_dedupes_same_drm_client_id_across_fds",
+        ),
+    ],
+)
+def test_processes_on_render_node_two_fds_for_one_pid(tmp_path, client_id, second_fdinfo, vram_mib):
     proc = build_proc_with_fd(
-        tmp_path, "3021", "firefox", "renderD128", fd_name="7", vram_kib=524288, client_id="1"
+        tmp_path, "3021", "firefox", "renderD128", fd_name="7", vram_kib=524288, client_id=client_id
     )
-    (proc / "3021" / "fdinfo" / "8").write_text(
-        "drm-driver:\tamdgpu\ndrm-client-id:\t2\ndrm-memory-vram:\t262144 KiB\n"
-    )
+    (proc / "3021" / "fdinfo" / "8").write_text(second_fdinfo)
     (proc / "3021" / "fd" / "8").symlink_to(proc.parent / "dev" / "dri" / "renderD128")
     result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 768}]
-
-
-def test_processes_on_render_node_dedupes_same_drm_client_id_across_fds(tmp_path):
-    """Two fds for one PID sharing the same drm-client-id (e.g. via dup(),
-    or certain driver/threading patterns) refer to the same logical DRM
-    client. The kernel's fdinfo docs
-    (https://origin.kernel.org/doc/html/latest/gpu/drm-usage-stats.html)
-    define drm-client-id specifically so consumers can recognize this and
-    count each client once, not once per fd -- summing both fds' VRAM here
-    would double the real total."""
-    proc = build_proc_with_fd(
-        tmp_path, "3021", "firefox", "renderD128", fd_name="7", vram_kib=524288, client_id="9"
-    )
-    (proc / "3021" / "fdinfo" / "8").write_text(
-        "drm-driver:\tamdgpu\ndrm-client-id:\t9\ndrm-memory-vram:\t524288 KiB\n"
-    )
-    (proc / "3021" / "fd" / "8").symlink_to(proc.parent / "dev" / "dri" / "renderD128")
-    result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 512}]
+    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": vram_mib}]
 
 
 def test_processes_on_render_node_sums_sub_mib_fds_without_losing_precision(tmp_path):
@@ -266,12 +273,6 @@ def test_processes_on_render_node_treats_single_token_vram_as_raw_bytes(tmp_path
     )
     result = processes_on_render_node("renderD128", proc)
     assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 1}]
-
-
-def test_processes_on_render_node_treats_missing_fdinfo_as_zero(tmp_path):
-    proc = build_proc_with_fd(tmp_path, "3021", "firefox", "renderD128", vram_kib=None)
-    result = processes_on_render_node("renderD128", proc)
-    assert result == [{"pid": 3021, "comm": "firefox", "exe": "firefox", "cmdline": "", "vram_mib": 0}]
 
 
 def test_processes_on_render_node_treats_malformed_fdinfo_as_zero(tmp_path):

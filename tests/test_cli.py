@@ -1165,7 +1165,17 @@ def test_cmd_budget_excludes_loaded_system_one_vram_from_compositor(tmp_path, mo
     assert output["required_mib"] < output["available_mib"]
 
 
-def test_cmd_budget_clamps_system_one_resident_to_reserve(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("measured_mib", "resident_mib", "key", "expected"),
+    [
+        pytest.param(
+            5000, 4480, "compositor_used_mib_excluding_system_one", 2427,
+            id="cmd_budget_clamps_system_one_resident_to_reserve",
+        ),
+        pytest.param(None, 0, "available_mib", 3893, id="cmd_budget_system_one_unreadable_does_not_subtract"),
+    ],
+)
+def test_cmd_budget_system_one_resident(tmp_path, monkeypatch, capsys, measured_mib, resident_mib, key, expected):
     import llmenv
 
     cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
@@ -1175,28 +1185,11 @@ def test_cmd_budget_clamps_system_one_resident_to_reserve(tmp_path, monkeypatch,
     monkeypatch.setattr(llmenv, "host_resources", lambda: {"cpu_count": 16, "memory_total_mib": 32768})
     monkeypatch.setattr(llmenv, "_model_costs", lambda c, p: [{"alias": "a", "weights_mib": 1, "ram_weights_mib": 0, "kv_mib": 0}])
     monkeypatch.setattr(llmenv.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="123\n"))
-    monkeypatch.setattr(llmenv, "process_vram_mib", lambda pid, pci: 5000)
+    monkeypatch.setattr(llmenv, "process_vram_mib", lambda pid, pci: measured_mib)
     llmenv.cmd_budget(cast(Namespace, SimpleNamespace(config="cfg", models_dir="m")))
     output = json.loads(capsys.readouterr().out)
-    assert output["system_one_resident_mib"] == 4480
-    assert output["compositor_used_mib_excluding_system_one"] == 2427
-
-
-def test_cmd_budget_system_one_unreadable_does_not_subtract(tmp_path, monkeypatch, capsys):
-    import llmenv
-
-    cfg = yaml.safe_load(write_test_config(tmp_path).read_text())
-    cfg["system_one"] = {"enabled": True, "vram_reserve_mib": 4480}
-    monkeypatch.setattr(llmenv, "load_config", lambda path: cfg)
-    monkeypatch.setattr(llmenv, "detect", lambda: {"compositor_render_node": "renderD128", "gpus": [{"pci_address": "0000:03:00.0", "render_node": "renderD128", "vram_total_mib": 16304, "vram_used_mib": 6907}]})
-    monkeypatch.setattr(llmenv, "host_resources", lambda: {"cpu_count": 16, "memory_total_mib": 32768})
-    monkeypatch.setattr(llmenv, "_model_costs", lambda c, p: [{"alias": "a", "weights_mib": 1, "ram_weights_mib": 0, "kv_mib": 0}])
-    monkeypatch.setattr(llmenv.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="123\n"))
-    monkeypatch.setattr(llmenv, "process_vram_mib", lambda pid, pci: None)
-    llmenv.cmd_budget(cast(Namespace, SimpleNamespace(config="cfg", models_dir="m")))
-    output = json.loads(capsys.readouterr().out)
-    assert output["system_one_resident_mib"] == 0
-    assert output["available_mib"] == 3893
+    assert output["system_one_resident_mib"] == resident_mib
+    assert output[key] == expected
 
 
 def test_cmd_budget_does_not_subtract_system_one_without_compositor_or_when_disabled(tmp_path, monkeypatch, capsys):
@@ -1593,32 +1586,35 @@ def test_resources_respects_the_configured_memory_ceiling_floor(tmp_path: Path):
         assert "error" in payload
 
 
+def _reply(handler, payload, *, status=200, set_cookie=None, content_length=True) -> None:
+    # content_length=False keeps _MutableCombosHandler's old replies, which sent no Content-Length.
+    body = json.dumps(payload).encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    if content_length:
+        handler.send_header("Content-Length", str(len(body)))
+    if set_cookie is not None:
+        handler.send_header("Set-Cookie", set_cookie)
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 class _RecordingProviderHandler(http.server.BaseHTTPRequestHandler):
     received: ClassVar[list[tuple]] = []
 
-    def _reply(self, payload, status=200, *, set_cookie=None):
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if set_cookie is not None:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_GET(self):
         self.received.append(("GET", self.path, self.headers.get("Cookie")))
-        self._reply({"connections": []})
+        _reply(self, {"connections": []})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         if self.path == "/api/auth/login":
             self.received.append(("POST", self.path, body))
-            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            _reply(self, {"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
             return
         self.received.append(("POST", self.path, body))
-        self._reply({"connection": {"id": "created-id"}})
+        _reply(self, {"connection": {"id": "created-id"}})
 
     def log_message(self, format_string, *args):
         pass
@@ -1719,20 +1715,10 @@ def test_omniroute_issue_key_fails_when_unconfigured(tmp_path):
 class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
     received: ClassVar[list[tuple[str, str, dict[str, Any]]]] = []
 
-    def _reply(self, payload, *, set_cookie=None):
-        body = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if set_cookie is not None:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_GET(self):
         self.received.append(("GET", self.path, {}))
         if self.path == "/api/providers":
-            self._reply({"connections": []})
+            _reply(self, {"connections": []})
             return
         self.send_error(404)
 
@@ -1741,10 +1727,10 @@ class _RecordingCodexImportHandler(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length)) if length else {}
         if self.path == "/api/auth/login":
             self.received.append(("POST", self.path, body))
-            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            _reply(self, {"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
             return
         self.received.append(("POST", self.path, body))
-        self._reply({"created": True, "connection": {"id": "codex-id", "name": body["name"]}})
+        _reply(self, {"created": True, "connection": {"id": "codex-id", "name": body["name"]}})
 
     def log_message(self, format_string, *args):
         pass
@@ -1815,25 +1801,16 @@ def test_omniroute_import_codex_fails_cleanly_when_auth_file_is_missing(tmp_path
 class _RecordingFixContextHandler(http.server.BaseHTTPRequestHandler):
     received: ClassVar[list[tuple[str, str, object]]] = []
 
-    def _reply(self, payload, *, set_cookie=None):
-        body = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if set_cookie is not None:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self.received.append(("POST", self.path, body))
-        self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+        _reply(self, {"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
 
     def do_GET(self):
         self.received.append(("GET", self.path, None))
-        self._reply(
+        _reply(
+            self,
             {
                 "object": "list",
                 "data": [
@@ -1857,7 +1834,7 @@ class _RecordingFixContextHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self.received.append(("PUT", self.path, body))
-        self._reply({"ok": True})
+        _reply(self, {"ok": True})
 
     def log_message(self, format_string, *args):
         pass
@@ -1899,26 +1876,17 @@ def test_omniroute_fix_codex_context_corrects_the_gpt_5_6_family(tmp_path):
 class _RecordingComboContextHandler(http.server.BaseHTTPRequestHandler):
     received: ClassVar[list[tuple[str, str, object]]] = []
 
-    def _reply(self, payload, *, set_cookie=None):
-        body = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if set_cookie is not None:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self.received.append(("POST", self.path, body))
-        self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+        _reply(self, {"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
 
     def do_GET(self):
         self.received.append(("GET", self.path, None))
         if self.path == "/v1/models":
-            self._reply(
+            _reply(
+                self,
                 {
                     "object": "list",
                     "data": [
@@ -1941,7 +1909,8 @@ class _RecordingComboContextHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         assert self.path == "/api/combos"
-        self._reply(
+        _reply(
+            self,
             {
                 "combos": [
                     {
@@ -2022,32 +1991,25 @@ class _MutableCombosHandler(http.server.BaseHTTPRequestHandler):
     combos: ClassVar[list] = []
     outputs: ClassVar[dict] = {}
 
-    def _reply(self, payload, set_cookie=None):
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        if set_cookie:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self._reply({"success": True}, set_cookie="auth_token=tok; Path=/; HttpOnly")
+        _reply(self, {"success": True}, set_cookie="auth_token=tok; Path=/; HttpOnly", content_length=False)
 
     def do_GET(self):
         if self.path == "/v1/models":
-            self._reply({"object": "list", "data": [
+            _reply(self, {"object": "list", "data": [
                 {"id": "grok-cli/grok-4.6", "root": "grok-4.6", "owned_by": "grok-cli",
-                 "context_length": 500000, "max_output_tokens": 128000}]})
+                 "context_length": 500000, "max_output_tokens": 128000}]}, content_length=False)
         elif self.path == "/api/providers":
-            self._reply({"connections": [{"id": "c1", "provider": "llama-cpp", "name": "llm-env-local",
-                                          "isActive": True, "providerSpecificData": {"baseUrl": "http://llm-server:8000/v1"}}]})
+            _reply(self, {"connections": [{"id": "c1", "provider": "llama-cpp", "name": "llm-env-local",
+                                           "isActive": True, "providerSpecificData": {"baseUrl": "http://llm-server:8000/v1"}}]},
+                   content_length=False)
         elif self.path == "/api/provider-models?provider=llama-cpp":
-            self._reply({"modelOutputOverrides": [
-                {"modelId": k, "maxOutputTokenOverride": v} for k, v in type(self).outputs.items()]})
+            _reply(self, {"modelOutputOverrides": [
+                {"modelId": k, "maxOutputTokenOverride": v} for k, v in type(self).outputs.items()]},
+                content_length=False)
         else:
-            self._reply({"combos": type(self).combos})
+            _reply(self, {"combos": type(self).combos}, content_length=False)
 
     def log_message(self, format_string, *args):
         pass
@@ -2156,39 +2118,29 @@ class _RecordingComboBackupRestoreHandler(http.server.BaseHTTPRequestHandler):
     combos: ClassVar[list[dict]] = []
     connections: ClassVar[list[dict]] = []
 
-    def _reply(self, payload, *, status=200, set_cookie=None):
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if set_cookie is not None:
-            self.send_header("Set-Cookie", set_cookie)
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self.received.append(("POST", self.path, body))
         if self.path == "/api/auth/login":
-            self._reply({"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
+            _reply(self, {"success": True}, set_cookie="auth_token=session-token; Path=/; HttpOnly")
             return
         assert self.path == "/api/combos"
-        self._reply({**body, "id": f"id-{body['name']}"}, status=201)
+        _reply(self, {**body, "id": f"id-{body['name']}"}, status=201)
 
     def do_GET(self):
         self.received.append(("GET", self.path, None))
         if self.path == "/api/providers":
-            self._reply({"connections": self.connections})
+            _reply(self, {"connections": self.connections})
             return
         assert self.path == "/api/combos"
-        self._reply({"combos": self.combos, "total": len(self.combos)})
+        _reply(self, {"combos": self.combos, "total": len(self.combos)})
 
     def do_PUT(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self.received.append(("PUT", self.path, body))
-        self._reply({**body, "id": self.path.rsplit("/", 1)[-1]})
+        _reply(self, {**body, "id": self.path.rsplit("/", 1)[-1]})
 
     def log_message(self, format_string, *args):
         pass

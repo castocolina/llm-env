@@ -43,12 +43,31 @@ def test_aggregates_both_services_without_source_labels():
     assert 'duration_seconds_sum{service="victoriametrics"}' not in text  # its duration metric only times /metrics
 
 
-def test_values_keep_full_precision():
-    body = ('grafana_http_request_duration_seconds_sum{handler="/x",status_code="200"} 2015.4344\n'
-            'grafana_http_request_duration_seconds_count{handler="/x",status_code="200"} 1234567\n')
+@pytest.mark.parametrize(
+    ("body", "first", "second"),
+    [
+        pytest.param(
+            'grafana_http_request_duration_seconds_sum{handler="/x",status_code="200"} 2015.4344\n'
+            'grafana_http_request_duration_seconds_count{handler="/x",status_code="200"} 1234567\n',
+            'request_duration_seconds_sum{service="grafana"} 2015.4344',
+            'requests_total{service="grafana",class="2xx"} 1234567.0',  # not 1.23457e+06
+            id="values_keep_full_precision",
+        ),
+        # real Grafana exposes `grafana_alerting_execution_time_milliseconds{quantile="0.5"} NaN` and +Inf histogram buckets
+        pytest.param(
+            'grafana_alerting_execution_time_milliseconds{quantile="0.5"} NaN\n'
+            'some_hist_bucket{le="+Inf"} +Inf\n'
+            'grafana_http_request_duration_seconds_count{handler="/x",status_code="200"} 4\n',
+            'llm_env_source_up{source="grafana_http"} 1',
+            'requests_total{service="grafana",class="2xx"} 4.0',
+            id="nan_quantiles_in_unused_families_are_skipped_like_real_grafana_output",
+        ),
+    ],
+)
+def test_grafana_body_renders(body, first, second):
     text = collect_native_http(lambda url, timeout, max_bytes: body if ":3000" in url else VM)
-    assert 'request_duration_seconds_sum{service="grafana"} 2015.4344' in text
-    assert 'requests_total{service="grafana",class="2xx"} 1234567.0' in text  # not 1.23457e+06
+    assert first in text
+    assert second in text
 
 
 def test_fetch_reads_at_most_the_cap_plus_one_byte(monkeypatch):
@@ -85,16 +104,6 @@ def test_failure_is_independent_and_does_not_echo_response():
     assert 'llm_env_source_up{source="grafana_http"} 0' in text
     assert 'llm_env_source_up{source="victoriametrics_http"} 1' in text
     assert "private" not in text
-
-
-def test_nan_quantiles_in_unused_families_are_skipped_like_real_grafana_output():
-    # real Grafana exposes `grafana_alerting_execution_time_milliseconds{quantile="0.5"} NaN` and +Inf histogram buckets
-    body = ('grafana_alerting_execution_time_milliseconds{quantile="0.5"} NaN\n'
-            'some_hist_bucket{le="+Inf"} +Inf\n'
-            'grafana_http_request_duration_seconds_count{handler="/x",status_code="200"} 4\n')
-    text = collect_native_http(lambda url, timeout, max_bytes: body if ":3000" in url else VM)
-    assert 'llm_env_source_up{source="grafana_http"} 1' in text
-    assert 'requests_total{service="grafana",class="2xx"} 4.0' in text
 
 
 @pytest.mark.parametrize("body", ["garbage\n", "x 1\nextra\n",

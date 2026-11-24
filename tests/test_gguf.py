@@ -468,22 +468,37 @@ def test_tensor_sizes_honors_a_non_default_general_alignment(tmp_path):
     assert sizes["blk.0.ffn_down_exps.weight"] == ROUTED_EXPERT_BYTES
 
 
-def test_tensor_sizes_rejects_a_tensor_offset_that_violates_alignment(tmp_path):
+@pytest.mark.parametrize(
+    ("offset", "name", "match"),
+    [
+        # Offset 3 is not a multiple of the default 32-byte alignment -- a real
+        # GGUF writer never produces this; a corrupt or hand-crafted file might.
+        pytest.param(3, "misaligned.gguf", "alignment", id="tensor_sizes_rejects_a_tensor_offset_that_violates_alignment"),
+        # Offset 1024 is a multiple of the default 32-byte alignment (passes the
+        # alignment check) but the file has no 1024 bytes of tensor data after
+        # the header -- a truncated or corrupt file. Without an explicit check,
+        # `file_size - data_start - offset` goes negative and tensor_sizes()
+        # would silently return a negative size instead of raising.
+        pytest.param(
+            1024, "truncated.gguf", "exceeds the tensor data span",
+            id="tensor_sizes_rejects_an_offset_beyond_the_tensor_data_span",
+        ),
+    ],
+)
+def test_tensor_sizes_rejects_a_bad_single_tensor_offset(tmp_path, offset, name, match):
     from pylib.gguf import GgufError, tensor_sizes
 
     kvs = [
         _kv_string("general.architecture", "llama"),
         _kv_uint32("llama.block_count", 1),
     ]
-    # Offset 3 is not a multiple of the default 32-byte alignment -- a real
-    # GGUF writer never produces this; a corrupt or hand-crafted file might.
-    tensor_info_bytes = _tensor_info("weight", 1, [1], 0, 3)
+    tensor_info_bytes = _tensor_info("weight", 1, [1], 0, offset)
     header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 1, len(kvs))
     body = b"".join(kvs) + tensor_info_bytes
-    path = tmp_path / "misaligned.gguf"
+    path = tmp_path / name
     path.write_bytes(header + body + b"\x00" * 64)
 
-    with pytest.raises(GgufError, match="alignment"):
+    with pytest.raises(GgufError, match=match):
         tensor_sizes(path)
 
 
@@ -506,28 +521,6 @@ def test_tensor_sizes_rejects_duplicate_tensor_offsets(tmp_path):
     path.write_bytes(header + body + b"\x00" * 64)
 
     with pytest.raises(GgufError, match="duplicate or out-of-order"):
-        tensor_sizes(path)
-
-
-def test_tensor_sizes_rejects_an_offset_beyond_the_tensor_data_span(tmp_path):
-    from pylib.gguf import GgufError, tensor_sizes
-
-    kvs = [
-        _kv_string("general.architecture", "llama"),
-        _kv_uint32("llama.block_count", 1),
-    ]
-    # Offset 1024 is a multiple of the default 32-byte alignment (passes the
-    # alignment check) but the file has no 1024 bytes of tensor data after
-    # the header -- a truncated or corrupt file. Without an explicit check,
-    # `file_size - data_start - offset` goes negative and tensor_sizes()
-    # would silently return a negative size instead of raising.
-    tensor_info_bytes = _tensor_info("weight", 1, [1], 0, 1024)
-    header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 1, len(kvs))
-    body = b"".join(kvs) + tensor_info_bytes
-    path = tmp_path / "truncated.gguf"
-    path.write_bytes(header + body + b"\x00" * 64)
-
-    with pytest.raises(GgufError, match="exceeds the tensor data span"):
         tensor_sizes(path)
 
 

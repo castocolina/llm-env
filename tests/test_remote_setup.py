@@ -142,10 +142,22 @@ def test_validate_host_header_rejects_an_empty_header():
     assert validate_host_header("") is False
 
 
-def test_validate_host_header_rejects_shell_metacharacters():
-    assert validate_host_header("evil`touch pwned`:20130") is False
-    assert validate_host_header("evil$(touch pwned):20130") is False
-    assert validate_host_header("evil; rm -rf /:20130") is False
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param(
+            ("evil`touch pwned`:20130", "evil$(touch pwned):20130", "evil; rm -rf /:20130"),
+            id="validate_host_header_rejects_shell_metacharacters",
+        ),
+        pytest.param(
+            ("[::1]junk:20130", "[::1]:20130junk", "[::1"),
+            id="validate_host_header_rejects_trailing_garbage_after_the_bracket",
+        ),
+    ],
+)
+def test_validate_host_header_rejects_each(headers):
+    for header in headers:
+        assert validate_host_header(header) is False
 
 
 def test_validate_host_header_rejects_a_bare_unbracketed_ipv6_authority():
@@ -155,12 +167,6 @@ def test_validate_host_header_rejects_a_bare_unbracketed_ipv6_authority():
     assert validate_host_header("::1:20130") is False
     assert validate_host_header("fe80::1") is False
     assert host_without_port("::1:20130") == ""
-
-
-def test_validate_host_header_rejects_trailing_garbage_after_the_bracket():
-    assert validate_host_header("[::1]junk:20130") is False
-    assert validate_host_header("[::1]:20130junk") is False
-    assert validate_host_header("[::1") is False
 
 
 def test_validate_host_header_rejects_a_non_numeric_or_out_of_range_port():
@@ -264,18 +270,22 @@ def test_combo_client_models_omits_limiting_model_when_absent():
     assert "limiting_model" not in result[0]
 
 
-def test_combo_client_models_falls_back_to_capped_output_when_unknown():
-    result = _combos_with_local_up(
-        [{"combo": "my-planning", "min_context_window": 500000, "min_max_output_tokens": None}],
-    )
-    assert result[0]["client_max_output_tokens"] == 128000
-
-
-def test_combo_client_models_clamps_output_above_context():
-    result = _combos_with_local_up(
-        [{"combo": "weird", "min_context_window": 50000, "min_max_output_tokens": 999999}],
-    )
-    assert result[0]["client_max_output_tokens"] == 50000
+@pytest.mark.parametrize(
+    ("combo", "expected"),
+    [
+        pytest.param(
+            {"combo": "my-planning", "min_context_window": 500000, "min_max_output_tokens": None}, 128000,
+            id="combo_client_models_falls_back_to_capped_output_when_unknown",
+        ),
+        pytest.param(
+            {"combo": "weird", "min_context_window": 50000, "min_max_output_tokens": 999999}, 50000,
+            id="combo_client_models_clamps_output_above_context",
+        ),
+    ],
+)
+def test_combo_client_models_output_tokens(combo, expected):
+    result = _combos_with_local_up([combo])
+    assert result[0]["client_max_output_tokens"] == expected
 
 
 def test_combo_client_models_skips_combos_with_unknown_context():
@@ -332,16 +342,28 @@ def test_render_setup_script_embeds_the_host(monkeypatch):
     assert script.startswith("#!/usr/bin/env bash")
 
 
-def test_render_setup_script_prompts_for_the_master_key_from_the_tty(monkeypatch):
+@pytest.mark.parametrize(
+    "needles",
+    [
+        # Under `curl ... | bash`, stdin is the script pipe, not the terminal --
+        # reading from /dev/tty explicitly is required for the prompt to
+        # actually reach the user instead of silently reading EOF.
+        pytest.param(
+            ("OMNI_ROUTER_MASTER_KEY:", "read -r -s", "/dev/tty"),
+            id="render_setup_script_prompts_for_the_master_key_from_the_tty",
+        ),
+        pytest.param(
+            ("chmod 700 \"$workdir\"", "chmod 600", "trap _iac_cleanup EXIT"),
+            id="render_setup_script_uses_staged_files_with_restrictive_permissions",
+        ),
+    ],
+)
+def test_render_setup_script_contains_three(monkeypatch, needles):
     _use_real_opencode_updater(monkeypatch)
     _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
-    assert "OMNI_ROUTER_MASTER_KEY:" in script
-    assert "read -r -s" in script
-    # Under `curl ... | bash`, stdin is the script pipe, not the terminal --
-    # reading from /dev/tty explicitly is required for the prompt to
-    # actually reach the user instead of silently reading EOF.
-    assert "/dev/tty" in script
+    for needle in needles:
+        assert needle in script
 
 
 def test_render_setup_script_does_not_use_curl_dash_f(monkeypatch):
@@ -359,12 +381,27 @@ def test_render_setup_script_does_not_use_curl_dash_f(monkeypatch):
     assert "curl -fsS" not in script
 
 
-def test_render_setup_script_captures_the_http_status_and_checks_it(monkeypatch):
+@pytest.mark.parametrize(
+    "needles",
+    [
+        pytest.param(
+            ("%{http_code}", 'if [ "$http_status" != "200" ]'),
+            id="render_setup_script_captures_the_http_status_and_checks_it",
+        ),
+        # $models_file already carries the final client-visible "id" per entry
+        # ("llama-cpp/<alias>" for llm-server models, the bare combo name for
+        # OmniRoute combos) -- built server-side by pylib.remote_setup before
+        # /config ever returns it, so the bash template must consume .id
+        # verbatim rather than re-prefixing "llama-cpp/" itself.
+        pytest.param(("id: .id", ".[$model.id]"), id="render_setup_script_sends_omniroute_routed_model_ids"),
+    ],
+)
+def test_render_setup_script_contains_two(monkeypatch, needles):
     _use_real_opencode_updater(monkeypatch)
     _use_real_install_agent_clients_lib(monkeypatch)
     script = render_setup_script("192.0.2.1:20130")
-    assert "%{http_code}" in script
-    assert 'if [ "$http_status" != "200" ]' in script
+    for needle in needles:
+        assert needle in script
 
 
 def test_render_setup_script_never_passes_the_master_key_as_a_curl_argument(monkeypatch):
@@ -382,19 +419,6 @@ def test_render_setup_script_never_passes_the_master_key_as_a_curl_argument(monk
     assert 'chmod 600 "$auth_conf"' in script
 
 
-def test_render_setup_script_sends_omniroute_routed_model_ids(monkeypatch):
-    # $models_file already carries the final client-visible "id" per entry
-    # ("llama-cpp/<alias>" for llm-server models, the bare combo name for
-    # OmniRoute combos) -- built server-side by pylib.remote_setup before
-    # /config ever returns it, so the bash template must consume .id
-    # verbatim rather than re-prefixing "llama-cpp/" itself.
-    _use_real_opencode_updater(monkeypatch)
-    _use_real_install_agent_clients_lib(monkeypatch)
-    script = render_setup_script("192.0.2.1:20130")
-    assert "id: .id" in script
-    assert ".[$model.id]" in script
-
-
 def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch):
     _use_real_opencode_updater(monkeypatch)
     _use_real_install_agent_clients_lib(monkeypatch)
@@ -405,15 +429,6 @@ def test_render_setup_script_embeds_the_opencode_updater_via_heredoc(monkeypatch
     # file's actual content was embedded rather than a second HTTP fetch.
     assert "function replaceProvider(text, provider)" in script
     assert "http://${LLM_ENV_HOST}/update-opencode-config.mjs" not in script
-
-
-def test_render_setup_script_uses_staged_files_with_restrictive_permissions(monkeypatch):
-    _use_real_opencode_updater(monkeypatch)
-    _use_real_install_agent_clients_lib(monkeypatch)
-    script = render_setup_script("192.0.2.1:20130")
-    assert "chmod 700 \"$workdir\"" in script
-    assert "chmod 600" in script
-    assert "trap _iac_cleanup EXIT" in script
 
 
 def test_render_setup_script_detects_an_existing_opencode_candidate_file(monkeypatch):
@@ -858,29 +873,22 @@ def test_config_rejects_missing_bearer_token(monkeypatch):
         thread.join()
 
 
-def test_config_rejects_wrong_bearer_token(monkeypatch):
-    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "test-key")
+@pytest.mark.parametrize(
+    ("master_key", "token", "status"),
+    [
+        pytest.param("test-key", "wrong", 401, id="config_rejects_wrong_bearer_token"),
+        pytest.param("", "anything", 503, id="config_returns_503_when_master_key_unset"),
+    ],
+)
+def test_config_refuses_the_request(monkeypatch, master_key, token, status):
+    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", master_key)
     server, thread = _start_server(RemoteSetupHandler)
     try:
         port = server.server_address[1]
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/config", headers={"Authorization": "Bearer wrong"})
+        conn.request("GET", "/config", headers={"Authorization": f"Bearer {token}"})
         response = conn.getresponse()
-        assert response.status == 401
-    finally:
-        server.shutdown()
-        thread.join()
-
-
-def test_config_returns_503_when_master_key_unset(monkeypatch):
-    monkeypatch.setenv("OMNI_ROUTER_MASTER_KEY", "")
-    server, thread = _start_server(RemoteSetupHandler)
-    try:
-        port = server.server_address[1]
-        conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/config", headers={"Authorization": "Bearer anything"})
-        response = conn.getresponse()
-        assert response.status == 503
+        assert response.status == status
     finally:
         server.shutdown()
         thread.join()

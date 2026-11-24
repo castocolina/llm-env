@@ -76,18 +76,19 @@ def test_dns_no_reply_fails(tmp_path):
     assert "container resolver does not answer; restart the DNS helper (aardvark-dns) after checking bridges" in result.stdout
 
 
-def test_absent_omniroute_makes_dns_unknown_without_failure(tmp_path):
+@pytest.mark.parametrize(
+    ("stub", "body"),
+    [
+        pytest.param(
+            "podman", "case \"$1 $2\" in 'container exists') exit 1;; *) exit 0;; esac",
+            id="absent_omniroute_makes_dns_unknown_without_failure",
+        ),
+        pytest.param("getent", "exit 2", id="host_getent_failure_makes_dns_unknown_without_failure"),
+    ],
+)
+def test_dns_unknown_without_failure(tmp_path, stub, body):
     stubs = Stubs(tmp_path)
-    stubs.set("podman", "case \"$1 $2\" in 'container exists') exit 1;; *) exit 0;; esac")
-    result = stubs.run()
-    assert result.returncode == 0
-    assert "podman-state: DNS UNKNOWN" in result.stdout
-    assert "podman-state: SUMMARY UNKNOWN" in result.stdout
-
-
-def test_host_getent_failure_makes_dns_unknown_without_failure(tmp_path):
-    stubs = Stubs(tmp_path)
-    stubs.set("getent", "exit 2")
+    stubs.set(stub, body)
     result = stubs.run()
     assert result.returncode == 0
     assert "podman-state: DNS UNKNOWN" in result.stdout
