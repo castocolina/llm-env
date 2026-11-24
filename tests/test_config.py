@@ -557,35 +557,63 @@ def test_migrate_config_preserves_existing_resources_values():
     }
 
 
-def test_migrate_config_adds_default_memory_ceiling_pct():
+INVALID_PCTS = [0, -1, 101, float("inf"), "lots", True]
+
+
+def cases(name, field, values):
+    """One (field, value) case per value, id "<former test-name suffix>-<value>"."""
+    return [pytest.param(field, value, id=f"{name}-{value}") for value in values]
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        pytest.param("memory_ceiling_pct", 46, id="pct"),
+        pytest.param("memory_ceiling_floor_pct", 30, id="floor_pct"),
+    ],
+)
+def test_migrate_config_adds_default_memory_ceiling(field, expected):
     cfg = make_cfg()
-    cfg["resources"]["llm_server"].pop("memory_ceiling_pct", None)
+    cfg["resources"]["llm_server"].pop(field, None)
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"]["memory_ceiling_pct"] == 46
+    assert migrated["resources"]["llm_server"][field] == expected
 
 
-def test_migrate_config_preserves_existing_memory_ceiling_pct():
+@pytest.mark.parametrize(
+    ("ceiling_pct", "floor_pct", "field", "expected"),
+    [
+        pytest.param(30, 30, "memory_ceiling_pct", 30, id="pct"),
+        pytest.param(46, 15, "memory_ceiling_floor_pct", 15, id="floor_pct"),
+    ],
+)
+def test_migrate_config_preserves_existing_memory_ceiling(ceiling_pct, floor_pct, field, expected):
     cfg = make_cfg(
         resources={
             "llm_server": {
                 "cpus": 6,
                 "memory_mib": 28672,
-                "memory_ceiling_pct": 30,
-                "memory_ceiling_floor_pct": 30,
+                "memory_ceiling_pct": ceiling_pct,
+                "memory_ceiling_floor_pct": floor_pct,
             }
         }
     )
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"]["memory_ceiling_pct"] == 30
+    assert migrated["resources"]["llm_server"][field] == expected
 
 
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_memory_ceiling_pct(value):
-    cfg = make_cfg(
-        resources={"llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_pct": value}}
-    )
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *cases("memory_ceiling_pct", "memory_ceiling_pct", INVALID_PCTS),
+        *cases("memory_ceiling_floor_pct", "memory_ceiling_floor_pct", INVALID_PCTS),
+        *cases("cpu_ceiling_pct", "cpu_ceiling_pct", INVALID_PCTS),
+        *cases("cpu_ceiling_floor_pct", "cpu_ceiling_floor_pct", INVALID_PCTS),
+    ],
+)
+def test_validate_config_rejects_invalid_llm_server_ceiling(field, value):
+    cfg = make_cfg(resources={"llm_server": {"cpus": 0, "memory_mib": 0, field: value}})
     errors = validate_config(cfg)
-    assert any("memory_ceiling_pct" in error for error in errors)
+    assert any(field in error for error in errors)
 
 
 def test_validate_config_accepts_boundary_memory_ceiling_pct():
@@ -593,39 +621,6 @@ def test_validate_config_accepts_boundary_memory_ceiling_pct():
         resources={"llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_pct": 100}}
     )
     assert validate_config(cfg) == []
-
-
-def test_migrate_config_adds_default_memory_ceiling_floor_pct():
-    cfg = make_cfg()
-    cfg["resources"]["llm_server"].pop("memory_ceiling_floor_pct", None)
-    migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"]["memory_ceiling_floor_pct"] == 30
-
-
-def test_migrate_config_preserves_existing_memory_ceiling_floor_pct():
-    cfg = make_cfg(
-        resources={
-            "llm_server": {
-                "cpus": 6,
-                "memory_mib": 28672,
-                "memory_ceiling_pct": 46,
-                "memory_ceiling_floor_pct": 15,
-            }
-        }
-    )
-    migrated = config_module.migrate_config(copy.deepcopy(cfg))
-    assert migrated["resources"]["llm_server"]["memory_ceiling_floor_pct"] == 15
-
-
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_memory_ceiling_floor_pct(value):
-    cfg = make_cfg(
-        resources={
-            "llm_server": {"cpus": 0, "memory_mib": 0, "memory_ceiling_floor_pct": value}
-        }
-    )
-    errors = validate_config(cfg)
-    assert any("memory_ceiling_floor_pct" in error for error in errors)
 
 
 def test_migrate_config_adds_default_cpu_ceiling_pct():
@@ -653,32 +648,6 @@ def test_migrate_config_preserves_existing_cpu_ceiling_pct():
     assert migrated["resources"]["llm_server"]["cpu_ceiling_floor_pct"] == 25
 
 
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_cpu_ceiling_pct(value):
-    cfg = make_cfg(
-        resources={"llm_server": {"cpus": 0, "memory_mib": 0, "cpu_ceiling_pct": value}}
-    )
-    errors = validate_config(cfg)
-    assert any("cpu_ceiling_pct" in error for error in errors)
-
-
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_cpu_ceiling_floor_pct(value):
-    cfg = make_cfg(
-        resources={
-            "llm_server": {"cpus": 0, "memory_mib": 0, "cpu_ceiling_floor_pct": value}
-        }
-    )
-    errors = validate_config(cfg)
-    assert any("cpu_ceiling_floor_pct" in error for error in errors)
-
-
-def test_validate_config_accepts_n_cpu_moe_as_non_negative_int():
-    cfg = make_cfg()
-    cfg["models"][0]["n_cpu_moe"] = 28
-    assert validate_config(cfg) == []
-
-
 def test_validate_config_accepts_n_cpu_moe_zero():
     """0 is a valid, meaningful value (see Task 4): it means 'no CPU
     offload', not 'field absent' -- the schema must not special-case it."""
@@ -695,30 +664,31 @@ def test_validate_config_rejects_invalid_n_cpu_moe(value):
     assert any("n_cpu_moe" in error for error in errors)
 
 
-def test_validate_config_accepts_check_ctx_size_as_positive_int():
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("n_cpu_moe", 28, id="n_cpu_moe_as_non_negative_int"),
+        pytest.param("check_ctx_size", 8192, id="check_ctx_size_as_positive_int"),
+        pytest.param("check_timeout_seconds", 600, id="check_timeout_seconds_as_positive_int"),
+    ],
+)
+def test_validate_config_accepts_model_int_field(field, value):
     cfg = make_cfg()
-    cfg["models"][0]["check_ctx_size"] = 8192
+    cfg["models"][0][field] = value
     assert validate_config(cfg) == []
 
 
-@pytest.mark.parametrize("value", [0, -1, True, "8192", 1.5])
-def test_validate_config_rejects_invalid_check_ctx_size(value):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *cases("check_ctx_size", "check_ctx_size", [0, -1, True, "8192", 1.5]),
+        *cases("check_timeout_seconds", "check_timeout_seconds", [0, -1, True, "600", 1.5]),
+    ],
+)
+def test_validate_config_rejects_invalid_check_field(field, value):
     cfg = make_cfg()
-    cfg["models"][0]["check_ctx_size"] = value
-    assert any("check_ctx_size" in error for error in validate_config(cfg))
-
-
-def test_validate_config_accepts_check_timeout_seconds_as_positive_int():
-    cfg = make_cfg()
-    cfg["models"][0]["check_timeout_seconds"] = 600
-    assert validate_config(cfg) == []
-
-
-@pytest.mark.parametrize("value", [0, -1, True, "600", 1.5])
-def test_validate_config_rejects_invalid_check_timeout_seconds(value):
-    cfg = make_cfg()
-    cfg["models"][0]["check_timeout_seconds"] = value
-    assert any("check_timeout_seconds" in error for error in validate_config(cfg))
+    cfg["models"][0][field] = value
+    assert any(field in error for error in validate_config(cfg))
 
 
 def test_validate_config_omits_check_fields_without_error():
@@ -746,20 +716,19 @@ def test_migrate_config_preserves_existing_vram_budget_ceiling():
     assert migrated["gpu"]["vram_budget_ceiling_mib"] == 12000
 
 
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_vram_ceiling_pct(value):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *cases("vram_ceiling_pct", "vram_budget_ceiling_pct", INVALID_PCTS),
+        *cases("vram_ceiling_mib", "vram_budget_ceiling_mib", [-1, 1.5, "lots", True, False]),
+        *cases("vram_ceiling_floor_pct", "vram_budget_ceiling_floor_pct", INVALID_PCTS),
+    ],
+)
+def test_validate_config_rejects_invalid_vram_ceiling(field, value):
     cfg = make_cfg()
-    cfg["gpu"]["vram_budget_ceiling_pct"] = value
+    cfg["gpu"][field] = value
     errors = validate_config(cfg)
-    assert any("vram_budget_ceiling_pct" in error for error in errors)
-
-
-@pytest.mark.parametrize("value", [-1, 1.5, "lots", True, False])
-def test_validate_config_rejects_invalid_vram_ceiling_mib(value):
-    cfg = make_cfg()
-    cfg["gpu"]["vram_budget_ceiling_mib"] = value
-    errors = validate_config(cfg)
-    assert any("vram_budget_ceiling_mib" in error for error in errors)
+    assert any(field in error for error in errors)
 
 
 def test_migrate_config_adds_default_vram_budget_ceiling_floor_pct():
@@ -774,14 +743,6 @@ def test_migrate_config_preserves_existing_vram_budget_ceiling_floor_pct():
     cfg["gpu"]["vram_budget_ceiling_floor_pct"] = 15
     migrated = config_module.migrate_config(copy.deepcopy(cfg))
     assert migrated["gpu"]["vram_budget_ceiling_floor_pct"] == 15
-
-
-@pytest.mark.parametrize("value", [0, -1, 101, float("inf"), "lots", True])
-def test_validate_config_rejects_invalid_vram_ceiling_floor_pct(value):
-    cfg = make_cfg()
-    cfg["gpu"]["vram_budget_ceiling_floor_pct"] = value
-    errors = validate_config(cfg)
-    assert any("vram_budget_ceiling_floor_pct" in error for error in errors)
 
 
 def test_validate_config_rejects_infinite_llm_server_cpus():
@@ -808,13 +769,15 @@ def test_config_without_resources_key_has_no_errors():
     assert validate_config(make_cfg()) == []
 
 
-def test_config_accepts_valid_resources_section():
-    cfg = make_cfg(resources={"llm_server": {"cpus": 6, "memory_mib": 28672}})
-    assert validate_config(cfg) == []
-
-
-def test_config_accepts_zero_sentinel_resources():
-    cfg = make_cfg(resources={"llm_server": {"cpus": 0, "memory_mib": 0}})
+@pytest.mark.parametrize(
+    ("cpus", "memory_mib"),
+    [
+        pytest.param(6, 28672, id="valid_resources_section"),
+        pytest.param(0, 0, id="zero_sentinel_resources"),
+    ],
+)
+def test_config_accepts_resources(cpus, memory_mib):
+    cfg = make_cfg(resources={"llm_server": {"cpus": cpus, "memory_mib": memory_mib}})
     assert validate_config(cfg) == []
 
 

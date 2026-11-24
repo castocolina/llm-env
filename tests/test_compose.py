@@ -3,6 +3,7 @@ import stat
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -75,9 +76,16 @@ def test_service_uses_configured_image():
     assert document["services"]["llm-server"]["image"] == "ghcr.io/ggml-org/llama.cpp:server-vulkan"
 
 
-def test_service_publishes_configured_port():
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        pytest.param("ports", ["8000:8000"], id="service_publishes_configured_port"),
+        pytest.param("devices", ["/dev/dri:/dev/dri"], id="service_passes_the_dri_device"),
+    ],
+)
+def test_llm_server_service_list_field(key, expected):
     _, document = compose_dict()
-    assert document["services"]["llm-server"]["ports"] == ["8000:8000"]
+    assert document["services"]["llm-server"][key] == expected
 
 
 def test_service_mounts_models_and_presets_read_only_with_selinux_label():
@@ -85,11 +93,6 @@ def test_service_mounts_models_and_presets_read_only_with_selinux_label():
     volumes = document["services"]["llm-server"]["volumes"]
     assert "/home/user/llm-workspace/models:/models:ro,z" in volumes
     assert "/home/user/.config/llm-env/presets.ini:/etc/llama/presets.ini:ro,z" in volumes
-
-
-def test_service_passes_the_dri_device():
-    _, document = compose_dict()
-    assert document["services"]["llm-server"]["devices"] == ["/dev/dri:/dev/dri"]
 
 
 def test_service_sets_router_environment():
@@ -131,9 +134,24 @@ def test_nonzero_resource_limits_are_applied():
     assert service["mem_limit"] == "28672m"
 
 
-def test_sleep_idle_seconds_becomes_a_command_flag():
+@pytest.mark.parametrize(
+    ("service", "expected"),
+    [
+        pytest.param(
+            "llm-server",
+            ["--sleep-idle-seconds", "300", "--metrics"],
+            id="sleep_idle_seconds_becomes_a_command_flag",
+        ),
+        pytest.param(
+            "remote-setup",
+            ["python3", "-m", "pylib.remote_setup"],
+            id="remote_setup_service_command_runs_the_module",
+        ),
+    ],
+)
+def test_service_command(service, expected):
     _, document = compose_dict()
-    assert document["services"]["llm-server"]["command"] == ["--sleep-idle-seconds", "300", "--metrics"]
+    assert document["services"][service]["command"] == expected
 
 
 def test_omniroute_service_uses_configured_image_and_port():
@@ -398,13 +416,6 @@ def test_remote_setup_mounts_the_shared_agent_client_library():
     assert any(v.endswith("/setup/lib:/app/setup/lib:ro,z") for v in volumes)
 
 
-def test_remote_setup_service_command_runs_the_module():
-    _, document = compose_dict()
-    assert document["services"]["remote-setup"]["command"] == [
-        "python3", "-m", "pylib.remote_setup",
-    ]
-
-
 def test_remote_setup_service_working_dir_is_app():
     _, document = compose_dict()
     assert document["services"]["remote-setup"]["working_dir"] == "/app"
@@ -510,10 +521,20 @@ def test_llm_server_service_omitted_when_disabled():
     assert "remote-setup" in document["services"]
 
 
-def test_omniroute_depends_on_llm_server_omitted_when_disabled():
+@pytest.mark.parametrize(
+    "service",
+    [
+        pytest.param("omniroute", id="omniroute_depends_on_llm_server_omitted_when_disabled"),
+        pytest.param(
+            "remote-setup",
+            id="remote_setup_has_no_dependency_regardless_of_llm_server_state",
+        ),
+    ],
+)
+def test_no_depends_on_when_llm_server_disabled(service):
     cfg = {**CFG, "llm_server": {"enabled": False}}
     _, document = compose_dict(cfg)
-    assert "depends_on" not in document["services"]["omniroute"]
+    assert "depends_on" not in document["services"][service]
 
 
 def test_llm_server_service_present_when_llm_server_key_absent():
@@ -525,12 +546,6 @@ def test_llm_server_service_present_when_llm_server_key_absent():
     assert document["services"]["omniroute"]["depends_on"] == {
         "llm-server": {"condition": "service_healthy"}
     }
-
-
-def test_remote_setup_has_no_dependency_regardless_of_llm_server_state():
-    cfg = {**CFG, "llm_server": {"enabled": False}}
-    _, document = compose_dict(cfg)
-    assert "depends_on" not in document["services"]["remote-setup"]
 
 
 def test_omniroute_depends_on_key_ordering_preserved_when_enabled():
