@@ -91,7 +91,7 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
 - D3 Hubs: `tests/conftest.py`, `pyproject.toml`, `uv.lock`, `tools/lib.sh`, `llmenv.py`, `pylib/config.py`,
   `Makefile`, `.pre-commit-config.yaml`, plus the selector's own inputs `pylib/selection.py`, `tools/test.sh`,
   `tools/test-changed.sh`, `tools/pre-push.sh` and `tests/selection-exempt.txt`. A file with no owner and no
-  exemption fails G1 before selection; a direct `select-tests` call maps it to the full suite. Per changed path, first
+  exemption fails G1 (which runs beside selection); a direct `select-tests` call maps it to the full suite. Per changed path, first
   match wins: (1) `SELECT_ALL=1`, a `full:` exemption (even when the file also has owners) or a hub at push: the full
   suite; (2) a hub at commit, root `tests/conftest.py` included: its direct namers only (the push of that commit runs
   the full suite); (3) any other changed or reached `conftest.py`: every test under its directory; (4) D1's naming.
@@ -186,9 +186,12 @@ checks that a run leaves no files, scratch dirs or Podman objects behind.
   <reason>` line accepts an executable file that no test can own (the `.test.mjs` files, plan O1); a change to it
   selects the full suite at both stages (D3). Stale or reasonless lines fail. Opt-in files
   (`test_omniroute_update_proof.py`, `test_omniroute_characterize.py`) never count as owners. The lint runs in
-  `tools/test-changed.sh` at both stages on every invocation, over the whole tree, before selection, and a lint
-  failure fails the hook. Tests pin that removing the last match of an exemption and removing a source's last owner
-  each fail the commit and push hooks. Its cost against R9 is measured by the plan.
+  `tools/test-changed.sh` at both stages on every invocation, over the whole tree, in parallel with the selection and
+  the selected tests (never gated or skipped; its output is printed after theirs), and a lint failure fails the hook
+  (exit 1, or the tests' own failing status). Tests pin that removing the last match of an exemption and removing a
+  source's last owner each fail the commit and push hooks whether the tests pass or fail, and that a failed lint does
+  not stop the tests. Its cost against R9 is measured by the plan; in parallel it adds only what it outlasts the tests
+  by (a docs-only commit: about 7.5 s serial, 6.5-7 s parallel, 2026-11-24).
 - G2 Mutation spot-check `tools/selection-mutation-check.sh`. It works in an allowlisted scratch copy of the index
   (`git checkout-index`), so the checker and the regression test being verified are in it before they are committed.
   First a clean control pass, which also runs the literal-table integrity test (every fault's target line exists).
@@ -240,7 +243,9 @@ it is split, and so do edits to `AGENTS.md` or `QUICK_START.md`, which it names.
 (about 190 s at 9 workers), as does a new-branch push. Both hooks test the worktree, so an untracked file (for example
 a module the commit deletes, left in place) can make them pass, as with the current hooks. Dynamic file names that no test spells out are invisible: G1 forces a prefix owner or the
 full suite for them, and G4 is the backstop. Reach beyond push depth is not guaranteed (D1). A push of any shape but
-D8's needs a manual `make test` and `--no-verify` (a dirty tree is committed or stashed first instead). Deleting a
+D8's needs a manual `make test` and `--no-verify` (a dirty tree is committed or stashed first instead). A lone
+deletion push passes even with a dirty index or worktree, by design (plan T8 item 1: deleting a remote branch tests
+nothing; a test pins it). Deleting a
 file together with the last test mention of it leaves "no owner", so that commit runs the full suite (about 2
 minutes); selecting only the always-run test would be faster but less sound. A test that starts processes through `systemd-run --user` runs
 them outside the namespace, so it is outside the offline guarantee until it stubs `systemd-run`. Inside a run,

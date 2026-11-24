@@ -71,7 +71,9 @@ backup and report if it is not). Prefer the skill's `bench-fit.sh` for screening
 (it exits 1 when `core.hooksPath` is set). At commit: shellcheck and ruff on the staged files in
 `tools/validate.sh`'s scope, pyright on the whole project when the index adds, changes, deletes or renames a `.py`
 file, `pyproject.toml` or `uv.lock`, then the tests selected from the staged diff without the slow ones
-(`tools/test-changed.sh --stage commit`); that last hook fails with "run make dev-setup" while the pre-push link is
+(`tools/test-changed.sh --stage commit`). At both stages `tools/test-changed.sh` runs the ownership lint
+(`uv run llmenv.py selection-lint`) in parallel with the selected tests, every commit and push, and fails when
+either fails. At commit that last hook fails with "run make dev-setup" while the pre-push link is
 missing or not executable. At push: `tools/validate.sh`, then the tests selected from the pushed range for a
 fast-forward of the checked-out branch (by name or `HEAD`) to itself, or `tools/test.sh` (the full suite) for a new
 branch. A dirty index or worktree fails with "push refused: the index or worktree is dirty: commit or stash your

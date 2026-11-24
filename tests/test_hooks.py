@@ -118,6 +118,11 @@ def test_pre_push_passes_a_lone_deletion_and_stops_at_a_failed_validate(tmp_path
     assert _push(repo, "main H main B", env={"STUB_VALIDATE_RC": "1"}).returncode == 1 and calls(repo) == ["validate"]
 
 
+def test_pre_push_passes_a_lone_deletion_even_with_a_dirty_tree(tmp_path):
+    repo = _push_repo(tmp_path, shape="staged edit")             # intentional (plan T8 item 1): a deletion tests nothing
+    assert _push(repo, f"(delete) {Z} refs/heads/gone {sha(repo, 'B')}").returncode == 0 and calls(repo) == []
+
+
 @pytest.mark.parametrize("ref", ["main", "HEAD"])
 def test_git_runs_the_linked_hook_only_while_it_is_executable(tmp_path, ref):        # a real push
     assert "tools/pre-push.sh" in executables(ROOT)                                  # tracked as 100755
@@ -209,10 +214,18 @@ def test_test_changed_fails_when_nothing_is_collected(tmp_path):                
     assert _run_changed(_hook_repo(tmp_path, {}), "commit", env={"STUB_RC": "5"}).returncode == 5
 
 
+@pytest.mark.parametrize(("tests_rc", "rc"), [("0", 1), ("5", 5)])
+def test_a_failed_lint_fails_the_hook_without_gating_the_tests(tmp_path, tests_rc, rc):         # spec G1
+    repo = _hook_repo(tmp_path, {})
+    assert _run_changed(repo, "commit", env={"STUB_LINT_RC": "1", "STUB_RC": tests_rc}).returncode == rc
+    assert any(" pytest " in c for c in calls(repo))                               # the lint runs beside the tests
+
+
 @pytest.mark.parametrize("stage", ["commit", "push"])
 @pytest.mark.parametrize(("removed", "problem"), [("docs/a.md", "stale exemption: docs/a.md"),
                                                   ("tests/test_x.py", "unowned: scripts/x.sh")])
-def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_owner(tmp_path, stage, removed, problem):
+@pytest.mark.parametrize("tests_rc", ["0", "1"])                                   # the lint is reported either way
+def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_owner(tmp_path, stage, removed, problem, tests_rc):
     repo = _hook_repo(tmp_path, {"docs/a.md": b"", "scripts/x.sh": b"", "tests/test_x.py": b"'x.sh'\n", NP: b"",
                                  "tests/test_tools.py": b"'pyright-staged.sh'\n",          # owns the copied tool
                                  "tests/selection-exempt.txt": b"docs/a.md  # why\n"})
@@ -223,8 +236,8 @@ def test_hooks_fail_when_an_exemption_loses_its_last_match_or_a_source_its_last_
     git(repo, "rm", "-q", removed)
     if stage == "push":
         git(repo, "commit", "-qm", "rm")
-    result = _run_changed(repo, stage, env={**real, **(_refs(repo) if stage == "push" else {})})
-    assert result.returncode == 1 and problem in result.stderr and not any(" pytest " in c for c in calls(repo))
+    result = _run_changed(repo, stage, env={**real, "STUB_RC": tests_rc, **(_refs(repo) if stage == "push" else {})})
+    assert result.returncode == 1 and problem in result.stderr
 
 
 @pytest.mark.parametrize("broken", ["missing", "not executable", "foreign"])
