@@ -2,6 +2,7 @@
 import os
 import re
 import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from runner_helpers import (
     run_runner,
     runner_repo,
     start_runner,
+    stop_runner,
     wait_until,
 )
 
@@ -119,3 +121,25 @@ def test_a_signal_to_the_runner_reaps_every_descendant(tmp_path, sig, rc):
     assert proc.wait(timeout=10) == rc and "term" in calls(repo)                     # forwarded, and waited for
     wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in tree), timeout=5)
     assert not run_dir(proc.communicate()[1].decode()).exists()
+
+
+def test_runner_rejects_a_bad_timeout(tmp_path):
+    for bad in ("0", "-1", "abc", "1.5", "", "010", "+5", " 5"):
+        result = run_runner(repo := runner_repo(tmp_path / (bad[:8] or "empty")), env={"LLM_ENV_TEST_TIMEOUT_SECONDS": bad})
+        assert result.returncode == 2 and "LLM_ENV_TEST_TIMEOUT_SECONDS" in result.stderr and calls(repo) == [], bad
+
+
+def test_a_run_past_the_timeout_exits_124_and_reaps_every_descendant(tmp_path):  # a hung node once held a hook for 78 min
+    proc = start_runner(runner_repo(tmp_path), env={"STUB_SLEEP": "1", "LLM_ENV_TEST_TIMEOUT_SECONDS": "2"})
+    seen: dict[int, bytes] = {}
+    try:
+        deadline = time.monotonic() + 30
+        while proc.poll() is None and time.monotonic() < deadline:                   # 2 s may expire before the stub starts
+            seen |= descendants(proc.pid)
+            time.sleep(0.05)
+        err = proc.communicate(timeout=10)[1].decode()
+    finally:
+        stop_runner(proc, seen)
+    assert proc.returncode == 124 and "timeout: test run exceeded 2 s" in err.splitlines()
+    wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in seen), timeout=5)
+    assert not run_dir(err).exists()

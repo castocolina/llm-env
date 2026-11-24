@@ -131,6 +131,10 @@ does not prompt for those keys. `LLM_ENV_PROFILE` and `LLM_ENV_ENV_FILE` relocat
 - `LLM_ENV_TEST_CPU_PCT` — share of the CPUs `make test` / `tools/test.sh` gives pytest
   workers (`max(1, floor(nproc * pct / 100))`, default 40; an integer 1-100 without leading
   zeros, else exit 2).
+- `LLM_ENV_TEST_TIMEOUT_SECONDS` — overall bound on one `tools/test.sh` run (default 1800; a
+  positive integer without leading zeros, else exit 2). On expiry the whole run is stopped and
+  the runner prints `timeout: test run exceeded <N> s` and exits 124. A node that cannot start
+  its threads (the Konsole scope's `pids.max` hit by other sessions) aborts or waits forever.
 - `LLM_ENV_SCOUT_OUT` — output root for the run directories that
   `scripts/model-interference.sh` (`model-interference/<stamp>-<pid>`) and the
   skill's `quant-headroom.sh check` (`model-tune/quant-<stamp>-<pid>`) write.

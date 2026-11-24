@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tomllib
@@ -13,7 +14,15 @@ from pathlib import Path
 import pytest
 import yaml
 from git_helpers import git, git_out, git_repo
-from runner_helpers import calls, run_runner, runner_repo
+from runner_helpers import (
+    calls,
+    descendants,
+    run_runner,
+    runner_repo,
+    start_runner,
+    stop_runner,
+    wait_until,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -221,6 +230,27 @@ def test_a_failed_lint_fails_the_hook_without_gating_the_tests(tmp_path, tests_r
     assert any(" pytest " in c for c in calls(repo))                               # the lint runs beside the tests
 
 
+@pytest.mark.parametrize(("script", "sig", "rc"), [("tools/test-changed.sh", signal.SIGTERM, 143),
+                                                   ("tools/test-changed.sh", signal.SIGINT, 130),
+                                                   ("tools/pre-push.sh", signal.SIGTERM, 143)])   # git's hook process
+def test_a_signal_to_the_hook_stops_the_runner_and_every_descendant(tmp_path, script, sig, rc):
+    repo = _hook_repo(tmp_path, {"tools/validate.sh": b"exit 0\n"})
+    (refs := tmp_path / "refs").write_text(f"refs/heads/main {git_out(repo, 'rev-parse', 'HEAD')} refs/heads/main "
+                                           f"{git_out(repo, 'rev-parse', 'HEAD~1')}\n")
+    args = ("--stage", "commit") if script == "tools/test-changed.sh" else ("origin", "url")
+    with refs.open() as stdin:
+        proc = start_runner(repo, *args, env={"STUB_SLEEP": "1"}, script=script, stdin=stdin)
+    tree: dict[int, bytes] = {}
+    try:
+        wait_until(lambda: b"sleep\x00300\x00" in descendants(proc.pid).values(), timeout=30)
+        tree = descendants(proc.pid)
+        proc.send_signal(sig)                                                       # the hook's PID only
+        assert proc.wait(timeout=15) == rc and "term" in calls(repo)
+    finally:
+        stop_runner(proc, tree)
+    wait_until(lambda: not any(Path(f"/proc/{p}").exists() for p in tree), timeout=10)
+
+
 @pytest.mark.parametrize("stage", ["commit", "push"])
 @pytest.mark.parametrize(("removed", "problem"), [("docs/a.md", "stale exemption: docs/a.md"),
                                                   ("tests/test_x.py", "unowned: scripts/x.sh")])
@@ -278,6 +308,7 @@ def test_every_mutation_fault_matches_exactly_one_line():                       
     (1, "1 failed, 3 passed in 1s", "leak: tmp/x\n", "HARNESS"), (1, "1 failed, 1 error in 1s", "", "HARNESS"),
     (1, "1 failed, 3 passed in 1s", "inventory: podman unavailable\n", "HARNESS"),   # a failed post-run inventory
     (1, "[gw0] node down: Not properly terminated\n2 failed in 1s", "", "HARNESS"),     # real xdist crash output, 2026-11-23
+    (1, "1 failed, 3 passed in 1s", "timeout: test run exceeded 1800 s\n", "HARNESS"),  # the runner's overall bound
     (3, "", "", "HARNESS"), (69, "", "network namespace unavailable\n", "HARNESS")])
 def test_mutation_verdict_credits_only_a_clean_assertion_failure(tmp_path, rc, out, err, verdict):
     assert _classify(tmp_path, rc, out + "\n", err) == verdict

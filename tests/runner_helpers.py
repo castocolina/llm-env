@@ -1,8 +1,10 @@
 """Harness for tests of tools/test.sh: a scratch repo with stub nproc, uv, unshare and podman on PATH."""
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -110,9 +112,21 @@ def run_runner(repo: Path, *args, env=None, prefix=(), podman=True, script="tool
                           capture_output=True, text=True, input=input, timeout=120, check=False)
 
 
-def start_runner(repo: Path, env=None) -> subprocess.Popen:
-    return subprocess.Popen(["bash", "tools/test.sh"], cwd=repo, env=_env(repo, env, True),
-                            start_new_session=True, stderr=subprocess.PIPE)
+def start_runner(repo: Path, *args, env=None, script="tools/test.sh", stdin=None) -> subprocess.Popen:
+    return subprocess.Popen(["bash", script, *args], cwd=repo, env=_env(repo, env, True),
+                            start_new_session=True, stdin=stdin, stderr=subprocess.PIPE)
+
+
+def stop_runner(proc: subprocess.Popen, seen: dict[int, bytes] | None = None) -> None:
+    """Cleanup for a failed test: TERM every tools/test.sh in the tree or in `seen` (an orphan has left the tree; its
+    trap reaps the namespace), then the root."""
+    for pid, cmd in ((seen or {}) | descendants(proc.pid)).items():
+        if b"tools/test.sh" in cmd:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+    if proc.poll() is None:
+        proc.terminate()
+        proc.wait(timeout=15)
 
 
 def wait_until(pred, timeout=10) -> None:

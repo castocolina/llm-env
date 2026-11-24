@@ -24,7 +24,7 @@ integrity=tests/test_hooks.py::test_every_mutation_fault_matches_exactly_one_lin
 
 classify() {  # $1 rc, $2 stdout file, $3 stderr file. xdist reports a crashed worker's test as failed: a harness error
   if grep -Eq 'node down:|crashed while running|replacing crashed worker|maximum crashed workers' "$2" ||
-    grep -Eq 'leak:|inventory:|network namespace unavailable|uv cannot resolve' "$3"; then
+    grep -Eq 'leak:|inventory:|network namespace unavailable|uv cannot resolve|timeout: test run exceeded' "$3"; then
     echo HARNESS
   elif [ "$1" = 0 ]; then
     echo passed

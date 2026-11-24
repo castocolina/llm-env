@@ -4,15 +4,16 @@
 # Each run gets its own TMPDIR (printed first as "run dir: <path>" on stderr) and fails with one "leak: <what>" line per
 # new entry under repo tmp/, in its TMPDIR (except pytest's temp root and uv's empty lock files) or in Podman's container/volume/image IDs.
 # Exit: 69 no namespace, 4 uv cannot resolve llmenv.py offline, 1 incomplete inventory ("inventory: <what>"),
-# 130/143 on INT/TERM, else pytest's own status, with a leak turning 0 or 5 into 1.
+# 130/143 on INT/TERM, 124 ("timeout: test run exceeded <N> s") once the run passes LLM_ENV_TEST_TIMEOUT_SECONDS
+# (default 1800), else pytest's own status, with a leak turning 0 or 5 into 1.
 # Usage: bash tools/test.sh [pytest args...]   (default target: tests/)
 set -euo pipefail
 
 unset LLM_ENV_UPDATE_PROOF LLM_ENV_UPDATE_CHARACTERIZE LLM_ENV_LIVE_VM LLM_ENV_MUTATION_CHECK PYTEST_ADDOPTS  # opt-in lanes run only by hand
 
 runs=/tmp/pytest-of-${USER:-$(id -un)}  # under pylib/observe_fs.py's pytest_roots
-run='' inv=''
-trap 'rm -rf -- "$run" "$inv"' EXIT
+run='' inv='' timer=''
+trap 'rm -rf -- "$run" "$inv"; [ -z "$timer" ] || kill "$timer" 2>/dev/null' EXIT
 # shellcheck disable=SC2174 # only $runs is created: /tmp exists
 mkdir -p -m 700 "$runs"
 run=$(mktemp -d "$runs/llm-env-run.XXXXXX")
@@ -21,7 +22,7 @@ echo "run dir: $run" >&2
 mkdir "$run/pytest"
 
 # shellcheck disable=SC2329 # invoked by the INT and TERM traps
-stop() {                         # $1: 130 or 143. A & job in non-interactive bash ignores SIGINT, so TERM is sent
+stop() {                         # $1: 130, 143 or 124. A & job in non-interactive bash ignores SIGINT, so TERM is sent
   trap '' INT TERM
   kill -TERM -- "-$child" 2>/dev/null || true
   { sleep 5 && kill -KILL -- "-$child" 2>/dev/null; } & guard=$!
@@ -33,6 +34,11 @@ child=; trap 'stop 130' INT; trap 'stop 143' TERM
 pct=${LLM_ENV_TEST_CPU_PCT-40}
 if ! { [[ $pct =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$pct <= 100)); }; then
   echo "LLM_ENV_TEST_CPU_PCT must be an integer from 1 to 100 without leading zeros, got '$pct'" >&2
+  exit 2
+fi
+limit=${LLM_ENV_TEST_TIMEOUT_SECONDS-1800}
+if ! [[ $limit =~ ^[1-9][0-9]*$ ]]; then
+  echo "LLM_ENV_TEST_TIMEOUT_SECONDS must be a positive integer without leading zeros, got '$limit'" >&2
   exit 2
 fi
 workers=$(($(nproc) * pct / 100))
@@ -63,7 +69,15 @@ snapshot before
 # shellcheck disable=SC2016 # "$@" expands in the inner bash, not here.
 setsid "${chain[@]}" env --default-signal=INT UV_OFFLINE=1 TMPDIR="$run" PYTEST_DEBUG_TEMPROOT="$run/pytest" bash -c 'uv run --offline llmenv.py --help >/dev/null || { echo "uv cannot resolve llmenv.py offline: run make dev-setup once with network" >&2; exit 4; }; nice -n 10 uv run pytest "$@"; exit $?' _ -n "$workers" -q "$@" &
 child=$!
-rc=0; wait "$child" || rc=$?     # || : errexit would exit with the child's status
+# The overall bound: a node that cannot start its threads (pids limit hit) waits forever. Its own fds: a leftover
+# sleep must not hold a caller's output pipe open.
+sleep "$limit" >/dev/null 2>&1 & timer=$!
+rc=0; wait -n -p ended "$child" "$timer" || rc=$?  # || : errexit would exit with the child's status
+if [ "$ended" = "$timer" ]; then
+  timer=''
+  echo "timeout: test run exceeded $limit s" >&2
+  stop 124
+fi
 
 # shortcut: a diff cannot tell another agent's or the live stack's new object (or a concurrent writer under repo tmp/,
 # such as a delegated run) from a leak; the line names it for a person to judge; switch to label-based attribution if

@@ -21,8 +21,9 @@ head=$(git rev-parse HEAD)
 [[ $remote_sha =~ ^0+$ ]] || git merge-base --is-ancestor "$remote_sha" HEAD 2>/dev/null || refuse
 
 bash "$root/tools/validate.sh"
+# exec: a signal to the hook's PID reaches the test run instead of orphaning it
 if [[ $remote_sha =~ ^0+$ ]]; then
-  bash "$root/tools/test.sh"
+  exec bash "$root/tools/test.sh"
 else
-  PUSH_FROM=$remote_sha PUSH_TO=$head bash "$root/tools/test-changed.sh" --stage push
+  PUSH_FROM=$remote_sha PUSH_TO=$head exec bash "$root/tools/test-changed.sh" --stage push
 fi

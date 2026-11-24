@@ -25,6 +25,13 @@ if [ "$(jq -r '.full' <<<"$json")" = true ]; then
 else
   mapfile -t tests < <(jq -r '.tests[]' <<<"$json")
 fi
-rc=0; bash tools/test.sh "${marker[@]}" "${tests[@]}" || rc=$?
+# In the background so INT/TERM reach it (a & job ignores INT unless reset); the lint is dropped on a signal.
+env --default-signal=INT bash tools/test.sh "${marker[@]}" "${tests[@]}" & runner=$!
+trap '{ kill -INT "$runner"; kill "$lint"; } 2>/dev/null || :' INT  # errexit applies in a trap: an ended job must not exit 1
+trap '{ kill -TERM "$runner"; kill "$lint"; } 2>/dev/null || :' TERM
+while :; do
+  rc=0; wait "$runner" || rc=$?
+  kill -0 "$runner" 2>/dev/null || break  # a trapped signal ends wait early: wait again for the runner's own status
+done
 wait "$lint" || exit $((rc ? rc : 1))
 exit "$rc"
