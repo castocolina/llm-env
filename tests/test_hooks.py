@@ -199,9 +199,14 @@ def test_test_changed_fails_when_nothing_is_collected(tmp_path):                
     assert _run_changed(_hook_repo(tmp_path, {}), "commit", env={"STUB_RC": "5"}).returncode == 5
 
 
-@pytest.mark.parametrize("broken", ["missing", "not executable"])
+@pytest.mark.parametrize("broken", ["missing", "not executable", "foreign"])
 def test_commit_hook_requires_the_pre_push_link(tmp_path, broken):
-    repo = _hook_repo(tmp_path, {})
-    (repo / ".git/hooks/pre-push").unlink() if broken == "missing" else (repo / "tools/pre-push.sh").chmod(0o644)
+    repo = _hook_repo(tmp_path, {}); hook = repo / ".git/hooks/pre-push"
+    if broken == "not executable":
+        (repo / "tools/pre-push.sh").chmod(0o644)
+    else:
+        hook.unlink()
+    if broken == "foreign":                                       # a leftover hook that passes every push (D8)
+        hook.write_text("#!/bin/sh\nexit 0\n"); hook.chmod(0o755)
     result = _run_changed(repo, "commit")
     assert result.returncode == 1 and "run make dev-setup" in result.stderr and calls(repo) == []
