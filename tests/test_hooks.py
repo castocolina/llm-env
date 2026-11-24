@@ -3,7 +3,9 @@ link by make dev-setup (spec R3, D8); scratch repos only."""
 import ast
 import fnmatch
 import json
+import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -238,3 +240,33 @@ def test_slow_marker_is_registered_and_the_known_32s_test_carries_it():
     fn = next(n for n in ast.walk(ast.parse((ROOT / "tests/test_gguf.py").read_text()))
               if isinstance(n, ast.FunctionDef) and n.name == "test_large_string_array_is_summarized_not_materialized")
     assert "pytest.mark.slow" in {ast.unparse(d) for d in fn.decorator_list}
+
+
+def _classify(tmp_path, rc, out, err):
+    (tmp_path / "out").write_text(out); (tmp_path / "err").write_text(err)
+    return subprocess.run(["bash", "tools/selection-mutation-check.sh", "--classify", str(rc), str(tmp_path / "out"),
+                           str(tmp_path / "err")], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_every_mutation_fault_matches_exactly_one_line():                               # spec G2 integrity test
+    out = subprocess.run(["bash", "tools/selection-mutation-check.sh", "--list"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    rows = [line.split("\t") for line in out.splitlines()]
+    assert len(rows) == 10 and len({r[3] for r in rows}) == 10 and rows[0][3] == "pylib-cli"
+    assert all((ROOT / f).read_text().count(search) == 1 for f, search, _r, _k in rows)
+
+
+@pytest.mark.parametrize(("rc", "out", "err", "verdict"), [
+    (1, "1 failed, 3 passed in 1s", "", "caught"), (0, "4 passed in 1s", "", "passed"),
+    (1, "1 failed, 3 passed in 1s", "leak: tmp/x\n", "HARNESS"), (1, "1 failed, 1 error in 1s", "", "HARNESS"),
+    (1, "1 failed, 3 passed in 1s", "inventory: podman unavailable\n", "HARNESS"),   # a failed post-run inventory
+    (1, "[gw0] node down: Not properly terminated\n2 failed in 1s", "", "HARNESS"),     # real xdist crash output, 2026-11-23
+    (3, "", "", "HARNESS"), (69, "", "network namespace unavailable\n", "HARNESS")])
+def test_mutation_verdict_credits_only_a_clean_assertion_failure(tmp_path, rc, out, err, verdict):
+    assert _classify(tmp_path, rc, out + "\n", err) == verdict
+
+
+@pytest.mark.skipif(os.environ.get("LLM_ENV_MUTATION_CHECK") != "1", reason="opt-in: LLM_ENV_MUTATION_CHECK=1 (runs the full suite)")
+def test_mutation_check_finds_a_hole_without_the_cli_edge():
+    result = subprocess.run(["bash", "tools/selection-mutation-check.sh", "--only", "1", "--break-cli-edge"],
+                            cwd=ROOT, capture_output=True, text=True, check=False)
+    assert result.returncode == 1 and "HOLE 1 pylib-cli" in result.stdout

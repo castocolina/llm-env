@@ -8,7 +8,7 @@
 # Usage: bash tools/test.sh [pytest args...]   (default target: tests/)
 set -euo pipefail
 
-unset LLM_ENV_UPDATE_PROOF LLM_ENV_UPDATE_CHARACTERIZE LLM_ENV_LIVE_VM PYTEST_ADDOPTS  # opt-in lanes run only by hand
+unset LLM_ENV_UPDATE_PROOF LLM_ENV_UPDATE_CHARACTERIZE LLM_ENV_LIVE_VM LLM_ENV_MUTATION_CHECK PYTEST_ADDOPTS  # opt-in lanes run only by hand
 
 runs=/tmp/pytest-of-${USER:-$(id -un)}  # under pylib/observe_fs.py's pytest_roots
 run='' inv=''

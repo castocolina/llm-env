@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OPT_IN_SWITCHES = ["LLM_ENV_UPDATE_PROOF", "LLM_ENV_UPDATE_CHARACTERIZE", "LLM_ENV_LIVE_VM"]
+OPT_IN_SWITCHES = ["LLM_ENV_UPDATE_PROOF", "LLM_ENV_UPDATE_CHARACTERIZE", "LLM_ENV_LIVE_VM", "LLM_ENV_MUTATION_CHECK"]
 SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin")
 
 STUB_NPROC = "#!/bin/sh\necho 24\n"
